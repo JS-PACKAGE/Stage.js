@@ -1,0 +1,26 @@
+{
+  "name": "@stage-js/client",
+  "version": "0.1.0",
+  "description": "Stage.js embeddable browser client (ESM)",
+  "license": "Apache-2.0",
+  "private": true,
+  "type": "module",
+  "main": "./dist/stage-client.js",
+  "module": "./dist/stage-client.js",
+  "types": "./dist/types/packages/client/src/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/types/packages/client/src/index.d.ts",
+      "import": "./dist/stage-client.js"
+    }
+  },
+  "files": ["dist"],
+  "scripts": {
+    "build": "vite build && tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json"
+  },
+  "devDependencies": {
+    "typescript": "7.0.2",
+    "vite": "8.3.4"
+  }
+}
