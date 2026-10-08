@@ -223,7 +223,13 @@ export function loadConfig(path: string): AppConfig {
   } catch {
     throw new ConfigError(`cannot read ${path} (copy config.example.yaml to config.yaml)`);
   }
-  return parseConfig(parse(text));
+  let raw: unknown;
+  try {
+    raw = parse(text);
+  } catch (err) {
+    throw new ConfigError(`invalid YAML in ${path}: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  return parseConfig(raw);
 }
 
 /** Samples per PCM frame at the mixer rate (960 for 48 kHz / 20 ms). */
