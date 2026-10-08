@@ -1,0 +1,66 @@
+# Stage.js 設定範本。複製為 config.yaml 後修改（config.yaml 不入庫）。
+# 所有欄位皆必填；程式不寫死任何參數。標「可調整」者為新創數值。
+
+server:
+  host: 127.0.0.1
+  port: 8080
+  wsPath: /ws
+  # 明文 ws 僅限本機開發：true 時 host 必須是 loopback（127.0.0.1／::1／localhost），否則拒絕啟動。
+  # 對外部署請設 false 並提供 TLS 憑證（或由本機反向代理終止 TLS）。
+  allowInsecure: true
+  tls:
+    certFile: ""
+    keyFile: ""
+  # 靜態檔掛載（空陣列停用）。/lib/ 提供 client 函式庫給外部網站 ESM 匯入（附 CORS *）。
+  static:
+    - mount: /
+      dir: web/dist
+      cors: false
+    - mount: /lib/
+      dir: packages/client/dist
+      cors: true
+
+limits:
+  maxRooms: 100                # 可調整
+  maxConnections: 2000         # 可調整
+  maxSpeakersPerRoom: 8        # 裁示定值
+  maxAudiencePerRoom: 300      # 裁示定值
+  maxFrameBytes: 65536         # 可調整（64KB）
+  controlPerSecond: 20         # 可調整
+  handRaiseIntervalMs: 10000   # 可調整
+  icePerSecond: 30             # 可調整
+  nameMaxLength: 32
+  codeMaxLength: 16
+  sdpMaxLength: 16384
+
+rooms:
+  codeLength: 8                # 房間代碼長度（可調整）
+  controllerGraceMs: 60000     # 主控斷線逾此時間才自動移交（可調整）
+  heartbeatIntervalMs: 30000   # ws ping 間隔
+
+audio:
+  sampleRate: 48000            # 擷取／混音／Opus 編解碼取樣率（Opus 原生 48k，無重取樣）
+  frameMs: 20
+  opus:
+    vbr: true
+    minBitrate: 32000
+    maxBitrate: 128000
+    bitrate: 64000             # VBR 目標，須落在 min..max
+    complexity: 9
+  mixer:
+    maxBufferedFrames: 10      # 每路 PCM 緩衝上限（10×20ms=200ms），超過丟最舊
+    limiterThreshold: 0.9      # soft-clip 起點（0..1）
+    latencyTargetMs: 300       # 可調整（Gate 3 目標）
+
+rtc:
+  # 下發給瀏覽器的 ICE servers。TURN 憑證只放 config.yaml，不入庫、不入日誌。
+  iceServers:
+    - urls: ["stun:stun.l.google.com:19302"]
+  # 伺服器端（werift）ICE 設定
+  serverIceServers:
+    - urls: ["stun:stun.l.google.com:19302"]
+  # UDP port 範圍（[min, max]）；空陣列＝系統自選
+  portRange: []
+
+log:
+  level: info                  # debug | info | warn | error

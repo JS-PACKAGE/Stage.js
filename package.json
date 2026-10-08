@@ -1,0 +1,35 @@
+{
+  "name": "stage-js",
+  "version": "0.1.0",
+  "description": "Stage.js — multi-party audio stage: WebSocket control plane + WebRTC audio plane with server-side mixing",
+  "license": "Apache-2.0",
+  "private": true,
+  "type": "module",
+  "engines": {
+    "node": ">=24"
+  },
+  "workspaces": [
+    "packages/client",
+    "web"
+  ],
+  "scripts": {
+    "build": "npm run build:server && npm run build -w packages/client && npm run build -w web",
+    "build:server": "tsc -p tsconfig.build.json",
+    "typecheck": "tsc --noEmit -p tsconfig.json && npm run typecheck -w packages/client && npm run typecheck -w web",
+    "test": "node --test --test-timeout=20000 \"test/**/*.test.ts\"",
+    "start": "node dist/src/index.js",
+    "dev": "node --watch src/index.ts",
+    "dev:web": "npm run dev -w web"
+  },
+  "dependencies": {
+    "opusscript": "0.1.1",
+    "werift": "0.25.0",
+    "ws": "8.22.0",
+    "yaml": "2.9.1"
+  },
+  "devDependencies": {
+    "@types/node": "24.19.1",
+    "@types/ws": "8.18.2",
+    "typescript": "7.0.2"
+  }
+}
