@@ -48,6 +48,21 @@ npm run dev        # 伺服器（node --watch src/index.ts）
 npm run dev:web    # Vite 前端開發伺服器，/ws 代理到 127.0.0.1:9728
 ```
 
+### 控制腳本
+
+根目錄的 `stage.sh`（macOS／Linux）與 `stage.ps1`（Windows）包裝常用操作，背景執行時 pid／log 存放在 `.run/`：
+
+```bash
+./stage.sh build      # 建置
+./stage.sh start      # 背景啟動（config.yaml 不存在時自動由範例建立）
+./stage.sh status     # 執行狀態（未執行時 exit code 3）
+./stage.sh logs -f    # 追蹤 log
+./stage.sh stop       # SIGTERM 優雅停止，逾時（STAGE_STOP_TIMEOUT，預設 15 秒）強制終止
+./stage.sh help       # 全部指令：install／restart／run／dev／test
+```
+
+Windows 用 `.\stage.ps1 <command>`，指令相同；Windows 無法對背景 node 送 SIGTERM，`stop` 為直接終止。
+
 ## 設定（`config.yaml`）
 
 所有欄位必填，啟動時嚴格驗證，錯誤會指出欄位路徑。設定檔路徑可用環境變數 `STAGE_CONFIG` 覆寫。`config.yaml` 不入庫。

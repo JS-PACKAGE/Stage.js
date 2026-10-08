@@ -1,6 +1,8 @@
 node_modules/
 dist/
 *.tsbuildinfo
+# 控制腳本的 pid／log
+.run/
 # 個人設定值不入庫（config.example.yaml 入庫）
 config.yaml
 *.pem
