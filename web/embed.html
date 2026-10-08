@@ -1,0 +1,8 @@
+<!doctype html>
+<html lang="zh-Hant" data-theme="system">
+<head><meta charset="UTF-8"><meta name="viewport" content="width=device-width, initial-scale=1"><meta name="referrer" content="no-referrer"><title>外部網站嵌入 Stage.js</title></head>
+<body><div id="app"><h1>外部網站 · Stage.js ESM 整合</h1><p>此頁從指定的 Stage.js 主機載入 /lib/stage-client.js，並使用該主機的 WSS 控制面。</p>
+<form class="panel" id="join"><label class="field">Stage.js 主機網址<input id="host" type="url" required placeholder="https://stage.example.com"></label><label class="field">房間 ID<input id="room" required maxlength="128"></label><label class="field">房間代碼<input id="code" maxlength="16"></label><label class="field">你的名稱<input id="name" required maxlength="32"></label><button class="primary">加入收聽</button></form>
+<p id="status" aria-live="polite">尚未加入</p><button id="unlock" type="button">點擊啟用音訊</button><button id="hand" type="button" disabled>舉手發言</button><button id="leave" type="button" disabled>離開房間</button><audio id="audio" autoplay controls></audio>
+</div><script type="module" src="/src/embed.ts"></script></body>
+</html>
