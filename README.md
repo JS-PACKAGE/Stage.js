@@ -1,0 +1,140 @@
+# Stage.js
+
+多人音訊舞台系統：**WebSocket** 為控制平面、**WebRTC** 為音訊平面。一位主控＋最多 8 位發言者在台發言；觀眾只能聆聽，可舉手由主控核准上台。多人同時發言由**伺服器端混音**成單一 Opus 串流（mono、VBR 32–128kbps、48kHz）分送全場。單一 process 承載多個房間，以房間代碼進場。
+
+交付內容：Node 伺服器、可嵌入其他網站的瀏覽器 client 函式庫（ESM）、完整範例前端（響應式手機版、深淺色主題、多人列表管理）。需求與決策全文見 [`PLAN.md`](PLAN.md)，撰寫規範與安全規則見 [`AGENTS.md`](AGENTS.md)。
+
+## 架構
+
+```
+瀏覽器（主控／發言者／觀眾）── StageClient（packages/client）
+   ├─ wss://host/ws   控制平面 JSON：進房、舉手、上下台、移交、靜音、SDP/ICE 信令
+   └─ WebRTC          每人一條 PeerConnection 連伺服器
+                       上行：僅台上者 Opus mono；下行：單一混音串流（台上者收不含自己的混音）
+
+Stage.js 伺服器（Node v24）
+   ├─ src/ws/          ws 伺服器、驗證、限流、StageHub（每房單序佇列、廣播）
+   ├─ src/model/       Room 狀態機與不變量
+   ├─ src/rtc/         offer 方向檢查（觀眾只能 recvonly）
+   ├─ src/mixer/       RoomMixer：N 路 PCM 48kHz 疊加 → limiter → mix / mix-minus-self
+   └─ src/transport/   MediaTransport 介面；werift adapter（Opus 解碼／編碼、RTP）；Mock
+```
+
+混音：每 20ms 一個 tick，各發言者取一個 960-sample frame 疊加。觀眾共用一次編碼；台上者各自一路 mix-minus-self 編碼。
+
+## 需求
+
+- Node.js **v24** 以上（`engines: >=24`；伺服器以 Node 內建 type stripping 直接執行 `.ts`）
+- npm 11
+- 對外部署：TLS 憑證（或本機反向代理終止 TLS）＋STUN/TURN（建議 coturn）
+
+## 安裝與啟動
+
+```bash
+git clone https://github.com/JS-PACKAGE/Stage.js.git
+cd Stage.js
+npm install
+cp config.example.yaml config.yaml
+npm run build
+npm start
+```
+
+開啟 <http://127.0.0.1:8080/>：建立房間 → 複製邀請連結 → 另一個瀏覽器開啟連結加入。範例設定為本機開發模式（明文 ws、只綁 127.0.0.1）。
+
+開發模式：
+
+```bash
+npm run dev        # 伺服器（node --watch src/index.ts）
+npm run dev:web    # Vite 前端開發伺服器，/ws 代理到 127.0.0.1:8080
+```
+
+## 設定（`config.yaml`）
+
+所有欄位必填，啟動時嚴格驗證，錯誤會指出欄位路徑。設定檔路徑可用環境變數 `STAGE_CONFIG` 覆寫。`config.yaml` 不入庫。
+
+| 區塊 | 重點欄位 |
+|---|---|
+| `server` | `host`、`port`、`wsPath`；`allowInsecure`（明文 ws，僅限 loopback host）；`tls.certFile`／`keyFile`；`static` 靜態掛載（`/` → `web/dist`，`/lib/` → `packages/client/dist` 附 CORS） |
+| `limits` | `maxRooms`、`maxConnections`、`maxSpeakersPerRoom`（8）、`maxAudiencePerRoom`（300）、`maxFrameBytes`（64KB）、`controlPerSecond`（20）、`handRaiseIntervalMs`（10000）、`icePerSecond`（30）、`nameMaxLength`（32）、`codeMaxLength`（16）、`sdpMaxLength` |
+| `rooms` | `codeLength`（8）、`controllerGraceMs`（主控斷線寬限 60000）、`heartbeatIntervalMs` |
+| `audio` | `sampleRate`（48000；只接受 Opus 原生取樣率）、`frameMs`（20）、`opus.{vbr,minBitrate,maxBitrate,bitrate,complexity}`、`mixer.{maxBufferedFrames,limiterThreshold,latencyTargetMs}` |
+| `rtc` | `iceServers`（下發給瀏覽器，可含 TURN 帳密）、`serverIceServers`（伺服器端 ICE）、`portRange`（`[]` 或 `[min, max]`） |
+| `log` | `level`：`debug`／`info`／`warn`／`error`（房間代碼、token、憑證、SDP 一律不入日誌） |
+
+對外部署：`allowInsecure: false`、`host: 0.0.0.0`、填 `tls`；開放 `rtc.portRange` 的 UDP；`iceServers` 加入 TURN。
+
+## WebSocket 協定摘要
+
+JSON frame，型別定義在 [`shared/protocol.ts`](shared/protocol.ts)。每個請求帶 `requestId`，成功回 `ok {requestId}`，失敗回 `error {requestId, code, message}`（固定 generic 訊息）。
+
+| Client → Server | 說明 |
+|---|---|
+| `room:create {name?, roomName?, codeRequired?}` | 開房，建立者成為主控（預設在台） |
+| `join {roomId, code?, name, resumeToken?}` | 進房（預設觀眾）；`resumeToken` 供主控斷線後回座 |
+| `hand:raise`／`hand:withdraw` | 觀眾舉手／收回（舉手 10 秒最多 1 次） |
+| `stage:approve {targetId}`／`stage:reject {targetId}` | 主控核准／婉拒；`targetId` 為自己＝主控返回舞台 |
+| `stage:leave` | 下台（主控下台仍保有控制權） |
+| `stage:remove {targetId}` | 主控把發言者移回觀眾 |
+| `control:transfer {targetId}` | 主控移交控制權 |
+| `mic:mute`／`mic:unmute`、`mic:force-mute`／`mic:force-unmute {targetId}` | 自我靜音；主控強制靜音（解除時保留本人的自我靜音） |
+| `room:close` | 主控關房 |
+| `rtc:offer`／`rtc:ice {payload}` | WebRTC 信令（一律由 client 發 offer） |
+| `ping` | 回 `pong` |
+
+| Server → Client | 說明 |
+|---|---|
+| `hello` | `{protocol, serverVersion}` |
+| `room:state` | 個人化 snapshot（每次變動重送）；`code`、`audience` 名單只給主控，`resumeToken` 只給本人 |
+| `room:created`、`room:closed` | 開房（只有建立者收到 code）、關房（全員離房） |
+| `rtc:config` | 瀏覽器用的 ICE servers |
+| `role:update`、`hand:raise`／`hand:withdraw`、`stage:invite`、`stage:joined`、`stage:left`、`control:transferred`、`mic:muted`／`mic:unmuted` | 事件廣播 |
+| `rtc:answer`、`rtc:ice` | 伺服器端信令 |
+| `status` | `waiting`／`live` |
+
+限制：frame ≤ 64KB；控制訊息 ≤ 20/s、`rtc:ice` ≤ 30/s；超過即以 close code 1008 斷線。房間不存在或代碼錯誤一律回 `unauthorized`。名稱以 HTML 轉義形式傳送。
+
+## 整合到其他網站（client 函式庫）
+
+伺服器在 `/lib/stage-client.js` 提供 ESM 版本（附 `Access-Control-Allow-Origin: *`），外部頁面可直接匯入：
+
+```html
+<button id="unlock">啟用音訊</button>
+<script type="module">
+  import { StageClient, decodeName } from 'https://stage.example.com/lib/stage-client.js';
+
+  const client = new StageClient({ url: 'wss://stage.example.com/ws' });
+  client.on('state', ({ detail }) => {
+    document.title = decodeName(detail.name); // 名稱已轉義：decodeName 後以 textContent 顯示
+  });
+  client.on('audioblocked', () => { /* 顯示「啟用音訊」按鈕 */ });
+  client.on('micerror', ({ detail }) => console.warn(detail.message));
+  document.querySelector('#unlock').onclick = () => client.unlockAudio();
+
+  await client.connect();
+  await client.join({ roomId: 'ROOM_ID', code: 'ROOMCODE', name: '訪客' });
+  // 觀眾：client.raiseHand()；主控：client.approve(id)、client.transferControl(id)…
+</script>
+```
+
+整合注意事項：
+
+- CSP：`script-src` 允許函式庫來源；`connect-src wss://stage.example.com`；`media-src blob: mediastream:`。
+- 以 iframe 嵌入時需 `allow="microphone; autoplay"`，且上層 Permissions-Policy 允許 `microphone`。
+- 瀏覽器自動播放限制：收到 `audioblocked` 時，必須在使用者點擊事件中呼叫 `unlockAudio()`。
+- 邀請連結含房間代碼，請視為敏感資訊。
+
+完整 API 見 [`packages/client/README.md`](packages/client/README.md)；`web/embed.html` 是最小嵌入範例。
+
+## 測試與驗證
+
+```bash
+npm run typecheck                # 伺服器＋client＋web
+npm test                         # 控制面流程 1–4、不變量、ws 邊界（驗證、限流、尺寸、轉義、靜態檔）、混音器
+node scripts/werift-loopback.ts  # 真 werift 端到端（含觀眾→發言者重協商）
+node scripts/bench-mixer.ts      # 混音壓測：3／8 發言者 × 300 訂閱者
+npm audit
+```
+
+## 授權
+
+[Apache License 2.0](LICENSE)
