@@ -3,7 +3,7 @@
 
 server:
   host: 127.0.0.1
-  port: 8080
+  port: 9728
   wsPath: /ws
   # 明文 ws 僅限本機開發：true 時 host 必須是 loopback（127.0.0.1／::1／localhost），否則拒絕啟動。
   # 對外部署請設 false 並提供 TLS 憑證（或由本機反向代理終止 TLS）。
