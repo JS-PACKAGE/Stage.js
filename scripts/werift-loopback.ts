@@ -7,7 +7,7 @@ import { RoomMixer } from '../src/mixer/RoomMixer.ts';
 import { WeriftMediaTransport, opusCodec } from '../src/transport/WeriftMediaTransport.ts';
 import { OpusEncoder, OpusDecoder } from '../src/transport/opus.ts';
 const config = loadConfig('config.example.yaml'); config.rtc.serverIceServers = [];
-const mixer = new RoomMixer({ ...config.audio, ...config.audio.mixer });
+const mixer = new RoomMixer({ ...config.audio, ...config.audio.mixer, ...config.audio.jitter });
 const clients = new Map<string, RTCPeerConnection>();
 const transport = new WeriftMediaTransport(config, { onLocalCandidate() {} }, silentLogger);
 const encoder = new OpusEncoder(config.audio);

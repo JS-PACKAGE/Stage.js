@@ -48,6 +48,7 @@ hub = new StageHub({
       sampleRate: audio.sampleRate,
       frameMs: audio.frameMs,
       maxBufferedFrames: audio.mixer.maxBufferedFrames,
+      playoutFrames: audio.jitter.playoutFrames,
       limiterThreshold: audio.mixer.limiterThreshold,
     });
     mixer.start();

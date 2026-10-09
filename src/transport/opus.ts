@@ -28,15 +28,31 @@ export class OpusEncoder {
     return Buffer.from(packet.buffer as ArrayBuffer, packet.byteOffset, packet.byteLength);
   }
 }
+/** Lost frames after the last good one fade by half each; beyond this many they are silent. */
+const CONCEAL_FRAMES = 4;
+
 export class OpusDecoder {
   private readonly codec: Decoder;
+  /** Copy of the last decoded frame (the returned array is transferred away by the worker). */
+  private last = new Float32Array(0);
+  private lost = 0;
   constructor(sampleRate: number) { this.codec = new Decoder({ channels: 1, sample_rate: sampleRate as OpusRate }); }
-  decode(packet: Uint8Array): Float32Array<ArrayBuffer> {
+  /** `null` = packet lost: the native binding exposes no PLC, so repeat the last frame with a fade. */
+  decode(packet: Uint8Array | null): Float32Array<ArrayBuffer> {
+    if (packet === null) {
+      const gain = ++this.lost > CONCEAL_FRAMES ? 0 : 0.5 ** this.lost;
+      const samples = new Float32Array(this.last.length);
+      for (let i = 0; i < samples.length; i++) samples[i] = this.last[i]! * gain;
+      return samples;
+    }
     // The binding returns a fresh copy at offset 0, so the Int16 view is aligned.
     const bytes = this.codec.decode(packet);
     const pcm16 = new Int16Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / 2);
     const samples = new Float32Array(pcm16.length);
     for (let i = 0; i < samples.length; i++) samples[i] = pcm16[i]! / 32768;
+    if (this.last.length !== samples.length) this.last = new Float32Array(samples.length);
+    this.last.set(samples);
+    this.lost = 0;
     return samples;
   }
 }

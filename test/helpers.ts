@@ -82,7 +82,7 @@ export function harness(config = testConfig()): Harness {
     },
     // Not started: tests drive mixer.tick() by hand for determinism.
     createMixer: (roomId) => {
-      const m = new RoomMixer({ sampleRate: config.audio.sampleRate, frameMs: config.audio.frameMs, maxBufferedFrames: 10, limiterThreshold: 0.9 });
+      const m = new RoomMixer({ sampleRate: config.audio.sampleRate, frameMs: config.audio.frameMs, maxBufferedFrames: 10, playoutFrames: 1, limiterThreshold: 0.9 });
       mixers.set(roomId, m);
       return m;
     },

@@ -6,6 +6,7 @@ import type { Logger } from '../log.ts';
 import type { IceCandidatePayload, SessionDescriptionPayload } from '../../shared/protocol.ts';
 import type { AudioFrameHandler, MediaTransport, MediaTransportCallbacks, MixedPcmSource, MixFrame, NegotiationPolicy, TransportStats } from './MediaTransport.ts';
 import { CodecPool, type EncodeItem } from './codecPool.ts';
+import { RtpReorderBuffer } from './jitter.ts';
 import { PcmChunker } from './opus.ts';
 
 export function opusCodec(): RTCRtpCodecParameters {
@@ -13,7 +14,7 @@ export function opusCodec(): RTCRtpCodecParameters {
 }
 interface Peer {
   pc: RTCPeerConnection; track: MediaStreamTrack; allowUplink: boolean; sender?: RTCRtpSender;
-  chunker: PcmChunker; sequence: number; timestamp: number; started: number;
+  chunker: PcmChunker; reorder: RtpReorderBuffer; sequence: number; timestamp: number; started: number;
   outboundBytes: number; outboundPackets: number; inboundBytes: number; inboundPackets: number;
 }
 interface Room {
@@ -44,7 +45,7 @@ export class WeriftMediaTransport implements MediaTransport {
     let peer = room.peers.get(id);
     if (!peer) {
       const pc = new RTCPeerConnection({ codecs: { audio: [opusCodec()], video: [] }, iceServers: this.config.rtc.serverIceServers, icePortRange: this.config.rtc.portRange.length === 2 ? this.config.rtc.portRange : undefined });
-      peer = { pc, track: new MediaStreamTrack({ kind: 'audio' }), allowUplink: policy.allowUplink, chunker: new PcmChunker(samplesPerFrame(this.config.audio)), sequence: randomInt(65536), timestamp: randomInt(0x100000000), started: performance.now(), outboundBytes: 0, outboundPackets: 0, inboundBytes: 0, inboundPackets: 0 };
+      peer = { pc, track: new MediaStreamTrack({ kind: 'audio' }), allowUplink: policy.allowUplink, chunker: new PcmChunker(samplesPerFrame(this.config.audio)), reorder: new RtpReorderBuffer(this.config.audio.jitter.reorderPackets), sequence: randomInt(65536), timestamp: randomInt(0x100000000), started: performance.now(), outboundBytes: 0, outboundPackets: 0, inboundBytes: 0, inboundPackets: 0 };
       room.peers.set(id, peer);
       const current = peer;
       pc.onIceCandidate.subscribe(candidate => this.callbacks.onLocalCandidate(roomId, id, candidate ? candidate.toJSON() : null));
@@ -55,11 +56,14 @@ export class WeriftMediaTransport implements MediaTransport {
           if (!current.allowUplink || !room.publishers.has(id)) return;
           current.inboundBytes += packet.payload.length;
           current.inboundPackets++;
-          this.codecs.decode(roomId, id, packet.payload).then(decoded => {
-            // Re-check after the worker hop: the peer may have been demoted or closed meanwhile.
-            const handler = room.publishers.get(id);
-            if (current.allowUplink && handler && room.peers.get(id) === current) current.chunker.push(decoded, handler);
-          }, () => { this.log.warn('Invalid uplink audio packet', { roomId, participantId: id }); });
+          for (const payload of current.reorder.push(packet.header.sequenceNumber, packet.payload)) {
+            // `null` = declared lost; the worker's decoder conceals it in stream order.
+            this.codecs.decode(roomId, id, payload).then(decoded => {
+              // Re-check after the worker hop: the peer may have been demoted or closed meanwhile.
+              const handler = room.publishers.get(id);
+              if (current.allowUplink && handler && room.peers.get(id) === current) current.chunker.push(decoded, handler);
+            }, () => { this.log.warn('Invalid uplink audio packet', { roomId, participantId: id }); });
+          }
         });
       });
     }
@@ -94,7 +98,7 @@ export class WeriftMediaTransport implements MediaTransport {
     room.publishers.delete(id);
     this.codecs.release(roomId, 'encoder', id);
     const peer = room.peers.get(id);
-    if (peer) peer.chunker = new PcmChunker(samplesPerFrame(this.config.audio));
+    if (peer) { peer.chunker = new PcmChunker(samplesPerFrame(this.config.audio)); peer.reorder = new RtpReorderBuffer(this.config.audio.jitter.reorderPackets); }
   }
   setMixedStream(roomId: string, source: MixedPcmSource | null): void {
     const room = this.room(roomId);

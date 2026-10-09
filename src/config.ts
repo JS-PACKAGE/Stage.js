@@ -51,6 +51,12 @@ export interface AppConfig {
       limiterThreshold: number;
       latencyTargetMs: number;
     };
+    jitter: {
+      /** Frames each uplink buffers before playing (latency vs. underrun trade-off). */
+      playoutFrames: number;
+      /** Out-of-order packets held behind a gap before the missing one is declared lost. */
+      reorderPackets: number;
+    };
   };
   rtc: {
     iceServers: IceServerConfig[];
@@ -169,6 +175,7 @@ export function parseConfig(raw: unknown): AppConfig {
   const a = obj(root.audio, 'audio');
   const o = obj(a.opus, 'audio.opus');
   const m = obj(a.mixer, 'audio.mixer');
+  const j = obj(a.jitter, 'audio.jitter');
   const audio: AppConfig['audio'] = {
     sampleRate: int(a, 'sampleRate', 'audio', 8000, 48000),
     frameMs: int(a, 'frameMs', 'audio', 10, 60),
@@ -185,7 +192,12 @@ export function parseConfig(raw: unknown): AppConfig {
       limiterThreshold: num(m, 'limiterThreshold', 'audio.mixer', 0.1, 1),
       latencyTargetMs: int(m, 'latencyTargetMs', 'audio.mixer', 1),
     },
+    jitter: {
+      playoutFrames: int(j, 'playoutFrames', 'audio.jitter', 1, 100),
+      reorderPackets: int(j, 'reorderPackets', 'audio.jitter', 0, 50),
+    },
   };
+  if (audio.jitter.playoutFrames > audio.mixer.maxBufferedFrames) throw new ConfigError('audio.jitter.playoutFrames: exceeds audio.mixer.maxBufferedFrames');
   if (![10, 20, 40, 60].includes(audio.frameMs)) throw new ConfigError('audio.frameMs: must be 10, 20, 40 or 60 (Opus frame sizes)');
   // libopus only encodes/decodes at these rates; using one end-to-end avoids resampling.
   if (![8000, 12000, 16000, 24000, 48000].includes(audio.sampleRate)) {

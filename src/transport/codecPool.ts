@@ -7,7 +7,7 @@ import type { Logger } from '../log.ts';
 export interface EncodeItem { key: string; pcm: Float32Array }
 export type CodecRequest =
   | { op: 'encode'; job: number; room: string; frames: EncodeItem[] }
-  | { op: 'decode'; job: number; room: string; key: string; packet: Uint8Array }
+  | { op: 'decode'; job: number; room: string; key: string; packet: Uint8Array | null }
   | { op: 'release'; room: string; kind: 'encoder' | 'decoder'; key: string }
   | { op: 'closeRoom'; room: string };
 export type CodecReply =
@@ -86,10 +86,10 @@ export class CodecPool {
     if (reply.op === 'failed' || !reply.payloads) throw new Error(reply.op === 'failed' ? reply.message : 'Missing encode result');
     return reply.payloads;
   }
-  /** `packet` is copied before transfer, so the caller's buffer stays intact. */
-  async decode(room: string, key: string, packet: Uint8Array): Promise<Float32Array> {
-    const copy = Uint8Array.from(packet);
-    const reply = await this.request(room, { op: 'decode', job: this.nextJob++, room, key, packet: copy }, [copy.buffer]);
+  /** `packet` is copied before transfer, so the caller's buffer stays intact; `null` conceals a lost packet. */
+  async decode(room: string, key: string, packet: Uint8Array | null): Promise<Float32Array> {
+    const copy = packet && Uint8Array.from(packet);
+    const reply = await this.request(room, { op: 'decode', job: this.nextJob++, room, key, packet: copy }, copy ? [copy.buffer] : []);
     if (reply.op === 'failed' || !reply.pcm) throw new Error(reply.op === 'failed' ? reply.message : 'Missing decode result');
     return reply.pcm;
   }

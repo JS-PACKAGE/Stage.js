@@ -5,7 +5,7 @@ import { loadConfig, samplesPerFrame } from '../src/config.ts';
 const config = loadConfig('config.example.yaml');
 const rows: Record<string, number | string>[] = [];
 for (const publishers of [3, 8]) {
-  const mixer = new RoomMixer({ ...config.audio, ...config.audio.mixer });
+  const mixer = new RoomMixer({ ...config.audio, ...config.audio.mixer, ...config.audio.jitter });
   const fullEncoder = new OpusEncoder(config.audio);
   const encoders = Array.from({ length: publishers }, () => new OpusEncoder(config.audio));
   const pcm = Array.from({ length: publishers }, (_, id) => Float32Array.from({ length: samplesPerFrame(config.audio) }, (_, i) => 0.08 * Math.sin(2 * Math.PI * (220 + id * 70) * i / config.audio.sampleRate) + 0.01 * (Math.random() * 2 - 1)));

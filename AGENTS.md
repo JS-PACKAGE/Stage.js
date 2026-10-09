@@ -40,8 +40,9 @@ node scripts/bench-mixer.ts      # Gate 3：8/3 發言者 × 300 訂閱者混音
 | `src/transport/MediaTransport.ts` | 媒體層契約 |
 | `src/transport/WeriftMediaTransport.ts`、`opus.ts` | werift adapter、Opus 編解碼（@evan/opus） |
 | `src/transport/codecPool.ts`、`codecWorker.ts` | Opus 編解碼 worker thread pool（`audio.codecWorkers`）；每房固定一個 worker，維持有狀態 codec 的順序 |
+| `src/transport/jitter.ts` | 上行 RTP 重排（`audio.jitter.reorderPackets`）；遺失包以 `null` 送解碼器做淡出補幀（binding 無 PLC） |
 | `src/transport/MockMediaTransport.ts` | 測試／無 WebRTC 開發用 |
-| `src/mixer/` | `RoomMixer`（N 路疊加、mix-minus-self、緩衝上限）、`limiter` |
+| `src/mixer/` | `RoomMixer`（N 路疊加、mix-minus-self、每路 playout 預緩衝／underrun 重緩衝／漂移排空、緩衝上限）、`limiter` |
 | `packages/client/` | 可嵌入的瀏覽器 ESM 函式庫 `StageClient` |
 | `web/` | 完整範例前端（建於 client 之上） |
 

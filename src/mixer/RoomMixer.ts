@@ -1,8 +1,9 @@
 import type { MixedPcmSource, MixFrame, MixFrameListener } from '../transport/MediaTransport.ts';
 import { limitInPlace } from './limiter.ts';
 
-export interface RoomMixerOptions { sampleRate: number; frameMs: number; maxBufferedFrames: number; limiterThreshold: number }
-interface Source { muted: boolean; frames: Float32Array[] }
+/** `playoutFrames`: frames a source must buffer before it plays (and again after every underrun). */
+export interface RoomMixerOptions { sampleRate: number; frameMs: number; maxBufferedFrames: number; playoutFrames: number; limiterThreshold: number }
+interface Source { muted: boolean; primed: boolean; frames: Float32Array[] }
 
 export class RoomMixer implements MixedPcmSource {
   private readonly sources = new Map<string, Source>();
@@ -13,12 +14,12 @@ export class RoomMixer implements MixedPcmSource {
   private timer?: NodeJS.Timeout;
   private running = false;
   constructor(opts: RoomMixerOptions) {
-    if (!(opts.sampleRate > 0 && opts.frameMs > 0 && Number.isInteger(opts.maxBufferedFrames) && opts.maxBufferedFrames > 0 && opts.limiterThreshold > 0 && opts.limiterThreshold < 1)) throw new RangeError('Invalid mixer options');
+    if (!(opts.sampleRate > 0 && opts.frameMs > 0 && Number.isInteger(opts.maxBufferedFrames) && opts.maxBufferedFrames > 0 && Number.isInteger(opts.playoutFrames) && opts.playoutFrames > 0 && opts.playoutFrames <= opts.maxBufferedFrames && opts.limiterThreshold > 0 && opts.limiterThreshold < 1)) throw new RangeError('Invalid mixer options');
     this.opts = opts;
     this.frameSize = Math.round(opts.sampleRate * opts.frameMs / 1000);
   }
   get sourceCount(): number { return this.sources.size; }
-  addSource(id: string): void { if (!this.sources.has(id)) this.sources.set(id, { muted: false, frames: [] }); }
+  addSource(id: string): void { if (!this.sources.has(id)) this.sources.set(id, { muted: false, primed: false, frames: [] }); }
   removeSource(id: string): void { this.sources.delete(id); }
   setMuted(id: string, muted: boolean): void { const source = this.sources.get(id); if (source) source.muted = muted; }
   /** Exact frames only; copy on ingress so callers may reuse their input buffers. */
@@ -35,8 +36,14 @@ export class RoomMixer implements MixedPcmSource {
     // Per source: own contribution (null when silent/muted), replaced by its limited mix-minus once computed.
     const minus = new Map<string, Float32Array | null>();
     const own = new Set<string>();
+    const playout = this.opts.playoutFrames;
     for (const [id, source] of this.sources) {
-      const samples = source.frames.shift();
+      // Jitter buffer: start (or restart after an underrun) only once `playout` frames are queued,
+      // and drain one extra frame when sender clock drift has doubled the queue.
+      if (!source.primed && source.frames.length >= playout) source.primed = true;
+      const samples = source.primed ? source.frames.shift() : undefined;
+      if (!samples) source.primed = false;
+      else if (source.frames.length > 2 * playout) source.frames.shift();
       const contribution = source.muted ? undefined : samples;
       minus.set(id, contribution ?? null);
       if (contribution) { own.add(id); for (let i = 0; i < raw.length; i++) raw[i] = raw[i]! + contribution[i]!; }
