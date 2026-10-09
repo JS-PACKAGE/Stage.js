@@ -21,6 +21,8 @@ export interface MixFrame {
   readonly seq: number;
   /** Mix of all active, unmuted publishers (limited). Audience downlink. */
   readonly full: Float32Array;
+  /** No publisher contributed audio this tick (all muted or starved): every mix is silence. */
+  readonly silent: boolean;
   /**
    * Mix excluding `participantId` (limited) if that participant is an active
    * publisher this tick; `undefined` otherwise (→ use `full`).

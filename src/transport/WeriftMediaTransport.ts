@@ -25,6 +25,8 @@ interface Uplink { reorder: RtpReorderBuffer; chunker: PcmChunker; muted: boolea
 interface FanoutPlan {
   ids: string[]; hosts: PeerHost[]; frameOf: number[];
   frames: EncodeItem[];
+  /** One empty payload per frame: what hosts get instead of an encode while the room is silent. */
+  silence: Uint8Array[];
   targets: [PeerHost, [id: string, frame: number][]][];
 }
 interface Room {
@@ -41,6 +43,8 @@ interface Room {
   /** Consecutive frames each subscribed source contributed nothing (muted or starved). */
   silentFrames: Map<string, number>;
   plan: FanoutPlan | undefined;
+  /** Consecutive ticks in which no publisher contributed audio. */
+  silentTicks: number;
   /** This tick's routing, reused across ticks; compared against `plan`. */
   scratch: { ids: string[]; hosts: PeerHost[]; keys: string[]; pcms: Float32Array[] };
   detach?: () => void;
@@ -55,6 +59,12 @@ const LOSS_SMOOTHING = 0.5;
  * of its own. Each switch restarts an encoder stream, so brief underruns must not flip it.
  */
 const SHARE_SILENT_AFTER_MS = 1000;
+/**
+ * After this long with nobody audible (DTX downlink only), mixes are not encoded at all: hosts get
+ * empty payloads, which they treat as DTX (timestamps advance, nothing is sent). The wait lets
+ * the encoders emit their own transition into DTX first.
+ */
+const SKIP_SILENCE_AFTER_MS = 1000;
 
 /**
  * werift adapter. Peers live on `rtc.mediaWorkers` worker threads (0 = on this thread), placed on
@@ -68,7 +78,7 @@ export class WeriftMediaTransport implements MediaTransport {
   private readonly rooms = new Map<string, Room>();
   private readonly codecs: CodecPool;
   private readonly hosts: PeerHost[];
-  private readonly counters = { uplinkPackets: 0, uplinkConcealed: 0, shedFrames: 0, encodeFailures: 0 };
+  private readonly counters = { uplinkPackets: 0, uplinkConcealed: 0, shedFrames: 0, encodeFailures: 0, silentSkipped: 0 };
   constructor(config: AppConfig, callbacks: MediaTransportCallbacks, log: Logger) {
     this.config = config; this.callbacks = callbacks; this.log = log;
     this.codecs = new CodecPool(config.audio, log);
@@ -97,6 +107,7 @@ export class WeriftMediaTransport implements MediaTransport {
       { name: 'stage_downlink_dtx_frames_total', help: 'Downlink frames suppressed by Opus DTX.', type: 'counter', value: hosts.reduce((n, h) => n + h.downlinkDtxFrames, 0) },
       { name: 'stage_mix_frames_shed_total', help: 'Mixed frames dropped because a codec worker fell behind.', type: 'counter', value: c.shedFrames },
       { name: 'stage_encode_failures_total', help: 'Mixed frames whose encode failed.', type: 'counter', value: c.encodeFailures },
+      { name: 'stage_mix_frames_silent_skipped_total', help: 'Mixed frames not encoded because nobody had been audible for a while (sent as DTX).', type: 'counter', value: c.silentSkipped },
     ];
   }
   private room(id: string): Room {
@@ -104,7 +115,7 @@ export class WeriftMediaTransport implements MediaTransport {
     if (!room) {
       room = {
         id, peers: new Map(), publishers: new Map(), subscribers: new Set(), uplinks: new Map(), downlinkLoss: new Map(), lowTier: new Set(), silentFrames: new Map(),
-        plan: undefined, scratch: { ids: [], hosts: [], keys: [], pcms: [] },
+        plan: undefined, silentTicks: 0, scratch: { ids: [], hosts: [], keys: [], pcms: [] },
       };
       this.rooms.set(id, room);
     }
@@ -196,6 +207,13 @@ export class WeriftMediaTransport implements MediaTransport {
   private sendFrame(room: Room, frame: MixFrame): void {
     const plan = this.fanout(room, frame);
     if (!plan.frames.length) return;
+    room.silentTicks = frame.silent ? room.silentTicks + 1 : 0;
+    // Only with nothing in flight: a silence send overtaking a pending encode would reorder audio.
+    if (this.config.audio.opus.dtx && room.silentTicks > SKIP_SILENCE_AFTER_MS / this.config.audio.frameMs && !this.codecs.backlog(room.id)) {
+      this.counters.silentSkipped++;
+      for (const [host, list] of plan.targets) host.send({ roomId: room.id, payloads: plan.silence, targets: list });
+      return;
+    }
     // Shed frames instead of queueing unbounded latency when the room's worker falls behind.
     if (this.codecs.backlog(room.id) >= this.config.audio.mixer.maxBufferedFrames) {
       this.counters.shedFrames++;
@@ -238,7 +256,7 @@ export class WeriftMediaTransport implements MediaTransport {
       if (!list) { list = []; targets.set(hosts[i]!, list); }
       list.push([ids[i]!, at]);
     }
-    room.plan = { ids: ids.slice(), hosts: hosts.slice(), frameOf, frames, targets: [...targets] };
+    room.plan = { ids: ids.slice(), hosts: hosts.slice(), frameOf, frames, silence: frames.map(() => new Uint8Array(0)), targets: [...targets] };
     return room.plan;
   }
   /**

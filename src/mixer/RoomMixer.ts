@@ -141,6 +141,7 @@ export class RoomMixer implements MixedPcmSource {
     const playout = this.opts.playoutFrames;
     const energyThreshold = this.opts.speakingThreshold ** 2 * this.frameSize;
     let speakingChanged = false;
+    let silent = true;
     const converge = ++this.windowTick >= this.convergeTicks;
     if (converge) this.windowTick = 0;
     for (const source of sources.values()) {
@@ -162,6 +163,7 @@ export class RoomMixer implements MixedPcmSource {
       source.contribution = contribution;
       let energy = 0;
       if (contribution) {
+        silent = false;
         for (let i = 0; i < raw.length; i++) { const s = contribution[i]!; raw[i] = raw[i]! + s; energy += s * s; }
       }
       const wasSpeaking = source.hold > 0;
@@ -181,7 +183,7 @@ export class RoomMixer implements MixedPcmSource {
       limitInPlace(minus, threshold);
     }
     const frame: MixFrame = {
-      seq: this.seq++, full,
+      seq: this.seq++, full, silent,
       minus(id) {
         const source = sources.get(id);
         // A silent source's mix-minus equals the full mix.
