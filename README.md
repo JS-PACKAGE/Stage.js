@@ -15,12 +15,15 @@
 Stage.js 伺服器（Node v24）
    ├─ src/ws/          ws 伺服器、驗證、限流、StageHub（每房單序佇列、廣播）
    ├─ src/model/       Room 狀態機與不變量
-   ├─ src/rtc/         offer 方向檢查（觀眾只能 recvonly）
-   ├─ src/mixer/       RoomMixer：N 路 PCM 48kHz 疊加 → limiter → mix / mix-minus-self
-   └─ src/transport/   MediaTransport 介面；werift adapter（Opus 解碼／編碼、RTP）；Mock
+   ├─ src/rtc/         offer 方向檢查（觀眾只能 recvonly）、短期 TURN 憑證
+   ├─ src/mixer/       RoomMixer：N 路 PCM 48kHz 疊加 → limiter → mix / mix-minus-self；jitter buffer、說話偵測
+   └─ src/transport/   MediaTransport 介面；werift adapter；Mock
+        ├─ 主執行緒       上行 RTP 重排／補幀、混音分送、政策關卡
+        ├─ media workers PeerConnection（ICE／DTLS／SRTP／RTP 打包）；rtc.mediaWorkers > 0 時分散到多條 thread，0＝主執行緒
+        └─ codec workers Opus 編解碼（audio.codecWorkers 條 thread，WASM）
 ```
 
-混音：每 20ms 一個 tick，各發言者取一個 960-sample frame 疊加。觀眾共用一次編碼；台上者各自一路 mix-minus-self 編碼。
+混音：每 20ms 一個 tick，各發言者取一個 960-sample frame 疊加。觀眾共用一次編碼；台上者各自一路 mix-minus-self 編碼。編好的封包送到持有該房 peer 的各 media worker，由它們各自打包、加密、送出。
 
 ## 需求
 
@@ -73,7 +76,7 @@ Windows 用 `.\stage.ps1 <command>`，指令相同；Windows 無法對背景 nod
 | `limits` | `maxRooms`、`maxConnections`、`maxSpeakersPerRoom`（8）、`maxAudiencePerRoom`（300）、`maxFrameBytes`（64KB）、`controlPerSecond`（20）、`handRaiseIntervalMs`（10000）、`icePerSecond`（30）、`nameMaxLength`（32）、`codeMaxLength`（16）、`sdpMaxLength` |
 | `rooms` | `codeLength`（8）、`controllerGraceMs`（主控斷線寬限 60000）、`heartbeatIntervalMs` |
 | `audio` | `sampleRate`（48000；只接受 Opus 原生取樣率）、`frameMs`（20）、`codecWorkers`（Opus 編解碼 worker 數，房間平均分配到各 worker）、`opus.{vbr,minBitrate,maxBitrate,bitrate,complexity}`、`opus.fec`／`opus.packetLossPercent`（下行 in-band FEC 與預期掉包率）、`opus.dtx`（靜音不送包）、`mixer.{maxBufferedFrames,limiterThreshold,latencyTargetMs}`、`mixer.speakingThreshold`／`speakingHoldMs`（說話指示的 RMS 門檻與釋放延遲）、`jitter.playoutFrames`（每路上行預緩衝幀數）、`jitter.reorderPackets`（亂序容忍包數，超過即判定遺失並補幀） |
-| `rtc` | `iceServers`（下發給瀏覽器的靜態 STUN）、`serverIceServers`（伺服器端 ICE）、`portRange`（`[]` 或 `[min, max]`）、`turn.{urls,secret,ttlSeconds}`（coturn `use-auth-secret` 短期憑證，每次進房以 HMAC 簽發；`urls: []` 停用） |
+| `rtc` | `iceServers`（下發給瀏覽器的靜態 STUN）、`serverIceServers`（伺服器端 ICE）、`portRange`（`[]` 或 `[min, max]`）、`mediaWorkers`（承載 PeerConnection 的 worker thread 數，0＝主執行緒）、`turn.{urls,secret,ttlSeconds}`（coturn `use-auth-secret` 短期憑證，每次進房以 HMAC 簽發；`urls: []` 停用） |
 | `log` | `level`：`debug`／`info`／`warn`／`error`（房間代碼、token、憑證、SDP 一律不入日誌） |
 
 對外部署：`allowInsecure: false`、`host: 0.0.0.0`、填 `tls`；開放 `rtc.portRange` 的 UDP；設定 `rtc.turn`（coturn 需 `use-auth-secret` 與相同的 `static-auth-secret`）。

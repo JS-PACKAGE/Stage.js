@@ -3,7 +3,7 @@
  * N werift audience peers spread over P child processes, and reports downlink loss, mouth-to-ear
  * latency of periodic beeps and the server's /metrics.
  *
- *   node scripts/load-test.ts [--speakers 3] [--audience 297] [--seconds 20] [--procs 4] [--url ws://…/ws]
+ *   node scripts/load-test.ts [--speakers 3] [--audience 298] [--seconds 20] [--procs 4] [--media-workers N] [--url ws://…/ws]
  */
 import assert from 'node:assert/strict';
 import { fork, spawn, type ChildProcess } from 'node:child_process';
@@ -18,23 +18,26 @@ import { WebSocket } from 'ws';
 import type { ClientMessage, ServerMessage } from '../shared/protocol.ts';
 import { loadConfig, samplesPerFrame } from '../src/config.ts';
 import { OpusDecoder, OpusEncoder } from '../src/transport/opus.ts';
-import { opusCodec } from '../src/transport/WeriftMediaTransport.ts';
+import { opusCodec } from '../src/transport/peerHost.ts';
 
 const { values: args } = parseArgs({
   options: {
     speakers: { type: 'string', default: '3' }, audience: { type: 'string' }, seconds: { type: 'string', default: '20' },
     procs: { type: 'string', default: '4' }, url: { type: 'string' }, child: { type: 'boolean', default: false },
+    'media-workers': { type: 'string' },
   },
 });
 const config = loadConfig('config.example.yaml');
 const FRAME_MS = config.audio.frameMs;
 const FRAME = samplesPerFrame(config.audio);
-/** Audience peers per child process that also decode audio to time beep arrivals. */
-const PROBES_PER_PROC = 5;
+/** Audience peers that decode audio to time beep arrivals. They get a process of their own so the
+ * bulk audience's decryption load cannot delay their timestamps. */
+const PROBES = 10;
 const wallMs = () => performance.timeOrigin + performance.now();
+const cpuSeconds = () => { const c = process.cpuUsage(); return (c.user + c.system) / 1e6; };
 
-type ChildInit = { url: string; roomId: string; code: string; count: number; index: number };
-type ChildReport = { peers: number; connected: number; packets: number; lost: number; onsets: number[] };
+type ChildInit = { url: string; roomId: string; code: string; count: number; index: number; probes: boolean };
+type ChildReport = { peers: number; connected: number; packets: number; lost: number; onsets: number[]; cpuSeconds: number };
 
 /** Minimal Stage.js signaling client over ws (Node stands in for the browser client library). */
 class Participant {
@@ -86,7 +89,7 @@ class Participant {
 }
 
 async function audienceChild(init: ChildInit): Promise<ChildReport> {
-  const report: ChildReport = { peers: init.count, connected: 0, packets: 0, lost: 0, onsets: [] };
+  const report: ChildReport = { peers: init.count, connected: 0, packets: 0, lost: 0, onsets: [], cpuSeconds: 0 };
   const people: Participant[] = [];
   for (let i = 0; i < init.count; i++) {
     const p = new Participant(init.url);
@@ -94,7 +97,7 @@ async function audienceChild(init: ChildInit): Promise<ChildReport> {
     await p.open();
     await p.request({ type: 'join', roomId: init.roomId, code: init.code, name: `A${init.index}-${i}` });
     p.pc.addTransceiver('audio', { direction: 'recvonly' });
-    const probe = i < PROBES_PER_PROC ? new OpusDecoder(config.audio.sampleRate) : undefined;
+    const probe = init.probes ? new OpusDecoder(config.audio.sampleRate) : undefined;
     let lastSeq = -1, quietSince = wallMs();
     p.pc.onTrack.subscribe((track) => track.onReceiveRtp.subscribe((packet) => {
       const now = wallMs();
@@ -116,12 +119,14 @@ async function audienceChild(init: ChildInit): Promise<ChildReport> {
   process.once('message', () => resolve());
   await promise;
   for (const p of people) p.close();
+  report.cpuSeconds = cpuSeconds();
   return report;
 }
 
 async function startServer(): Promise<{ url: string; metricsUrl: string; child: ChildProcess }> {
   const raw = parse(readFileSync('config.example.yaml', 'utf8'));
   raw.server.port = 0; raw.server.static = []; raw.rtc.serverIceServers = []; raw.rtc.iceServers = []; raw.log.level = 'info';
+  if (args['media-workers'] !== undefined) raw.rtc.mediaWorkers = Number(args['media-workers']);
   const dir = mkdtempSync(join(tmpdir(), 'stage-load-'));
   writeFileSync(join(dir, 'config.yaml'), stringify(raw));
   const child = spawn(process.execPath, ['src/index.ts'], { env: { ...process.env, STAGE_CONFIG: join(dir, 'config.yaml') }, stdio: ['ignore', 'ignore', 'pipe'] });
@@ -163,10 +168,11 @@ async function main(): Promise<void> {
     for (const s of stage) assert.ok(await s.connected(20000), 'speaker ICE');
 
     const started = performance.now();
-    const children = Array.from({ length: procs }, (_, index) => {
-      const count = Math.floor(audience / procs) + (index < audience % procs ? 1 : 0);
+    const bulk = audience - PROBES;
+    const shares = [PROBES, ...Array.from({ length: procs }, (_, index) => Math.floor(bulk / procs) + (index < bulk % procs ? 1 : 0))];
+    const children = shares.map((count, index) => {
       const child = fork(new URL(import.meta.url), ['--child'], { stdio: 'inherit' });
-      child.send({ url, roomId, code: code ?? '', count, index } satisfies ChildInit);
+      child.send({ url, roomId, code: code ?? '', count, index, probes: index === 0 } satisfies ChildInit);
       return child;
     });
     await Promise.all(children.map((c) => new Promise((r) => c.once('message', r))));
@@ -209,6 +215,9 @@ async function main(): Promise<void> {
       serverEventLoopMs: `p99 ${pick('stage_event_loop_delay_p99_ms')} · max ${pick('stage_event_loop_delay_max_ms')}`,
       mixer: `late ticks ${pick('stage_mixer_late_ticks_total')} · max lag ${pick('stage_mixer_max_tick_lag_ms')}ms · underruns ${pick('stage_mixer_underruns_total')}`,
       shedFrames: pick('stage_mix_frames_shed_total'),
+      serverCpuSeconds: pick('stage_process_cpu_seconds_total'),
+      // The harness shares the machine: when it needs most cores, server numbers are pessimistic.
+      harnessCpuSeconds: (reports.reduce((n, r) => n + r.cpuSeconds, 0) + cpuSeconds()).toFixed(1),
     });
     if (total.connected < total.peers || latencies.length === 0 || Number(pct(0.95)) > config.audio.mixer.latencyTargetMs) process.exitCode = 1;
   } finally {

@@ -84,7 +84,7 @@ describe('ws server boundary', () => {
       createMixer: () => new RoomMixer({ sampleRate: 48000, frameMs: 20, maxBufferedFrames: 10, playoutFrames: 1, limiterThreshold: 0.9, speakingThreshold: 0.02, speakingHoldMs: 40 }),
     });
     const stageHub = hub;
-    server = createStageServer({ config, hub, log: silentLogger, baseDir: staticDir, metrics: () => renderPrometheus(stageHub.metrics()) });
+    server = createStageServer({ config, hub, log: silentLogger, baseDir: staticDir, metrics: async () => renderPrometheus(stageHub.metrics()) });
     const addr = await server.listen();
     base = `http://127.0.0.1:${addr.port}`;
     url = `ws://127.0.0.1:${addr.port}${config.server.wsPath}`;

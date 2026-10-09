@@ -67,7 +67,7 @@ const server = createStageServer({
   hub: stageHub,
   log,
   baseDir: root,
-  metrics: () => renderPrometheus([...stageHub.metrics(), ...transport.metrics(), ...mixerCounters.samples(), ...processMetrics()]),
+  metrics: async () => renderPrometheus([...stageHub.metrics(), ...await transport.metrics(), ...mixerCounters.samples(), ...processMetrics()]),
 });
 const addr = await server.listen();
 const secure = config.server.tls.certFile !== '';

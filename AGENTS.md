@@ -20,12 +20,12 @@ npm test                       # node --test（MockMediaTransport，無需 WebRT
 npm run build                  # tsc → dist/，vite → packages/client/dist、web/dist
 npm start                      # node dist/src/index.js（讀 ./config.yaml 或 $STAGE_CONFIG）
 npm run dev                    # node --watch src/index.ts
-node scripts/werift-loopback.ts  # 真 werift 端到端：上行解碼、混音、不含自己、觀眾上行封鎖、觀眾→發言者重協商
+node scripts/werift-loopback.ts [N]  # 真 werift 端到端：上行解碼、混音、不含自己、觀眾上行封鎖、觀眾→發言者重協商；N＝rtc.mediaWorkers
 node scripts/bench-mixer.ts      # Gate 3：8/3 發言者 × 300 訂閱者混音延遲
 node scripts/load-test.ts        # 全端壓測：自起伺服器，K 發言者＋N werift 觀眾（多 process），回報掉包、beep 端到端延遲、/metrics
 ```
 
-改動媒體層（`src/transport/`、`src/mixer/`）後必跑 `werift-loopback`；改動控制面後必跑 `npm test`。
+改動媒體層（`src/transport/`、`src/mixer/`）後必跑 `werift-loopback`（`0` 與 `2` 各一次，兩種 peer host 都要過）；改動控制面後必跑 `npm test`。
 
 ## 結構對應
 
@@ -39,7 +39,9 @@ node scripts/load-test.ts        # 全端壓測：自起伺服器，K 發言者�
 | `src/ws/validate.ts`、`rateLimit.ts` | 輸入白名單驗證、name 清洗轉義；token bucket 限流 |
 | `src/rtc/sdp.ts` | offer 方向解析（觀眾 recvonly 強制，與 WebRTC 實作無關） |
 | `src/transport/MediaTransport.ts` | 媒體層契約 |
-| `src/transport/WeriftMediaTransport.ts`、`opus.ts` | werift adapter、Opus 編解碼（@evan/opus） |
+| `src/transport/WeriftMediaTransport.ts`、`opus.ts` | werift adapter（主執行緒：peer 配置、上行重排／解碼、混音分送、publisher 關卡）、Opus 編解碼（@evan/opus） |
+| `src/transport/peerHost.ts` | `PeerHost` 介面與 `WeriftPeerHost`：PeerConnection、方向政策、上行第二道關卡、RTP 打包／DTX 省略 |
+| `src/transport/mediaShards.ts`、`mediaWorker.ts` | `MediaShard`：在 worker thread 上跑 `WeriftPeerHost`（`rtc.mediaWorkers`；0＝主執行緒）；worker 掛掉時回報其 peer 已關閉並重生 |
 | `src/transport/codecPool.ts`、`codecWorker.ts` | Opus 編解碼 worker thread pool（`audio.codecWorkers`）；每房固定一個 worker，維持有狀態 codec 的順序 |
 | `src/transport/jitter.ts` | 上行 RTP 重排（`audio.jitter.reorderPackets`）；遺失包以 `null` 送解碼器做淡出補幀（binding 無 PLC） |
 | `src/transport/MockMediaTransport.ts` | 測試／無 WebRTC 開發用 |

@@ -74,6 +74,8 @@ export interface AppConfig {
     iceServers: IceServerConfig[];
     serverIceServers: IceServerConfig[];
     portRange: [number, number] | [];
+    /** Worker threads hosting PeerConnections (ICE/DTLS/SRTP); 0 keeps them on the main thread. */
+    mediaWorkers: number;
     /** Ephemeral TURN (coturn use-auth-secret); empty `urls` disables it. */
     turn: { urls: string[]; secret: string; ttlSeconds: number };
   };
@@ -255,6 +257,7 @@ export function parseConfig(raw: unknown): AppConfig {
     iceServers: iceServers(t.iceServers, 'rtc.iceServers'),
     serverIceServers: iceServers(t.serverIceServers, 'rtc.serverIceServers'),
     portRange,
+    mediaWorkers: int(t, 'mediaWorkers', 'rtc', 0, 64),
     turn,
   };
 

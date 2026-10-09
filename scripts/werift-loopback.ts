@@ -4,9 +4,12 @@ import { MediaStreamTrack, RTCPeerConnection, RtpHeader, RtpPacket } from 'werif
 import { loadConfig, samplesPerFrame } from '../src/config.ts';
 import { silentLogger } from '../src/log.ts';
 import { RoomMixer } from '../src/mixer/RoomMixer.ts';
-import { WeriftMediaTransport, opusCodec } from '../src/transport/WeriftMediaTransport.ts';
+import { opusCodec } from '../src/transport/peerHost.ts';
+import { WeriftMediaTransport } from '../src/transport/WeriftMediaTransport.ts';
 import { OpusEncoder, OpusDecoder } from '../src/transport/opus.ts';
+// Optional argv[2] = rtc.mediaWorkers, so both the in-process and the sharded peer hosts get exercised.
 const config = loadConfig('config.example.yaml'); config.rtc.serverIceServers = [];
+if (process.argv[2] !== undefined) config.rtc.mediaWorkers = Number(process.argv[2]);
 const mixer = new RoomMixer({ ...config.audio, ...config.audio.mixer, ...config.audio.jitter });
 const clients = new Map<string, RTCPeerConnection>();
 const transport = new WeriftMediaTransport(config, { onLocalCandidate() {} }, silentLogger);
@@ -88,7 +91,7 @@ try {
   const framesAtDemotion = promotedFrames;
   await sendPromoted(300);
   assert.equal(promotedFrames, framesAtDemotion, 'demoted participant uplink still reaches the mixer');
-  console.log(`PASS packets=${received} audienceEnergy=${audienceEnergy.toFixed(6)} selfEnergy=${selfEnergy.toFixed(6)} blockedPacketsSent=${blockedPacketsSent} blockedFrames=${rejectedFrames}; renegotiation promotedFrames=${promotedFrames} PASS`);
+  console.log(`PASS mediaWorkers=${config.rtc.mediaWorkers} packets=${received} audienceEnergy=${audienceEnergy.toFixed(6)} selfEnergy=${selfEnergy.toFixed(6)} blockedPacketsSent=${blockedPacketsSent} blockedFrames=${rejectedFrames}; renegotiation promotedFrames=${promotedFrames} PASS`);
 } catch (error) { console.error('FAIL', error); process.exitCode = 1; }
 finally {
   clearInterval(timer); mixer.stop();

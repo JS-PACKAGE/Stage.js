@@ -26,7 +26,7 @@ export interface StageServerDeps {
   baseDir: string;
   now?: () => number;
   /** Prometheus text for `GET /metrics` (served only when `server.metrics.enabled`). */
-  metrics?: () => string;
+  metrics?: () => Promise<string>;
 }
 
 /** Policy-violation close code (RFC 6455) used for rate-limit disconnects. */
@@ -67,7 +67,10 @@ export function createStageServer(deps: StageServerDeps): StageServer {
         res.writeHead(401, { 'Content-Type': 'text/plain', 'WWW-Authenticate': 'Bearer' }).end('unauthorized');
         return;
       }
-      res.writeHead(200, { 'Content-Type': 'text/plain; version=0.0.4', 'Cache-Control': 'no-store' }).end(deps.metrics());
+      deps.metrics().then(
+        (text) => res.writeHead(200, { 'Content-Type': 'text/plain; version=0.0.4', 'Cache-Control': 'no-store' }).end(text),
+        (err) => { log.error('metrics error', { error: String(err) }); res.writeHead(500).end(); },
+      );
       return;
     }
     serveStatic(req, res).then(
