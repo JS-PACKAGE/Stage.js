@@ -45,6 +45,12 @@ export interface AppConfig {
       maxBitrate: number;
       bitrate: number;
       complexity: number;
+      /** In-band forward error correction for the downlink. */
+      fec: boolean;
+      /** Expected downlink loss (0–100) the encoder provisions FEC for. */
+      packetLossPercent: number;
+      /** Discontinuous transmission: silent frames are not sent. */
+      dtx: boolean;
     };
     mixer: {
       maxBufferedFrames: number;
@@ -186,6 +192,9 @@ export function parseConfig(raw: unknown): AppConfig {
       maxBitrate: int(o, 'maxBitrate', 'audio.opus', 6000, 510000),
       bitrate: int(o, 'bitrate', 'audio.opus', 6000, 510000),
       complexity: int(o, 'complexity', 'audio.opus', 0, 10),
+      fec: bool(o, 'fec', 'audio.opus'),
+      packetLossPercent: int(o, 'packetLossPercent', 'audio.opus', 0, 100),
+      dtx: bool(o, 'dtx', 'audio.opus'),
     },
     mixer: {
       maxBufferedFrames: int(m, 'maxBufferedFrames', 'audio.mixer', 1, 100),

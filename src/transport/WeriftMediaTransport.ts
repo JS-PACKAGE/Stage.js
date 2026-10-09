@@ -15,6 +15,8 @@ export function opusCodec(): RTCRtpCodecParameters {
 interface Peer {
   pc: RTCPeerConnection; track: MediaStreamTrack; allowUplink: boolean; sender?: RTCRtpSender;
   chunker: PcmChunker; reorder: RtpReorderBuffer; sequence: number; timestamp: number; started: number;
+  /** Next sent packet starts a talkspurt (stream start or end of a DTX gap): set the RTP marker. */
+  talkspurt: boolean;
   outboundBytes: number; outboundPackets: number; inboundBytes: number; inboundPackets: number;
 }
 interface Room {
@@ -45,7 +47,7 @@ export class WeriftMediaTransport implements MediaTransport {
     let peer = room.peers.get(id);
     if (!peer) {
       const pc = new RTCPeerConnection({ codecs: { audio: [opusCodec()], video: [] }, iceServers: this.config.rtc.serverIceServers, icePortRange: this.config.rtc.portRange.length === 2 ? this.config.rtc.portRange : undefined });
-      peer = { pc, track: new MediaStreamTrack({ kind: 'audio' }), allowUplink: policy.allowUplink, chunker: new PcmChunker(samplesPerFrame(this.config.audio)), reorder: new RtpReorderBuffer(this.config.audio.jitter.reorderPackets), sequence: randomInt(65536), timestamp: randomInt(0x100000000), started: performance.now(), outboundBytes: 0, outboundPackets: 0, inboundBytes: 0, inboundPackets: 0 };
+      peer = { pc, track: new MediaStreamTrack({ kind: 'audio' }), allowUplink: policy.allowUplink, chunker: new PcmChunker(samplesPerFrame(this.config.audio)), reorder: new RtpReorderBuffer(this.config.audio.jitter.reorderPackets), sequence: randomInt(65536), timestamp: randomInt(0x100000000), started: performance.now(), talkspurt: true, outboundBytes: 0, outboundPackets: 0, inboundBytes: 0, inboundPackets: 0 };
       room.peers.set(id, peer);
       const current = peer;
       pc.onIceCandidate.subscribe(candidate => this.callbacks.onLocalCandidate(roomId, id, candidate ? candidate.toJSON() : null));
@@ -131,7 +133,10 @@ export class WeriftMediaTransport implements MediaTransport {
         const sender = peer.sender;
         if (room.peers.get(id) !== peer || !room.subscribers.has(id) || !sender?.codec) continue;
         const payload = payloads[index.get(key)!]!;
-        const packet = new RtpPacket(new RtpHeader({ payloadType: sender.codec.payloadType, sequenceNumber: peer.sequence, timestamp: peer.timestamp, ssrc: sender.ssrc, marker: peer.outboundPackets === 0 }), payload);
+        // libopus DTX emits ≤2-byte packets for silence; like libwebrtc, skip them but keep the RTP clock running.
+        if (payload.length <= 2) { peer.timestamp = (peer.timestamp + timestampStep) >>> 0; peer.talkspurt = true; continue; }
+        const packet = new RtpPacket(new RtpHeader({ payloadType: sender.codec.payloadType, sequenceNumber: peer.sequence, timestamp: peer.timestamp, ssrc: sender.ssrc, marker: peer.talkspurt }), payload);
+        peer.talkspurt = false;
         peer.sequence = (peer.sequence + 1) & 0xffff;
         peer.timestamp = (peer.timestamp + timestampStep) >>> 0;
         peer.track.writeRtp(packet);

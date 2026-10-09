@@ -15,6 +15,12 @@ export class OpusEncoder {
     this.codec.bitrate = Math.min(audio.opus.maxBitrate, Math.max(audio.opus.minBitrate, audio.opus.bitrate));
     this.codec.vbr = audio.opus.vbr;
     this.codec.complexity = audio.opus.complexity as Encoder['complexity'];
+    // In-band FEC lets receivers rebuild a lost packet from the next one; libopus only spends
+    // bits on it when told to expect loss. DTX collapses silence into ≤2-byte packets the
+    // transport does not send.
+    this.codec.inband_fec = audio.opus.fec;
+    this.codec.packet_loss = audio.opus.packetLossPercent;
+    this.codec.dtx = audio.opus.dtx;
   }
   /** Returns a freshly allocated packet the caller owns (sole owner of its ArrayBuffer, so it is transferable). */
   encode(samples: Float32Array): Buffer<ArrayBuffer> {

@@ -48,6 +48,9 @@ audio:
     maxBitrate: 128000
     bitrate: 64000             # VBR 目標，須落在 min..max
     complexity: 9
+    fec: true                  # in-band FEC：觀眾端可由下一包還原遺失包
+    packetLossPercent: 10      # 預期下行掉包率（%），FEC 依此配置冗餘位元（可調整）
+    dtx: true                  # 靜音不送包（≤2 bytes 的 DTX 幀不傳），省觀眾頻寬
   mixer:
     maxBufferedFrames: 10      # 每路 PCM 緩衝上限（10×20ms=200ms），超過丟最舊
     limiterThreshold: 0.9      # soft-clip 起點（0..1）
