@@ -2,6 +2,7 @@ import type { MixedPcmSource, MixFrame, MixFrameListener } from '../transport/Me
 import { MixerCounters } from '../metrics.ts';
 import { limitInPlace } from './limiter.ts';
 import type { MixerClock } from './MixerClock.ts';
+import { LoudnessNormalizer, type LoudnessOptions } from './loudness.ts';
 import { NoiseFilter, type NoiseFilterOptions } from './noiseFilter.ts';
 
 /**
@@ -9,14 +10,16 @@ import { NoiseFilter, type NoiseFilterOptions } from './noiseFilter.ts';
  * `speakingThreshold`: frame RMS (0..1) at which a source counts as speaking; it stays speaking for
  * `speakingHoldMs` after dropping below, so pauses between words do not flap the indicator.
  * `noiseFilter`: when set, every source is high-passed and noise-gated on ingress (see NoiseFilter).
+ * `loudness`: when set, every source is then level-normalized on ingress (see LoudnessNormalizer).
  */
-export interface RoomMixerOptions { sampleRate: number; frameMs: number; maxBufferedFrames: number; playoutFrames: number; limiterThreshold: number; speakingThreshold: number; speakingHoldMs: number; noiseFilter?: NoiseFilterOptions }
+export interface RoomMixerOptions { sampleRate: number; frameMs: number; maxBufferedFrames: number; playoutFrames: number; limiterThreshold: number; speakingThreshold: number; speakingHoldMs: number; noiseFilter?: NoiseFilterOptions; loudness?: LoudnessOptions }
 export type SpeakingListener = (participantIds: string[]) => void;
 interface Source {
   muted: boolean; primed: boolean; frames: FrameQueue;
   /** Fewest frames queued at any tick of the current convergence window. */
   low: number;
-  /** Ticks left in the speaking state. */ hold: number; filter: NoiseFilter | undefined;
+  /** Ticks left in the speaking state. */ hold: number;
+  filter: NoiseFilter | undefined; loudness: LoudnessNormalizer | undefined;
   /** This tick's audible frame (a queue slot), null when silent, muted or starved. */
   contribution: Float32Array | null;
   /** This tick's limited mix-minus; meaningful only while `contribution` is set. */
@@ -83,8 +86,12 @@ export class RoomMixer implements MixedPcmSource {
   get sourceCount(): number { return this.sources.size; }
   addSource(id: string): void {
     if (this.sources.has(id)) return;
-    const nf = this.opts.noiseFilter;
-    this.sources.set(id, { muted: false, primed: false, frames: new FrameQueue(this.opts.maxBufferedFrames, this.frameSize), low: Infinity, hold: 0, filter: nf && new NoiseFilter(nf, this.opts.sampleRate, this.opts.frameMs), contribution: null, minus: new Float32Array(this.frameSize) });
+    const { noiseFilter: nf, loudness: ln, sampleRate, frameMs } = this.opts;
+    this.sources.set(id, {
+      muted: false, primed: false, frames: new FrameQueue(this.opts.maxBufferedFrames, this.frameSize), low: Infinity, hold: 0,
+      filter: nf && new NoiseFilter(nf, sampleRate, frameMs), loudness: ln && new LoudnessNormalizer(ln, frameMs),
+      contribution: null, minus: new Float32Array(this.frameSize),
+    });
   }
   removeSource(id: string): void {
     const source = this.sources.get(id);
@@ -108,6 +115,7 @@ export class RoomMixer implements MixedPcmSource {
     if (source.frames.full) this.counters.droppedFrames++;
     const slot = source.frames.push(samples);
     source.filter?.process(slot);
+    source.loudness?.process(slot);
   }
   tick(): MixFrame | null {
     if (!this.sources.size) return null;

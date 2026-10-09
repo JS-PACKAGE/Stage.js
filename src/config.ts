@@ -87,6 +87,8 @@ export interface AppConfig {
       /** Gain applied while gated (0 = silence). */
       gateFloor: number;
     };
+    /** Server-side per-uplink loudness normalization (see src/mixer/loudness.ts). */
+    loudness: { enabled: boolean; targetRms: number; maxGainDb: number; speechRms: number; adaptMs: number };
   };
   rtc: {
     iceServers: IceServerConfig[];
@@ -218,6 +220,7 @@ export function parseConfig(raw: unknown): AppConfig {
   const j = obj(a.jitter, 'audio.jitter');
   const nf = obj(a.noiseFilter, 'audio.noiseFilter');
   const lt = obj(a.lowTier, 'audio.lowTier');
+  const ld = obj(a.loudness, 'audio.loudness');
   const audio: AppConfig['audio'] = {
     sampleRate: int(a, 'sampleRate', 'audio', 8000, 48000),
     frameMs: int(a, 'frameMs', 'audio', 10, 60),
@@ -257,9 +260,17 @@ export function parseConfig(raw: unknown): AppConfig {
       gateHoldMs: int(nf, 'gateHoldMs', 'audio.noiseFilter', 0, 10000),
       gateFloor: num(nf, 'gateFloor', 'audio.noiseFilter', 0, 1),
     },
+    loudness: {
+      enabled: bool(ld, 'enabled', 'audio.loudness'),
+      targetRms: num(ld, 'targetRms', 'audio.loudness', 0.001, 0.9),
+      maxGainDb: num(ld, 'maxGainDb', 'audio.loudness', 0, 40),
+      speechRms: num(ld, 'speechRms', 'audio.loudness', 0.0001, 0.5),
+      adaptMs: int(ld, 'adaptMs', 'audio.loudness', 100, 60000),
+    },
   };
   if (audio.jitter.playoutFrames > audio.mixer.maxBufferedFrames) throw new ConfigError('audio.jitter.playoutFrames: exceeds audio.mixer.maxBufferedFrames');
   if (audio.noiseFilter.enabled && audio.noiseFilter.gateThreshold >= audio.mixer.speakingThreshold) throw new ConfigError('audio.noiseFilter.gateThreshold: must be below audio.mixer.speakingThreshold');
+  if (audio.loudness.enabled && audio.noiseFilter.enabled && audio.loudness.speechRms <= audio.noiseFilter.gateThreshold) throw new ConfigError('audio.loudness.speechRms: must be above audio.noiseFilter.gateThreshold');
   if (![10, 20, 40, 60].includes(audio.frameMs)) throw new ConfigError('audio.frameMs: must be 10, 20, 40 or 60 (Opus frame sizes)');
   // libopus only encodes/decodes at these rates; using one end-to-end avoids resampling.
   if (![8000, 12000, 16000, 24000, 48000].includes(audio.sampleRate)) {

@@ -78,6 +78,12 @@ audio:
     gateThreshold: 0.008       # 噪音門：單幀 RMS 低於此值視為背景噪音（約 −42 dBFS，須低於 speakingThreshold）
     gateHoldMs: 200            # 最後一個有聲幀後維持開啟多久，避免切掉字尾（可調整）
     gateFloor: 0.1             # 關門時的增益（0.1≈−20 dB；0＝完全靜音，較生硬）
+  loudness:                    # 伺服器端每路音量正規化（自動增益，接在 noiseFilter 之後）：小聲的麥克風拉高、大聲的壓低
+    enabled: true
+    targetRms: 0.1             # 說話時的目標 RMS（約 −20 dBFS，可調整）
+    maxGainDb: 12              # 最多放大／衰減幾 dB，避免把很小聲的背景放大成噪音（可調整）
+    speechRms: 0.01            # 單幀 RMS ≥ 此值才算說話、才更新音量估計（須高於 noiseFilter.gateThreshold）
+    adaptMs: 3000              # 音量估計的時間常數；越長越穩、越短越快跟上（可調整）
 
 rtc:
   # 下發給瀏覽器的靜態 ICE servers（STUN）。TURN 請用下方 turn 區塊發短期憑證，勿把長期帳密放這裡。
