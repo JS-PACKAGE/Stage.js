@@ -283,6 +283,51 @@ describe('flow 4 — open and close rooms', () => {
   });
 });
 
+describe('moderation', () => {
+  it('kicks a speaker out of the room: media torn down, connection closed, others updated', async () => {
+    const h = harness();
+    const host = await h.create();
+    const a = await h.join(host.roomId, host.code, 'A');
+    const b = await h.join(host.roomId, host.code, 'B');
+    await h.req(a.s, { type: 'hand:raise' });
+    await h.req(host.s, { type: 'stage:approve', targetId: a.id });
+    assert.equal(await h.req(a.s, { type: 'rtc:offer', payload: SENDRECV_OFFER }), 'ok');
+    assert.equal(await h.req(b.s, { type: 'participant:kick', targetId: a.id }), 'forbidden', 'controller only');
+    assert.equal(await h.req(host.s, { type: 'participant:kick', targetId: host.id }), 'conflict');
+
+    assert.equal(await h.req(host.s, { type: 'participant:kick', targetId: a.id }), 'ok');
+    assert.deepEqual(a.s.last('kicked'), { type: 'kicked', roomId: host.roomId });
+    assert.equal(a.s.closed?.code, 4001);
+    assert.equal(h.transport.emitUplink(host.roomId, a.id, sine(FRAME, 0.5)), false, 'uplink no longer reaches the mixer');
+    assert.equal(h.transport.rooms.get(host.roomId)!.peers.has(a.id), false);
+    const st = b.s.last('room:state')!;
+    assert.ok(!st.speakers.some((p) => p.participantId === a.id));
+    assert.equal(st.audienceCount, 1);
+    assert.deepEqual(b.s.last('stage:left'), { type: 'stage:left', participantId: a.id, role: 'audience', reason: 'leave' });
+    assert.equal(await h.req(a.s, { type: 'hand:raise' }), 'not_joined', 'the kicked session is unbound');
+    await h.hub.detach(a.s);
+    assert.equal(await h.req(host.s, { type: 'participant:kick', targetId: a.id }), 'not_found');
+  });
+
+  it('rotating the code locks out the old code but keeps everyone inside', async () => {
+    const h = harness();
+    const host = await h.create();
+    const a = await h.join(host.roomId, host.code, 'A');
+    assert.equal(await h.req(a.s, { type: 'room:rotate-code' }), 'forbidden');
+    assert.equal(await h.req(host.s, { type: 'room:rotate-code' }), 'ok');
+    const code = host.s.last('room:state')!.code!;
+    assert.match(code, /^[A-Z0-9]{8}$/);
+    assert.notEqual(code, host.code);
+    const late = new FakeSession();
+    assert.equal(await h.req(late, { type: 'join', roomId: host.roomId, code: host.code, name: 'L' }), 'unauthorized');
+    await h.join(host.roomId, code, 'L');
+    assert.equal(await h.req(a.s, { type: 'hand:raise' }), 'ok', 'existing participants unaffected');
+
+    const open = await h.create('Host', { codeRequired: false });
+    assert.equal(await h.req(open.s, { type: 'room:rotate-code' }), 'conflict');
+  });
+});
+
 describe('mute', () => {
   it('force-mute blocks self-unmute; force-unmute preserves self-mute', async () => {
     const h = harness();

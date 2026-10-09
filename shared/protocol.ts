@@ -16,6 +16,11 @@
  *     and controller-only fields (`code`, `audience`), recipient-only `resumeToken`.
  *   - S→C `speaking`  : participants currently audible in the mix (voice activity with
  *     a release hold); sent only when the set changes.
+ *   - C→S `participant:kick` (controller): removes a participant from the room; the target
+ *     gets S→C `kicked` and its connection is closed (it must not auto-rejoin). Kick, then
+ *     `room:rotate-code`, to keep them out.
+ *   - C→S `room:rotate-code` (controller, code-protected rooms): replaces the room code;
+ *     participants already inside stay. The controller's next `room:state` carries the new code.
  */
 
 export const PROTOCOL_VERSION = 1;
@@ -122,6 +127,7 @@ export interface ServerMessageMap {
   status: { state: StageStatus };
   ok: { requestId: string };
   pong: Record<never, never>;
+  kicked: { roomId: string };
 }
 
 export type ServerMessageType = keyof ServerMessageMap;
@@ -147,6 +153,8 @@ export interface ClientMessageMap {
   'mic:force-mute': { requestId: string; targetId: string };
   'mic:force-unmute': { requestId: string; targetId: string };
   'stage:remove': { requestId: string; targetId: string };
+  'participant:kick': { requestId: string; targetId: string };
+  'room:rotate-code': { requestId: string };
   'rtc:offer': { requestId: string; payload: SessionDescriptionPayload };
   'rtc:answer': { requestId: string; payload: SessionDescriptionPayload };
   'rtc:ice': { requestId: string; payload: IceCandidatePayload | null };
@@ -174,6 +182,8 @@ export const CLIENT_MESSAGE_TYPES: readonly ClientMessageType[] = [
   'mic:force-mute',
   'mic:force-unmute',
   'stage:remove',
+  'participant:kick',
+  'room:rotate-code',
   'rtc:offer',
   'rtc:answer',
   'rtc:ice',

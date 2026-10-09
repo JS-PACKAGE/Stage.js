@@ -98,6 +98,8 @@ JSON frame，型別定義在 [`shared/protocol.ts`](shared/protocol.ts)。每個
 | `control:transfer {targetId}` | 主控移交控制權 |
 | `mic:mute`／`mic:unmute`、`mic:force-mute`／`mic:force-unmute {targetId}` | 自我靜音；主控強制靜音（解除時保留本人的自我靜音） |
 | `room:close` | 主控關房 |
+| `participant:kick {targetId}` | 主控把人踢出房間（對方收到 `kicked` 後連線被關閉、不會自動重連）；要防止對方再進來，接著更換代碼 |
+| `room:rotate-code` | 主控更換房間代碼（限需代碼的房間）；舊代碼／邀請連結立即失效，已在房內的人不受影響 |
 | `rtc:offer`／`rtc:ice {payload}` | WebRTC 信令（一律由 client 發 offer） |
 | `ping` | 回 `pong` |
 
@@ -106,6 +108,7 @@ JSON frame，型別定義在 [`shared/protocol.ts`](shared/protocol.ts)。每個
 | `hello` | `{protocol, serverVersion}` |
 | `room:state` | 個人化 snapshot（每次變動重送）；`code`、`audience` 名單只給主控，`resumeToken` 只給本人 |
 | `room:created`、`room:closed` | 開房（只有建立者收到 code）、關房（全員離房） |
+| `kicked` | `{roomId}`：你被主控踢出，伺服器隨即以 close code 4001 關閉連線 |
 | `rtc:config` | 瀏覽器用的 ICE servers（設定 `rtc.turn` 時含該參與者專屬的短期 TURN 憑證） |
 | `speaking` | `{participantIds}`：目前在混音中有聲的參與者（VAD＋釋放延遲），集合變動時才送 |
 | `role:update`、`hand:raise`／`hand:withdraw`、`stage:invite`、`stage:joined`、`stage:left`、`control:transferred`、`mic:muted`／`mic:unmuted` | 事件廣播 |

@@ -59,7 +59,7 @@ export type RoomEvent = Extract<
 export class Room {
   readonly roomId: string;
   readonly name: string;
-  readonly code: string;
+  code: string;
   readonly codeRequired: boolean;
   readonly createdAt: number;
   readonly limits: RoomLimits;
@@ -152,6 +152,21 @@ export class Room {
     this.participants.delete(participantId);
     this.assertInvariants();
     return events;
+  }
+
+  /** Controller removes someone from the room (their session is closed by the hub). */
+  kick(byId: string, targetId: string): RoomEvent[] {
+    this.requireController(byId);
+    if (targetId === byId) throw new StageError('conflict', 'controller cannot kick itself');
+    this.require(targetId);
+    return this.remove(targetId);
+  }
+
+  /** New code for future joins; whoever is already inside stays. */
+  rotateCode(byId: string, code: string): void {
+    this.requireController(byId);
+    if (!this.codeRequired) throw new StageError('conflict', 'room has no code');
+    this.code = code;
   }
 
   // ─────────────────────────────── hands ───────────────────────────────

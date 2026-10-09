@@ -70,6 +70,8 @@ export interface StageEventMap {
   status: ClientStatus;
   created: ServerMessageMap['room:created'];
   closed: ServerMessageMap['room:closed'];
+  /** The controller removed you from the room; you are disconnected and will not rejoin on your own. */
+  kicked: ServerMessageMap['kicked'];
   hand: { participantId: string; raised: boolean };
   invite: ServerMessageMap['stage:invite'];
   stagejoined: ServerMessageMap['stage:joined'];
@@ -282,6 +284,10 @@ export class StageClient extends EventTarget {
   forceMute(id: string): Promise<void> { return this.request('mic:force-mute', { targetId: id }); }
   forceUnmute(id: string): Promise<void> { return this.request('mic:force-unmute', { targetId: id }); }
   removeFromStage(id: string): Promise<void> { return this.request('stage:remove', { targetId: id }); }
+  /** Controller only: remove someone from the room; they get a `kicked` event and are disconnected. */
+  kick(id: string): Promise<void> { return this.request('participant:kick', { targetId: id }); }
+  /** Controller only: issue a new room code (code-protected rooms); people already inside stay. */
+  rotateCode(): Promise<void> { return this.request('room:rotate-code', {}); }
   closeRoom(): Promise<void> { return this.request('room:close', {}); }
   async disconnect(): Promise<void> {
     this.intentional = true;
@@ -378,7 +384,8 @@ export class StageClient extends EventTarget {
         if (!this.pc?.remoteDescription) this.remoteIce.push(message.payload);
         else await this.pc.addIceCandidate(message.payload ?? undefined);
         break;
-      case 'room:closed':
+      // Either way the seat is gone: forget the session so the socket close does not trigger a rejoin.
+      case 'room:closed': case 'kicked':
         this.session = null;
         this.snapshot = null;
         this.speakingIds = new Set();
@@ -386,7 +393,7 @@ export class StageClient extends EventTarget {
         this.reconnectTimer = undefined;
         this.destroyMedia();
         this.setStatus('disconnected');
-        this.emit('closed', { roomId: message.roomId });
+        this.emit(message.type === 'kicked' ? 'kicked' : 'closed', { roomId: message.roomId });
         break;
       case 'status': this.setStatus(message.state); break;
       case 'hand:raise': case 'hand:withdraw': this.emit('hand', { participantId: message.participantId, raised: message.type === 'hand:raise' }); break;

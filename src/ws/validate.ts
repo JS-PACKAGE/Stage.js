@@ -100,6 +100,7 @@ export function parseClientMessage(text: string, limits: ValidationLimits): Clie
       return out;
     }
     case 'room:close':
+    case 'room:rotate-code':
     case 'hand:raise':
     case 'hand:withdraw':
     case 'stage:leave':
@@ -112,6 +113,7 @@ export function parseClientMessage(text: string, limits: ValidationLimits): Clie
     case 'mic:force-mute':
     case 'mic:force-unmute':
     case 'stage:remove':
+    case 'participant:kick':
       return { type: t, requestId: rid, targetId: id('targetId') };
     case 'rtc:offer':
     case 'rtc:answer':

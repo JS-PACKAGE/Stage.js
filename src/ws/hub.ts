@@ -67,6 +67,8 @@ interface RoomRuntime {
 }
 
 const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
+/** Application close code (RFC 6455 private range) telling the client it was removed, not dropped. */
+const CLOSE_KICKED = 4001;
 
 function safeEqual(a: string, b: string): boolean {
   const x = Buffer.from(a);
@@ -176,8 +178,7 @@ export class StageHub {
     let roomId: string;
     do roomId = randomBytes(6).toString('base64url');
     while (this.rooms.has(roomId));
-    let code = '';
-    for (let i = 0; i < config.rooms.codeLength; i++) code += CODE_ALPHABET[randomInt(CODE_ALPHABET.length)];
+    const code = this.newCode();
     const codeRequired = msg.codeRequired ?? true;
     const controller = { participantId: randomBytes(9).toString('base64url'), name: msg.name ?? 'Host', resumeToken: randomBytes(24).toString('base64url') };
     const room = new Room({
@@ -296,6 +297,19 @@ export class StageHub {
       case 'mic:force-unmute':
         events = room.forceUnmute(pid, msg.targetId);
         break;
+      case 'participant:kick':
+        events = room.kick(pid, msg.targetId);
+        // Off the session list before the state fan-out: the room no longer knows this participant.
+        this.evict(rt, msg.targetId);
+        this.deps.log.info('participant kicked', { roomId: room.roomId, byId: pid, participantId: msg.targetId });
+        break;
+      case 'room:rotate-code':
+        room.rotateCode(pid, this.newCode());
+        // Only the controller's snapshot carries the code.
+        session.send({ type: 'room:state', ...room.snapshot(pid) });
+        session.send({ type: 'ok', requestId: msg.requestId });
+        this.deps.log.info('room code rotated', { roomId: room.roomId });
+        return;
       case 'rtc:offer':
         await this.negotiate(rt, session, pid, msg.payload);
         session.send({ type: 'ok', requestId: msg.requestId });
@@ -319,6 +333,24 @@ export class StageHub {
     this.apply(rt, events);
     session.send({ type: 'ok', requestId: msg.requestId });
     if (msg.type === 'control:transfer') this.deps.log.info('control transferred', { roomId: room.roomId, fromId: pid, toId: msg.targetId });
+  }
+
+  private newCode(): string {
+    let code = '';
+    for (let i = 0; i < this.deps.config.rooms.codeLength; i++) code += CODE_ALPHABET[randomInt(CODE_ALPHABET.length)];
+    return code;
+  }
+
+  /** Tears down a kicked participant's media and connection; the client must not rejoin on its own. */
+  private evict(rt: RoomRuntime, pid: string): void {
+    const session = rt.sessions.get(pid);
+    rt.sessions.delete(pid);
+    this.unpublish(rt, pid);
+    this.deps.transport.closePeer(rt.room.roomId, pid);
+    if (!session) return;
+    this.bindings.delete(session);
+    session.send({ type: 'kicked', roomId: rt.room.roomId });
+    session.close(CLOSE_KICKED, 'kicked');
   }
 
   private async negotiate(

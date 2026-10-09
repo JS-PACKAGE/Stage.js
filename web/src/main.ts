@@ -237,6 +237,11 @@ function renderRoom(state: RoomStatePayload): void {
       renderNotices();
     });
     summary.append(inviteLink, copy);
+    if (state.codeRequired) summary.append(button('更換房間代碼', async () => {
+      if (!window.confirm('更換後舊代碼與舊邀請連結立即失效，已在房內的人不受影響。確定更換？')) return;
+      await client.rotateCode();
+      invitation = '已更換房間代碼，請重新分享邀請連結。'; renderNotices();
+    }));
   }
   const controls = element('section', 'panel');
   controls.append(element('h2', '', `你好，${decodeName(state.me.name)}`), element('p', '', `${roleLabels[state.me.role]}${state.me.forceMuted ? ' · 主控已鎖定靜音' : ''}`));
@@ -308,7 +313,9 @@ function personRow(person: ParticipantView, controller: boolean, kind: 'speaker'
     if (kind === 'speaker') actions.append(button(person.forceMuted ? '解除強制靜音' : '強制靜音', () => person.forceMuted ? client.forceUnmute(id) : client.forceMute(id)), button('移出舞台', () => client.removeFromStage(id)));
     actions.append(button('移交控制權', async () => {
       if (window.confirm(`確定將控制權移交給 ${decodeName(person.name)}？`)) await client.transferControl(id);
-    }));
+    }), button('踢出房間', async () => {
+      if (window.confirm(`確定將 ${decodeName(person.name)} 踢出房間？若要防止對方再進來，請接著更換房間代碼。`)) await client.kick(id);
+    }, 'danger'));
     row.append(actions);
   }
   return row;
@@ -326,6 +333,7 @@ client.on('state', ({ detail }) => renderRoom(detail));
 client.on('status', ({ detail }) => { status.textContent = statusLabels[detail]; updateCooldown(); });
 client.on('created', ({ detail }) => { createdRoom = detail; });
 client.on('closed', () => { createdRoom = null; micNotice = ''; invitation = '房間已關閉，歡迎建立或加入其他舞台。'; audioBlocked = false; landing(); });
+client.on('kicked', () => { createdRoom = null; micNotice = ''; invitation = '你已被主控移出房間。'; audioBlocked = false; landing(); });
 client.on('invite', ({ detail }) => {
   if (detail.participantId === client.me?.participantId) { invitation = '主控已邀請你上台，請允許麥克風權限。'; renderNotices(); }
 });
