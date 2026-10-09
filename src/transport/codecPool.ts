@@ -63,8 +63,10 @@ export class CodecPool {
   }
   private attach(slot: Slot): void {
     const { worker } = slot;
-    worker.on('message', ({ results }: CodecBatchReply) => {
-      for (const result of results) {
+    worker.on('message', (reply: CodecBatchReply | object) => {
+      // `node --watch` makes worker threads post their module graph to the parent as well.
+      if (!('results' in reply)) return;
+      for (const result of reply.results) {
         const pending = slot.pending.get(result.job);
         slot.pending.delete(result.job);
         pending?.resolve(result);
