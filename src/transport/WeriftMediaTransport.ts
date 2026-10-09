@@ -1,5 +1,5 @@
 import { randomInt } from 'node:crypto';
-import { MediaStreamTrack, RTCPeerConnection, RTCRtpCodecParameters, RtpHeader, RtpPacket } from 'werift';
+import { MediaStreamTrack, RTCPeerConnection, RTCRtpCodecParameters, RtpHeader, RtpPacket, type RTCRtpSender } from 'werift';
 import type { AppConfig } from '../config.ts';
 import { samplesPerFrame } from '../config.ts';
 import type { Logger } from '../log.ts';
@@ -12,7 +12,7 @@ export function opusCodec(): RTCRtpCodecParameters {
   return new RTCRtpCodecParameters({ mimeType: 'audio/opus', clockRate: 48000, channels: 2, payloadType: 111, parameters: 'minptime=10;useinbandfec=1;stereo=0;sprop-stereo=0;maxaveragebitrate=128000' });
 }
 interface Peer {
-  pc: RTCPeerConnection; track: MediaStreamTrack; allowUplink: boolean;
+  pc: RTCPeerConnection; track: MediaStreamTrack; allowUplink: boolean; sender?: RTCRtpSender;
   chunker: PcmChunker; sequence: number; timestamp: number; started: number;
   outboundBytes: number; outboundPackets: number; inboundBytes: number; inboundPackets: number;
 }
@@ -77,6 +77,7 @@ export class WeriftMediaTransport implements MediaTransport {
     const transceiver = audio[0]!;
     transceiver.direction = policy.allowUplink && (transceiver.offerDirection === 'sendrecv' || transceiver.offerDirection === 'sendonly') ? 'sendrecv' : 'sendonly';
     await transceiver.sender.replaceTrack(peer.track);
+    peer.sender = transceiver.sender;
     const answer = await peer.pc.createAnswer();
     await peer.pc.setLocalDescription(answer);
     return { type: 'answer', sdp: peer.pc.localDescription!.sdp };
@@ -119,13 +120,13 @@ export class WeriftMediaTransport implements MediaTransport {
       return;
     }
     const timestampStep = samplesPerFrame(this.config.audio);
-    this.codecs.encode(room.id, frames).then(payloads => {
+    this.codecs.encode(room.id, frames).then(encoded => {
       if (this.rooms.get(room.id) !== room) return;
+      const payloads = encoded.map(p => Buffer.from(p.buffer, p.byteOffset, p.byteLength));
       for (const { id, peer, key } of targets) {
-        if (room.peers.get(id) !== peer || !room.subscribers.has(id)) continue;
-        const sender = peer.pc.getSenders().find(s => s.track === peer.track);
-        if (!sender?.codec) continue;
-        const payload = Buffer.from(payloads[index.get(key)!]!.buffer);
+        const sender = peer.sender;
+        if (room.peers.get(id) !== peer || !room.subscribers.has(id) || !sender?.codec) continue;
+        const payload = payloads[index.get(key)!]!;
         const packet = new RtpPacket(new RtpHeader({ payloadType: sender.codec.payloadType, sequenceNumber: peer.sequence, timestamp: peer.timestamp, ssrc: sender.ssrc, marker: peer.outboundPackets === 0 }), payload);
         peer.sequence = (peer.sequence + 1) & 0xffff;
         peer.timestamp = (peer.timestamp + timestampStep) >>> 0;
