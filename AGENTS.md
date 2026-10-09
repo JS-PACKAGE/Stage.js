@@ -39,8 +39,8 @@ node scripts/load-test.ts        # 全端壓測：自起伺服器，K 發言者�
 | `src/ws/validate.ts`、`rateLimit.ts` | 輸入白名單驗證、name 清洗轉義；token bucket 限流 |
 | `src/rtc/sdp.ts` | offer 方向解析（觀眾 recvonly 強制，與 WebRTC 實作無關） |
 | `src/transport/MediaTransport.ts` | 媒體層契約 |
-| `src/transport/WeriftMediaTransport.ts`、`opus.ts` | werift adapter（主執行緒：peer 配置、上行重排／解碼、靜音上行不解碼、混音分送、觀眾 low tier 分級、publisher 關卡）、Opus 編解碼（自行實例化 `@evan/opus` 內附的 libopus WASM，含 FEC／PLC） |
-| `src/transport/peerHost.ts` | `PeerHost` 介面與 `WeriftPeerHost`：PeerConnection、方向政策、上行第二道關卡、RTP 打包／DTX 省略、RTCP 接收報告的下行掉包率 |
+| `src/transport/WeriftMediaTransport.ts`、`opus.ts` | werift adapter（主執行緒：peer 配置、上行重排／解碼、靜音上行不解碼、混音分送（路由不變時重用快取的分送計畫；久未出聲的台上者共用完整混音編碼；全房無聲超過 1 秒不再編碼）、觀眾 low tier 分級、publisher 關卡）、Opus 編解碼（自行實例化 `@evan/opus` 內附的 libopus WASM，含 FEC／PLC） |
+| `src/transport/peerHost.ts`、`srtpKeys.ts` | `PeerHost` 介面與 `WeriftPeerHost`：PeerConnection、方向政策、上行第二道關卡、RTP 打包／DTX 省略（空 payload＝DTX）、RTCP 接收報告的下行掉包率；建構時把 werift SRTP cipher 的金鑰換成 `KeyObject`（`test/srtpKeys.test.ts` 守輸出與原版逐位元相同；升級 werift 時必跑） |
 | `src/transport/mediaShards.ts`、`mediaWorker.ts` | `MediaShard`：在 worker thread 上跑 `WeriftPeerHost`（`rtc.mediaWorkers`；0＝主執行緒）；worker 掛掉時回報其 peer 已關閉並重生 |
 | `src/transport/codecPool.ts`、`codecWorker.ts` | Opus 編解碼 worker thread pool（`audio.codecWorkers`）；每房固定一個 worker，維持有狀態 codec 的順序；同一 worker 的工作合併成一則訊息（編碼在本輪結束前、解碼在本次 I/O 階段後送出） |
 | `src/transport/jitter.ts` | 上行 RTP 重排（`audio.jitter.reorderPackets`）；遺失包以 `null` 送解碼器，由下一包的 in-band FEC 還原，沒有 FEC 時走 libopus PLC |
@@ -54,7 +54,7 @@ node scripts/load-test.ts        # 全端壓測：自起伺服器，K 發言者�
 
 - 核心（`src/model`、`src/ws`、`src/mixer`）**只透過 `MediaTransport` 介面**操作媒體；不得 import werift。換 WebRTC 實作＝新增 adapter，不動核心。
 - PCM 慣例：mono Float32、`audio.sampleRate`（48kHz）、`frameMs`（20ms＝960 samples）。Opus 編解碼與混音同取樣率，**不重取樣**；RTP 時鐘恆為 48kHz（RFC 7587）。
-- 觀眾共用一個 encoder（每房一次編碼分送全體）；只有台上者各有 mix-minus-self encoder；下行掉包持續偏高的觀眾改收第二個共用的 low tier encoder。不得引入「每位觀眾一個 encoder」。
+- 觀眾共用一個 encoder（每房一次編碼分送全體）；只有台上者各有 mix-minus-self encoder（無聲超過 1 秒即改收共用的完整混音、釋放自己的 encoder）；下行掉包持續偏高的觀眾改收第二個共用的 low tier encoder。不得引入「每位觀眾一個 encoder」。
 - `MixFrame` 的 PCM 緩衝屬於混音器、下個 tick 就會被覆寫；要保留就複製（CodecPool 在同一輪內 postMessage 時即複製）。
 - Opus 一律走 `src/transport/opus.ts`：它直接實例化 `@evan/opus` 內附的 libopus WASM（套件的 JS wrapper 寫死 `decode_fec = 0`、不能解遺失包，等於沒有 FEC／PLC）；不要改回套件的 `Encoder`／`Decoder`，也不要用其 N-API addon（以 process 全域暫存區編解碼，多執行緒同時使用會互相污染封包）。每條執行緒各有一份 WASM 記憶體，`test/codecPool.test.ts` 守跨執行緒不互相污染。
 - werift：伺服器 transceiver 必須在 `setRemoteDescription` **之前**設成政策方向，否則重協商時新 SSRC 不會被登錄（見 PLAN 十二-11）。
