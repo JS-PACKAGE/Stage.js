@@ -28,6 +28,8 @@ interface Room {
   downlinkLoss: Map<string, number>;
   /** Audience listeners currently served the low-bitrate, FEC-heavy mix (`audio.lowTier`). */
   lowTier: Set<string>;
+  /** Consecutive frames each subscribed source contributed nothing (muted or starved). */
+  silentFrames: Map<string, number>;
   detach?: () => void;
 }
 /** Encoder keys of the audience mixes; participant ids (base64url) key their mix-minus encoders. */
@@ -35,6 +37,11 @@ const FULL_MIX = '';
 const FULL_MIX_LOW = '~low';
 /** Weight of the newest receiver report in the smoothed loss: one report alone cannot flip a tier. */
 const LOSS_SMOOTHING = 0.5;
+/**
+ * A source silent this long shares the full-mix encode instead of encoding an identical mix-minus
+ * of its own. Each switch restarts an encoder stream, so brief underruns must not flip it.
+ */
+const SHARE_SILENT_AFTER_MS = 1000;
 
 /**
  * werift adapter. Peers live on `rtc.mediaWorkers` worker threads (0 = on this thread), placed on
@@ -82,7 +89,7 @@ export class WeriftMediaTransport implements MediaTransport {
   private room(id: string): Room {
     let room = this.rooms.get(id);
     if (!room) {
-      room = { id, peers: new Map(), publishers: new Map(), subscribers: new Set(), uplinks: new Map(), downlinkLoss: new Map(), lowTier: new Set() };
+      room = { id, peers: new Map(), publishers: new Map(), subscribers: new Set(), uplinks: new Map(), downlinkLoss: new Map(), lowTier: new Set(), silentFrames: new Map() };
       this.rooms.set(id, room);
     }
     return room;
@@ -153,6 +160,7 @@ export class WeriftMediaTransport implements MediaTransport {
     room.uplinks.delete(id);
     room.peers.get(id)?.setUplink(roomId, id, false);
     this.codecs.release(roomId, 'encoder', id);
+    room.silentFrames.delete(id);
   }
   setPublisherMuted(roomId: string, id: string, muted: boolean): void {
     const room = this.rooms.get(roomId);
@@ -176,10 +184,11 @@ export class WeriftMediaTransport implements MediaTransport {
     for (const id of room.subscribers) {
       const host = room.peers.get(id);
       if (!host) continue;
-      const pcm = frame.minus(id);
-      const key = pcm ? id : room.lowTier.has(id) ? FULL_MIX_LOW : FULL_MIX;
+      const minus = frame.minus(id);
+      const own = minus && this.ownMix(room, id, minus, frame.full);
+      const key = own ? id : !minus && room.lowTier.has(id) ? FULL_MIX_LOW : FULL_MIX;
       let at = index.get(key);
-      if (at === undefined) { at = frames.length; index.set(key, at); frames.push({ key, pcm: pcm ?? frame.full, low: key === FULL_MIX_LOW }); }
+      if (at === undefined) { at = frames.length; index.set(key, at); frames.push({ key, pcm: own ?? frame.full, low: key === FULL_MIX_LOW }); }
       let list = targets.get(host);
       if (!list) { list = []; targets.set(host, list); }
       list.push([id, at]);
@@ -196,11 +205,26 @@ export class WeriftMediaTransport implements MediaTransport {
       for (const [host, list] of targets) host.send({ roomId: room.id, payloads, targets: list });
     }, (err: Error) => { this.counters.encodeFailures++; this.log.warn('Mixed frame encode failed', { roomId: room.id, error: err.message }); });
   }
+  /**
+   * A source's own mix-minus, or undefined once it has been silent for SHARE_SILENT_AFTER_MS: its
+   * mix-minus is then the full mix, so it shares that encode (sources stay off the low tier).
+   * The idle encoder is released so the source's stream restarts clean when it speaks again.
+   */
+  private ownMix(room: Room, id: string, minus: Float32Array, full: Float32Array): Float32Array | undefined {
+    if (minus !== full) { room.silentFrames.delete(id); return minus; }
+    const shareAfter = Math.ceil(SHARE_SILENT_AFTER_MS / this.config.audio.frameMs);
+    const silent = room.silentFrames.get(id) ?? 0;
+    if (silent >= shareAfter) return undefined;
+    room.silentFrames.set(id, silent + 1);
+    if (silent + 1 < shareAfter) return minus;
+    this.codecs.release(room.id, 'encoder', id);
+    return undefined;
+  }
   subscribe(roomId: string, id: string): void { this.room(roomId).subscribers.add(id); }
   unsubscribe(roomId: string, id: string): void {
     const room = this.rooms.get(roomId);
     if (!room) return;
-    room.subscribers.delete(id); this.codecs.release(roomId, 'encoder', id);
+    room.subscribers.delete(id); room.silentFrames.delete(id); this.codecs.release(roomId, 'encoder', id);
   }
   /** Uplink counts come from this side's reorder buffer (what the mixer actually got); downlink loss from receiver reports. */
   async getStats(roomId: string, id: string): Promise<TransportStats | null> {
