@@ -57,6 +57,12 @@ audio:
     fec: true                  # in-band FEC：觀眾端可由下一包還原遺失包
     packetLossPercent: 10      # 預期下行掉包率（%），FEC 依此配置冗餘位元（可調整）
     dtx: true                  # 靜音不送包（≤2 bytes 的 DTX 幀不傳），省觀眾頻寬
+  lowTier:                     # 網路差的觀眾改收第二路共用混音：較低位元率＋較多 FEC（台上者不受影響）
+    enabled: true
+    bitrate: 32000             # 須落在 opus.minBitrate..opus.bitrate（規格下限 32kbps）
+    packetLossPercent: 25      # 為這路配置的 FEC 冗餘（%），比主混音多，換取掉包時可還原（可調整）
+    enterLossPercent: 5        # 接收報告的平滑掉包率 ≥ 此值即切到 low tier（可調整）
+    exitLossPercent: 1         # ≤ 此值才切回主混音；須小於 enterLossPercent，避免來回切換（可調整）
   mixer:
     maxBufferedFrames: 10      # 每路 PCM 緩衝上限（10×20ms=200ms），超過丟最舊
     limiterThreshold: 0.9      # soft-clip 起點（0..1）

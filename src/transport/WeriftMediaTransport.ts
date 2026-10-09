@@ -23,10 +23,17 @@ interface Room {
   publishers: Map<string, AudioFrameHandler>;
   subscribers: Set<string>;
   uplinks: Map<string, Uplink>;
+  /** Smoothed downlink loss (0..1) per participant, from their RTCP receiver reports. */
+  downlinkLoss: Map<string, number>;
+  /** Audience listeners currently served the low-bitrate, FEC-heavy mix (`audio.lowTier`). */
+  lowTier: Set<string>;
   detach?: () => void;
 }
-/** Encoder key of the audience mix; participant ids key their mix-minus encoders. */
+/** Encoder keys of the audience mixes; participant ids (base64url) key their mix-minus encoders. */
 const FULL_MIX = '';
+const FULL_MIX_LOW = '~low';
+/** Weight of the newest receiver report in the smoothed loss: one report alone cannot flip a tier. */
+const LOSS_SMOOTHING = 0.5;
 
 /**
  * werift adapter. Peers live on `rtc.mediaWorkers` worker threads (0 = on this thread), placed on
@@ -48,19 +55,21 @@ export class WeriftMediaTransport implements MediaTransport {
       localCandidate: (roomId, id, candidate) => this.callbacks.onLocalCandidate(roomId, id, candidate),
       peerClosed: (roomId, id) => this.callbacks.onPeerClosed?.(roomId, id),
       uplink: (roomId, id, seq, payload) => this.onUplink(roomId, id, seq, payload),
+      downlinkLoss: (roomId, id, fraction) => this.onDownlinkLoss(roomId, id, fraction),
     };
     const shards = config.rtc.mediaWorkers;
     this.hosts = shards === 0 ? [new WeriftPeerHost(config, events)] : Array.from({ length: shards }, () => new MediaShard(config, events, log));
   }
   async metrics(): Promise<MetricSample[]> {
-    let peers = 0, subscribers = 0, backlog = 0;
-    for (const room of this.rooms.values()) { peers += room.peers.size; subscribers += room.subscribers.size; backlog = Math.max(backlog, this.codecs.backlog(room.id)); }
+    let peers = 0, subscribers = 0, backlog = 0, lowTier = 0;
+    for (const room of this.rooms.values()) { peers += room.peers.size; subscribers += room.subscribers.size; lowTier += room.lowTier.size; backlog = Math.max(backlog, this.codecs.backlog(room.id)); }
     const hosts = await Promise.all(this.hosts.map(h => h.counters()));
     const c = this.counters;
     return [
       { name: 'stage_media_peers', help: 'Open server-side PeerConnections.', type: 'gauge', value: peers },
       { name: 'stage_media_subscribers', help: 'Participants receiving the downlink mix.', type: 'gauge', value: subscribers },
-      { name: 'stage_codec_backlog_max', help: 'Largest in-flight codec job count of any room.', type: 'gauge', value: backlog },
+      { name: 'stage_codec_backlog_max', help: 'Largest count of mixed frames still being encoded for any room.', type: 'gauge', value: backlog },
+      { name: 'stage_downlink_low_tier', help: 'Listeners served the low-bitrate mix because of downlink loss.', type: 'gauge', value: lowTier },
       { name: 'stage_uplink_packets_total', help: 'Accepted uplink RTP packets.', type: 'counter', value: c.uplinkPackets },
       { name: 'stage_uplink_concealed_total', help: 'Uplink packets declared lost and concealed.', type: 'counter', value: c.uplinkConcealed },
       { name: 'stage_downlink_packets_total', help: 'Downlink RTP packets sent.', type: 'counter', value: hosts.reduce((n, h) => n + h.downlinkPackets, 0) },
@@ -72,13 +81,24 @@ export class WeriftMediaTransport implements MediaTransport {
   private room(id: string): Room {
     let room = this.rooms.get(id);
     if (!room) {
-      room = { id, peers: new Map(), publishers: new Map(), subscribers: new Set(), uplinks: new Map() };
+      room = { id, peers: new Map(), publishers: new Map(), subscribers: new Set(), uplinks: new Map(), downlinkLoss: new Map(), lowTier: new Set() };
       this.rooms.set(id, room);
     }
     return room;
   }
   private uplink(): Uplink {
     return { reorder: new RtpReorderBuffer(this.config.audio.jitter.reorderPackets), chunker: new PcmChunker(samplesPerFrame(this.config.audio)), muted: false };
+  }
+  private onDownlinkLoss(roomId: string, id: string, fraction: number): void {
+    const room = this.rooms.get(roomId);
+    if (!room?.peers.has(id)) return;
+    const previous = room.downlinkLoss.get(id);
+    const loss = previous === undefined ? fraction : previous + LOSS_SMOOTHING * (fraction - previous);
+    room.downlinkLoss.set(id, loss);
+    const tier = this.config.audio.lowTier;
+    if (!tier.enabled) return;
+    if (loss * 100 >= tier.enterLossPercent) room.lowTier.add(id);
+    else if (loss * 100 <= tier.exitLossPercent) room.lowTier.delete(id);
   }
   private onUplink(roomId: string, id: string, seq: number, payload: Uint8Array): void {
     const room = this.rooms.get(roomId);
@@ -155,9 +175,9 @@ export class WeriftMediaTransport implements MediaTransport {
       const host = room.peers.get(id);
       if (!host) continue;
       const pcm = frame.minus(id);
-      const key = pcm ? id : FULL_MIX;
+      const key = pcm ? id : room.lowTier.has(id) ? FULL_MIX_LOW : FULL_MIX;
       let at = index.get(key);
-      if (at === undefined) { at = frames.length; index.set(key, at); frames.push({ key, pcm: pcm ?? frame.full }); }
+      if (at === undefined) { at = frames.length; index.set(key, at); frames.push({ key, pcm: pcm ?? frame.full, low: key === FULL_MIX_LOW }); }
       let list = targets.get(host);
       if (!list) { list = []; targets.set(host, list); }
       list.push([id, at]);
@@ -188,7 +208,8 @@ export class WeriftMediaTransport implements MediaTransport {
     const room = this.rooms.get(roomId);
     const host = room?.peers.get(id);
     if (!room || !host) return;
-    room.peers.delete(id); this.removePublisher(roomId, id); this.unsubscribe(roomId, id);
+    room.peers.delete(id); room.downlinkLoss.delete(id); room.lowTier.delete(id);
+    this.removePublisher(roomId, id); this.unsubscribe(roomId, id);
     host.closePeer(roomId, id); this.codecs.release(roomId, 'decoder', id);
   }
   closeRoom(id: string): void {

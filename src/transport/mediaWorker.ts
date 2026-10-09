@@ -15,6 +15,7 @@ const host = new WeriftPeerHost(config, {
     const copy = Uint8Array.from(payload);
     emit({ op: 'uplink', roomId, id, seq, payload: copy }, [copy.buffer]);
   },
+  downlinkLoss: (roomId, id, fraction) => emit({ op: 'loss', roomId, id, fraction }),
 });
 
 async function reply(job: number, work: () => Promise<Extract<ShardMessage, { op: 'done' }>['result']>): Promise<void> {

@@ -21,7 +21,8 @@ export type ShardMessage =
   | { op: 'failed'; job: number; message: string }
   | { op: 'candidate'; roomId: string; id: string; candidate: IceCandidatePayload | null }
   | { op: 'closed'; roomId: string; id: string }
-  | { op: 'uplink'; roomId: string; id: string; seq: number; payload: Uint8Array };
+  | { op: 'uplink'; roomId: string; id: string; seq: number; payload: Uint8Array }
+  | { op: 'loss'; roomId: string; id: string; fraction: number };
 
 // The worker shares this module's extension: `.ts` under type stripping, `.js` from `dist/`.
 const workerUrl = new URL(`./mediaWorker${extname(fileURLToPath(import.meta.url))}`, import.meta.url);
@@ -55,6 +56,7 @@ export class MediaShard implements PeerHost {
         case 'candidate': this.events.localCandidate(msg.roomId, msg.id, msg.candidate); return;
         case 'closed': this.events.peerClosed(msg.roomId, msg.id); return;
         case 'uplink': this.events.uplink(msg.roomId, msg.id, msg.seq, msg.payload); return;
+        case 'loss': this.events.downlinkLoss(msg.roomId, msg.id, msg.fraction); return;
       }
     });
     worker.on('error', err => this.log.error('Media worker crashed', { error: err.message }));

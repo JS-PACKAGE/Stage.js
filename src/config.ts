@@ -56,6 +56,12 @@ export interface AppConfig {
       /** Discontinuous transmission: silent frames are not sent. */
       dtx: boolean;
     };
+    /**
+     * Audience listeners whose receiver reports show sustained loss get a second shared mix
+     * encoded at `bitrate` with FEC provisioned for `packetLossPercent`; they return to the main
+     * mix once loss falls to `exitLossPercent` (hysteresis keeps them from flapping).
+     */
+    lowTier: { enabled: boolean; bitrate: number; packetLossPercent: number; enterLossPercent: number; exitLossPercent: number };
     mixer: {
       maxBufferedFrames: number;
       limiterThreshold: number;
@@ -211,6 +217,7 @@ export function parseConfig(raw: unknown): AppConfig {
   const m = obj(a.mixer, 'audio.mixer');
   const j = obj(a.jitter, 'audio.jitter');
   const nf = obj(a.noiseFilter, 'audio.noiseFilter');
+  const lt = obj(a.lowTier, 'audio.lowTier');
   const audio: AppConfig['audio'] = {
     sampleRate: int(a, 'sampleRate', 'audio', 8000, 48000),
     frameMs: int(a, 'frameMs', 'audio', 10, 60),
@@ -224,6 +231,13 @@ export function parseConfig(raw: unknown): AppConfig {
       fec: bool(o, 'fec', 'audio.opus'),
       packetLossPercent: int(o, 'packetLossPercent', 'audio.opus', 0, 100),
       dtx: bool(o, 'dtx', 'audio.opus'),
+    },
+    lowTier: {
+      enabled: bool(lt, 'enabled', 'audio.lowTier'),
+      bitrate: int(lt, 'bitrate', 'audio.lowTier', 6000, 510000),
+      packetLossPercent: int(lt, 'packetLossPercent', 'audio.lowTier', 0, 100),
+      enterLossPercent: num(lt, 'enterLossPercent', 'audio.lowTier', 0.1, 100),
+      exitLossPercent: num(lt, 'exitLossPercent', 'audio.lowTier', 0, 100),
     },
     mixer: {
       maxBufferedFrames: int(m, 'maxBufferedFrames', 'audio.mixer', 1, 100),
@@ -255,6 +269,10 @@ export function parseConfig(raw: unknown): AppConfig {
   if (audio.opus.bitrate < audio.opus.minBitrate || audio.opus.bitrate > audio.opus.maxBitrate) {
     throw new ConfigError('audio.opus.bitrate: must lie within [minBitrate, maxBitrate]');
   }
+  if (audio.lowTier.bitrate < audio.opus.minBitrate || audio.lowTier.bitrate > audio.opus.bitrate) {
+    throw new ConfigError('audio.lowTier.bitrate: must lie within [opus.minBitrate, opus.bitrate]');
+  }
+  if (audio.lowTier.exitLossPercent >= audio.lowTier.enterLossPercent) throw new ConfigError('audio.lowTier.exitLossPercent: must be below enterLossPercent');
 
   const t = obj(root.rtc, 'rtc');
   const pr = t.portRange;

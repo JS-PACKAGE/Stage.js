@@ -4,7 +4,8 @@ import { Worker } from 'node:worker_threads';
 import type { AppConfig } from '../config.ts';
 import type { Logger } from '../log.ts';
 
-export interface EncodeItem { key: string; pcm: Float32Array }
+/** `low`: the encoder for `key` is created with `audio.lowTier` settings. */
+export interface EncodeItem { key: string; pcm: Float32Array; low?: boolean }
 export type CodecJob =
   | { op: 'encode'; job: number; room: string; frames: EncodeItem[] }
   | { op: 'decode'; job: number; room: string; key: string; packets: (Uint8Array | null)[] }

@@ -14,6 +14,8 @@ export interface PeerHostEvents {
   peerClosed(roomId: string, id: string): void;
   /** Uplink RTP payload of a peer whose uplink is both negotiated and enabled. */
   uplink(roomId: string, id: string, seq: number, payload: Uint8Array): void;
+  /** Fraction (0..1) of downlink packets lost since the participant's previous RTCP receiver report. */
+  downlinkLoss(roomId: string, id: string, fraction: number): void;
 }
 export interface HostCounters { downlinkPackets: number; downlinkDtxFrames: number }
 /** One encoded mixed frame for a room: `targets` pairs a participant with an index into `payloads`. */
@@ -94,6 +96,14 @@ export class WeriftPeerHost implements PeerHost {
     const transceiver = audio[0]!;
     transceiver.direction = allowUplink && (transceiver.offerDirection === 'sendrecv' || transceiver.offerDirection === 'sendonly') ? 'sendrecv' : 'sendonly';
     await transceiver.sender.replaceTrack(peer.track);
+    if (peer.sender !== transceiver.sender) {
+      const { sender } = transceiver;
+      const owner = peer;
+      sender.onRtcp.subscribe(packet => {
+        if (this.peers.get(key) !== owner || !('reports' in packet)) return;
+        for (const report of packet.reports) if (report.ssrc === sender.ssrc) this.events.downlinkLoss(roomId, id, report.fractionLost / 256);
+      });
+    }
     peer.sender = transceiver.sender;
     const answer = await peer.pc.createAnswer();
     await peer.pc.setLocalDescription(answer);

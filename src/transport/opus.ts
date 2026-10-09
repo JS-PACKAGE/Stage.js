@@ -100,21 +100,21 @@ export class OpusEncoder {
   private readonly rt = runtime();
   private state: number;
   readonly frameSize: number;
-  /** `bitrate` overrides `audio.opus.bitrate` (still clamped to min/max), e.g. for a low-bandwidth tier. */
-  constructor(audio: AppConfig['audio'], bitrate = audio.opus.bitrate) {
+  /** `tier` overrides the main mix's bitrate (still clamped to min/max) and FEC provisioning, e.g. `audio.lowTier`. */
+  constructor(audio: AppConfig['audio'], tier: { bitrate: number; packetLossPercent: number } = audio.opus) {
     const { api } = this.rt;
     this.frameSize = Math.round(audio.sampleRate * audio.frameMs / 1000);
     this.state = api.malloc(api.opus_encoder_get_size(1));
     this.rt.check(api.opus_encoder_init(this.state, audio.sampleRate, 1, APPLICATION_VOIP));
     const set = (request: string, value: number) => this.rt.check(api.opus_encoder_ctl_set(this.state, CTL[request]!, value));
-    set('setBitrate', Math.min(audio.opus.maxBitrate, Math.max(audio.opus.minBitrate, bitrate)));
+    set('setBitrate', Math.min(audio.opus.maxBitrate, Math.max(audio.opus.minBitrate, tier.bitrate)));
     set('setVbr', Number(audio.opus.vbr));
     set('setComplexity', audio.opus.complexity);
     // In-band FEC lets receivers rebuild a lost packet from the next one; libopus only spends
     // bits on it when told to expect loss. DTX collapses silence into ≤2-byte packets the
     // transport does not send.
     set('setInbandFec', Number(audio.opus.fec));
-    set('setPacketLossPerc', audio.opus.packetLossPercent);
+    set('setPacketLossPerc', tier.packetLossPercent);
     set('setDtx', Number(audio.opus.dtx));
   }
   /** Returns a freshly allocated packet the caller owns (sole owner of its ArrayBuffer, so it is transferable). */

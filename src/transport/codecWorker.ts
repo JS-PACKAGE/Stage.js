@@ -32,9 +32,9 @@ function run(job: CodecJob, results: CodecResult[], transfer: ArrayBuffer[]): vo
       try {
         if (job.op === 'encode') {
           const room = codecs(encoders, job.room);
-          const payloads = job.frames.map(({ key, pcm }) => {
+          const payloads = job.frames.map(({ key, pcm, low }) => {
             let encoder = room.get(key);
-            if (!encoder) { encoder = new OpusEncoder(audio); room.set(key, encoder); }
+            if (!encoder) { encoder = new OpusEncoder(audio, low ? audio.lowTier : audio.opus); room.set(key, encoder); }
             return encoder.encode(pcm);
           });
           results.push({ op: 'done', job: job.job, payloads });
