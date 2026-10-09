@@ -16,14 +16,14 @@ Stage.js 伺服器（Node v24）
    ├─ src/ws/          ws 伺服器、驗證、限流、StageHub（每房單序佇列、廣播）
    ├─ src/model/       Room 狀態機與不變量
    ├─ src/rtc/         offer 方向檢查（觀眾只能 recvonly）、短期 TURN 憑證
-   ├─ src/mixer/       RoomMixer：N 路 PCM 48kHz 疊加 → limiter → mix / mix-minus-self；jitter buffer、說話偵測
+   ├─ src/mixer/       RoomMixer：每路降噪＋音量正規化 → N 路 PCM 48kHz 疊加 → limiter → mix / mix-minus-self；jitter buffer、說話偵測；所有房間共用一個 MixerClock
    └─ src/transport/   MediaTransport 介面；werift adapter；Mock
-        ├─ 主執行緒       上行 RTP 重排／補幀、混音分送、政策關卡
-        ├─ media workers PeerConnection（ICE／DTLS／SRTP／RTP 打包）；rtc.mediaWorkers > 0 時分散到多條 thread，0＝主執行緒
-        └─ codec workers Opus 編解碼（audio.codecWorkers 條 thread，WASM）
+        ├─ 主執行緒       上行 RTP 重排／判定遺失、混音分送、觀眾 low tier 分級、政策關卡
+        ├─ media workers PeerConnection（ICE／DTLS／SRTP／RTP 打包、RTCP 接收報告）；rtc.mediaWorkers > 0 時分散到多條 thread，0＝主執行緒
+        └─ codec workers Opus 編解碼（audio.codecWorkers 條 thread，libopus WASM；遺失包以 FEC／PLC 還原；同 worker 的工作合併成一則訊息）
 ```
 
-混音：每 20ms 一個 tick，各發言者取一個 960-sample frame 疊加。觀眾共用一次編碼；台上者各自一路 mix-minus-self 編碼。編好的封包送到持有該房 peer 的各 media worker，由它們各自打包、加密、送出。
+混音：每 20ms 一個 tick，各發言者取一個 960-sample frame 疊加。觀眾共用一次編碼（下行掉包持續偏高的觀眾改收另一路共用的低位元率＋高 FEC 編碼）；台上者各自一路 mix-minus-self 編碼。編好的封包送到持有該房 peer 的各 media worker，由它們各自打包、加密、送出。
 
 ## 需求
 
@@ -81,7 +81,7 @@ Windows 用 `.\stage.ps1 <command>`，指令相同；Windows 無法對背景 nod
 
 對外部署：`allowInsecure: false`、`host: 0.0.0.0`、填 `tls`；開放 `rtc.portRange` 的 UDP；設定 `rtc.turn`（coturn 需 `use-auth-secret` 與相同的 `static-auth-secret`）。
 
-監控：`GET /healthz` 回 `ok`；`GET /metrics` 回 Prometheus 文字格式（`Authorization: Bearer <server.metrics.token>`），包含房間／連線／發言者數、上下行封包與補幀數、DTX 省略幀、codec backlog 與丟幀、mixer underrun／漂移丟幀／tick 延遲、event loop delay 與記憶體。
+監控：`GET /healthz` 回 `ok`；`GET /metrics` 回 Prometheus 文字格式（`Authorization: Bearer <server.metrics.token>`），包含房間／連線／發言者數、上下行封包與補幀數、DTX 省略幀、low tier 聽眾數、codec backlog 與丟幀、mixer underrun／漂移丟幀／tick 延遲、event loop delay 與記憶體。
 
 ## WebSocket 協定摘要
 
