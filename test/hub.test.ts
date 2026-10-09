@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { createHmac } from 'node:crypto';
 import { describe, it } from 'node:test';
 import { setImmediate as nextTurn } from 'node:timers/promises';
 import { FakeSession, harness, RECVONLY_OFFER, SENDRECV_OFFER, sine, testConfig } from './helpers.ts';
@@ -276,5 +277,25 @@ describe('mute', () => {
     assert.equal(me.muted, true, 'self-mute kept');
     assert.equal(await h.req(sp.s, { type: 'mic:unmute' }), 'ok');
     assert.equal(sp.s.last('room:state')!.me.muted, false);
+  });
+});
+
+describe('ephemeral TURN credentials', () => {
+  it('issues per-participant HMAC credentials that expire after ttlSeconds', async () => {
+    const secret = 'coturn-shared-secret-123';
+    const h = harness(testConfig((c) => { c.rtc.turn = { urls: ['turns:turn.example:5349'], secret, ttlSeconds: 600 }; }));
+    const host = await h.create('Host');
+    const guest = await h.join(host.roomId, host.code, 'Guest');
+    const usernames = [host, guest].map(({ s, id }) => {
+      const servers = s.last('rtc:config')!.iceServers;
+      const turn = servers.at(-1)!;
+      assert.deepEqual(turn.urls, ['turns:turn.example:5349']);
+      assert.equal(turn.username, `${h.clock.now / 1000 + 600}:${id}`);
+      assert.equal(turn.credential, createHmac('sha1', secret).update(turn.username!).digest('base64'));
+      assert.ok(servers.length > 1, 'static STUN servers are kept');
+      assert.ok(!JSON.stringify(servers).includes(secret), 'secret never leaves the server');
+      return turn.username;
+    });
+    assert.notEqual(usernames[0], usernames[1]);
   });
 });

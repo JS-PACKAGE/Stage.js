@@ -170,4 +170,9 @@ describe('transport security policy', () => {
     notEnabled.server.allowInsecure = false;
     assert.throws(() => parseConfig(notEnabled), ConfigError);
   });
+  it('refuses TURN urls without a usable shared secret', () => {
+    const noSecret = raw();
+    noSecret.rtc.turn.urls = ['turn:turn.example:3478'];
+    assert.throws(() => parseConfig(noSecret), ConfigError);
+  });
 });

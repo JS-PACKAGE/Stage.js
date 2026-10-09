@@ -60,7 +60,7 @@ audio:
     reorderPackets: 2          # 亂序容忍：缺包後再收到幾包即判定遺失並補幀（可調整）
 
 rtc:
-  # 下發給瀏覽器的 ICE servers。TURN 憑證只放 config.yaml，不入庫、不入日誌。
+  # 下發給瀏覽器的靜態 ICE servers（STUN）。TURN 請用下方 turn 區塊發短期憑證，勿把長期帳密放這裡。
   iceServers:
     - urls: ["stun:stun.l.google.com:19302"]
   # 伺服器端（werift）ICE 設定
@@ -68,6 +68,12 @@ rtc:
     - urls: ["stun:stun.l.google.com:19302"]
   # UDP port 範圍（[min, max]）；空陣列＝系統自選
   portRange: []
+  # 短期 TURN 憑證（coturn：use-auth-secret + static-auth-secret）。每次進房以 HMAC 簽發，
+  # 帳密逾 ttlSeconds 失效；secret 只放 config.yaml，不入庫、不入日誌。urls 空陣列＝停用。
+  turn:
+    urls: []                   # 例：["turn:turn.example.com:3478?transport=udp", "turns:turn.example.com:5349"]
+    secret: ""                 # 與 coturn static-auth-secret 相同（≥16 字元）
+    ttlSeconds: 86400          # 建議長於最長場次：瀏覽器在 allocation refresh 時沿用同一組帳密（可調整）
 
 log:
   level: info                  # debug | info | warn | error

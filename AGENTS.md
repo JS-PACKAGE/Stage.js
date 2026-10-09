@@ -64,7 +64,7 @@ node scripts/bench-mixer.ts      # Gate 3：8/3 發言者 × 300 訂閱者混音
 
 **S4. 每連線頻率限制。** 控制訊息 ≤ `controlPerSecond`（20/s）、`hand:raise` ≤ 1 次／`handRaiseIntervalMs`（10s）、`rtc:ice` ≤ `icePerSecond`（30/s）；任一超過即以 close code 1008 斷線並記 warning。無法解析的 frame 也計入控制額度。
 
-**S5. 憑證不入庫、不入日誌。** STUN/TURN（coturn）憑證只放 `config.yaml`（已在 `.gitignore`），入庫的是 `config.example.yaml`。TURN 憑證只經 `rtc:config` 發給已進房者。
+**S5. 憑證不入庫、不入日誌。** STUN/TURN（coturn）設定只放 `config.yaml`（已在 `.gitignore`），入庫的是 `config.example.yaml`。TURN 一律用 `rtc.turn` 短期憑證（`src/rtc/turn.ts`：`<到期秒>:<participantId>`＋HMAC-SHA1），只經 `rtc:config` 發給已進房者；`rtc.turn.secret` 永不離開伺服器。不得把長期 TURN 帳密放進 `rtc.iceServers`。
 
 **S6. 競態保證。** 每房一條 `SerialQueue`：所有狀態變更與該房信令依序原子套用；每連線訊息依序處理。狀態機每次轉換後檢查不變量；「雙主控」等違例拋 `InvariantViolation` → 關房（fail-closed）。單一 client 的信令錯誤只回該請求錯誤，不得關房。
 

@@ -14,7 +14,7 @@ export interface Logger {
 }
 
 /** Field names that must never reach the log, even by accident. */
-const REDACT = /^(code|resumeToken|token|credential|password|username|sdp|payload)$/i;
+const REDACT = /^(code|resumeToken|token|credential|password|username|secret|sdp|payload)$/i;
 
 export function createLogger(level: LogLevel, sink: (line: string) => void = (l) => process.stderr.write(l + '\n')): Logger {
   const min = ORDER[level];

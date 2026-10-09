@@ -68,6 +68,8 @@ export interface AppConfig {
     iceServers: IceServerConfig[];
     serverIceServers: IceServerConfig[];
     portRange: [number, number] | [];
+    /** Ephemeral TURN (coturn use-auth-secret); empty `urls` disables it. */
+    turn: { urls: string[]; secret: string; ttlSeconds: number };
   };
   log: { level: 'debug' | 'info' | 'warn' | 'error' };
 }
@@ -226,10 +228,21 @@ export function parseConfig(raw: unknown): AppConfig {
     pr.every((p) => Number.isInteger(p) && p > 0 && p <= 65535) && (pr[0] as number) <= (pr[1] as number)
   ) portRange = [pr[0] as number, pr[1] as number];
   else throw new ConfigError('rtc.portRange: expected [] or [min, max]');
+  const tu = obj(t.turn, 'rtc.turn');
+  if (!Array.isArray(tu.urls) || !tu.urls.every((u) => typeof u === 'string' && /^turns?:/.test(u))) {
+    throw new ConfigError('rtc.turn.urls: expected list of turn:/turns: urls ([] disables)');
+  }
+  const turn: AppConfig['rtc']['turn'] = {
+    urls: tu.urls as string[],
+    secret: str(tu, 'secret', 'rtc.turn'),
+    ttlSeconds: int(tu, 'ttlSeconds', 'rtc.turn', 60),
+  };
+  if (turn.urls.length && turn.secret.length < 16) throw new ConfigError('rtc.turn.secret: at least 16 characters when urls are set');
   const rtc: AppConfig['rtc'] = {
     iceServers: iceServers(t.iceServers, 'rtc.iceServers'),
     serverIceServers: iceServers(t.serverIceServers, 'rtc.serverIceServers'),
     portRange,
+    turn,
   };
 
   const lg = obj(root.log, 'log');

@@ -73,10 +73,10 @@ Windows 用 `.\stage.ps1 <command>`，指令相同；Windows 無法對背景 nod
 | `limits` | `maxRooms`、`maxConnections`、`maxSpeakersPerRoom`（8）、`maxAudiencePerRoom`（300）、`maxFrameBytes`（64KB）、`controlPerSecond`（20）、`handRaiseIntervalMs`（10000）、`icePerSecond`（30）、`nameMaxLength`（32）、`codeMaxLength`（16）、`sdpMaxLength` |
 | `rooms` | `codeLength`（8）、`controllerGraceMs`（主控斷線寬限 60000）、`heartbeatIntervalMs` |
 | `audio` | `sampleRate`（48000；只接受 Opus 原生取樣率）、`frameMs`（20）、`codecWorkers`（Opus 編解碼 worker 數，房間平均分配到各 worker）、`opus.{vbr,minBitrate,maxBitrate,bitrate,complexity}`、`opus.fec`／`opus.packetLossPercent`（下行 in-band FEC 與預期掉包率）、`opus.dtx`（靜音不送包）、`mixer.{maxBufferedFrames,limiterThreshold,latencyTargetMs}`、`jitter.playoutFrames`（每路上行預緩衝幀數）、`jitter.reorderPackets`（亂序容忍包數，超過即判定遺失並補幀） |
-| `rtc` | `iceServers`（下發給瀏覽器，可含 TURN 帳密）、`serverIceServers`（伺服器端 ICE）、`portRange`（`[]` 或 `[min, max]`） |
+| `rtc` | `iceServers`（下發給瀏覽器的靜態 STUN）、`serverIceServers`（伺服器端 ICE）、`portRange`（`[]` 或 `[min, max]`）、`turn.{urls,secret,ttlSeconds}`（coturn `use-auth-secret` 短期憑證，每次進房以 HMAC 簽發；`urls: []` 停用） |
 | `log` | `level`：`debug`／`info`／`warn`／`error`（房間代碼、token、憑證、SDP 一律不入日誌） |
 
-對外部署：`allowInsecure: false`、`host: 0.0.0.0`、填 `tls`；開放 `rtc.portRange` 的 UDP；`iceServers` 加入 TURN。
+對外部署：`allowInsecure: false`、`host: 0.0.0.0`、填 `tls`；開放 `rtc.portRange` 的 UDP；設定 `rtc.turn`（coturn 需 `use-auth-secret` 與相同的 `static-auth-secret`）。
 
 ## WebSocket 協定摘要
 

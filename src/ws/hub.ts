@@ -12,6 +12,7 @@ import type { Logger } from '../log.ts';
 import { ERROR_MESSAGES, InvariantViolation, StageError } from '../model/errors.ts';
 import { Room, type RoomEvent } from '../model/room.ts';
 import { offerSendsAudio, summarizeOffer } from '../rtc/sdp.ts';
+import { iceServersFor } from '../rtc/turn.ts';
 import type { MediaTransport, MixedPcmSource } from '../transport/MediaTransport.ts';
 import { SerialQueue } from './serialQueue.ts';
 
@@ -189,7 +190,7 @@ export class StageHub {
     log.info('room created', { roomId, participantId: controller.participantId, codeRequired });
 
     session.send(codeRequired ? { type: 'room:created', roomId, code } : { type: 'room:created', roomId });
-    session.send({ type: 'rtc:config', iceServers: config.rtc.iceServers });
+    session.send({ type: 'rtc:config', iceServers: iceServersFor(config.rtc, controller.participantId, this.now()) });
     session.send({ type: 'room:state', ...room.snapshot(controller.participantId) });
     session.send({ type: 'ok', requestId: msg.requestId });
   }
@@ -226,7 +227,7 @@ export class StageHub {
     this.bindings.set(session, { roomId: room.roomId, participantId });
     this.deps.log.info('participant joined', { roomId: room.roomId, participantId, resumed: msg.resumeToken !== undefined });
 
-    session.send({ type: 'rtc:config', iceServers: this.deps.config.rtc.iceServers });
+    session.send({ type: 'rtc:config', iceServers: iceServersFor(this.deps.config.rtc, participantId, this.now()) });
     this.broadcastState(rt);
     session.send({ type: 'ok', requestId: msg.requestId });
   }
