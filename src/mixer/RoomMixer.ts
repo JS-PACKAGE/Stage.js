@@ -1,15 +1,17 @@
 import type { MixedPcmSource, MixFrame, MixFrameListener } from '../transport/MediaTransport.ts';
 import { MixerCounters } from '../metrics.ts';
 import { limitInPlace } from './limiter.ts';
+import { NoiseFilter, type NoiseFilterOptions } from './noiseFilter.ts';
 
 /**
  * `playoutFrames`: frames a source must buffer before it plays (and again after every underrun).
  * `speakingThreshold`: frame RMS (0..1) at which a source counts as speaking; it stays speaking for
  * `speakingHoldMs` after dropping below, so pauses between words do not flap the indicator.
+ * `noiseFilter`: when set, every source is high-passed and noise-gated on ingress (see NoiseFilter).
  */
-export interface RoomMixerOptions { sampleRate: number; frameMs: number; maxBufferedFrames: number; playoutFrames: number; limiterThreshold: number; speakingThreshold: number; speakingHoldMs: number }
+export interface RoomMixerOptions { sampleRate: number; frameMs: number; maxBufferedFrames: number; playoutFrames: number; limiterThreshold: number; speakingThreshold: number; speakingHoldMs: number; noiseFilter?: NoiseFilterOptions }
 export type SpeakingListener = (participantIds: string[]) => void;
-interface Source { muted: boolean; primed: boolean; frames: Float32Array[]; /** Ticks left in the speaking state. */ hold: number }
+interface Source { muted: boolean; primed: boolean; frames: Float32Array[]; /** Ticks left in the speaking state. */ hold: number; filter: NoiseFilter | undefined }
 
 export class RoomMixer implements MixedPcmSource {
   private readonly sources = new Map<string, Source>();
@@ -31,7 +33,11 @@ export class RoomMixer implements MixedPcmSource {
     this.holdFrames = Math.max(1, Math.ceil(opts.speakingHoldMs / opts.frameMs));
   }
   get sourceCount(): number { return this.sources.size; }
-  addSource(id: string): void { if (!this.sources.has(id)) this.sources.set(id, { muted: false, primed: false, frames: [], hold: 0 }); }
+  addSource(id: string): void {
+    if (this.sources.has(id)) return;
+    const nf = this.opts.noiseFilter;
+    this.sources.set(id, { muted: false, primed: false, frames: [], hold: 0, filter: nf && new NoiseFilter(nf, this.opts.sampleRate, this.opts.frameMs) });
+  }
   removeSource(id: string): void {
     const source = this.sources.get(id);
     this.sources.delete(id);
@@ -49,7 +55,9 @@ export class RoomMixer implements MixedPcmSource {
     if (!source) return;
     if (samples.length !== this.frameSize) throw new RangeError('PCM frame has incorrect length');
     if (source.frames.length === this.opts.maxBufferedFrames) { source.frames.shift(); this.counters.droppedFrames++; }
-    source.frames.push(samples.slice());
+    const copy = samples.slice();
+    source.filter?.process(copy);
+    source.frames.push(copy);
   }
   tick(): MixFrame | null {
     if (!this.sources.size) return null;
