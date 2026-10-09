@@ -11,7 +11,6 @@ const mixer = new RoomMixer({ ...config.audio, ...config.audio.mixer });
 const clients = new Map<string, RTCPeerConnection>();
 const transport = new WeriftMediaTransport(config, { onLocalCandidate() {} }, silentLogger);
 const encoder = new OpusEncoder(config.audio);
-const decoders: OpusDecoder[] = [];
 let timer: NodeJS.Timeout | undefined;
 try {
   let audienceEnergy = 0, selfEnergy = 0, received = 0, rejectedFrames = 0;
@@ -22,7 +21,7 @@ try {
   const tracks = new Map<string, MediaStreamTrack>();
   for (const id of ['speaker', 'audience', 'blocked']) {
     const client = new RTCPeerConnection({ codecs: { audio: [opusCodec()], video: [] }, iceServers: [] }); clients.set(id, client);
-    const decoder = new OpusDecoder(config.audio.sampleRate); decoders.push(decoder);
+    const decoder = new OpusDecoder(config.audio.sampleRate);
     client.onTrack.subscribe(track => track.onReceiveRtp.subscribe(packet => {
       const samples = decoder.decode(packet.payload);
       const energy = samples.reduce((sum, sample) => sum + sample * sample, 0) / samples.length;
@@ -92,6 +91,6 @@ try {
   console.log(`PASS packets=${received} audienceEnergy=${audienceEnergy.toFixed(6)} selfEnergy=${selfEnergy.toFixed(6)} blockedPacketsSent=${blockedPacketsSent} blockedFrames=${rejectedFrames}; renegotiation promotedFrames=${promotedFrames} PASS`);
 } catch (error) { console.error('FAIL', error); process.exitCode = 1; }
 finally {
-  clearInterval(timer); mixer.stop(); encoder.delete(); for (const decoder of decoders) decoder.delete();
+  clearInterval(timer); mixer.stop();
   await transport.close(); await Promise.all([...clients.values()].map(client => client.close()));
 }

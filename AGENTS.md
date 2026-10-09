@@ -6,7 +6,7 @@
 
 - TypeScript（`strict`、`noUncheckedIndexedAccess`、`erasableSyntaxOnly`、`verbatimModuleSyntax`），ESM。目標 **Node.js v24**（`engines: >=24`）。
 - 伺服器原始碼直接以 Node type stripping 執行：相對 import **必須帶 `.ts` 副檔名**；不可用 enum、namespace、constructor parameter properties；純型別一律 `import type`。
-- 依賴一律釘選精確版本（`package.json` 無 `^`／`~`）。控制面只用 `ws`＋`yaml`；媒體層 `werift`＋`opusscript`；前端 vanilla TS＋Vite。新增依賴前先確認標準庫或既有依賴做不到。
+- 依賴一律釘選精確版本（`package.json` 無 `^`／`~`）。控制面只用 `ws`＋`yaml`；媒體層 `werift`＋`@evan/opus`（內附 N-API prebuild，無 install script，其他平台退回 WASM）；前端 vanilla TS＋Vite。新增依賴前先確認標準庫或既有依賴做不到。不要換回 `opusscript`（0.1.1 以 byte 指標當 `HEAPU16` index，PCM 寫到 2× 位址造成 heap 損毀）或 `@discordjs/opus`（0.10.0 在 arm64 走 SILK 會 segfault）。
 - 設定值一律來自 `config.yaml`（範本 `config.example.yaml`），程式不得寫死埠號、上限、編碼參數、STUN/TURN。新增設定鍵時同步更新 `src/config.ts` 驗證、`config.example.yaml`、README。
 - UI 與使用者訊息用繁體中文；程式碼、log、協定欄位用英文。
 - 註解只寫「為什麼」與非顯而易見的限制。

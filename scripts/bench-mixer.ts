@@ -31,7 +31,6 @@ for (const publishers of [3, 8]) {
   cpu.sort((a, b) => a - b); latency.sort((a, b) => a - b);
   const p95 = latency[Math.floor(latency.length * 0.95)]!;
   rows.push({ publishers, subscribers: 300, 'CPU avg ms': +(cpu.reduce((a, b) => a + b, 0) / cpu.length).toFixed(3), 'CPU p95 ms': +cpu[Math.floor(cpu.length * 0.95)]!.toFixed(3), 'push→packet p95 ms': +p95.toFixed(3), 'push→packet max ms': +latency.at(-1)!.toFixed(3), bytes, gate: latency.at(-1)! <= config.audio.mixer.latencyTargetMs ? 'PASS' : 'FAIL' });
-  fullEncoder.delete(); for (const encoder of encoders) encoder.delete();
 }
 console.table(rows);
 if (rows.some(row => row.gate === 'FAIL')) process.exitCode = 1;

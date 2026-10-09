@@ -87,7 +87,7 @@ export class WeriftMediaTransport implements MediaTransport {
     const room = this.rooms.get(roomId);
     if (!room) return;
     room.publishers.delete(id);
-    room.minusEncoders.get(id)?.delete(); room.minusEncoders.delete(id);
+    room.minusEncoders.delete(id);
     const peer = room.peers.get(id);
     if (peer) peer.chunker = new PcmChunker(samplesPerFrame(this.config.audio));
   }
@@ -127,7 +127,7 @@ export class WeriftMediaTransport implements MediaTransport {
   unsubscribe(roomId: string, id: string): void {
     const room = this.rooms.get(roomId);
     if (!room) return;
-    room.subscribers.delete(id); room.minusEncoders.get(id)?.delete(); room.minusEncoders.delete(id);
+    room.subscribers.delete(id); room.minusEncoders.delete(id);
   }
   async getStats(roomId: string, id: string): Promise<TransportStats | null> {
     const peer = this.rooms.get(roomId)?.peers.get(id);
@@ -147,7 +147,7 @@ export class WeriftMediaTransport implements MediaTransport {
     const peer = room?.peers.get(id);
     if (!room || !peer) return;
     room.peers.delete(id); this.removePublisher(roomId, id); this.unsubscribe(roomId, id);
-    peer.track.stop(); peer.decoder.delete();
+    peer.track.stop();
     const closing = peer.pc.close().finally(() => { this.closing.delete(closing); });
     this.closing.add(closing);
   }
@@ -156,8 +156,7 @@ export class WeriftMediaTransport implements MediaTransport {
     if (!room) return;
     room.detach?.();
     for (const peerId of room.peers.keys()) this.closePeer(id, peerId);
-    for (const encoder of room.minusEncoders.values()) encoder.delete();
-    room.fullEncoder.delete(); this.rooms.delete(id);
+    this.rooms.delete(id);
   }
   async close(): Promise<void> { for (const id of this.rooms.keys()) this.closeRoom(id); await Promise.all(this.closing); }
 }

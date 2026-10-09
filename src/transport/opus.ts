@@ -1,45 +1,49 @@
-import OpusScript from 'opusscript';
+import { Decoder, Encoder } from '@evan/opus';
 import type { AppConfig } from '../config.ts';
 
-/** libopus include/opus_defines.h: https://opus-codec.org/docs/html_api-1.1.0/opus__defines_8h.html */
-export const OPUS_SET_VBR_REQUEST = 4006;
-export const OPUS_SET_COMPLEXITY_REQUEST = 4010;
+type OpusRate = 8000 | 12000 | 16000 | 24000 | 48000;
+
+/** Native libopus binding (prebuilt N-API for darwin/linux arm64+x64, win32 x64; WASM fallback elsewhere). */
 export class OpusEncoder {
-  private readonly codec: OpusScript;
-  private readonly pcm: Buffer;
+  private readonly codec: Encoder;
+  private readonly pcm: Int16Array;
   readonly frameSize: number;
   constructor(audio: AppConfig['audio']) {
     this.frameSize = Math.round(audio.sampleRate * audio.frameMs / 1000);
-    this.pcm = Buffer.alloc(this.frameSize * 2);
-    this.codec = new OpusScript(audio.sampleRate as 8000 | 12000 | 16000 | 24000 | 48000, 1, OpusScript.Application.VOIP);
-    this.codec.setBitrate(Math.min(audio.opus.maxBitrate, Math.max(audio.opus.minBitrate, audio.opus.bitrate)));
-    this.codec.encoderCTL(OPUS_SET_VBR_REQUEST, audio.opus.vbr ? 1 : 0);
-    this.codec.encoderCTL(OPUS_SET_COMPLEXITY_REQUEST, audio.opus.complexity);
+    this.pcm = new Int16Array(this.frameSize);
+    this.codec = new Encoder({ channels: 1, sample_rate: audio.sampleRate as OpusRate, application: 'voip' });
+    this.codec.bitrate = Math.min(audio.opus.maxBitrate, Math.max(audio.opus.minBitrate, audio.opus.bitrate));
+    this.codec.vbr = audio.opus.vbr;
+    this.codec.complexity = audio.opus.complexity as Encoder['complexity'];
   }
-  encode(samples: Float32Array): Buffer {
+  /** Returns a freshly allocated packet the caller owns (sole owner of its ArrayBuffer, so it is transferable). */
+  encode(samples: Float32Array): Buffer<ArrayBuffer> {
     if (samples.length !== this.frameSize) throw new RangeError('Incorrect Opus frame size');
-    for (let i = 0; i < samples.length; i++) this.pcm.writeInt16LE(Math.round(Math.min(1, Math.max(-1, samples[i]!)) * (samples[i]! < 0 ? 32768 : 32767)), i * 2);
-    return this.codec.encode(this.pcm, this.frameSize);
+    const pcm = this.pcm;
+    for (let i = 0; i < samples.length; i++) {
+      const s = Math.min(1, Math.max(-1, samples[i]!));
+      pcm[i] = Math.round(s * (s < 0 ? 32768 : 32767));
+    }
+    const packet = this.codec.encode(pcm);
+    return Buffer.from(packet.buffer as ArrayBuffer, packet.byteOffset, packet.byteLength);
   }
-  delete(): void { this.codec.delete(); }
 }
 export class OpusDecoder {
-  private readonly codec: OpusScript;
-  constructor(sampleRate: number) {
-    this.codec = new OpusScript(sampleRate as 8000 | 12000 | 16000 | 24000 | 48000, 1, OpusScript.Application.VOIP);
-  }
-  decode(packet: Buffer): Float32Array {
-    const pcm = this.codec.decode(packet);
-    const samples = new Float32Array(pcm.length / 2);
-    for (let i = 0; i < samples.length; i++) samples[i] = pcm.readInt16LE(i * 2) / 32768;
+  private readonly codec: Decoder;
+  constructor(sampleRate: number) { this.codec = new Decoder({ channels: 1, sample_rate: sampleRate as OpusRate }); }
+  decode(packet: Uint8Array): Float32Array<ArrayBuffer> {
+    // The binding returns a fresh copy at offset 0, so the Int16 view is aligned.
+    const bytes = this.codec.decode(packet);
+    const pcm16 = new Int16Array(bytes.buffer, bytes.byteOffset, bytes.byteLength / 2);
+    const samples = new Float32Array(pcm16.length);
+    for (let i = 0; i < samples.length; i++) samples[i] = pcm16[i]! / 32768;
     return samples;
   }
-  delete(): void { this.codec.delete(); }
 }
 
-/** Re-chunks variable-duration decoded Opus packets into the mixer quantum. */
+/** Re-chunks variable-duration decoded Opus packets into the mixer quantum. The emitted frame is reused once `emit` returns. */
 export class PcmChunker {
-  private pending: Float32Array;
+  private readonly pending: Float32Array;
   private filled = 0;
   private readonly size: number;
   constructor(size: number) { this.size = size; this.pending = new Float32Array(size); }
@@ -50,7 +54,7 @@ export class PcmChunker {
       this.pending.set(samples.subarray(offset, offset + count), this.filled);
       this.filled += count;
       offset += count;
-      if (this.filled === this.size) { emit(this.pending); this.pending = new Float32Array(this.size); this.filled = 0; }
+      if (this.filled === this.size) { emit(this.pending); this.filled = 0; }
     }
   }
 }
