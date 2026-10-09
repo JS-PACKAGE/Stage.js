@@ -32,18 +32,38 @@ test('reorder buffer resyncs on a large sequence jump instead of concealing it',
   assert.deepEqual(ids(buf.push(5001, pkt(3))), [3]);
 });
 
-test('decoder conceals lost packets by fading the last frame to silence', () => {
-  const audio = testConfig().audio;
+test('decoder rebuilds a lost packet from the next packet\'s in-band FEC, better than plain concealment', () => {
+  // libopus spends FEC bits only on SILK/hybrid frames it judges to be speech: feed a noisy,
+  // pitch-gliding, amplitude-modulated signal (deterministic PRNG) at a speech bitrate.
+  const audio = testConfig(c => { c.audio.opus.minBitrate = 6000; c.audio.opus.bitrate = 24000; c.audio.opus.dtx = false; }).audio;
   const enc = new OpusEncoder(audio);
-  const dec = new OpusDecoder(audio.sampleRate);
-  assert.equal(dec.decode(null).length, 0, 'nothing to conceal before the first packet');
-  const tone = new Float32Array(enc.frameSize).map((_, i) => 0.5 * Math.sin(i / 8));
-  const good = dec.decode(enc.encode(tone));
-  const peak = (a: Float32Array) => a.reduce((m, x) => Math.max(m, Math.abs(x)), 0);
-  const first = dec.decode(null);
-  assert.equal(first.length, good.length);
-  assert.ok(Math.abs(peak(first) - peak(good) / 2) < 1e-6);
-  for (let i = 0; i < 3; i++) dec.decode(null);
-  assert.equal(peak(dec.decode(null)), 0, 'silent after the fade-out');
-  assert.ok(peak(dec.decode(enc.encode(tone))) > 0, 'recovers on the next real packet');
+  let seed = 1;
+  const noise = () => ((seed = (seed * 1103515245 + 12345) & 0x7fffffff) / 0x7fffffff) * 2 - 1;
+  const voice = (f: number) => Float32Array.from({ length: enc.frameSize }, (_, i) => {
+    const t = (f * enc.frameSize + i) / audio.sampleRate;
+    return (0.5 + 0.5 * Math.sin(2 * Math.PI * 4 * t)) * (0.2 * Math.sin(2 * Math.PI * (140 + 30 * Math.sin(2 * Math.PI * 2 * t)) * t) + 0.05 * noise());
+  });
+  const packets = Array.from({ length: 60 }, (_, f) => enc.encode(voice(f)));
+  const reference = new OpusDecoder(audio.sampleRate);
+  const lossless = packets.map(p => reference.decode(p));
+  const snrDb = (out: Float32Array, ref: Float32Array) => {
+    let noise = 0, signal = 0;
+    for (let i = 0; i < ref.length; i++) { noise += (out[i]! - ref[i]!) ** 2; signal += ref[i]! ** 2; }
+    return 10 * Math.log10(signal / noise);
+  };
+  const recover = (useFec: boolean) => {
+    const dec = new OpusDecoder(audio.sampleRate);
+    assert.equal(dec.conceal(null).length, 0, 'nothing to conceal before the first packet');
+    const snr: number[] = [];
+    for (let f = 0; f < packets.length; f++) {
+      if (f % 10 === 5) {
+        const out = dec.conceal(useFec ? packets[f + 1]! : null);
+        assert.equal(out.length, enc.frameSize, 'a lost packet is replaced by one frame of audio');
+        snr.push(snrDb(out, lossless[f]!));
+      } else dec.decode(packets[f]!);
+    }
+    return snr;
+  };
+  const fec = recover(true), plc = recover(false);
+  fec.forEach((db, i) => assert.ok(db > plc[i]! + 5, `loss ${i}: FEC ${db.toFixed(1)} dB vs PLC ${plc[i]!.toFixed(1)} dB`));
 });

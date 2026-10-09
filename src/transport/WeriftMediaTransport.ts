@@ -82,15 +82,15 @@ export class WeriftMediaTransport implements MediaTransport {
     // Hosts only forward enabled uplinks, but a packet can cross a removePublisher in flight.
     if (!room || !uplink || !room.publishers.has(id)) return;
     this.counters.uplinkPackets++;
-    for (const packet of uplink.reorder.push(seq, payload)) {
-      // `null` = declared lost; the worker's decoder conceals it in stream order.
-      if (packet === null) this.counters.uplinkConcealed++;
-      this.codecs.decode(roomId, id, packet).then(decoded => {
-        // Re-check after the worker hop: the publisher may have been removed (and re-added) meanwhile.
-        const handler = room.publishers.get(id);
-        if (handler && room.uplinks.get(id) === uplink) uplink.chunker.push(decoded, handler);
-      }, () => { this.log.warn('Invalid uplink audio packet', { roomId, participantId: id }); });
-    }
+    const packets = uplink.reorder.push(seq, payload);
+    if (!packets.length) return;
+    // `null` = declared lost: the worker rebuilds it from the next packet's FEC, in stream order.
+    for (const packet of packets) if (packet === null) this.counters.uplinkConcealed++;
+    this.codecs.decode(roomId, id, packets).then(decoded => {
+      // Re-check after the worker hop: the publisher may have been removed (and re-added) meanwhile.
+      const handler = room.publishers.get(id);
+      if (handler && room.uplinks.get(id) === uplink) uplink.chunker.push(decoded, handler);
+    }, () => { this.log.warn('Invalid uplink audio packet', { roomId, participantId: id }); });
   }
   private host(room: Room, id: string): PeerHost {
     let host = room.peers.get(id);

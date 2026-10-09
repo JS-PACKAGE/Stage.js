@@ -6,7 +6,7 @@
 
 - TypeScript（`strict`、`noUncheckedIndexedAccess`、`erasableSyntaxOnly`、`verbatimModuleSyntax`），ESM。目標 **Node.js v24**（`engines: >=24`）。
 - 伺服器原始碼直接以 Node type stripping 執行：相對 import **必須帶 `.ts` 副檔名**；不可用 enum、namespace、constructor parameter properties；純型別一律 `import type`。
-- 依賴一律釘選精確版本（`package.json` 無 `^`／`~`）。控制面只用 `ws`＋`yaml`；媒體層 `werift`＋`@evan/opus`（內附 N-API prebuild，無 install script，其他平台退回 WASM）；前端 vanilla TS＋Vite。新增依賴前先確認標準庫或既有依賴做不到。不要換回 `opusscript`（0.1.1 以 byte 指標當 `HEAPU16` index，PCM 寫到 2× 位址造成 heap 損毀）或 `@discordjs/opus`（0.10.0 在 arm64 走 SILK 會 segfault）。
+- 依賴一律釘選精確版本（`package.json` 無 `^`／`~`）。控制面只用 `ws`＋`yaml`；媒體層 `werift`＋`@evan/opus`（只取其內附的 libopus WASM，由 `src/transport/opus.ts` 自行實例化）；前端 vanilla TS＋Vite。新增依賴前先確認標準庫或既有依賴做不到。不要換回 `opusscript`（0.1.1 以 byte 指標當 `HEAPU16` index，PCM 寫到 2× 位址造成 heap 損毀）或 `@discordjs/opus`（0.10.0 在 arm64 走 SILK 會 segfault）。
 - 設定值一律來自 `config.yaml`（範本 `config.example.yaml`），程式不得寫死埠號、上限、編碼參數、STUN/TURN。新增設定鍵時同步更新 `src/config.ts` 驗證、`config.example.yaml`、README。
 - UI 與使用者訊息用繁體中文；程式碼、log、協定欄位用英文。
 - 註解只寫「為什麼」與非顯而易見的限制。
@@ -43,7 +43,7 @@ node scripts/load-test.ts        # 全端壓測：自起伺服器，K 發言者�
 | `src/transport/peerHost.ts` | `PeerHost` 介面與 `WeriftPeerHost`：PeerConnection、方向政策、上行第二道關卡、RTP 打包／DTX 省略 |
 | `src/transport/mediaShards.ts`、`mediaWorker.ts` | `MediaShard`：在 worker thread 上跑 `WeriftPeerHost`（`rtc.mediaWorkers`；0＝主執行緒）；worker 掛掉時回報其 peer 已關閉並重生 |
 | `src/transport/codecPool.ts`、`codecWorker.ts` | Opus 編解碼 worker thread pool（`audio.codecWorkers`）；每房固定一個 worker，維持有狀態 codec 的順序 |
-| `src/transport/jitter.ts` | 上行 RTP 重排（`audio.jitter.reorderPackets`）；遺失包以 `null` 送解碼器做淡出補幀（binding 無 PLC） |
+| `src/transport/jitter.ts` | 上行 RTP 重排（`audio.jitter.reorderPackets`）；遺失包以 `null` 送解碼器，由下一包的 in-band FEC 還原，沒有 FEC 時走 libopus PLC |
 | `src/transport/MockMediaTransport.ts` | 測試／無 WebRTC 開發用 |
 | `src/mixer/` | `RoomMixer`（N 路疊加、mix-minus-self、每路 playout 預緩衝／underrun 重緩衝／漂移排空、緩衝上限）、`limiter` |
 | `packages/client/` | 可嵌入的瀏覽器 ESM 函式庫 `StageClient` |
@@ -55,7 +55,7 @@ node scripts/load-test.ts        # 全端壓測：自起伺服器，K 發言者�
 - 核心（`src/model`、`src/ws`、`src/mixer`）**只透過 `MediaTransport` 介面**操作媒體；不得 import werift。換 WebRTC 實作＝新增 adapter，不動核心。
 - PCM 慣例：mono Float32、`audio.sampleRate`（48kHz）、`frameMs`（20ms＝960 samples）。Opus 編解碼與混音同取樣率，**不重取樣**；RTP 時鐘恆為 48kHz（RFC 7587）。
 - 觀眾共用一個 encoder（每房一次編碼分送全體）；只有台上者各有 mix-minus-self encoder。不得引入「每位觀眾一個 encoder」。
-- `@evan/opus` 的 N-API addon 以 process 全域暫存區編解碼，**多執行緒同時使用會互相污染封包**；codec worker 一律以 `OPUS_FORCE_WASM=1` 載入（各自獨立記憶體，約慢 20%），整個 process 最多只有一條執行緒用 native（目前只有測試／腳本的主執行緒）。`test/codecPool.test.ts` 守這條。
+- Opus 一律走 `src/transport/opus.ts`：它直接實例化 `@evan/opus` 內附的 libopus WASM（套件的 JS wrapper 寫死 `decode_fec = 0`、不能解遺失包，等於沒有 FEC／PLC）；不要改回套件的 `Encoder`／`Decoder`，也不要用其 N-API addon（以 process 全域暫存區編解碼，多執行緒同時使用會互相污染封包）。每條執行緒各有一份 WASM 記憶體，`test/codecPool.test.ts` 守跨執行緒不互相污染。
 - werift：伺服器 transceiver 必須在 `setRemoteDescription` **之前**設成政策方向，否則重協商時新 SSRC 不會被登錄（見 PLAN 十二-11）。
 
 ## 安全性（PLAN.md 第六節，逐條為硬規則）

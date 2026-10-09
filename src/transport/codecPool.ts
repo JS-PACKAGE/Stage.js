@@ -7,7 +7,7 @@ import type { Logger } from '../log.ts';
 export interface EncodeItem { key: string; pcm: Float32Array }
 export type CodecRequest =
   | { op: 'encode'; job: number; room: string; frames: EncodeItem[] }
-  | { op: 'decode'; job: number; room: string; key: string; packet: Uint8Array | null }
+  | { op: 'decode'; job: number; room: string; key: string; packets: (Uint8Array | null)[] }
   | { op: 'release'; room: string; kind: 'encoder' | 'decoder'; key: string }
   | { op: 'closeRoom'; room: string };
 export type CodecReply =
@@ -39,9 +39,7 @@ export class CodecPool {
     }
   }
   private spawn(): Worker {
-    // The @evan/opus N-API addon encodes/decodes through process-global scratch buffers, so codecs on
-    // concurrent threads corrupt each other's packets. Each worker's WASM instance has its own memory.
-    const worker = new Worker(workerUrl, { workerData: this.audio, env: { ...process.env, OPUS_FORCE_WASM: '1' } });
+    const worker = new Worker(workerUrl, { workerData: this.audio });
     worker.unref();
     return worker;
   }
@@ -88,10 +86,13 @@ export class CodecPool {
     if (reply.op === 'failed' || !reply.payloads) throw new Error(reply.op === 'failed' ? reply.message : 'Missing encode result');
     return reply.payloads;
   }
-  /** `packet` is copied before transfer, so the caller's buffer stays intact; `null` conceals a lost packet. */
-  async decode(room: string, key: string, packet: Uint8Array | null): Promise<Float32Array> {
-    const copy = packet && Uint8Array.from(packet);
-    const reply = await this.request(room, { op: 'decode', job: this.nextJob++, room, key, packet: copy }, copy ? [copy.buffer] : []);
+  /**
+   * Decodes an in-order run of one uplink (`null` = lost packet, rebuilt from the next packet's FEC
+   * or concealed) into one PCM block. Packets are copied before transfer, so callers keep theirs.
+   */
+  async decode(room: string, key: string, packets: (Uint8Array | null)[]): Promise<Float32Array> {
+    const copies = packets.map(p => p && Uint8Array.from(p));
+    const reply = await this.request(room, { op: 'decode', job: this.nextJob++, room, key, packets: copies }, copies.flatMap(p => p ? [p.buffer] : []));
     if (reply.op === 'failed' || !reply.pcm) throw new Error(reply.op === 'failed' ? reply.message : 'Missing decode result');
     return reply.pcm;
   }
