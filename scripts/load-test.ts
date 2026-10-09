@@ -33,6 +33,10 @@ const FRAME = samplesPerFrame(config.audio);
 /** Audience peers that decode audio to time beep arrivals. They get a process of their own so the
  * bulk audience's decryption load cannot delay their timestamps. */
 const PROBES = 10;
+/** RMS ≈ 0.0035: under the default loudness speechRms (0.01) and noise gate (0.008). */
+const BED_AMPLITUDE = 0.005;
+/** Mean-square level that counts as a beep; the normalizer may pull a 0.5-amplitude beep down to ≈ 0.1 RMS (0.01). */
+const ONSET_ENERGY = 0.002;
 const wallMs = () => performance.timeOrigin + performance.now();
 const cpuSeconds = () => { const c = process.cpuUsage(); return (c.user + c.system) / 1e6; };
 
@@ -108,7 +112,7 @@ async function audienceChild(init: ChildInit): Promise<ChildReport> {
       if (!probe) return;
       const pcm = probe.decode(packet.payload);
       let e = 0; for (const s of pcm) e += s * s;
-      if (e / pcm.length > 0.02) { if (now - quietSince > 300) report.onsets.push(now); quietSince = Infinity; }
+      if (e / pcm.length > ONSET_ENERGY) { if (now - quietSince > 300) report.onsets.push(now); quietSince = Infinity; }
       else if (quietSince === Infinity) quietSince = now;
     }));
     await p.negotiate();
@@ -178,7 +182,9 @@ async function main(): Promise<void> {
     await Promise.all(children.map((c) => new Promise((r) => c.once('message', r))));
     console.log(`joined ${audience} audience in ${((performance.now() - started) / 1000).toFixed(1)}s`);
 
-    // Speaker 0 beeps 120 ms every second over a quiet bed from the others; beep send times anchor latency.
+    // Speaker 0 beeps 120 ms every second over a quiet bed from the others; beep send times anchor
+    // latency. The bed stays below audio.loudness.speechRms, so the server's loudness normalizer
+    // leaves it quiet instead of raising 7 beds into a constant roar that hides the beep onsets.
     const encoders = stage.map(() => new OpusEncoder(encoderConfig));
     const beeps: number[] = [];
     let seq = 0, ts = 0, frame = 0;
@@ -191,7 +197,7 @@ async function main(): Promise<void> {
       const beeping = phase >= 0 && phase < 120;
       if (beeping && (beeps.length === 0 || now - beeps.at(-1)! > 500)) beeps.push(now);
       stage.forEach((s, i) => {
-        const amp = i === 0 ? (beeping ? 0.5 : 0) : 0.03;
+        const amp = i === 0 ? (beeping ? 0.5 : 0) : BED_AMPLITUDE;
         const pcm = Float32Array.from({ length: FRAME }, (_, n) => amp * Math.sin(2 * Math.PI * (440 + i * 110) * (frame * FRAME + n) / config.audio.sampleRate));
         const sender = s.pc.getTransceivers()[0]!.sender;
         tracks[i]!.writeRtp(new RtpPacket(new RtpHeader({ payloadType: sender.codec!.payloadType, sequenceNumber: seq & 0xffff, timestamp: ts >>> 0, ssrc: sender.ssrc }), encoders[i]!.encode(pcm)));
