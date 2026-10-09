@@ -43,6 +43,7 @@ rooms:
   controllerGraceMs: 60000     # 主控斷線逾此時間才自動移交（可調整）
   heartbeatIntervalMs: 30000   # ws ping 間隔
   presenceBroadcastMs: 250     # 觀眾進出時合併 room:state 廣播的時間窗（0＝即時；大量同時進場時避免 N² 廣播，可調整）
+  qualityIntervalMs: 2000      # 每隔多久把台上者的連線品質（上下行掉包、RTT）送給主控與台上者（0＝停用，可調整）
 
 audio:
   sampleRate: 48000            # 擷取／混音／Opus 編解碼取樣率（Opus 原生 48k，無重取樣）

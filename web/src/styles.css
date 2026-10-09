@@ -39,6 +39,7 @@ button.danger { color: var(--danger); border-color: var(--danger); }
 .check input { width: 22px; min-height: 22px; height: 22px; accent-color: var(--accent); }
 .actions { display: flex; flex-wrap: wrap; gap: 8px; }
 .badge { display: inline-flex; align-items: center; padding: 4px 9px; border: 1px solid var(--border); border-radius: 99px; color: var(--muted); font-size: .85rem; }
+.badge.quality { color: var(--danger); border-color: var(--danger); cursor: help; }
 .muted { color: var(--muted); }
 .banner { display: flex; align-items: center; flex-wrap: wrap; gap: 12px; border: 1px solid var(--accent); background: var(--panel); border-radius: 12px; padding: 14px; margin: 0 0 16px; }
 .error { border-color: var(--danger); color: var(--danger); }

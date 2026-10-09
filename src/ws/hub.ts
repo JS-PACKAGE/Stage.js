@@ -3,6 +3,7 @@ import {
   PROTOCOL_VERSION,
   SERVER_PEER_ID,
   type ClientMessage,
+  type ConnectionQuality,
   type IceCandidatePayload,
   type ServerMessage,
   type SessionDescriptionPayload,
@@ -62,6 +63,10 @@ interface RoomRuntime {
   graceTimer: unknown;
   /** Pending coalesced `room:state` broadcast (see `presenceChanged`). */
   stateTimer: unknown;
+  /** Next connection-quality report; scheduled only while someone publishes. */
+  qualityTimer: unknown;
+  /** Uplink counters at the previous report, so each report covers one interval. */
+  readonly uplinkCounts: Map<string, { received: number; lost: number }>;
   lastStatus: 'waiting' | 'live';
   closed: boolean;
 }
@@ -69,6 +74,7 @@ interface RoomRuntime {
 const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
 /** Application close code (RFC 6455 private range) telling the client it was removed, not dropped. */
 const CLOSE_KICKED = 4001;
+const round1 = (x: number) => Math.round(x * 10) / 10;
 
 function safeEqual(a: string, b: string): boolean {
   const x = Buffer.from(a);
@@ -199,6 +205,8 @@ export class StageHub {
       publishers: new Set(),
       graceTimer: undefined,
       stateTimer: undefined,
+      qualityTimer: undefined,
+      uplinkCounts: new Map(),
       lastStatus: room.status,
       closed: false,
     };
@@ -387,6 +395,7 @@ export class StageHub {
     if (sends && !rt.publishers.has(pid)) {
       rt.publishers.add(pid);
       rt.mixer.addSource(pid);
+      this.scheduleQuality(rt);
       transport.addPublisher(room.roomId, pid, (samples) => rt.mixer.push(pid, samples));
       this.setPublisherMuted(rt, pid, p.selfMuted || p.forceMuted);
       this.broadcast(rt, { type: 'stage:joined', participantId: pid, role: p.role });
@@ -451,6 +460,53 @@ export class StageHub {
     if (!rt.publishers.delete(pid)) return;
     this.deps.transport.removePublisher(rt.room.roomId, pid);
     rt.mixer.removeSource(pid);
+    rt.uplinkCounts.delete(pid);
+  }
+
+  private scheduleQuality(rt: RoomRuntime): void {
+    const interval = this.deps.config.rooms.qualityIntervalMs;
+    if (interval === 0 || rt.qualityTimer !== undefined) return;
+    rt.qualityTimer = this.setTimer(() => {
+      rt.qualityTimer = undefined;
+      void this.reportQuality(rt).catch((err) => this.deps.log.warn('quality report failed', { roomId: rt.room.roomId, error: String(err) }));
+    }, interval);
+  }
+
+  /**
+   * Tells the controller and the stage how every publisher's connection is doing. Read-only on
+   * the room and outside its queue, like `speaking`; stops rescheduling once nobody publishes.
+   */
+  private async reportQuality(rt: RoomRuntime): Promise<void> {
+    if (rt.closed || !rt.publishers.size) return;
+    const { roomId } = rt.room;
+    const ids = [...rt.publishers];
+    const stats = await Promise.all(ids.map((id) => this.deps.transport.getStats(roomId, id)));
+    if (rt.closed) return;
+    const participants: ConnectionQuality[] = [];
+    ids.forEach((participantId, i) => {
+      const s = stats[i];
+      if (!s || !rt.publishers.has(participantId)) return;
+      const q: ConnectionQuality = { participantId };
+      const received = s.inbound?.packetsReceived, lost = s.inbound?.packetsLost;
+      if (received !== undefined && lost !== undefined) {
+        const previous = rt.uplinkCounts.get(participantId) ?? { received: 0, lost: 0 };
+        const total = received - previous.received + lost - previous.lost;
+        if (total > 0) q.uplinkLossPercent = round1(100 * (lost - previous.lost) / total);
+        rt.uplinkCounts.set(participantId, { received, lost });
+      }
+      if (s.outbound?.fractionLost !== undefined) q.downlinkLossPercent = round1(100 * s.outbound.fractionLost);
+      if (s.rttMs !== undefined) q.rttMs = Math.round(s.rttMs);
+      participants.push(q);
+    });
+    if (participants.length) {
+      const msg: ServerMessage = { type: 'quality', participants };
+      const encoded = JSON.stringify(msg);
+      for (const [pid, session] of rt.sessions) {
+        const p = rt.room.get(pid);
+        if (p && (p.onStage || pid === rt.room.controllerId)) session.send(msg, encoded);
+      }
+    }
+    if (rt.publishers.size) this.scheduleQuality(rt);
   }
 
   private setPublisherMuted(rt: RoomRuntime, pid: string, muted: boolean): void {
@@ -500,6 +556,7 @@ export class StageHub {
     const { roomId } = rt.room;
     if (rt.graceTimer !== undefined) this.clearTimer(rt.graceTimer);
     if (rt.stateTimer !== undefined) this.clearTimer(rt.stateTimer);
+    if (rt.qualityTimer !== undefined) this.clearTimer(rt.qualityTimer);
     for (const s of rt.sessions.values()) {
       s.send({ type: 'room:closed', roomId });
       this.bindings.delete(s);

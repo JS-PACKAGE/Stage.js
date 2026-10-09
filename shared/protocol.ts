@@ -21,6 +21,8 @@
  *     `room:rotate-code`, to keep them out.
  *   - C→S `room:rotate-code` (controller, code-protected rooms): replaces the room code;
  *     participants already inside stay. The controller's next `room:state` carries the new code.
+ *   - S→C `quality`   : connection quality of everyone publishing audio, every
+ *     `rooms.qualityIntervalMs`, sent to the controller and on-stage participants.
  */
 
 export const PROTOCOL_VERSION = 1;
@@ -86,6 +88,16 @@ export interface IceServerConfig {
   credential?: string;
 }
 
+/** Measured since the previous `quality` report; fields are absent until there is data. */
+export interface ConnectionQuality {
+  participantId: string;
+  /** Share of the participant's uplink packets the server lost (0–100). */
+  uplinkLossPercent?: number;
+  /** Share of the mix the participant reports losing (0–100, smoothed RTCP receiver reports). */
+  downlinkLossPercent?: number;
+  rttMs?: number;
+}
+
 export type StageLeftReason = 'leave' | 'removed';
 
 export type ErrorCode =
@@ -128,6 +140,7 @@ export interface ServerMessageMap {
   ok: { requestId: string };
   pong: Record<never, never>;
   kicked: { roomId: string };
+  quality: { participants: ConnectionQuality[] };
 }
 
 export type ServerMessageType = keyof ServerMessageMap;

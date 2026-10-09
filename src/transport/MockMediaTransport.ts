@@ -14,6 +14,8 @@ interface MockPeer {
   candidates: (IceCandidatePayload | null)[];
   /** Downlink frames this participant received (mix or mix-minus-self). */
   received: Float32Array[];
+  /** Uplink frames accepted, and lost ones a test may add to simulate a bad connection. */
+  uplink: { packetsReceived: number; packetsLost: number };
 }
 
 interface MockRoom {
@@ -50,7 +52,7 @@ export class MockMediaTransport implements MediaTransport {
     const r = this.room(roomId);
     let peer = r.peers.get(participantId);
     if (!peer) {
-      peer = { allowUplink: false, candidates: [], received: [] };
+      peer = { allowUplink: false, candidates: [], received: [], uplink: { packetsReceived: 0, packetsLost: 0 } };
       r.peers.set(participantId, peer);
     }
     peer.allowUplink = policy.allowUplink;
@@ -101,7 +103,7 @@ export class MockMediaTransport implements MediaTransport {
   async getStats(roomId: string, participantId: string): Promise<TransportStats | null> {
     const peer = this.rooms.get(roomId)?.peers.get(participantId);
     if (!peer) return null;
-    return { outbound: { codec: { mimeType: 'audio/opus', clockRate: 48000, channels: 1 }, packetsSent: peer.received.length } };
+    return { outbound: { codec: { mimeType: 'audio/opus', clockRate: 48000, channels: 1 }, packetsSent: peer.received.length }, inbound: { ...peer.uplink } };
   }
 
   closePeer(roomId: string, participantId: string): void {
@@ -127,6 +129,7 @@ export class MockMediaTransport implements MediaTransport {
     const r = this.rooms.get(roomId);
     const handler = r?.publishers.get(participantId);
     if (!handler || !r?.peers.get(participantId)?.allowUplink || r.muted.has(participantId)) return false;
+    r.peers.get(participantId)!.uplink.packetsReceived++;
     handler(samples);
     return true;
   }

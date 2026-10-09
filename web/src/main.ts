@@ -1,5 +1,5 @@
 import { StageClient, decodeName } from '../../packages/client/src/index.ts';
-import type { MicTest, ParticipantView, RoomStatePayload } from '../../packages/client/src/index.ts';
+import type { ConnectionQuality, MicTest, ParticipantView, RoomStatePayload } from '../../packages/client/src/index.ts';
 import './styles.css';
 
 const app = document.querySelector<HTMLDivElement>('#app')!;
@@ -13,6 +13,11 @@ let micNotice = '';
 let invitation = '';
 let createdRoom: { roomId: string; code?: string } | null = null;
 let cooldownButton: HTMLButtonElement | null = null;
+/** Latest server report per publisher; loss at or above this is flagged in the stage list. */
+const POOR_LOSS_PERCENT = 5;
+let quality = new Map<string, ConnectionQuality>();
+/** Own connection, refreshed from `getStats()`; kept across re-renders of the room view. */
+const connectionLine = element('p', 'muted connection');
 const header = element('header', 'topbar');
 const brand = element('h1', '', 'Stage.js 音訊舞台');
 const status = element('span', 'badge', statusLabels.disconnected);
@@ -244,7 +249,7 @@ function renderRoom(state: RoomStatePayload): void {
     }));
   }
   const controls = element('section', 'panel');
-  controls.append(element('h2', '', `你好，${decodeName(state.me.name)}`), element('p', '', `${roleLabels[state.me.role]}${state.me.forceMuted ? ' · 主控已鎖定靜音' : ''}`));
+  controls.append(element('h2', '', `你好，${decodeName(state.me.name)}`), element('p', '', `${roleLabels[state.me.role]}${state.me.forceMuted ? ' · 主控已鎖定靜音' : ''}`), connectionLine);
   const actions = element('div', 'actions');
   if (state.me.onStage) {
     const mute = button(state.me.muted ? '取消靜音' : '靜音', () => state.me.muted ? client.unmute() : client.mute());
@@ -305,6 +310,7 @@ function personRow(person: ParticipantView, controller: boolean, kind: 'speaker'
   if (person.muted) identity.append(element('span', 'badge', person.forceMuted ? '強制靜音' : '已靜音'));
   if (person.participantId === client.me?.participantId) identity.append(element('span', 'badge', '我'));
   row.append(identity);
+  applyQuality(row);
   // The controller manages others; its own mic/stage use the personal controls above.
   if (controller && person.participantId !== client.me?.participantId) {
     const id = person.participantId;
@@ -319,6 +325,16 @@ function personRow(person: ParticipantView, controller: boolean, kind: 'speaker'
     row.append(actions);
   }
   return row;
+}
+/** Adds, updates or removes the connection warning badge of one stage row. */
+function applyQuality(row: HTMLElement): void {
+  const q = quality.get(row.dataset.participantId!);
+  const worst = Math.max(q?.uplinkLossPercent ?? 0, q?.downlinkLossPercent ?? 0);
+  let badge = row.querySelector<HTMLElement>('.badge.quality');
+  if (!q || worst < POOR_LOSS_PERCENT) { badge?.remove(); return; }
+  if (!badge) { badge = element('span', 'badge quality'); row.querySelector('.identity')!.append(badge); }
+  badge.textContent = `連線不穩 ${worst.toFixed(0)}%`;
+  badge.title = `上行掉包 ${q.uplinkLossPercent ?? '—'}%、下行掉包 ${q.downlinkLossPercent ?? '—'}%${q.rttMs !== undefined ? `、RTT ${q.rttMs} ms` : ''}`;
 }
 function updateCooldown(): void {
   const remaining = Math.ceil(client.handCooldownMs / 1000);
@@ -348,5 +364,21 @@ client.on('speaking', ({ detail }) => {
   const ids = new Set(detail.participantIds);
   for (const row of content.querySelectorAll<HTMLElement>('.person[data-participant-id]')) row.classList.toggle('speaking', ids.has(row.dataset.participantId!));
 });
+client.on('quality', ({ detail }) => {
+  quality = new Map(detail.participants.map((q) => [q.participantId, q]));
+  for (const row of content.querySelectorAll<HTMLElement>('.person[data-participant-id]')) applyQuality(row);
+});
+setInterval(() => {
+  if (!client.state) { connectionLine.textContent = ''; return; }
+  void client.getStats().then(({ inbound, outbound }) => {
+    const parts: string[] = [];
+    if (inbound?.lossPercent !== undefined) parts.push(`收聽掉包 ${inbound.lossPercent.toFixed(1)}%`);
+    if (outbound?.lossPercent !== undefined) parts.push(`發言掉包 ${outbound.lossPercent.toFixed(1)}%`);
+    const rtt = inbound?.rtt ?? outbound?.rtt;
+    if (rtt !== undefined) parts.push(`延遲 ${Math.round(rtt * 1000)} ms`);
+    connectionLine.textContent = parts.length ? `你的連線：${parts.join(' · ')}` : '';
+    connectionLine.classList.toggle('error', Math.max(inbound?.lossPercent ?? 0, outbound?.lossPercent ?? 0) >= POOR_LOSS_PERCENT);
+  }, () => {});
+}, 2000);
 setInterval(updateCooldown, 250);
 landing();

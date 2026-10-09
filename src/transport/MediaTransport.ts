@@ -47,6 +47,8 @@ export interface TransportStats {
     codec?: { mimeType: string; clockRate: number; channels: number };
     bitrateKbps?: number;
     packetsSent?: number;
+    /** Recent share (0..1) of these packets the participant reported lost (smoothed RTCP receiver reports). */
+    fractionLost?: number;
   };
   /** Uplink (participant → server) */
   inbound?: {

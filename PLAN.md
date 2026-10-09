@@ -310,6 +310,7 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 10. **明文 ws**：`server.allowInsecure: true` 且 host 為 loopback 才允許；否則必須提供 TLS 憑證，啟動即檢查。
 11. **werift 注意**：伺服器 transceiver 於套用 offer **之前**須先設成政策方向，否則 werift 不登錄瀏覽器重協商時新出現的 SSRC（觀眾升發言者後上行被丟棄）；`scripts/werift-loopback.ts` 以「去除 recvonly offer 的 SSRC」模擬瀏覽器並驗證此情境。werift 在 answer 為 recvonly 時仍可能送出 RTP，故上行一律以 publisher 註冊＋政策雙重把關。
 12. **踢人與更換代碼**：C→S `participant:kick {targetId}`（主控限定，不可踢自己）把參與者移出房間（台上者等同下台並移除），對方收到 S→C `kicked {roomId}` 後伺服器以 close code 4001 關閉連線，client 不自動重連；`room:rotate-code`（主控限定、需代碼的房間）換發新代碼，舊代碼立即失效、已在房內者不受影響。兩者合用＝封鎖鬧場者（無帳號制度下的「ban」）。
+13. **連線品質回報**：有人上行時，伺服器每 `rooms.qualityIntervalMs` 以 S→C `quality {participants}` 把每位上行者的上行掉包（伺服器重排緩衝實際判定遺失的比例，逐區間計算）、下行掉包（對方 RTCP 接收報告的平滑值）與 RTT 送給主控與台上者；觀眾不收，改由 client `getStats()` 的 `lossPercent` 自行顯示。
 
 ---
 

@@ -328,6 +328,31 @@ describe('moderation', () => {
   });
 });
 
+describe('connection quality', () => {
+  it('reports each publisher\'s uplink loss per interval to the controller and stage only', async () => {
+    const config = testConfig();
+    const h = harness(config);
+    const host = await h.create();
+    const aud = await h.join(host.roomId, host.code, 'Aud');
+    assert.equal(await h.req(host.s, { type: 'rtc:offer', payload: SENDRECV_OFFER }), 'ok');
+    const timer = () => h.timers.filter((t) => !t.cleared && t.ms === config.rooms.qualityIntervalMs);
+    assert.equal(timer().length, 1, 'scheduled once someone publishes');
+    const peer = h.transport.rooms.get(host.roomId)!.peers.get(host.id)!;
+    for (let i = 0; i < 18; i++) h.transport.emitUplink(host.roomId, host.id, sine(FRAME, 0.1));
+    peer.uplink.packetsLost = 2;
+    const fire = async () => { const t = timer().at(-1)!; t.cleared = true; t.fn(); await nextTurn(); };
+    await fire();
+    assert.deepEqual(host.s.last('quality'), { type: 'quality', participants: [{ participantId: host.id, uplinkLossPercent: 10 }] });
+    assert.equal(aud.s.last('quality'), undefined, 'audience does not get it');
+    for (let i = 0; i < 10; i++) h.transport.emitUplink(host.roomId, host.id, sine(FRAME, 0.1));
+    await fire();
+    assert.equal(host.s.last('quality')!.participants[0]!.uplinkLossPercent, 0, 'measured over the last interval only');
+    await h.req(host.s, { type: 'stage:leave' });
+    await fire();
+    assert.equal(timer().length, 0, 'stops once nobody publishes');
+  });
+});
+
 describe('mute', () => {
   it('force-mute blocks self-unmute; force-unmute preserves self-mute', async () => {
     const h = harness();

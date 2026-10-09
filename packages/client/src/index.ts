@@ -1,5 +1,5 @@
 import type { ClientMessageMap, ClientMessageType, ErrorCode, IceCandidatePayload, ParticipantView, RoomStatePayload, ServerMessage, ServerMessageMap } from '../../../shared/protocol.ts';
-export type { ParticipantView, RoomStatePayload, Role, StageStatus, ErrorCode, IceServerConfig } from '../../../shared/protocol.ts';
+export type { ParticipantView, RoomStatePayload, Role, StageStatus, ErrorCode, IceServerConfig, ConnectionQuality } from '../../../shared/protocol.ts';
 
 export function decodeName(value: string): string {
   const entities: Record<string, string> = { '&amp;': '&', '&lt;': '<', '&gt;': '>', '&quot;': '"', '&#39;': "'" };
@@ -29,6 +29,11 @@ export interface AudioStats {
   packetsLost?: number;
   jitter?: number;
   rtt?: number;
+  /**
+   * Recent loss in percent: for inbound, packets lost since the previous `getStats()` call (absent
+   * on the first call); for outbound, the share the server last reported losing.
+   */
+  lossPercent?: number;
 }
 export interface StageStats { inbound: AudioStats | null; outbound: AudioStats | null }
 export interface AudioDevices { inputs: MediaDeviceInfo[]; outputs: MediaDeviceInfo[] }
@@ -85,6 +90,8 @@ export interface StageEventMap {
   audioblocked: { message: string };
   /** Full set of participants currently audible in the mix; fired only when it changes. */
   speaking: { participantIds: string[] };
+  /** Connection quality of everyone publishing (controller and on-stage participants only). */
+  quality: ServerMessageMap['quality'];
 }
 interface Pending { resolve: () => void; reject: (error: StageError) => void; timer: ReturnType<typeof setTimeout> }
 type JoinOptions = { roomId: string; code?: string; name: string; resumeToken?: string };
@@ -124,7 +131,7 @@ export class StageClient extends EventTarget {
   private nextIceAt = 0;
   /** Latest scheduled send of any kind: the server processes frames in arrival order, so ICE must never overtake its offer. */
   private lastSendAt = 0;
-  private previousStats = new Map<string, { bytes: number; timestamp: number }>();
+  private previousStats = new Map<string, { bytes: number; timestamp: number; received: number; lost: number }>();
   private speakingIds: ReadonlySet<string> = new Set();
 
   constructor(options: StageClientOptions) {
@@ -404,6 +411,7 @@ export class StageClient extends EventTarget {
       case 'mic:muted': case 'mic:unmuted': this.emit('mic', { participantId: message.participantId, muted: message.type === 'mic:muted' }); break;
       case 'role:update': this.emit('role', { participantId: message.participantId, role: message.role, reason: message.reason }); break;
       case 'speaking': this.speakingIds = new Set(message.participantIds); this.emit('speaking', { participantIds: message.participantIds }); break;
+      case 'quality': this.emit('quality', { participants: message.participants }); break;
     }
   }
   private scheduleReconnect(): void {
@@ -564,7 +572,10 @@ export class StageClient extends EventTarget {
       const remote = entry.remoteId ? stats.get(entry.remoteId) : undefined;
       const summary: AudioStats = { mimeType: codec?.mimeType, clockRate: codec?.clockRate, channels: codec?.channels, packetsLost: entry.packetsLost ?? remote?.packetsLost, jitter: entry.jitter ?? remote?.jitter, rtt: remote?.roundTripTime ?? rtt };
       if (previous && elapsed > 0) summary.bitrateKbps = Math.max(0, (bytes - previous.bytes) * 8 / elapsed);
-      this.previousStats.set(entry.id, { bytes, timestamp: entry.timestamp });
+      const received = Number(entry.packetsReceived ?? 0), lost = Number(entry.packetsLost ?? 0);
+      if (inbound && previous && received + lost > previous.received + previous.lost) summary.lossPercent = 100 * Math.max(0, lost - previous.lost) / (received + lost - previous.received - previous.lost);
+      if (!inbound && typeof remote?.fractionLost === 'number') summary.lossPercent = 100 * remote.fractionLost;
+      this.previousStats.set(entry.id, { bytes, timestamp: entry.timestamp, received, lost });
       if (inbound) result.inbound = summary; else result.outbound = summary;
     });
     return result;

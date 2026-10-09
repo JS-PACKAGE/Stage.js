@@ -13,9 +13,10 @@ import { WeriftPeerHost, type PeerHost, type PeerHostEvents } from './peerHost.t
 /**
  * Main-thread uplink state of one publisher: RTP reorder before the stateful decoder, PCM
  * re-chunking after. While `muted`, packets still pass the reorder buffer (it keeps tracking
- * sequence numbers) but are not decoded.
+ * sequence numbers, and loss keeps being counted) but are not decoded. `packets`/`lost` count
+ * accepted packets and packets the reorder buffer declared lost.
  */
-interface Uplink { reorder: RtpReorderBuffer; chunker: PcmChunker; muted: boolean }
+interface Uplink { reorder: RtpReorderBuffer; chunker: PcmChunker; muted: boolean; packets: number; lost: number }
 interface Room {
   id: string;
   /** Which host owns each participant's PeerConnection. */
@@ -87,7 +88,7 @@ export class WeriftMediaTransport implements MediaTransport {
     return room;
   }
   private uplink(): Uplink {
-    return { reorder: new RtpReorderBuffer(this.config.audio.jitter.reorderPackets), chunker: new PcmChunker(samplesPerFrame(this.config.audio)), muted: false };
+    return { reorder: new RtpReorderBuffer(this.config.audio.jitter.reorderPackets), chunker: new PcmChunker(samplesPerFrame(this.config.audio)), muted: false, packets: 0, lost: 0 };
   }
   private onDownlinkLoss(roomId: string, id: string, fraction: number): void {
     const room = this.rooms.get(roomId);
@@ -106,10 +107,11 @@ export class WeriftMediaTransport implements MediaTransport {
     // Hosts only forward enabled uplinks, but a packet can cross a removePublisher in flight.
     if (!room || !uplink || !room.publishers.has(id)) return;
     this.counters.uplinkPackets++;
+    uplink.packets++;
     const packets = uplink.reorder.push(seq, payload);
-    if (!packets.length || uplink.muted) return;
     // `null` = declared lost: the worker rebuilds it from the next packet's FEC, in stream order.
-    for (const packet of packets) if (packet === null) this.counters.uplinkConcealed++;
+    for (const packet of packets) if (packet === null) { this.counters.uplinkConcealed++; uplink.lost++; }
+    if (!packets.length || uplink.muted) return;
     this.codecs.decode(roomId, id, packets).then(decoded => {
       // Re-check after the worker hop: the publisher may have been removed (and re-added) meanwhile.
       const handler = room.publishers.get(id);
@@ -160,7 +162,7 @@ export class WeriftMediaTransport implements MediaTransport {
     if (!muted) return;
     // A decoder resumed after a gap would extrapolate from stale state; the next packet gets a fresh one.
     this.codecs.release(roomId, 'decoder', id);
-    room.uplinks.set(id, { ...this.uplink(), reorder: uplink.reorder, muted: true });
+    room.uplinks.set(id, { ...this.uplink(), reorder: uplink.reorder, muted: true, packets: uplink.packets, lost: uplink.lost });
   }
   setMixedStream(roomId: string, source: MixedPcmSource | null): void {
     const room = this.room(roomId);
@@ -200,9 +202,17 @@ export class WeriftMediaTransport implements MediaTransport {
     if (!room) return;
     room.subscribers.delete(id); this.codecs.release(roomId, 'encoder', id);
   }
+  /** Uplink counts come from this side's reorder buffer (what the mixer actually got); downlink loss from receiver reports. */
   async getStats(roomId: string, id: string): Promise<TransportStats | null> {
-    const host = this.rooms.get(roomId)?.peers.get(id);
-    return host ? host.getStats(roomId, id) : null;
+    const room = this.rooms.get(roomId);
+    const host = room?.peers.get(id);
+    const stats = host && await host.getStats(roomId, id);
+    if (!room || !stats) return null;
+    const uplink = room.uplinks.get(id);
+    if (uplink) stats.inbound = { ...stats.inbound, packetsReceived: uplink.packets, packetsLost: uplink.lost };
+    const loss = room.downlinkLoss.get(id);
+    if (loss !== undefined) stats.outbound = { ...stats.outbound, fractionLost: loss };
+    return stats;
   }
   closePeer(roomId: string, id: string): void {
     const room = this.rooms.get(roomId);
