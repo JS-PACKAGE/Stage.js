@@ -55,6 +55,25 @@ test('jitter buffer primes, re-primes after underrun and drains drift', () => {
   assert.ok(Math.abs(mixer.tick()!.full[0]! - 0.5) < 1e-6);
   assert.deepEqual([counters.ticks, counters.underruns, counters.droppedFrames], [7, 1, 1], 'one underrun after 0.2, one drift drop');
 });
+test('jitter buffer sheds standing latency one frame per window until it sits at the playout target', () => {
+  const counters = new MixerCounters();
+  const mixer = new RoomMixer({ ...options, maxBufferedFrames: 10, playoutFrames: 2 }, counters); mixer.addSource('a');
+  // A burst at start leaves 4 frames queued at each tick (3 waiting behind the one played; below
+  // the 2×playout drift drain); afterwards frames arrive exactly once per tick.
+  let pushed = 0;
+  for (; pushed < 3; pushed++) mixer.push('a', samples(pushed / 1000));
+  const lag: number[] = [];
+  for (let tick = 0; tick < 200; tick++) {
+    mixer.push('a', samples(pushed++ / 1000));
+    const played = Math.round(mixer.tick()!.full[0]! * 1000);
+    lag.push(pushed - 1 - played);
+  }
+  // Window = 1000 ms / 20 ms = 50 ticks: trimmed at the 50th and 100th tick, then the queue sits at
+  // the target (2 at tick time: the frame played plus one waiting).
+  assert.deepEqual([lag[0], lag[48], lag[49], lag[98], lag[99], lag[199]], [3, 3, 2, 2, 1, 1]);
+  assert.equal(counters.droppedFrames, 2);
+  assert.equal(counters.underruns, 0);
+});
 test('speaking set follows voice activity with a release hold, mute and removal', () => {
   const mixer = new RoomMixer(options); mixer.addSource('a'); mixer.addSource('b');
   const events: string[][] = [];

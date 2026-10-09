@@ -11,13 +11,26 @@ import { NoiseFilter, type NoiseFilterOptions } from './noiseFilter.ts';
  */
 export interface RoomMixerOptions { sampleRate: number; frameMs: number; maxBufferedFrames: number; playoutFrames: number; limiterThreshold: number; speakingThreshold: number; speakingHoldMs: number; noiseFilter?: NoiseFilterOptions }
 export type SpeakingListener = (participantIds: string[]) => void;
-interface Source { muted: boolean; primed: boolean; frames: Float32Array[]; /** Ticks left in the speaking state. */ hold: number; filter: NoiseFilter | undefined }
+interface Source {
+  muted: boolean; primed: boolean; frames: Float32Array[];
+  /** Fewest frames queued at any tick of the current convergence window. */
+  low: number;
+  /** Ticks left in the speaking state. */ hold: number; filter: NoiseFilter | undefined;
+}
+/**
+ * Once primed, a queue only grows (packet bursts, a source that started mid-burst), and nothing
+ * else pulls it back until it doubles. A window in which the queue never dipped to the playout
+ * target means every frame waited at least one tick longer than configured: drop one.
+ */
+const CONVERGE_WINDOW_MS = 1000;
 
 export class RoomMixer implements MixedPcmSource {
   private readonly sources = new Map<string, Source>();
   private readonly listeners = new Set<MixFrameListener>();
   private readonly speakingListeners = new Set<SpeakingListener>();
   private readonly holdFrames: number;
+  private readonly convergeTicks: number;
+  private windowTick = 0;
   private readonly opts: RoomMixerOptions;
   private readonly frameSize: number;
   private seq = 0;
@@ -31,12 +44,13 @@ export class RoomMixer implements MixedPcmSource {
     this.counters = counters;
     this.frameSize = Math.round(opts.sampleRate * opts.frameMs / 1000);
     this.holdFrames = Math.max(1, Math.ceil(opts.speakingHoldMs / opts.frameMs));
+    this.convergeTicks = Math.ceil(CONVERGE_WINDOW_MS / opts.frameMs);
   }
   get sourceCount(): number { return this.sources.size; }
   addSource(id: string): void {
     if (this.sources.has(id)) return;
     const nf = this.opts.noiseFilter;
-    this.sources.set(id, { muted: false, primed: false, frames: [], hold: 0, filter: nf && new NoiseFilter(nf, this.opts.sampleRate, this.opts.frameMs) });
+    this.sources.set(id, { muted: false, primed: false, frames: [], low: Infinity, hold: 0, filter: nf && new NoiseFilter(nf, this.opts.sampleRate, this.opts.frameMs) });
   }
   removeSource(id: string): void {
     const source = this.sources.get(id);
@@ -69,10 +83,19 @@ export class RoomMixer implements MixedPcmSource {
     const playout = this.opts.playoutFrames;
     const energyThreshold = this.opts.speakingThreshold ** 2 * this.frameSize;
     let speakingChanged = false;
+    const converge = ++this.windowTick >= this.convergeTicks;
+    if (converge) this.windowTick = 0;
     for (const [id, source] of this.sources) {
       // Jitter buffer: start (or restart after an underrun) only once `playout` frames are queued,
       // and drain one extra frame when sender clock drift has doubled the queue.
       if (!source.primed && source.frames.length >= playout) source.primed = true;
+      if (source.primed) {
+        if (source.frames.length < source.low) source.low = source.frames.length;
+        if (converge) {
+          if (source.low > playout) { source.frames.shift(); this.counters.droppedFrames++; }
+          source.low = Infinity;
+        }
+      }
       const samples = source.primed ? source.frames.shift() : undefined;
       if (!samples) { if (source.primed) this.counters.underruns++; source.primed = false; }
       else if (source.frames.length > 2 * playout) { source.frames.shift(); this.counters.droppedFrames++; }
