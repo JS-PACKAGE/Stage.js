@@ -9,6 +9,7 @@ import {
 } from '../../shared/protocol.ts';
 import type { AppConfig } from '../config.ts';
 import type { Logger } from '../log.ts';
+import type { MetricSample } from '../metrics.ts';
 import { ERROR_MESSAGES, InvariantViolation, StageError } from '../model/errors.ts';
 import { Room, type RoomEvent } from '../model/room.ts';
 import { offerSendsAudio, summarizeOffer } from '../rtc/sdp.ts';
@@ -92,6 +93,17 @@ export class StageHub {
 
   get roomCount(): number {
     return this.rooms.size;
+  }
+
+  metrics(): MetricSample[] {
+    let participants = 0, sessions = 0, publishers = 0;
+    for (const rt of this.rooms.values()) { participants += rt.room.participants.size; sessions += rt.sessions.size; publishers += rt.publishers.size; }
+    return [
+      { name: 'stage_rooms', help: 'Open rooms.', type: 'gauge', value: this.rooms.size },
+      { name: 'stage_participants', help: 'Participants in all rooms, including disconnected ones within grace.', type: 'gauge', value: participants },
+      { name: 'stage_sessions', help: 'Connected ws sessions bound to a room.', type: 'gauge', value: sessions },
+      { name: 'stage_publishers', help: 'Participants whose uplink feeds a mixer.', type: 'gauge', value: publishers },
+    ];
   }
 
   attach(session: Session): void {

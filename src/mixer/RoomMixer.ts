@@ -1,4 +1,5 @@
 import type { MixedPcmSource, MixFrame, MixFrameListener } from '../transport/MediaTransport.ts';
+import { MixerCounters } from '../metrics.ts';
 import { limitInPlace } from './limiter.ts';
 
 /**
@@ -20,9 +21,12 @@ export class RoomMixer implements MixedPcmSource {
   private seq = 0;
   private timer?: NodeJS.Timeout;
   private running = false;
-  constructor(opts: RoomMixerOptions) {
+  private readonly counters: MixerCounters;
+  /** `counters` may be shared by every room's mixer to keep process-wide totals. */
+  constructor(opts: RoomMixerOptions, counters = new MixerCounters()) {
     if (!(opts.sampleRate > 0 && opts.frameMs > 0 && Number.isInteger(opts.maxBufferedFrames) && opts.maxBufferedFrames > 0 && Number.isInteger(opts.playoutFrames) && opts.playoutFrames > 0 && opts.playoutFrames <= opts.maxBufferedFrames && opts.limiterThreshold > 0 && opts.limiterThreshold < 1 && opts.speakingThreshold > 0 && opts.speakingThreshold < 1 && opts.speakingHoldMs >= 0)) throw new RangeError('Invalid mixer options');
     this.opts = opts;
+    this.counters = counters;
     this.frameSize = Math.round(opts.sampleRate * opts.frameMs / 1000);
     this.holdFrames = Math.max(1, Math.ceil(opts.speakingHoldMs / opts.frameMs));
   }
@@ -44,11 +48,12 @@ export class RoomMixer implements MixedPcmSource {
     const source = this.sources.get(id);
     if (!source) return;
     if (samples.length !== this.frameSize) throw new RangeError('PCM frame has incorrect length');
-    if (source.frames.length === this.opts.maxBufferedFrames) source.frames.shift();
+    if (source.frames.length === this.opts.maxBufferedFrames) { source.frames.shift(); this.counters.droppedFrames++; }
     source.frames.push(samples.slice());
   }
   tick(): MixFrame | null {
     if (!this.sources.size) return null;
+    this.counters.ticks++;
     const raw = new Float32Array(this.frameSize);
     // Per source: own contribution (null when silent/muted), replaced by its limited mix-minus once computed.
     const minus = new Map<string, Float32Array | null>();
@@ -61,8 +66,8 @@ export class RoomMixer implements MixedPcmSource {
       // and drain one extra frame when sender clock drift has doubled the queue.
       if (!source.primed && source.frames.length >= playout) source.primed = true;
       const samples = source.primed ? source.frames.shift() : undefined;
-      if (!samples) source.primed = false;
-      else if (source.frames.length > 2 * playout) source.frames.shift();
+      if (!samples) { if (source.primed) this.counters.underruns++; source.primed = false; }
+      else if (source.frames.length > 2 * playout) { source.frames.shift(); this.counters.droppedFrames++; }
       const contribution = source.muted ? undefined : samples;
       minus.set(id, contribution ?? null);
       let energy = 0;
@@ -102,6 +107,9 @@ export class RoomMixer implements MixedPcmSource {
     let deadline = performance.now() + this.opts.frameMs;
     const run = () => {
       if (!this.running) return;
+      const lag = performance.now() - deadline;
+      if (lag > this.counters.maxTickLagMs) this.counters.maxTickLagMs = lag;
+      if (lag > this.opts.frameMs) this.counters.lateTicks++;
       this.tick();
       deadline += this.opts.frameMs;
       // Skip missed wall-clock slots instead of bursting old audio after a stall.

@@ -3,6 +3,7 @@ import { MediaStreamTrack, RTCPeerConnection, RTCRtpCodecParameters, RtpHeader, 
 import type { AppConfig } from '../config.ts';
 import { samplesPerFrame } from '../config.ts';
 import type { Logger } from '../log.ts';
+import type { MetricSample } from '../metrics.ts';
 import type { IceCandidatePayload, SessionDescriptionPayload } from '../../shared/protocol.ts';
 import type { AudioFrameHandler, MediaTransport, MediaTransportCallbacks, MixedPcmSource, MixFrame, NegotiationPolicy, TransportStats } from './MediaTransport.ts';
 import { CodecPool, type EncodeItem } from './codecPool.ts';
@@ -33,7 +34,24 @@ export class WeriftMediaTransport implements MediaTransport {
   private readonly rooms = new Map<string, Room>();
   private readonly closing = new Set<Promise<void>>();
   private readonly codecs: CodecPool;
+  private readonly counters = { uplinkPackets: 0, uplinkConcealed: 0, downlinkPackets: 0, downlinkDtxFrames: 0, shedFrames: 0, encodeFailures: 0 };
   constructor(config: AppConfig, callbacks: MediaTransportCallbacks, log: Logger) { this.config = config; this.callbacks = callbacks; this.log = log; this.codecs = new CodecPool(config.audio, log); }
+  metrics(): MetricSample[] {
+    let peers = 0, subscribers = 0, backlog = 0;
+    for (const room of this.rooms.values()) { peers += room.peers.size; subscribers += room.subscribers.size; backlog = Math.max(backlog, this.codecs.backlog(room.id)); }
+    const c = this.counters;
+    return [
+      { name: 'stage_media_peers', help: 'Open server-side PeerConnections.', type: 'gauge', value: peers },
+      { name: 'stage_media_subscribers', help: 'Participants receiving the downlink mix.', type: 'gauge', value: subscribers },
+      { name: 'stage_codec_backlog_max', help: 'Largest in-flight codec job count of any room.', type: 'gauge', value: backlog },
+      { name: 'stage_uplink_packets_total', help: 'Accepted uplink RTP packets.', type: 'counter', value: c.uplinkPackets },
+      { name: 'stage_uplink_concealed_total', help: 'Uplink packets declared lost and concealed.', type: 'counter', value: c.uplinkConcealed },
+      { name: 'stage_downlink_packets_total', help: 'Downlink RTP packets sent.', type: 'counter', value: c.downlinkPackets },
+      { name: 'stage_downlink_dtx_frames_total', help: 'Downlink frames suppressed by Opus DTX.', type: 'counter', value: c.downlinkDtxFrames },
+      { name: 'stage_mix_frames_shed_total', help: 'Mixed frames dropped because a codec worker fell behind.', type: 'counter', value: c.shedFrames },
+      { name: 'stage_encode_failures_total', help: 'Mixed frames whose encode failed.', type: 'counter', value: c.encodeFailures },
+    ];
+  }
   private room(id: string): Room {
     let room = this.rooms.get(id);
     if (!room) {
@@ -58,8 +76,10 @@ export class WeriftMediaTransport implements MediaTransport {
           if (!current.allowUplink || !room.publishers.has(id)) return;
           current.inboundBytes += packet.payload.length;
           current.inboundPackets++;
+          this.counters.uplinkPackets++;
           for (const payload of current.reorder.push(packet.header.sequenceNumber, packet.payload)) {
             // `null` = declared lost; the worker's decoder conceals it in stream order.
+            if (payload === null) this.counters.uplinkConcealed++;
             this.codecs.decode(roomId, id, payload).then(decoded => {
               // Re-check after the worker hop: the peer may have been demoted or closed meanwhile.
               const handler = room.publishers.get(id);
@@ -122,6 +142,7 @@ export class WeriftMediaTransport implements MediaTransport {
     if (!targets.length) return;
     // Shed frames instead of queueing unbounded latency when the room's worker falls behind.
     if (this.codecs.backlog(room.id) >= this.config.audio.mixer.maxBufferedFrames) {
+      this.counters.shedFrames++;
       this.log.warn('Codec worker behind; dropping mixed frame', { roomId: room.id, seq: frame.seq });
       return;
     }
@@ -134,7 +155,7 @@ export class WeriftMediaTransport implements MediaTransport {
         if (room.peers.get(id) !== peer || !room.subscribers.has(id) || !sender?.codec) continue;
         const payload = payloads[index.get(key)!]!;
         // libopus DTX emits ≤2-byte packets for silence; like libwebrtc, skip them but keep the RTP clock running.
-        if (payload.length <= 2) { peer.timestamp = (peer.timestamp + timestampStep) >>> 0; peer.talkspurt = true; continue; }
+        if (payload.length <= 2) { peer.timestamp = (peer.timestamp + timestampStep) >>> 0; peer.talkspurt = true; this.counters.downlinkDtxFrames++; continue; }
         const packet = new RtpPacket(new RtpHeader({ payloadType: sender.codec.payloadType, sequenceNumber: peer.sequence, timestamp: peer.timestamp, ssrc: sender.ssrc, marker: peer.talkspurt }), payload);
         peer.talkspurt = false;
         peer.sequence = (peer.sequence + 1) & 0xffff;
@@ -142,8 +163,9 @@ export class WeriftMediaTransport implements MediaTransport {
         peer.track.writeRtp(packet);
         peer.outboundBytes += payload.length;
         peer.outboundPackets++;
+        this.counters.downlinkPackets++;
       }
-    }, (err: Error) => { this.log.warn('Mixed frame encode failed', { roomId: room.id, error: err.message }); });
+    }, (err: Error) => { this.counters.encodeFailures++; this.log.warn('Mixed frame encode failed', { roomId: room.id, error: err.message }); });
   }
   subscribe(roomId: string, id: string): void { this.room(roomId).subscribers.add(id); }
   unsubscribe(roomId: string, id: string): void {

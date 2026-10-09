@@ -2,7 +2,7 @@ import { readFileSync } from 'node:fs';
 import { createServer as createHttpServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
 import { createServer as createHttpsServer } from 'node:https';
 import type { AddressInfo } from 'node:net';
-import { randomBytes } from 'node:crypto';
+import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { WebSocketServer, type WebSocket } from 'ws';
 import type { ServerMessage } from '../../shared/protocol.ts';
 import type { AppConfig } from '../config.ts';
@@ -25,6 +25,8 @@ export interface StageServerDeps {
   /** Directory static mounts are resolved against. */
   baseDir: string;
   now?: () => number;
+  /** Prometheus text for `GET /metrics` (served only when `server.metrics.enabled`). */
+  metrics?: () => string;
 }
 
 /** Policy-violation close code (RFC 6455) used for rate-limit disconnects. */
@@ -55,6 +57,17 @@ export function createStageServer(deps: StageServerDeps): StageServer {
   const onRequest = (req: IncomingMessage, res: ServerResponse) => {
     if (req.url === '/healthz') {
       res.writeHead(200, { 'Content-Type': 'text/plain' }).end('ok');
+      return;
+    }
+    if (req.url === '/metrics' && config.server.metrics.enabled && deps.metrics) {
+      const { token } = config.server.metrics;
+      const given = Buffer.from(req.headers.authorization ?? '');
+      const expected = Buffer.from(`Bearer ${token}`);
+      if (token !== '' && !(given.length === expected.length && timingSafeEqual(given, expected))) {
+        res.writeHead(401, { 'Content-Type': 'text/plain', 'WWW-Authenticate': 'Bearer' }).end('unauthorized');
+        return;
+      }
+      res.writeHead(200, { 'Content-Type': 'text/plain; version=0.0.4', 'Cache-Control': 'no-store' }).end(deps.metrics());
       return;
     }
     serveStatic(req, res).then(

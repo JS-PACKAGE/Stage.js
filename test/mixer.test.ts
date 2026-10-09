@@ -1,6 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { RoomMixer } from '../src/mixer/RoomMixer.ts';
+import { MixerCounters } from '../src/metrics.ts';
 import { limitInPlace } from '../src/mixer/limiter.ts';
 const options = { sampleRate: 48000, frameMs: 20, maxBufferedFrames: 2, playoutFrames: 1, limiterThreshold: 0.9, speakingThreshold: 0.02, speakingHoldMs: 40 };
 const samples = (value: number) => new Float32Array(960).fill(value);
@@ -38,7 +39,8 @@ test('limiter bounded and transparent, minus computed before limiting', () => {
   assert.ok(frame.full[0]! <= 1); assert.ok(Math.abs(frame.minus('a')![0]! - 0.8) < 1e-6);
 });
 test('jitter buffer primes, re-primes after underrun and drains drift', () => {
-  const mixer = new RoomMixer({ ...options, maxBufferedFrames: 10, playoutFrames: 2 }); mixer.addSource('a');
+  const counters = new MixerCounters();
+  const mixer = new RoomMixer({ ...options, maxBufferedFrames: 10, playoutFrames: 2 }, counters); mixer.addSource('a');
   mixer.push('a', samples(0.1));
   assert.equal(mixer.tick()!.full[0], 0, 'one frame is below the playout target');
   mixer.push('a', samples(0.2));
@@ -51,6 +53,7 @@ test('jitter buffer primes, re-primes after underrun and drains drift', () => {
   // Queue 0.3..0.8 (6 > 2×2): play 0.3 and drop 0.4 to pull latency back.
   assert.ok(Math.abs(mixer.tick()!.full[0]! - 0.3) < 1e-6);
   assert.ok(Math.abs(mixer.tick()!.full[0]! - 0.5) < 1e-6);
+  assert.deepEqual([counters.ticks, counters.underruns, counters.droppedFrames], [7, 1, 1], 'one underrun after 0.2, one drift drop');
 });
 test('speaking set follows voice activity with a release hold, mute and removal', () => {
   const mixer = new RoomMixer(options); mixer.addSource('a'); mixer.addSource('b');

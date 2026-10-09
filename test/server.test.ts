@@ -7,6 +7,7 @@ import { WebSocket } from 'ws';
 import type { ServerMessage } from '../shared/protocol.ts';
 import { ConfigError, parseConfig } from '../src/config.ts';
 import { silentLogger } from '../src/log.ts';
+import { renderPrometheus } from '../src/metrics.ts';
 import { RoomMixer } from '../src/mixer/RoomMixer.ts';
 import { MockMediaTransport } from '../src/transport/MockMediaTransport.ts';
 import { StageHub } from '../src/ws/hub.ts';
@@ -71,6 +72,7 @@ describe('ws server boundary', () => {
       c.server.port = 0;
       c.limits.controlPerSecond = 5;
       c.server.static = [{ mount: '/', dir: join(staticDir, 'pub'), cors: false }];
+      c.server.metrics = { enabled: true, token: 'metrics-token' };
     });
     let hub: StageHub | undefined;
     const transport = new MockMediaTransport({ onLocalCandidate: (r, p, c) => hub?.onLocalCandidate(r, p, c) });
@@ -81,7 +83,8 @@ describe('ws server boundary', () => {
       serverVersion: 'test',
       createMixer: () => new RoomMixer({ sampleRate: 48000, frameMs: 20, maxBufferedFrames: 10, playoutFrames: 1, limiterThreshold: 0.9, speakingThreshold: 0.02, speakingHoldMs: 40 }),
     });
-    server = createStageServer({ config, hub, log: silentLogger, baseDir: staticDir });
+    const stageHub = hub;
+    server = createStageServer({ config, hub, log: silentLogger, baseDir: staticDir, metrics: () => renderPrometheus(stageHub.metrics()) });
     const addr = await server.listen();
     base = `http://127.0.0.1:${addr.port}`;
     url = `ws://127.0.0.1:${addr.port}${config.server.wsPath}`;
@@ -157,6 +160,24 @@ describe('ws server boundary', () => {
     assert.equal(await (await fetch(`${base}/`)).text(), '<h1>hi</h1>');
     assert.equal((await fetch(`${base}/..%2fsecret.txt`)).status, 404);
     assert.equal((await fetch(`${base}/healthz`)).status, 200);
+  });
+
+  it('serves /metrics only with the bearer token', async () => {
+    assert.equal((await fetch(`${base}/metrics`)).status, 401);
+    assert.equal((await fetch(`${base}/metrics`, { headers: { authorization: 'Bearer wrong-token-x' } })).status, 401);
+    const ok = await fetch(`${base}/metrics`, { headers: { authorization: 'Bearer metrics-token' } });
+    assert.equal(ok.status, 200);
+    assert.match(await ok.text(), /^# TYPE stage_rooms gauge\nstage_rooms \d+$/m);
+  });
+});
+
+describe('metrics exposure policy', () => {
+  it('refuses unauthenticated metrics on a non-loopback host', () => {
+    const raw = parse(readFileSync(new URL('../config.example.yaml', import.meta.url), 'utf8'));
+    Object.assign(raw.server, { host: '0.0.0.0', allowInsecure: false, tls: { certFile: 'c.pem', keyFile: 'k.pem' } });
+    assert.throws(() => parseConfig(raw), /server\.metrics\.token/);
+    raw.server.metrics.token = 'x';
+    assert.doesNotThrow(() => parseConfig(raw));
   });
 });
 

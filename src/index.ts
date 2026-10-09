@@ -3,6 +3,7 @@ import { basename, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { ConfigError, loadConfig } from './config.ts';
 import { createLogger } from './log.ts';
+import { MixerCounters, processSamples, renderPrometheus } from './metrics.ts';
 import { RoomMixer } from './mixer/RoomMixer.ts';
 import { WeriftMediaTransport } from './transport/WeriftMediaTransport.ts';
 import { StageHub } from './ws/hub.ts';
@@ -38,7 +39,8 @@ const transport = new WeriftMediaTransport(
   log,
 );
 const audio = config.audio;
-hub = new StageHub({
+const mixerCounters = new MixerCounters();
+const stageHub = new StageHub({
   config,
   transport,
   log,
@@ -52,13 +54,21 @@ hub = new StageHub({
       limiterThreshold: audio.mixer.limiterThreshold,
       speakingThreshold: audio.mixer.speakingThreshold,
       speakingHoldMs: audio.mixer.speakingHoldMs,
-    });
+    }, mixerCounters);
     mixer.start();
     return mixer;
   },
 });
+hub = stageHub;
 
-const server = createStageServer({ config, hub, log, baseDir: root });
+const processMetrics = processSamples();
+const server = createStageServer({
+  config,
+  hub: stageHub,
+  log,
+  baseDir: root,
+  metrics: () => renderPrometheus([...stageHub.metrics(), ...transport.metrics(), ...mixerCounters.samples(), ...processMetrics()]),
+});
 const addr = await server.listen();
 const secure = config.server.tls.certFile !== '';
 log.info('Stage.js listening', {

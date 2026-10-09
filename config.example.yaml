@@ -19,6 +19,11 @@ server:
     - mount: /lib/
       dir: packages/client/dist
       cors: true
+  # GET /metrics（Prometheus 文字格式）。token 非空時需 `Authorization: Bearer <token>`；
+  # 對外 host 啟用時 token 必填（否則拒絕啟動）。token 只放 config.yaml。
+  metrics:
+    enabled: true
+    token: ""
 
 limits:
   maxRooms: 100                # 可調整

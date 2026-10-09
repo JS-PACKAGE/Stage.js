@@ -45,6 +45,7 @@ node scripts/bench-mixer.ts      # Gate 3：8/3 發言者 × 300 訂閱者混音
 | `src/mixer/` | `RoomMixer`（N 路疊加、mix-minus-self、每路 playout 預緩衝／underrun 重緩衝／漂移排空、緩衝上限）、`limiter` |
 | `packages/client/` | 可嵌入的瀏覽器 ESM 函式庫 `StageClient` |
 | `web/` | 完整範例前端（建於 client 之上） |
+| `src/metrics.ts` | Prometheus 文字輸出、跨房共用的 `MixerCounters`、event loop／記憶體取樣；`/metrics` 由 `server.metrics` 控制（對外 host 必須設 token） |
 
 ## 媒體層規則
 

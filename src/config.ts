@@ -16,6 +16,8 @@ export interface AppConfig {
     allowInsecure: boolean;
     tls: { certFile: string; keyFile: string };
     static: StaticMount[];
+    /** `GET /metrics` (Prometheus text). Non-empty `token` requires `Authorization: Bearer <token>`. */
+    metrics: { enabled: boolean; token: string };
   };
   limits: {
     maxRooms: number;
@@ -137,6 +139,7 @@ export function parseConfig(raw: unknown): AppConfig {
 
   const s = obj(root.server, 'server');
   const tls = obj(s.tls, 'server.tls');
+  const mt = obj(s.metrics, 'server.metrics');
   if (!Array.isArray(s.static)) throw new ConfigError('server.static: expected list');
   const server: AppConfig['server'] = {
     host: str(s, 'host', 'server'),
@@ -151,7 +154,11 @@ export function parseConfig(raw: unknown): AppConfig {
       if (!mount.startsWith('/') || !mount.endsWith('/')) throw new ConfigError(`${p}.mount: must start and end with "/"`);
       return { mount, dir: str(o, 'dir', p), cors: bool(o, 'cors', p) };
     }),
+    metrics: { enabled: bool(mt, 'enabled', 'server.metrics'), token: str(mt, 'token', 'server.metrics') },
   };
+  if (server.metrics.enabled && server.metrics.token === '' && LOOPBACK[server.host] !== true) {
+    throw new ConfigError('server.metrics.token: required when metrics are enabled on a non-loopback host');
+  }
   if (!server.wsPath.startsWith('/')) throw new ConfigError('server.wsPath: must start with "/"');
   const hasTls = server.tls.certFile !== '' && server.tls.keyFile !== '';
   if (!hasTls && !server.allowInsecure) {
