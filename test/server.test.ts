@@ -79,7 +79,7 @@ describe('ws server boundary', () => {
       transport,
       log: silentLogger,
       serverVersion: 'test',
-      createMixer: () => new RoomMixer({ sampleRate: 48000, frameMs: 20, maxBufferedFrames: 10, playoutFrames: 1, limiterThreshold: 0.9 }),
+      createMixer: () => new RoomMixer({ sampleRate: 48000, frameMs: 20, maxBufferedFrames: 10, playoutFrames: 1, limiterThreshold: 0.9, speakingThreshold: 0.02, speakingHoldMs: 40 }),
     });
     server = createStageServer({ config, hub, log: silentLogger, baseDir: staticDir });
     const addr = await server.listen();

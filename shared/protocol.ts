@@ -14,6 +14,8 @@
  *     the grace period (PLAN §5: controller auto-transfer only after 60 s).
  *   - `room:state` carries `onStage`/`forceMuted` per participant, `audienceCount`,
  *     and controller-only fields (`code`, `audience`), recipient-only `resumeToken`.
+ *   - S→C `speaking`  : participants currently audible in the mix (voice activity with
+ *     a release hold); sent only when the set changes.
  */
 
 export const PROTOCOL_VERSION = 1;
@@ -115,6 +117,7 @@ export interface ServerMessageMap {
   'rtc:answer': { fromId: string; payload: SessionDescriptionPayload };
   'rtc:ice': { fromId: string; payload: IceCandidatePayload | null };
   'rtc:config': { iceServers: IceServerConfig[] };
+  speaking: { participantIds: string[] };
   error: { requestId?: string; code: ErrorCode; message: string };
   status: { state: StageStatus };
   ok: { requestId: string };

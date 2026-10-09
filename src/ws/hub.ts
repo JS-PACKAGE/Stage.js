@@ -31,6 +31,8 @@ export interface Mixer extends MixedPcmSource {
   setMuted(participantId: string, muted: boolean): void;
   push(participantId: string, samples: Float32Array): void;
   stop(): void;
+  /** Listener receives the full speaking set whenever it changes; returns an unsubscribe function. */
+  onSpeaking(listener: (participantIds: string[]) => void): () => void;
 }
 
 export interface HubDeps {
@@ -186,6 +188,8 @@ export class StageHub {
     };
     this.rooms.set(roomId, rt);
     transport.setMixedStream(roomId, mixer);
+    // Fired from the mixer clock, outside the room queue: read-only fan-out, so no queueing needed.
+    mixer.onSpeaking((participantIds) => { if (!rt.closed) this.broadcast(rt, { type: 'speaking', participantIds }); });
     this.bindings.set(session, { roomId, participantId: controller.participantId });
     log.info('room created', { roomId, participantId: controller.participantId, codeRequired });
 

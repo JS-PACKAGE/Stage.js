@@ -43,6 +43,7 @@ describe('flow 1 — raise hand → approve → on stage with uplink', () => {
     const peers = h.transport.rooms.get(host.roomId)!.peers;
     assert.ok(energy(peers.get(other.id)!.received.at(-1)!) > 0.05, 'audience hears the speaker');
     assert.equal(energy(peers.get(aud.id)!.received.at(-1)!), 0, 'speaker gets mix-minus-self');
+    assert.deepEqual(other.s.last('speaking'), { type: 'speaking', participantIds: [aud.id] }, 'audience sees who is talking');
   });
 
   it('rejects approve without a raised hand and beyond the 8-speaker cap', async () => {

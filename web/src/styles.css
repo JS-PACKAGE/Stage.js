@@ -45,6 +45,8 @@ button.danger { color: var(--danger); border-color: var(--danger); }
 [hidden] { display: none !important; }
 .people { margin: 0; padding: 0; list-style: none; }
 .person { padding: 16px 0; border-top: 1px solid var(--border); }
+.person.speaking { box-shadow: inset 4px 0 0 var(--accent); padding-left: 12px; }
+.person.speaking .identity strong::after { content: ' · 說話中'; color: var(--accent); font-weight: normal; }
 .identity { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 10px; }
 .identity strong { overflow-wrap: anywhere; }
 .invite-link { margin-bottom: 10px; }

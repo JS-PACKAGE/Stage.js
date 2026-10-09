@@ -50,6 +50,8 @@ hub = new StageHub({
       maxBufferedFrames: audio.mixer.maxBufferedFrames,
       playoutFrames: audio.jitter.playoutFrames,
       limiterThreshold: audio.mixer.limiterThreshold,
+      speakingThreshold: audio.mixer.speakingThreshold,
+      speakingHoldMs: audio.mixer.speakingHoldMs,
     });
     mixer.start();
     return mixer;

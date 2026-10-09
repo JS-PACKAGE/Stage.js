@@ -56,6 +56,10 @@ export interface AppConfig {
       maxBufferedFrames: number;
       limiterThreshold: number;
       latencyTargetMs: number;
+      /** Frame RMS (0..1) at which a publisher counts as speaking. */
+      speakingThreshold: number;
+      /** How long the speaking state outlasts the last loud frame. */
+      speakingHoldMs: number;
     };
     jitter: {
       /** Frames each uplink buffers before playing (latency vs. underrun trade-off). */
@@ -202,6 +206,8 @@ export function parseConfig(raw: unknown): AppConfig {
       maxBufferedFrames: int(m, 'maxBufferedFrames', 'audio.mixer', 1, 100),
       limiterThreshold: num(m, 'limiterThreshold', 'audio.mixer', 0.1, 1),
       latencyTargetMs: int(m, 'latencyTargetMs', 'audio.mixer', 1),
+      speakingThreshold: num(m, 'speakingThreshold', 'audio.mixer', 0.0001, 0.5),
+      speakingHoldMs: int(m, 'speakingHoldMs', 'audio.mixer', 0, 10000),
     },
     jitter: {
       playoutFrames: int(j, 'playoutFrames', 'audio.jitter', 1, 100),

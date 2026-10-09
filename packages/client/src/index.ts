@@ -46,6 +46,8 @@ export interface StageEventMap {
   error: StageError;
   micerror: { name: string; message: string };
   audioblocked: { message: string };
+  /** Full set of participants currently audible in the mix; fired only when it changes. */
+  speaking: { participantIds: string[] };
 }
 interface Pending { resolve: () => void; reject: (error: StageError) => void; timer: ReturnType<typeof setTimeout> }
 type JoinOptions = { roomId: string; code?: string; name: string; resumeToken?: string };
@@ -82,6 +84,7 @@ export class StageClient extends EventTarget {
   /** Latest scheduled send of any kind: the server processes frames in arrival order, so ICE must never overtake its offer. */
   private lastSendAt = 0;
   private previousStats = new Map<string, { bytes: number; timestamp: number }>();
+  private speakingIds: ReadonlySet<string> = new Set();
 
   constructor(options: StageClientOptions) {
     super();
@@ -94,6 +97,8 @@ export class StageClient extends EventTarget {
   get state(): RoomStatePayload | null { return this.snapshot; }
   get status(): ClientStatus { return this.currentStatus; }
   get me(): ParticipantView | null { return this.snapshot?.me ?? null; }
+  /** Participants currently audible in the mix (server voice activity). */
+  get speaking(): ReadonlySet<string> { return this.speakingIds; }
   get handCooldownMs(): number { return Math.max(0, 10000 - (Date.now() - this.lastHandAt)); }
   on<K extends keyof StageEventMap>(type: K, listener: (event: CustomEvent<StageEventMap[K]>) => void): () => void {
     const handler = listener as EventListener;
@@ -181,6 +186,7 @@ export class StageClient extends EventTarget {
     this.reconnectTimer = undefined;
     this.session = null;
     this.snapshot = null;
+    this.speakingIds = new Set();
     this.socket?.close(1000);
     this.socket = null;
     this.rejectPending();
@@ -270,6 +276,7 @@ export class StageClient extends EventTarget {
       case 'room:closed':
         this.session = null;
         this.snapshot = null;
+        this.speakingIds = new Set();
         clearTimeout(this.reconnectTimer);
         this.reconnectTimer = undefined;
         this.destroyMedia();
@@ -284,6 +291,7 @@ export class StageClient extends EventTarget {
       case 'control:transferred': this.emit('transferred', { fromId: message.fromId, toId: message.toId }); break;
       case 'mic:muted': case 'mic:unmuted': this.emit('mic', { participantId: message.participantId, muted: message.type === 'mic:muted' }); break;
       case 'role:update': this.emit('role', { participantId: message.participantId, role: message.role, reason: message.reason }); break;
+      case 'speaking': this.speakingIds = new Set(message.participantIds); this.emit('speaking', { participantIds: message.participantIds }); break;
     }
   }
   private scheduleReconnect(): void {

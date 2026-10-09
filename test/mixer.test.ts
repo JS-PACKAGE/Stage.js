@@ -2,7 +2,7 @@ import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import { RoomMixer } from '../src/mixer/RoomMixer.ts';
 import { limitInPlace } from '../src/mixer/limiter.ts';
-const options = { sampleRate: 48000, frameMs: 20, maxBufferedFrames: 2, playoutFrames: 1, limiterThreshold: 0.9 };
+const options = { sampleRate: 48000, frameMs: 20, maxBufferedFrames: 2, playoutFrames: 1, limiterThreshold: 0.9, speakingThreshold: 0.02, speakingHoldMs: 40 };
 const samples = (value: number) => new Float32Array(960).fill(value);
 test('sum, minus-self, missing frames and muted membership', () => {
   const mixer = new RoomMixer(options);
@@ -51,4 +51,22 @@ test('jitter buffer primes, re-primes after underrun and drains drift', () => {
   // Queue 0.3..0.8 (6 > 2×2): play 0.3 and drop 0.4 to pull latency back.
   assert.ok(Math.abs(mixer.tick()!.full[0]! - 0.3) < 1e-6);
   assert.ok(Math.abs(mixer.tick()!.full[0]! - 0.5) < 1e-6);
+});
+test('speaking set follows voice activity with a release hold, mute and removal', () => {
+  const mixer = new RoomMixer(options); mixer.addSource('a'); mixer.addSource('b');
+  const events: string[][] = [];
+  mixer.onSpeaking(ids => events.push(ids));
+  mixer.push('a', samples(0.5)); mixer.push('b', samples(0.001)); mixer.tick();
+  assert.deepEqual(events, [['a']], 'quiet source b stays below the threshold');
+  mixer.tick();
+  assert.equal(events.length, 1, 'held through a one-frame pause (hold = 40 ms = 2 frames)');
+  mixer.tick();
+  assert.deepEqual(events.at(-1), [], 'released after the hold');
+  mixer.push('a', samples(0.5)); mixer.tick();
+  mixer.setMuted('a', true);
+  assert.deepEqual(events.slice(-2), [['a'], []], 'muting clears immediately');
+  mixer.setMuted('a', false); mixer.push('a', samples(0.5)); mixer.push('b', samples(0.5)); mixer.tick();
+  assert.deepEqual(events.at(-1), ['a', 'b']);
+  mixer.removeSource('a');
+  assert.deepEqual(events.at(-1), ['b'], 'removal of a speaking source is reported');
 });

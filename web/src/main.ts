@@ -209,6 +209,8 @@ function panelList(title: string, people: ParticipantView[], controller: boolean
 }
 function personRow(person: ParticipantView, controller: boolean, kind: 'speaker' | 'hand' | 'audience'): HTMLLIElement {
   const row = element('li', 'person');
+  row.dataset.participantId = person.participantId;
+  row.classList.toggle('speaking', client.speaking.has(person.participantId));
   const identity = element('div', 'identity');
   identity.append(element('strong', '', decodeName(person.name)), element('span', 'badge', roleLabels[person.role]));
   if (person.muted) identity.append(element('span', 'badge', person.forceMuted ? '強制靜音' : '已靜音'));
@@ -249,5 +251,10 @@ client.on('stageleft', ({ detail }) => {
 client.on('micerror', ({ detail }) => { micNotice = `${detail.message}（${detail.name}）`; renderNotices(); });
 client.on('audioblocked', () => { audioBlocked = true; renderNotices(); });
 client.on('error', ({ detail }) => showError(detail.message));
+// Toggle in place: a full re-render every few hundred ms would reset focus and scroll.
+client.on('speaking', ({ detail }) => {
+  const ids = new Set(detail.participantIds);
+  for (const row of content.querySelectorAll<HTMLElement>('.person[data-participant-id]')) row.classList.toggle('speaking', ids.has(row.dataset.participantId!));
+});
 setInterval(updateCooldown, 250);
 landing();

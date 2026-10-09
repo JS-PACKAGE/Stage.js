@@ -55,6 +55,8 @@ audio:
     maxBufferedFrames: 10      # 每路 PCM 緩衝上限（10×20ms=200ms），超過丟最舊
     limiterThreshold: 0.9      # soft-clip 起點（0..1）
     latencyTargetMs: 300       # 可調整（Gate 3 目標）
+    speakingThreshold: 0.02    # 單幀 RMS 超過即視為「正在說話」（約 −34 dBFS，可調整）
+    speakingHoldMs: 400        # 說話狀態在最後一個有聲幀後維持多久，避免指示燈閃爍（可調整）
   jitter:
     playoutFrames: 3           # 每路上行先緩衝 3 幀（60ms）才開始播；underrun 後重新緩衝（可調整）
     reorderPackets: 2          # 亂序容忍：缺包後再收到幾包即判定遺失並補幀（可調整）
