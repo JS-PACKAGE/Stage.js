@@ -1,5 +1,5 @@
 import { StageClient, decodeName } from '../../packages/client/src/index.ts';
-import type { ParticipantView, RoomStatePayload } from '../../packages/client/src/index.ts';
+import type { MicTest, ParticipantView, RoomStatePayload } from '../../packages/client/src/index.ts';
 import './styles.css';
 
 const app = document.querySelector<HTMLDivElement>('#app')!;
@@ -40,6 +40,88 @@ errorBox.hidden = true;
 errorBox.setAttribute('role', 'alert');
 const content = element('main');
 app.append(header, notices, errorBox, content);
+const settings = element('section', 'panel audio-settings');
+settings.append(element('h2', '', '音訊設定'));
+const micSelect = element('select');
+micSelect.id = 'microphone-device';
+const speakerSelect = element('select');
+speakerSelect.id = 'speaker-device';
+for (const [label, select] of [['麥克風', micSelect], ['揚聲器', speakerSelect]] as const) {
+  const wrapper = element('label', 'field', label);
+  wrapper.append(select);
+  settings.append(wrapper);
+}
+speakerSelect.disabled = !client.outputDeviceSupported;
+if (!client.outputDeviceSupported) settings.append(element('p', 'muted', '此瀏覽器不支援選擇揚聲器，將使用系統預設輸出。'));
+let micTest: MicTest | null = null;
+let testingBusy = false;
+let selectedInput = '';
+let selectedOutput = '';
+const testButton = button('測試麥克風', async () => {
+  testingBusy = true;
+  micSelect.disabled = true;
+  try {
+    if (micTest) { micTest.stop(); micTest = null; }
+    else micTest = await client.startMicTest();
+    testButton.textContent = micTest ? '停止測試' : '測試麥克風';
+    testButton.setAttribute('aria-pressed', String(Boolean(micTest)));
+  } finally { testingBusy = false; micSelect.disabled = false; }
+});
+testButton.id = 'mic-test';
+testButton.setAttribute('aria-pressed', 'false');
+const levelLabel = element('label', 'mic-level-label', '麥克風音量');
+const level = element('meter', 'mic-level');
+level.id = 'mic-level';
+level.min = 0; level.max = 1; level.value = 0;
+levelLabel.append(level);
+settings.append(testButton, levelLabel);
+app.append(settings);
+micSelect.onchange = () => {
+  const deviceId = micSelect.value;
+  micSelect.disabled = true;
+  testingBusy = true;
+  void run(async () => {
+    await client.setInputDevice(deviceId);
+    selectedInput = deviceId;
+    if (micTest) {
+      micTest.stop(); micTest = null;
+      testButton.textContent = '測試麥克風'; testButton.setAttribute('aria-pressed', 'false');
+      micTest = await client.startMicTest();
+      testButton.textContent = '停止測試'; testButton.setAttribute('aria-pressed', 'true');
+    }
+  }).finally(() => { testingBusy = false; micSelect.disabled = false; micSelect.value = selectedInput; });
+};
+speakerSelect.onchange = () => {
+  const deviceId = speakerSelect.value;
+  speakerSelect.disabled = true;
+  void run(async () => { await client.setOutputDevice(deviceId); selectedOutput = deviceId; })
+    .finally(() => { speakerSelect.disabled = false; speakerSelect.value = selectedOutput; });
+};
+async function refreshDevices(): Promise<void> {
+  const devices = await client.listAudioDevices();
+  for (const [select, list, chosen] of [[micSelect, devices.inputs, selectedInput], [speakerSelect, devices.outputs, selectedOutput]] as const) {
+    const defaultOption = element('option', '', '系統預設');
+    defaultOption.value = '';
+    select.replaceChildren(defaultOption);
+    for (const [index, device] of list.entries()) {
+      const option = element('option', '', device.label || `音訊裝置 ${index + 1}`);
+      option.value = device.deviceId;
+      select.append(option);
+    }
+    select.value = chosen;
+  }
+}
+client.on('micready', () => { void refreshDevices().catch(() => {}); });
+navigator.mediaDevices?.addEventListener('devicechange', () => { void refreshDevices().catch(() => {}); });
+void refreshDevices().catch(() => {});
+setInterval(() => {
+  if (client.me?.onStage && micTest) {
+    micTest.stop(); micTest = null;
+    testButton.textContent = '測試麥克風'; testButton.setAttribute('aria-pressed', 'false');
+  }
+  testButton.disabled = testingBusy || Boolean(client.me?.onStage);
+  level.value = client.me?.onStage ? client.micLevel : micTest?.level() ?? 0;
+}, 50);
 
 function element<K extends keyof HTMLElementTagNameMap>(tag: K, className = '', text?: string): HTMLElementTagNameMap[K] {
   const node = document.createElement(tag);
@@ -175,6 +257,8 @@ function renderRoom(state: RoomStatePayload): void {
     actions.append(cooldownButton);
   }
   actions.append(button('離開房間', async () => {
+    micTest?.stop(); micTest = null;
+    testButton.textContent = '測試麥克風'; testButton.setAttribute('aria-pressed', 'false');
     await client.disconnect(); createdRoom = null; micNotice = invitation = ''; landing();
   }));
   if (controller) actions.append(button('關閉房間', async () => {

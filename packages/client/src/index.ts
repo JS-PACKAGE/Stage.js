@@ -31,6 +31,40 @@ export interface AudioStats {
   rtt?: number;
 }
 export interface StageStats { inbound: AudioStats | null; outbound: AudioStats | null }
+export interface AudioDevices { inputs: MediaDeviceInfo[]; outputs: MediaDeviceInfo[] }
+export interface MicTest { level(): number; stop(): void }
+
+function createMicMeter(stream: MediaStream): MicTest {
+  const context = new AudioContext();
+  try {
+    const source = context.createMediaStreamSource(stream);
+    const analyser = context.createAnalyser();
+    analyser.fftSize = 2048;
+    source.connect(analyser);
+    const samples = new Float32Array(analyser.fftSize);
+    let stopped = false;
+    void context.resume().catch(() => {});
+    return {
+      level() {
+        if (stopped) return 0;
+        analyser.getFloatTimeDomainData(samples);
+        let sum = 0;
+        for (const sample of samples) sum += sample * sample;
+        return Math.min(1, Math.sqrt(sum / samples.length));
+      },
+      stop() {
+        if (stopped) return;
+        stopped = true;
+        source.disconnect();
+        analyser.disconnect();
+        void context.close().catch(() => {});
+      },
+    };
+  } catch (error) {
+    void context.close().catch(() => {});
+    throw error;
+  }
+}
 export interface StageEventMap {
   state: RoomStatePayload;
   status: ClientStatus;
@@ -45,6 +79,7 @@ export interface StageEventMap {
   role: ServerMessageMap['role:update'];
   error: StageError;
   micerror: { name: string; message: string };
+  micready: undefined;
   audioblocked: { message: string };
   /** Full set of participants currently audible in the mix; fired only when it changes. */
   speaking: { participantIds: string[] };
@@ -71,6 +106,10 @@ export class StageClient extends EventTarget {
   private transceiver: RTCRtpTransceiver | null = null;
   private mic: MediaStream | null = null;
   private micFailed = false;
+  private inputDeviceId = '';
+  private micMeter: MicTest | null = null;
+  private micTests = new Set<MicTest>();
+  private testRevision = 0;
   private remoteIce: (IceCandidatePayload | null)[] = [];
   private mediaRevision = 0;
   private mediaTask: Promise<void> = Promise.resolve();
@@ -100,6 +139,70 @@ export class StageClient extends EventTarget {
   /** Participants currently audible in the mix (server voice activity). */
   get speaking(): ReadonlySet<string> { return this.speakingIds; }
   get handCooldownMs(): number { return Math.max(0, 10000 - (Date.now() - this.lastHandAt)); }
+  get outputDeviceSupported(): boolean { return typeof this.audio.setSinkId === 'function'; }
+  /** RMS amplitude in [0, 1]; zero when not publishing or muted. */
+  get micLevel(): number { return this.mic?.getAudioTracks()[0]?.enabled ? this.micMeter?.level() ?? 0 : 0; }
+  async listAudioDevices(): Promise<AudioDevices> {
+    const devices = await navigator.mediaDevices.enumerateDevices();
+    return { inputs: devices.filter((device) => device.kind === 'audioinput'), outputs: devices.filter((device) => device.kind === 'audiooutput') };
+  }
+  async setOutputDevice(deviceId: string): Promise<void> {
+    if (!this.outputDeviceSupported) throw new StageError('media_error', '此瀏覽器不支援選擇揚聲器。');
+    try { await this.audio.setSinkId(deviceId); }
+    catch (error) { throw new StageError('media_error', error instanceof Error ? error.message : '無法切換揚聲器。'); }
+  }
+  setInputDevice(deviceId: string): Promise<void> {
+    const task = this.mediaTask.catch(() => {}).then(async () => {
+      const pc = this.pc;
+      const transceiver = this.transceiver;
+      if (!this.mic || !pc || !transceiver || !this.me?.onStage) { this.inputDeviceId = deviceId; return; }
+      const stream = await navigator.mediaDevices.getUserMedia({ audio: this.audioConstraints(deviceId) });
+      let meter: MicTest | null = null;
+      try {
+        if (pc !== this.pc || !this.me?.onStage) return;
+        const track = stream.getAudioTracks()[0];
+        if (!track) throw new StageError('media_error', '所選裝置沒有音訊軌道。');
+        track.enabled = !this.me.muted;
+        meter = createMicMeter(stream);
+        await transceiver.sender.replaceTrack(track);
+        if (pc !== this.pc || !this.me?.onStage) return;
+        track.enabled = !this.me.muted;
+        this.micMeter?.stop();
+        this.mic?.getTracks().forEach((oldTrack) => oldTrack.stop());
+        this.mic = stream;
+        this.micMeter = meter;
+        this.inputDeviceId = deviceId;
+        this.emit('micready', undefined);
+      } finally {
+        if (this.mic !== stream) { meter?.stop(); stream.getTracks().forEach((track) => track.stop()); }
+      }
+    });
+    this.mediaTask = task.catch(() => {});
+    return task;
+  }
+  async startMicTest(): Promise<MicTest> {
+    const revision = this.testRevision;
+    const stream = await navigator.mediaDevices.getUserMedia({ audio: this.audioConstraints(this.inputDeviceId) });
+    let meter: MicTest;
+    try {
+      if (revision !== this.testRevision) throw new StageError('disconnected', '麥克風測試已取消。');
+      meter = createMicMeter(stream);
+    } catch (error) { stream.getTracks().forEach((track) => track.stop()); throw error; }
+    const test: MicTest = {
+      level: meter.level,
+      stop: () => {
+        meter.stop();
+        stream.getTracks().forEach((track) => track.stop());
+        this.micTests.delete(test);
+      },
+    };
+    this.micTests.add(test);
+    this.emit('micready', undefined);
+    return test;
+  }
+  private audioConstraints(deviceId: string): MediaTrackConstraints {
+    return { channelCount: 1, sampleRate: 48000, echoCancellation: true, noiseSuppression: true, autoGainControl: true, ...this.options.micConstraints, ...(deviceId ? { deviceId: { exact: deviceId } } : {}) };
+  }
   on<K extends keyof StageEventMap>(type: K, listener: (event: CustomEvent<StageEventMap[K]>) => void): () => void {
     const handler = listener as EventListener;
     this.addEventListener(type, handler);
@@ -182,6 +285,8 @@ export class StageClient extends EventTarget {
   closeRoom(): Promise<void> { return this.request('room:close', {}); }
   async disconnect(): Promise<void> {
     this.intentional = true;
+    ++this.testRevision;
+    for (const test of this.micTests) test.stop();
     clearTimeout(this.reconnectTimer);
     this.reconnectTimer = undefined;
     this.session = null;
@@ -351,9 +456,12 @@ export class StageClient extends EventTarget {
       if (!me.onStage) this.micFailed = false;
       if (me.onStage && !this.mic && !this.micFailed) {
         try {
-          const stream = await navigator.mediaDevices.getUserMedia({ audio: { channelCount: 1, sampleRate: 48000, echoCancellation: true, noiseSuppression: true, autoGainControl: true, ...this.options.micConstraints } });
+          const stream = await navigator.mediaDevices.getUserMedia({ audio: this.audioConstraints(this.inputDeviceId) });
           if (pc !== this.pc || !this.me?.onStage) { stream.getTracks().forEach((track) => track.stop()); return; }
           this.mic = stream;
+          try { this.micMeter = createMicMeter(stream); }
+          catch (error) { this.mic = null; stream.getTracks().forEach((track) => track.stop()); throw error; }
+          this.emit('micready', undefined);
         } catch (error) {
           if (pc !== this.pc) return;
           this.micFailed = true;
@@ -366,7 +474,7 @@ export class StageClient extends EventTarget {
       if (pc !== this.pc) return;
       const current = this.me;
       if (!current) return;
-      if (!current.onStage) { this.mic?.getTracks().forEach((track) => track.stop()); this.mic = null; }
+      if (!current.onStage) { this.micMeter?.stop(); this.micMeter = null; this.mic?.getTracks().forEach((track) => track.stop()); this.mic = null; }
       const track = this.mic?.getAudioTracks()[0] ?? null;
       if (track) track.enabled = !current.muted;
       const direction = current.onStage && track ? 'sendrecv' : 'recvonly';
@@ -418,10 +526,11 @@ export class StageClient extends EventTarget {
     this.pc?.close();
     this.pc = null;
     this.transceiver = null;
+    this.micMeter?.stop();
+    this.micMeter = null;
     this.mic?.getTracks().forEach((track) => track.stop());
     this.mic = null;
     this.micFailed = false;
-    this.mediaTask = Promise.resolve();
     this.audio.pause();
     this.audio.srcObject = null;
     this.remoteIce = [];

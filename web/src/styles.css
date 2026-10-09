@@ -50,6 +50,10 @@ button.danger { color: var(--danger); border-color: var(--danger); }
 .identity { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 10px; }
 .identity strong { overflow-wrap: anywhere; }
 .invite-link { margin-bottom: 10px; }
+.audio-settings { margin-top: 16px; }
+.audio-settings select { width: 100%; min-width: 0; }
+.mic-level-label { display: grid; gap: 8px; margin-top: 16px; }
+.mic-level { width: 100%; height: 24px; accent-color: var(--accent); }
 @media (min-width: 760px) {
   #app { padding: 24px; }
   .landing-grid, .stage-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
