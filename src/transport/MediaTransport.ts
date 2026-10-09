@@ -15,7 +15,7 @@ import type { IceCandidatePayload, SessionDescriptionPayload } from '../../share
 /** Receives one decoded uplink PCM frame from a publisher. */
 export type AudioFrameHandler = (samples: Float32Array) => void;
 
-/** One mixer tick output. */
+/** One mixer tick output. Its buffers belong to the mixer and are rewritten next tick: copy to keep. */
 export interface MixFrame {
   /** Monotonic tick counter. */
   readonly seq: number;

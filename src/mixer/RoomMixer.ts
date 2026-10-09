@@ -12,10 +12,38 @@ import { NoiseFilter, type NoiseFilterOptions } from './noiseFilter.ts';
 export interface RoomMixerOptions { sampleRate: number; frameMs: number; maxBufferedFrames: number; playoutFrames: number; limiterThreshold: number; speakingThreshold: number; speakingHoldMs: number; noiseFilter?: NoiseFilterOptions }
 export type SpeakingListener = (participantIds: string[]) => void;
 interface Source {
-  muted: boolean; primed: boolean; frames: Float32Array[];
+  muted: boolean; primed: boolean; frames: FrameQueue;
   /** Fewest frames queued at any tick of the current convergence window. */
   low: number;
   /** Ticks left in the speaking state. */ hold: number; filter: NoiseFilter | undefined;
+  /** This tick's audible frame (a queue slot), null when silent, muted or starved. */
+  contribution: Float32Array | null;
+  /** This tick's limited mix-minus; meaningful only while `contribution` is set. */
+  readonly minus: Float32Array;
+}
+
+/** Fixed-capacity FIFO over preallocated frames, so steady-state mixing allocates nothing. */
+class FrameQueue {
+  private readonly slots: Float32Array[];
+  private head = 0;
+  length = 0;
+  constructor(capacity: number, frameSize: number) { this.slots = Array.from({ length: capacity }, () => new Float32Array(frameSize)); }
+  get full(): boolean { return this.length === this.slots.length; }
+  /** Copies `samples` into the next slot, dropping the oldest frame when full; returns the slot. */
+  push(samples: Float32Array): Float32Array {
+    if (this.full) this.shift();
+    const slot = this.slots[(this.head + this.length++) % this.slots.length]!;
+    slot.set(samples);
+    return slot;
+  }
+  /** The returned slot stays intact until the queue wraps onto it, i.e. at least until the next push. */
+  shift(): Float32Array | undefined {
+    if (!this.length) return undefined;
+    const slot = this.slots[this.head]!;
+    this.head = (this.head + 1) % this.slots.length;
+    this.length--;
+    return slot;
+  }
 }
 /**
  * Once primed, a queue only grows (packet bursts, a source that started mid-burst), and nothing
@@ -33,6 +61,9 @@ export class RoomMixer implements MixedPcmSource {
   private windowTick = 0;
   private readonly opts: RoomMixerOptions;
   private readonly frameSize: number;
+  /** Unlimited sum and limited full mix, rewritten every tick. */
+  private readonly raw: Float32Array;
+  private readonly full: Float32Array;
   private seq = 0;
   private timer?: NodeJS.Timeout;
   private running = false;
@@ -43,6 +74,8 @@ export class RoomMixer implements MixedPcmSource {
     this.opts = opts;
     this.counters = counters;
     this.frameSize = Math.round(opts.sampleRate * opts.frameMs / 1000);
+    this.raw = new Float32Array(this.frameSize);
+    this.full = new Float32Array(this.frameSize);
     this.holdFrames = Math.max(1, Math.ceil(opts.speakingHoldMs / opts.frameMs));
     this.convergeTicks = Math.ceil(CONVERGE_WINDOW_MS / opts.frameMs);
   }
@@ -50,7 +83,7 @@ export class RoomMixer implements MixedPcmSource {
   addSource(id: string): void {
     if (this.sources.has(id)) return;
     const nf = this.opts.noiseFilter;
-    this.sources.set(id, { muted: false, primed: false, frames: [], low: Infinity, hold: 0, filter: nf && new NoiseFilter(nf, this.opts.sampleRate, this.opts.frameMs) });
+    this.sources.set(id, { muted: false, primed: false, frames: new FrameQueue(this.opts.maxBufferedFrames, this.frameSize), low: Infinity, hold: 0, filter: nf && new NoiseFilter(nf, this.opts.sampleRate, this.opts.frameMs), contribution: null, minus: new Float32Array(this.frameSize) });
   }
   removeSource(id: string): void {
     const source = this.sources.get(id);
@@ -63,47 +96,44 @@ export class RoomMixer implements MixedPcmSource {
     source.muted = muted;
     if (muted && source.hold > 0) { source.hold = 0; this.emitSpeaking(); }
   }
-  /** Exact frames only; copy on ingress so callers may reuse their input buffers. */
+  /** Exact frames only; copied on ingress so callers may reuse their input buffers. */
   push(id: string, samples: Float32Array): void {
     const source = this.sources.get(id);
     if (!source) return;
     if (samples.length !== this.frameSize) throw new RangeError('PCM frame has incorrect length');
-    if (source.frames.length === this.opts.maxBufferedFrames) { source.frames.shift(); this.counters.droppedFrames++; }
-    const copy = samples.slice();
-    source.filter?.process(copy);
-    source.frames.push(copy);
+    if (source.frames.full) this.counters.droppedFrames++;
+    const slot = source.frames.push(samples);
+    source.filter?.process(slot);
   }
   tick(): MixFrame | null {
     if (!this.sources.size) return null;
     this.counters.ticks++;
-    const raw = new Float32Array(this.frameSize);
-    // Per source: own contribution (null when silent/muted), replaced by its limited mix-minus once computed.
-    const minus = new Map<string, Float32Array | null>();
-    const own = new Set<string>();
+    const { raw, full, sources } = this;
+    raw.fill(0);
     const playout = this.opts.playoutFrames;
     const energyThreshold = this.opts.speakingThreshold ** 2 * this.frameSize;
     let speakingChanged = false;
     const converge = ++this.windowTick >= this.convergeTicks;
     if (converge) this.windowTick = 0;
-    for (const [id, source] of this.sources) {
+    for (const source of sources.values()) {
+      const { frames } = source;
       // Jitter buffer: start (or restart after an underrun) only once `playout` frames are queued,
       // and drain one extra frame when sender clock drift has doubled the queue.
-      if (!source.primed && source.frames.length >= playout) source.primed = true;
+      if (!source.primed && frames.length >= playout) source.primed = true;
       if (source.primed) {
-        if (source.frames.length < source.low) source.low = source.frames.length;
+        if (frames.length < source.low) source.low = frames.length;
         if (converge) {
-          if (source.low > playout) { source.frames.shift(); this.counters.droppedFrames++; }
+          if (source.low > playout) { frames.shift(); this.counters.droppedFrames++; }
           source.low = Infinity;
         }
       }
-      const samples = source.primed ? source.frames.shift() : undefined;
+      const samples = source.primed ? frames.shift() : undefined;
       if (!samples) { if (source.primed) this.counters.underruns++; source.primed = false; }
-      else if (source.frames.length > 2 * playout) { source.frames.shift(); this.counters.droppedFrames++; }
-      const contribution = source.muted ? undefined : samples;
-      minus.set(id, contribution ?? null);
+      else if (frames.length > 2 * playout) { frames.shift(); this.counters.droppedFrames++; }
+      const contribution = source.muted ? null : samples ?? null;
+      source.contribution = contribution;
       let energy = 0;
       if (contribution) {
-        own.add(id);
         for (let i = 0; i < raw.length; i++) { const s = contribution[i]!; raw[i] = raw[i]! + s; energy += s * s; }
       }
       const wasSpeaking = source.hold > 0;
@@ -113,20 +143,21 @@ export class RoomMixer implements MixedPcmSource {
     }
     if (speakingChanged) this.emitSpeaking();
     const threshold = this.opts.limiterThreshold;
-    const full = limitInPlace(raw.slice(), threshold);
+    full.set(raw);
+    limitInPlace(full, threshold);
+    // Every audible source gets its mix-minus: each one is a subscriber that will ask for it.
+    for (const source of sources.values()) {
+      const { contribution, minus } = source;
+      if (!contribution) continue;
+      for (let i = 0; i < minus.length; i++) minus[i] = raw[i]! - contribution[i]!;
+      limitInPlace(minus, threshold);
+    }
     const frame: MixFrame = {
       seq: this.seq++, full,
       minus(id) {
-        const entry = minus.get(id);
-        if (entry === undefined) return undefined;
+        const source = sources.get(id);
         // A silent source's mix-minus equals the full mix.
-        if (entry === null) return full;
-        if (!own.has(id)) return entry;
-        const result = new Float32Array(raw.length);
-        for (let i = 0; i < result.length; i++) result[i] = raw[i]! - entry[i]!;
-        limitInPlace(result, threshold);
-        minus.set(id, result); own.delete(id);
-        return result;
+        return source && (source.contribution ? source.minus : full);
       },
     };
     for (const listener of this.listeners) listener(frame);

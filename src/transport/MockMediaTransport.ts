@@ -77,7 +77,7 @@ export class MockMediaTransport implements MediaTransport {
     const r = this.room(roomId);
     r.unsubscribeMix?.();
     r.unsubscribeMix = source?.onFrame((frame) => {
-      for (const id of r.subscribers) r.peers.get(id)?.received.push(frame.minus(id) ?? frame.full);
+      for (const id of r.subscribers) r.peers.get(id)?.received.push((frame.minus(id) ?? frame.full).slice());
     });
   }
 
