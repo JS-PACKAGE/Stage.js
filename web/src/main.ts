@@ -1,4 +1,4 @@
-import { StageClient, decodeName } from '../../packages/client/src/index.ts';
+import { MAX_GAIN_DB, StageClient, decodeName } from '../../packages/client/src/index.ts';
 import type { ConnectionQuality, MicTest, ParticipantView, RoomStatePayload } from '../../packages/client/src/index.ts';
 import './styles.css';
 
@@ -310,6 +310,7 @@ function personRow(person: ParticipantView, controller: boolean, kind: 'speaker'
   const identity = element('div', 'identity');
   identity.append(element('strong', '', decodeName(person.name)), element('span', 'badge', roleLabels[person.role]));
   if (person.muted) identity.append(element('span', 'badge', person.forceMuted ? '強制靜音' : '已靜音'));
+  if (person.gainDb) identity.append(element('span', 'badge', `音量 ${person.gainDb > 0 ? '+' : ''}${person.gainDb} dB`));
   if (person.participantId === client.me?.participantId) identity.append(element('span', 'badge', '我'));
   row.append(identity);
   applyQuality(row);
@@ -318,7 +319,7 @@ function personRow(person: ParticipantView, controller: boolean, kind: 'speaker'
     const id = person.participantId;
     const actions = element('div', 'actions');
     if (kind === 'hand') actions.append(button('核准上台', () => client.approve(id), 'primary'), button('婉拒', () => client.reject(id)));
-    if (kind === 'speaker') actions.append(button(person.forceMuted ? '解除強制靜音' : '強制靜音', () => person.forceMuted ? client.forceUnmute(id) : client.forceMute(id)), button('移出舞台', () => client.removeFromStage(id)));
+    if (kind === 'speaker') actions.append(gainSlider(person), button(person.forceMuted ? '解除強制靜音' : '強制靜音', () => person.forceMuted ? client.forceUnmute(id) : client.forceMute(id)), button('移出舞台', () => client.removeFromStage(id)));
     actions.append(button('移交控制權', async () => {
       if (window.confirm(`確定將控制權移交給 ${decodeName(person.name)}？`)) await client.transferControl(id);
     }), button('踢出房間', async () => {
@@ -327,6 +328,18 @@ function personRow(person: ParticipantView, controller: boolean, kind: 'speaker'
     row.append(actions);
   }
   return row;
+}
+/** Controller's per-speaker level trim; sends on release (`change`) so dragging is one request. */
+function gainSlider(person: ParticipantView): HTMLLabelElement {
+  const label = element('label', 'gain', '音量');
+  const slider = element('input');
+  slider.type = 'range';
+  slider.min = String(-MAX_GAIN_DB); slider.max = String(MAX_GAIN_DB); slider.step = '1';
+  slider.value = String(person.gainDb);
+  slider.title = `${person.gainDb} dB`;
+  slider.onchange = () => { void run(() => client.setGain(person.participantId, Number(slider.value))); };
+  label.append(slider);
+  return label;
 }
 /** Adds, updates or removes the connection warning badge of one stage row. */
 function applyQuality(row: HTMLElement): void {

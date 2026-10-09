@@ -336,6 +336,38 @@ describe('moderation', () => {
     const open = await h.create('Host', { codeRequired: false });
     assert.equal(await h.req(open.s, { type: 'room:rotate-code' }), 'conflict');
   });
+
+  it('controller trims a speaker\'s level in the mix; it survives leaving and rejoining the stage', async () => {
+    const h = harness();
+    const host = await h.create();
+    const sp = await h.join(host.roomId, host.code, 'Sam');
+    const aud = await h.join(host.roomId, host.code, 'Ann');
+    await h.req(aud.s, { type: 'rtc:offer', payload: RECVONLY_OFFER });
+    const onStage = async () => {
+      await h.req(sp.s, { type: 'hand:raise' });
+      await h.req(host.s, { type: 'stage:approve', targetId: sp.id });
+      await h.req(sp.s, { type: 'rtc:offer', payload: SENDRECV_OFFER });
+    };
+    const heard = () => {
+      h.transport.emitUplink(host.roomId, sp.id, sine(FRAME, 0.5));
+      h.mixers.get(host.roomId)!.tick();
+      return energy(h.transport.rooms.get(host.roomId)!.peers.get(aud.id)!.received.at(-1)!);
+    };
+    await onStage();
+    const unity = heard();
+
+    assert.equal(await h.req(aud.s, { type: 'mic:gain', targetId: sp.id, gainDb: -6 }), 'forbidden');
+    assert.equal(await h.req(host.s, { type: 'mic:gain', targetId: sp.id, gainDb: -6 }), 'ok');
+    assert.equal(aud.s.last('room:state')!.speakers.find((p) => p.participantId === sp.id)!.gainDb, -6);
+    heard(); // the frame that glides to the new gain
+    const ratio = 10 ** (-6 / 10);
+    assert.ok(Math.abs(heard() / unity - ratio) < 0.01, 'audience hears the speaker 6 dB quieter');
+
+    await h.req(sp.s, { type: 'stage:leave' });
+    await onStage();
+    heard();
+    assert.ok(Math.abs(heard() / unity - ratio) < 0.01, 'trim still applies after coming back on stage');
+  });
 });
 
 describe('connection quality', () => {

@@ -20,6 +20,8 @@ export interface Participant {
   handRaised: boolean;
   selfMuted: boolean;
   forceMuted: boolean;
+  /** Controller-set level trim in dB; survives stage changes for as long as they stay. */
+  gainDb: number;
   connected: boolean;
 }
 
@@ -94,6 +96,7 @@ export class Room {
       handRaised: false,
       selfMuted: false,
       forceMuted: false,
+      gainDb: 0,
       connected: true,
     });
     this.speakers.add(c.participantId);
@@ -129,6 +132,7 @@ export class Room {
       handRaised: false,
       selfMuted: false,
       forceMuted: false,
+      gainDb: 0,
       connected: true,
     };
     this.participants.set(p.participantId, p);
@@ -160,6 +164,12 @@ export class Room {
     if (targetId === byId) throw new StageError('conflict', 'controller cannot kick itself');
     this.require(targetId);
     return this.remove(targetId);
+  }
+
+  /** Trim one participant's level in the mix; validation bounds the range. */
+  setGain(byId: string, targetId: string, gainDb: number): void {
+    this.requireController(byId);
+    this.require(targetId).gainDb = gainDb;
   }
 
   /** New code for future joins; whoever is already inside stays. */
@@ -347,6 +357,7 @@ export class Room {
       handRaised: p.handRaised,
       muted: p.selfMuted || p.forceMuted,
       forceMuted: p.forceMuted,
+      gainDb: p.gainDb,
       joinedAt: p.joinedAt,
     };
   }

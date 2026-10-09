@@ -20,6 +20,8 @@ interface Source {
   low: number;
   /** Ticks left in the speaking state. */ hold: number;
   filter: NoiseFilter | undefined; loudness: LoudnessNormalizer | undefined;
+  /** Manual trim (linear): `gain` is what the last frame ended on, `targetGain` what was asked for. */
+  gain: number; targetGain: number;
   /** This tick's audible frame (a queue slot), null when silent, muted or starved. */
   contribution: Float32Array | null;
   /** This tick's limited mix-minus; meaningful only while `contribution` is set. */
@@ -90,7 +92,7 @@ export class RoomMixer implements MixedPcmSource {
     this.sources.set(id, {
       muted: false, primed: false, frames: new FrameQueue(this.opts.maxBufferedFrames, this.frameSize), low: Infinity, hold: 0,
       filter: nf && new NoiseFilter(nf, sampleRate, frameMs), loudness: ln && new LoudnessNormalizer(ln, frameMs),
-      contribution: null, minus: new Float32Array(this.frameSize),
+      contribution: null, minus: new Float32Array(this.frameSize), gain: 1, targetGain: 1,
     });
   }
   removeSource(id: string): void {
@@ -107,6 +109,11 @@ export class RoomMixer implements MixedPcmSource {
     source.frames.clear(); source.primed = false; source.low = Infinity;
     if (source.hold > 0) { source.hold = 0; this.emitSpeaking(); }
   }
+  /** Manual level trim on top of loudness normalization; the change ramps over one frame. */
+  setGain(id: string, gainDb: number): void {
+    const source = this.sources.get(id);
+    if (source) source.targetGain = 10 ** (gainDb / 20);
+  }
   /** Exact frames only; copied on ingress so callers may reuse their input buffers. */
   push(id: string, samples: Float32Array): void {
     const source = this.sources.get(id);
@@ -116,6 +123,15 @@ export class RoomMixer implements MixedPcmSource {
     const slot = source.frames.push(samples);
     source.filter?.process(slot);
     source.loudness?.process(slot);
+    const { gain, targetGain } = source;
+    if (gain === targetGain) {
+      if (gain !== 1) for (let i = 0; i < slot.length; i++) slot[i] = slot[i]! * gain;
+      return;
+    }
+    // A step change would click; glide linearly across this frame instead.
+    const step = (targetGain - gain) / slot.length;
+    for (let i = 0; i < slot.length; i++) slot[i] = slot[i]! * (gain + step * (i + 1));
+    source.gain = targetGain;
   }
   tick(): MixFrame | null {
     if (!this.sources.size) return null;

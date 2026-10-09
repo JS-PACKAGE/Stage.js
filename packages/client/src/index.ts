@@ -1,5 +1,6 @@
 import type { ClientMessageMap, ClientMessageType, ErrorCode, IceCandidatePayload, ParticipantView, RoomStatePayload, ServerMessage, ServerMessageMap } from '../../../shared/protocol.ts';
 export type { ParticipantView, RoomStatePayload, Role, StageStatus, ErrorCode, IceServerConfig, ConnectionQuality } from '../../../shared/protocol.ts';
+export { MAX_GAIN_DB } from '../../../shared/protocol.ts';
 
 export function decodeName(value: string): string {
   const entities: Record<string, string> = { '&amp;': '&', '&lt;': '<', '&gt;': '>', '&quot;': '"', '&#39;': "'" };
@@ -293,6 +294,8 @@ export class StageClient extends EventTarget {
   removeFromStage(id: string): Promise<void> { return this.request('stage:remove', { targetId: id }); }
   /** Controller only: remove someone from the room; they get a `kicked` event and are disconnected. */
   kick(id: string): Promise<void> { return this.request('participant:kick', { targetId: id }); }
+  /** Controller only: trim someone's level in the mix by `gainDb` (±MAX_GAIN_DB; 0 resets). */
+  setGain(id: string, gainDb: number): Promise<void> { return this.request('mic:gain', { targetId: id, gainDb }); }
   /** Controller only: issue a new room code (code-protected rooms); people already inside stay. */
   rotateCode(): Promise<void> { return this.request('room:rotate-code', {}); }
   closeRoom(): Promise<void> { return this.request('room:close', {}); }

@@ -27,12 +27,18 @@
  *     clients cannot fill `limits.maxRooms`; a missing or wrong token is `unauthorized`.
  *   - `room:closed.reason`: `'shutdown'` when the server is stopping (restart or maintenance) rather
  *     than the controller closing the room; the socket then closes with 1001 (going away).
+ *   - C→S `mic:gain {targetId, gainDb}` (controller): manual level trim for one participant's
+ *     voice in the mix, on top of automatic loudness normalization; kept while they stay in the
+ *     room and shown to everyone as `ParticipantView.gainDb`.
  */
 
 export const PROTOCOL_VERSION = 1;
 
 /** Opaque id assigned by the server to the server-side WebRTC peer. */
 export const SERVER_PEER_ID = 'server';
+
+/** `mic:gain` accepts gains within ±MAX_GAIN_DB. */
+export const MAX_GAIN_DB = 20;
 
 export type Role = 'controller' | 'speaker' | 'audience';
 
@@ -49,6 +55,8 @@ export interface ParticipantView {
   muted: boolean;
   /** Muted by the controller; participant cannot self-unmute. */
   forceMuted: boolean;
+  /** Controller-set level trim applied to this participant's voice in the mix (0 = unchanged). */
+  gainDb: number;
   /** ms since epoch */
   joinedAt: number;
 }
@@ -171,6 +179,7 @@ export interface ClientMessageMap {
   'mic:force-unmute': { requestId: string; targetId: string };
   'stage:remove': { requestId: string; targetId: string };
   'participant:kick': { requestId: string; targetId: string };
+  'mic:gain': { requestId: string; targetId: string; gainDb: number };
   'room:rotate-code': { requestId: string };
   'rtc:offer': { requestId: string; payload: SessionDescriptionPayload };
   'rtc:answer': { requestId: string; payload: SessionDescriptionPayload };
@@ -200,6 +209,7 @@ export const CLIENT_MESSAGE_TYPES: readonly ClientMessageType[] = [
   'mic:force-unmute',
   'stage:remove',
   'participant:kick',
+  'mic:gain',
   'room:rotate-code',
   'rtc:offer',
   'rtc:answer',

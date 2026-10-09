@@ -1,5 +1,6 @@
 import {
   CLIENT_MESSAGE_TYPES,
+  MAX_GAIN_DB,
   type ClientMessage,
   type ClientMessageType,
   type IceCandidatePayload,
@@ -120,6 +121,12 @@ export function parseClientMessage(text: string, limits: ValidationLimits): Clie
     case 'stage:remove':
     case 'participant:kick':
       return { type: t, requestId: rid, targetId: id('targetId') };
+    case 'mic:gain': {
+      const gainDb = m.gainDb;
+      if (typeof gainDb !== 'number' || !Number.isFinite(gainDb) || Math.abs(gainDb) > MAX_GAIN_DB) bad('gainDb');
+      // One decimal is far below audibility; keeps the shared state free of float noise.
+      return { type: t, requestId: rid, targetId: id('targetId'), gainDb: Math.round((gainDb as number) * 10) / 10 };
+    }
     case 'rtc:offer':
     case 'rtc:answer':
       return { type: t, requestId: rid, payload: description(m.payload, t === 'rtc:offer' ? 'offer' : 'answer', limits, bad) };

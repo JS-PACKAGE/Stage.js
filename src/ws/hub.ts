@@ -31,6 +31,7 @@ export interface Mixer extends MixedPcmSource {
   addSource(participantId: string): void;
   removeSource(participantId: string): void;
   setMuted(participantId: string, muted: boolean): void;
+  setGain(participantId: string, gainDb: number): void;
   push(participantId: string, samples: Float32Array): void;
   stop(): void;
   /** Listener receives the full speaking set whenever it changes; returns an unsubscribe function. */
@@ -314,6 +315,11 @@ export class StageHub {
         this.evict(rt, msg.targetId);
         this.deps.log.info('participant kicked', { roomId: room.roomId, byId: pid, participantId: msg.targetId });
         break;
+      case 'mic:gain':
+        room.setGain(pid, msg.targetId, msg.gainDb);
+        if (rt.publishers.has(msg.targetId)) rt.mixer.setGain(msg.targetId, msg.gainDb);
+        events = [];
+        break;
       case 'room:rotate-code':
         room.rotateCode(pid, this.newCode());
         // Only the controller's snapshot carries the code.
@@ -398,6 +404,7 @@ export class StageHub {
     if (sends && !rt.publishers.has(pid)) {
       rt.publishers.add(pid);
       rt.mixer.addSource(pid);
+      rt.mixer.setGain(pid, p.gainDb);
       this.scheduleQuality(rt);
       transport.addPublisher(room.roomId, pid, (samples) => rt.mixer.push(pid, samples));
       this.setPublisherMuted(rt, pid, p.selfMuted || p.forceMuted);
