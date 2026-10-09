@@ -51,6 +51,7 @@ node scripts/bench-mixer.ts      # Gate 3：8/3 發言者 × 300 訂閱者混音
 - 核心（`src/model`、`src/ws`、`src/mixer`）**只透過 `MediaTransport` 介面**操作媒體；不得 import werift。換 WebRTC 實作＝新增 adapter，不動核心。
 - PCM 慣例：mono Float32、`audio.sampleRate`（48kHz）、`frameMs`（20ms＝960 samples）。Opus 編解碼與混音同取樣率，**不重取樣**；RTP 時鐘恆為 48kHz（RFC 7587）。
 - 觀眾共用一個 encoder（每房一次編碼分送全體）；只有台上者各有 mix-minus-self encoder。不得引入「每位觀眾一個 encoder」。
+- `@evan/opus` 的 N-API addon 以 process 全域暫存區編解碼，**多執行緒同時使用會互相污染封包**；codec worker 一律以 `OPUS_FORCE_WASM=1` 載入（各自獨立記憶體，約慢 20%），整個 process 最多只有一條執行緒用 native（目前只有測試／腳本的主執行緒）。`test/codecPool.test.ts` 守這條。
 - werift：伺服器 transceiver 必須在 `setRemoteDescription` **之前**設成政策方向，否則重協商時新 SSRC 不會被登錄（見 PLAN 十二-11）。
 
 ## 安全性（PLAN.md 第六節，逐條為硬規則）

@@ -39,7 +39,9 @@ export class CodecPool {
     }
   }
   private spawn(): Worker {
-    const worker = new Worker(workerUrl, { workerData: this.audio });
+    // The @evan/opus N-API addon encodes/decodes through process-global scratch buffers, so codecs on
+    // concurrent threads corrupt each other's packets. Each worker's WASM instance has its own memory.
+    const worker = new Worker(workerUrl, { workerData: this.audio, env: { ...process.env, OPUS_FORCE_WASM: '1' } });
     worker.unref();
     return worker;
   }
