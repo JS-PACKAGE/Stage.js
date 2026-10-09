@@ -4,6 +4,7 @@ import type { AppConfig } from '../config.ts';
 import { samplesPerFrame } from '../config.ts';
 import type { IceCandidatePayload, SessionDescriptionPayload } from '../../shared/protocol.ts';
 import type { TransportStats } from './MediaTransport.ts';
+import { installSrtpKeyObjects } from './srtpKeys.ts';
 
 export function opusCodec(): RTCRtpCodecParameters {
   return new RTCRtpCodecParameters({ mimeType: 'audio/opus', clockRate: 48000, channels: 2, payloadType: 111, parameters: 'minptime=10;useinbandfec=1;stereo=0;sprop-stereo=0;maxaveragebitrate=128000' });
@@ -59,6 +60,7 @@ export class WeriftPeerHost implements PeerHost {
   private readonly totals: HostCounters = { downlinkPackets: 0, downlinkDtxFrames: 0 };
   constructor(config: AppConfig, events: PeerHostEvents) {
     this.config = config; this.events = events;
+    installSrtpKeyObjects();
     this.timestampStep = samplesPerFrame(config.audio);
   }
   get peerCount(): number { return this.peers.size; }
