@@ -35,6 +35,12 @@ export interface AudioStats {
    * on the first call); for outbound, the share the server last reported losing.
    */
   lossPercent?: number;
+  /**
+   * Inbound only: how long received audio waited in the browser's jitter buffer before playing,
+   * averaged since the previous `getStats()` call (absent on the first call). Network jitter
+   * shows up here; together with `rtt` it is the listener's share of the end-to-end delay.
+   */
+  bufferMs?: number;
 }
 export interface StageStats { inbound: AudioStats | null; outbound: AudioStats | null }
 export interface AudioDevices { inputs: MediaDeviceInfo[]; outputs: MediaDeviceInfo[] }
@@ -132,7 +138,7 @@ export class StageClient extends EventTarget {
   private nextIceAt = 0;
   /** Latest scheduled send of any kind: the server processes frames in arrival order, so ICE must never overtake its offer. */
   private lastSendAt = 0;
-  private previousStats = new Map<string, { bytes: number; timestamp: number; received: number; lost: number }>();
+  private previousStats = new Map<string, { bytes: number; timestamp: number; received: number; lost: number; bufferDelay: number; emitted: number }>();
   private speakingIds: ReadonlySet<string> = new Set();
 
   constructor(options: StageClientOptions) {
@@ -579,7 +585,9 @@ export class StageClient extends EventTarget {
       const received = Number(entry.packetsReceived ?? 0), lost = Number(entry.packetsLost ?? 0);
       if (inbound && previous && received + lost > previous.received + previous.lost) summary.lossPercent = 100 * Math.max(0, lost - previous.lost) / (received + lost - previous.received - previous.lost);
       if (!inbound && typeof remote?.fractionLost === 'number') summary.lossPercent = 100 * remote.fractionLost;
-      this.previousStats.set(entry.id, { bytes, timestamp: entry.timestamp, received, lost });
+      const bufferDelay = Number(entry.jitterBufferDelay ?? 0), emitted = Number(entry.jitterBufferEmittedCount ?? 0);
+      if (inbound && previous && emitted > previous.emitted) summary.bufferMs = 1000 * (bufferDelay - previous.bufferDelay) / (emitted - previous.emitted);
+      this.previousStats.set(entry.id, { bytes, timestamp: entry.timestamp, received, lost, bufferDelay, emitted });
       if (inbound) result.inbound = summary; else result.outbound = summary;
     });
     return result;

@@ -391,6 +391,7 @@ setInterval(() => {
     if (outbound?.lossPercent !== undefined) parts.push(`發言掉包 ${outbound.lossPercent.toFixed(1)}%`);
     const rtt = inbound?.rtt ?? outbound?.rtt;
     if (rtt !== undefined) parts.push(`延遲 ${Math.round(rtt * 1000)} ms`);
+    if (inbound?.bufferMs !== undefined) parts.push(`緩衝 ${Math.round(inbound.bufferMs)} ms`);
     connectionLine.textContent = parts.length ? `你的連線：${parts.join(' · ')}` : '';
     connectionLine.classList.toggle('error', Math.max(inbound?.lossPercent ?? 0, outbound?.lossPercent ?? 0) >= POOR_LOSS_PERCENT);
   }, () => {});
