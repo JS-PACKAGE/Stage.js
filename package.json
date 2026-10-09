@@ -1,6 +1,6 @@
 {
   "name": "stage-js",
-  "version": "0.1.0",
+  "version": "1.0.0",
   "description": "Stage.js — multi-party audio stage: WebSocket control plane + WebRTC audio plane with server-side mixing",
   "license": "Apache-2.0",
   "private": true,
