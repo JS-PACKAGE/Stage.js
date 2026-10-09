@@ -5,20 +5,23 @@ import { samplesPerFrame } from '../config.ts';
 import type { Logger } from '../log.ts';
 import type { IceCandidatePayload, SessionDescriptionPayload } from '../../shared/protocol.ts';
 import type { AudioFrameHandler, MediaTransport, MediaTransportCallbacks, MixedPcmSource, MixFrame, NegotiationPolicy, TransportStats } from './MediaTransport.ts';
-import { OpusDecoder, OpusEncoder, PcmChunker } from './opus.ts';
+import { CodecPool, type EncodeItem } from './codecPool.ts';
+import { PcmChunker } from './opus.ts';
 
 export function opusCodec(): RTCRtpCodecParameters {
   return new RTCRtpCodecParameters({ mimeType: 'audio/opus', clockRate: 48000, channels: 2, payloadType: 111, parameters: 'minptime=10;useinbandfec=1;stereo=0;sprop-stereo=0;maxaveragebitrate=128000' });
 }
 interface Peer {
-  pc: RTCPeerConnection; track: MediaStreamTrack; allowUplink: boolean; decoder: OpusDecoder;
+  pc: RTCPeerConnection; track: MediaStreamTrack; allowUplink: boolean;
   chunker: PcmChunker; sequence: number; timestamp: number; started: number;
   outboundBytes: number; outboundPackets: number; inboundBytes: number; inboundPackets: number;
 }
 interface Room {
-  peers: Map<string, Peer>; publishers: Map<string, AudioFrameHandler>; subscribers: Set<string>;
-  fullEncoder: OpusEncoder; minusEncoders: Map<string, OpusEncoder>; detach?: () => void;
+  id: string; peers: Map<string, Peer>; publishers: Map<string, AudioFrameHandler>; subscribers: Set<string>;
+  detach?: () => void;
 }
+/** Encoder key of the audience mix; participant ids key their mix-minus encoders. */
+const FULL_MIX = '';
 
 export class WeriftMediaTransport implements MediaTransport {
   private readonly config: AppConfig;
@@ -26,11 +29,12 @@ export class WeriftMediaTransport implements MediaTransport {
   private readonly log: Logger;
   private readonly rooms = new Map<string, Room>();
   private readonly closing = new Set<Promise<void>>();
-  constructor(config: AppConfig, callbacks: MediaTransportCallbacks, log: Logger) { this.config = config; this.callbacks = callbacks; this.log = log; }
+  private readonly codecs: CodecPool;
+  constructor(config: AppConfig, callbacks: MediaTransportCallbacks, log: Logger) { this.config = config; this.callbacks = callbacks; this.log = log; this.codecs = new CodecPool(config.audio, log); }
   private room(id: string): Room {
     let room = this.rooms.get(id);
     if (!room) {
-      room = { peers: new Map(), publishers: new Map(), subscribers: new Set(), fullEncoder: new OpusEncoder(this.config.audio), minusEncoders: new Map() };
+      room = { id, peers: new Map(), publishers: new Map(), subscribers: new Set() };
       this.rooms.set(id, room);
     }
     return room;
@@ -40,7 +44,7 @@ export class WeriftMediaTransport implements MediaTransport {
     let peer = room.peers.get(id);
     if (!peer) {
       const pc = new RTCPeerConnection({ codecs: { audio: [opusCodec()], video: [] }, iceServers: this.config.rtc.serverIceServers, icePortRange: this.config.rtc.portRange.length === 2 ? this.config.rtc.portRange : undefined });
-      peer = { pc, track: new MediaStreamTrack({ kind: 'audio' }), allowUplink: policy.allowUplink, decoder: new OpusDecoder(this.config.audio.sampleRate), chunker: new PcmChunker(samplesPerFrame(this.config.audio)), sequence: randomInt(65536), timestamp: randomInt(0x100000000), started: performance.now(), outboundBytes: 0, outboundPackets: 0, inboundBytes: 0, inboundPackets: 0 };
+      peer = { pc, track: new MediaStreamTrack({ kind: 'audio' }), allowUplink: policy.allowUplink, chunker: new PcmChunker(samplesPerFrame(this.config.audio)), sequence: randomInt(65536), timestamp: randomInt(0x100000000), started: performance.now(), outboundBytes: 0, outboundPackets: 0, inboundBytes: 0, inboundPackets: 0 };
       room.peers.set(id, peer);
       const current = peer;
       pc.onIceCandidate.subscribe(candidate => this.callbacks.onLocalCandidate(roomId, id, candidate ? candidate.toJSON() : null));
@@ -48,14 +52,14 @@ export class WeriftMediaTransport implements MediaTransport {
       pc.onTrack.subscribe(track => {
         if (track.kind !== 'audio') return;
         track.onReceiveRtp.subscribe(packet => {
-          const handler = room.publishers.get(id);
-          if (!current.allowUplink || !handler) return;
-          try {
-            const decoded = current.decoder.decode(packet.payload);
-            current.inboundBytes += packet.payload.length;
-            current.inboundPackets++;
-            current.chunker.push(decoded, handler);
-          } catch { this.log.warn('Invalid uplink audio packet', { roomId, participantId: id }); }
+          if (!current.allowUplink || !room.publishers.has(id)) return;
+          current.inboundBytes += packet.payload.length;
+          current.inboundPackets++;
+          this.codecs.decode(roomId, id, packet.payload).then(decoded => {
+            // Re-check after the worker hop: the peer may have been demoted or closed meanwhile.
+            const handler = room.publishers.get(id);
+            if (current.allowUplink && handler && room.peers.get(id) === current) current.chunker.push(decoded, handler);
+          }, () => { this.log.warn('Invalid uplink audio packet', { roomId, participantId: id }); });
         });
       });
     }
@@ -87,7 +91,7 @@ export class WeriftMediaTransport implements MediaTransport {
     const room = this.rooms.get(roomId);
     if (!room) return;
     room.publishers.delete(id);
-    room.minusEncoders.delete(id);
+    this.codecs.release(roomId, 'encoder', id);
     const peer = room.peers.get(id);
     if (peer) peer.chunker = new PcmChunker(samplesPerFrame(this.config.audio));
   }
@@ -97,37 +101,45 @@ export class WeriftMediaTransport implements MediaTransport {
     if (source) room.detach = source.onFrame(frame => this.sendFrame(room, frame));
   }
   private sendFrame(room: Room, frame: MixFrame): void {
-    let full: Buffer | undefined;
-    const minus = new Map<string, Buffer>();
+    const targets: { id: string; peer: Peer; key: string }[] = [];
+    const frames: EncodeItem[] = [];
+    const index = new Map<string, number>();
     for (const id of room.subscribers) {
       const peer = room.peers.get(id);
       if (!peer || peer.pc.connectionState !== 'connected') continue;
-      const sender = peer.pc.getSenders().find(s => s.track === peer.track);
-      if (!sender?.codec) continue;
       const pcm = frame.minus(id);
-      let payload: Buffer;
-      if (pcm) {
-        let encoded = minus.get(id);
-        if (!encoded) {
-          let encoder = room.minusEncoders.get(id);
-          if (!encoder) { encoder = new OpusEncoder(this.config.audio); room.minusEncoders.set(id, encoder); }
-          encoded = encoder.encode(pcm); minus.set(id, encoded);
-        }
-        payload = encoded;
-      } else { full ??= room.fullEncoder.encode(frame.full); payload = full; }
-      const packet = new RtpPacket(new RtpHeader({ payloadType: sender.codec.payloadType, sequenceNumber: peer.sequence, timestamp: peer.timestamp, ssrc: sender.ssrc, marker: peer.outboundPackets === 0 }), payload);
-      peer.sequence = (peer.sequence + 1) & 0xffff;
-      peer.timestamp = (peer.timestamp + Math.round(48000 * this.config.audio.frameMs / 1000)) >>> 0;
-      peer.track.writeRtp(packet);
-      peer.outboundBytes += payload.length;
-      peer.outboundPackets++;
+      const key = pcm ? id : FULL_MIX;
+      if (!index.has(key)) { index.set(key, frames.length); frames.push({ key, pcm: pcm ?? frame.full }); }
+      targets.push({ id, peer, key });
     }
+    if (!targets.length) return;
+    // Shed frames instead of queueing unbounded latency when the room's worker falls behind.
+    if (this.codecs.backlog(room.id) >= this.config.audio.mixer.maxBufferedFrames) {
+      this.log.warn('Codec worker behind; dropping mixed frame', { roomId: room.id, seq: frame.seq });
+      return;
+    }
+    const timestampStep = samplesPerFrame(this.config.audio);
+    this.codecs.encode(room.id, frames).then(payloads => {
+      if (this.rooms.get(room.id) !== room) return;
+      for (const { id, peer, key } of targets) {
+        if (room.peers.get(id) !== peer || !room.subscribers.has(id)) continue;
+        const sender = peer.pc.getSenders().find(s => s.track === peer.track);
+        if (!sender?.codec) continue;
+        const payload = Buffer.from(payloads[index.get(key)!]!.buffer);
+        const packet = new RtpPacket(new RtpHeader({ payloadType: sender.codec.payloadType, sequenceNumber: peer.sequence, timestamp: peer.timestamp, ssrc: sender.ssrc, marker: peer.outboundPackets === 0 }), payload);
+        peer.sequence = (peer.sequence + 1) & 0xffff;
+        peer.timestamp = (peer.timestamp + timestampStep) >>> 0;
+        peer.track.writeRtp(packet);
+        peer.outboundBytes += payload.length;
+        peer.outboundPackets++;
+      }
+    }, (err: Error) => { this.log.warn('Mixed frame encode failed', { roomId: room.id, error: err.message }); });
   }
   subscribe(roomId: string, id: string): void { this.room(roomId).subscribers.add(id); }
   unsubscribe(roomId: string, id: string): void {
     const room = this.rooms.get(roomId);
     if (!room) return;
-    room.subscribers.delete(id); room.minusEncoders.delete(id);
+    room.subscribers.delete(id); this.codecs.release(roomId, 'encoder', id);
   }
   async getStats(roomId: string, id: string): Promise<TransportStats | null> {
     const peer = this.rooms.get(roomId)?.peers.get(id);
@@ -147,7 +159,7 @@ export class WeriftMediaTransport implements MediaTransport {
     const peer = room?.peers.get(id);
     if (!room || !peer) return;
     room.peers.delete(id); this.removePublisher(roomId, id); this.unsubscribe(roomId, id);
-    peer.track.stop();
+    peer.track.stop(); this.codecs.release(roomId, 'decoder', id);
     const closing = peer.pc.close().finally(() => { this.closing.delete(closing); });
     this.closing.add(closing);
   }
@@ -156,7 +168,7 @@ export class WeriftMediaTransport implements MediaTransport {
     if (!room) return;
     room.detach?.();
     for (const peerId of room.peers.keys()) this.closePeer(id, peerId);
-    this.rooms.delete(id);
+    this.codecs.closeRoom(id); this.rooms.delete(id);
   }
-  async close(): Promise<void> { for (const id of this.rooms.keys()) this.closeRoom(id); await Promise.all(this.closing); }
+  async close(): Promise<void> { for (const id of this.rooms.keys()) this.closeRoom(id); await Promise.all(this.closing); await this.codecs.close(); }
 }

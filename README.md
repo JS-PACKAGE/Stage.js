@@ -72,7 +72,7 @@ Windows 用 `.\stage.ps1 <command>`，指令相同；Windows 無法對背景 nod
 | `server` | `host`、`port`、`wsPath`；`allowInsecure`（明文 ws，僅限 loopback host）；`tls.certFile`／`keyFile`；`static` 靜態掛載（`/` → `web/dist`，`/lib/` → `packages/client/dist` 附 CORS） |
 | `limits` | `maxRooms`、`maxConnections`、`maxSpeakersPerRoom`（8）、`maxAudiencePerRoom`（300）、`maxFrameBytes`（64KB）、`controlPerSecond`（20）、`handRaiseIntervalMs`（10000）、`icePerSecond`（30）、`nameMaxLength`（32）、`codeMaxLength`（16）、`sdpMaxLength` |
 | `rooms` | `codeLength`（8）、`controllerGraceMs`（主控斷線寬限 60000）、`heartbeatIntervalMs` |
-| `audio` | `sampleRate`（48000；只接受 Opus 原生取樣率）、`frameMs`（20）、`opus.{vbr,minBitrate,maxBitrate,bitrate,complexity}`、`mixer.{maxBufferedFrames,limiterThreshold,latencyTargetMs}` |
+| `audio` | `sampleRate`（48000；只接受 Opus 原生取樣率）、`frameMs`（20）、`codecWorkers`（Opus 編解碼 worker 數，房間平均分配到各 worker）、`opus.{vbr,minBitrate,maxBitrate,bitrate,complexity}`、`mixer.{maxBufferedFrames,limiterThreshold,latencyTargetMs}` |
 | `rtc` | `iceServers`（下發給瀏覽器，可含 TURN 帳密）、`serverIceServers`（伺服器端 ICE）、`portRange`（`[]` 或 `[min, max]`） |
 | `log` | `level`：`debug`／`info`／`warn`／`error`（房間代碼、token、憑證、SDP 一律不入日誌） |
 

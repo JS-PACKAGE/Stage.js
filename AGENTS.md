@@ -38,7 +38,8 @@ node scripts/bench-mixer.ts      # Gate 3：8/3 發言者 × 300 訂閱者混音
 | `src/ws/validate.ts`、`rateLimit.ts` | 輸入白名單驗證、name 清洗轉義；token bucket 限流 |
 | `src/rtc/sdp.ts` | offer 方向解析（觀眾 recvonly 強制，與 WebRTC 實作無關） |
 | `src/transport/MediaTransport.ts` | 媒體層契約 |
-| `src/transport/WeriftMediaTransport.ts`、`opus.ts` | werift adapter、Opus 編解碼（opusscript） |
+| `src/transport/WeriftMediaTransport.ts`、`opus.ts` | werift adapter、Opus 編解碼（@evan/opus） |
+| `src/transport/codecPool.ts`、`codecWorker.ts` | Opus 編解碼 worker thread pool（`audio.codecWorkers`）；每房固定一個 worker，維持有狀態 codec 的順序 |
 | `src/transport/MockMediaTransport.ts` | 測試／無 WebRTC 開發用 |
 | `src/mixer/` | `RoomMixer`（N 路疊加、mix-minus-self、緩衝上限）、`limiter` |
 | `packages/client/` | 可嵌入的瀏覽器 ESM 函式庫 `StageClient` |

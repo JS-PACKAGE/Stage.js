@@ -38,6 +38,7 @@ export interface AppConfig {
   audio: {
     sampleRate: number;
     frameMs: number;
+    codecWorkers: number;
     opus: {
       vbr: boolean;
       minBitrate: number;
@@ -171,6 +172,7 @@ export function parseConfig(raw: unknown): AppConfig {
   const audio: AppConfig['audio'] = {
     sampleRate: int(a, 'sampleRate', 'audio', 8000, 48000),
     frameMs: int(a, 'frameMs', 'audio', 10, 60),
+    codecWorkers: int(a, 'codecWorkers', 'audio', 1, 64),
     opus: {
       vbr: bool(o, 'vbr', 'audio.opus'),
       minBitrate: int(o, 'minBitrate', 'audio.opus', 6000, 510000),
