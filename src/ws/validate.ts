@@ -21,6 +21,7 @@ export class ValidationError extends StageError {
 
 const ID_RE = /^[A-Za-z0-9_-]{1,64}$/;
 const CODE_RE = /^[A-Za-z0-9]+$/;
+const TOKEN_MAX_LENGTH = 256;
 /** Control, format (bidi overrides, zero-width) and line/paragraph separators are stripped from names. */
 const UNSAFE_CHARS_RE = /[\p{Cc}\p{Cf}\p{Zl}\p{Zp}]/gu;
 const HTML_ESCAPES: Record<string, string> = { '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' };
@@ -84,6 +85,10 @@ export function parseClientMessage(text: string, limits: ValidationLimits): Clie
       if (m.codeRequired !== undefined) {
         if (typeof m.codeRequired !== 'boolean') bad('codeRequired');
         out.codeRequired = m.codeRequired as boolean;
+      }
+      if (m.token !== undefined) {
+        if (typeof m.token !== 'string' || m.token.length > TOKEN_MAX_LENGTH) bad('token');
+        out.token = m.token as string;
       }
       return out;
     }

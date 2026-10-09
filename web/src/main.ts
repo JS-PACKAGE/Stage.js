@@ -174,6 +174,8 @@ function landing(): void {
   const codeRequired = element('input');
   codeRequired.type = 'checkbox'; codeRequired.checked = true;
   codeLabel.append(codeRequired, document.createTextNode('需要房間代碼才能加入'));
+  const createToken = field(create, '建立權杖（伺服器有設定時才需要）', 'token', '', false, 256);
+  createToken.type = 'password';
   const createSubmit = element('button', 'primary', '建立並進入');
   createSubmit.type = 'submit';
   create.append(codeLabel, createSubmit);
@@ -183,7 +185,7 @@ function landing(): void {
     busy = true;
     void run(async () => {
       micNotice = invitation = '';
-      createdRoom = await client.createRoom({ name: createName.value.trim(), roomName: roomName.value.trim() || undefined, codeRequired: codeRequired.checked });
+      createdRoom = await client.createRoom({ name: createName.value.trim(), roomName: roomName.value.trim() || undefined, codeRequired: codeRequired.checked, token: createToken.value || undefined });
       if (client.state) renderRoom(client.state);
     }, createSubmit).finally(() => { busy = false; });
   };

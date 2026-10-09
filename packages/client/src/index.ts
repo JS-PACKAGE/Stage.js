@@ -257,7 +257,7 @@ export class StageClient extends EventTarget {
     void promise.finally(() => { if (this.connecting === promise) this.connecting = null; }).catch(() => {});
     return promise;
   }
-  async createRoom(options: { name: string; roomName?: string; codeRequired?: boolean }): Promise<{ roomId: string; code?: string }> {
+  async createRoom(options: { name: string; roomName?: string; codeRequired?: boolean; token?: string }): Promise<{ roomId: string; code?: string }> {
     await this.connect();
     this.created = null;
     await this.request('room:create', options);

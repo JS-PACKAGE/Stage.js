@@ -40,6 +40,8 @@ export interface AppConfig {
     presenceBroadcastMs: number;
     /** How often publishers' connection quality goes to the controller and stage (0 = never). */
     qualityIntervalMs: number;
+    /** Non-empty: `room:create` must carry this token (empty = anyone may create rooms). */
+    createToken: string;
   };
   audio: {
     sampleRate: number;
@@ -214,6 +216,7 @@ export function parseConfig(raw: unknown): AppConfig {
     heartbeatIntervalMs: int(r, 'heartbeatIntervalMs', 'rooms', 1000),
     presenceBroadcastMs: int(r, 'presenceBroadcastMs', 'rooms', 0, 10000),
     qualityIntervalMs: int(r, 'qualityIntervalMs', 'rooms', 0, 60000),
+    createToken: str(r, 'createToken', 'rooms'),
   };
   if (rooms.codeLength > limits.codeMaxLength) throw new ConfigError('rooms.codeLength: exceeds limits.codeMaxLength');
 

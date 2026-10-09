@@ -262,6 +262,16 @@ describe('flow 4 — open and close rooms', () => {
     await h.join(host.roomId, undefined, 'Guest');
   });
 
+  it('requires rooms.createToken to create a room when one is configured', async () => {
+    const h = harness(testConfig((c) => { c.rooms.createToken = 'let-me-in'; }));
+    const s = new FakeSession();
+    assert.equal(await h.req(s, { type: 'room:create', name: 'H' }), 'unauthorized');
+    assert.equal(await h.req(s, { type: 'room:create', name: 'H', token: 'let-me-iN' }), 'unauthorized');
+    assert.equal(h.hub.roomCount, 0);
+    assert.equal(await h.req(s, { type: 'room:create', name: 'H', token: 'let-me-in' }), 'ok');
+    assert.equal(h.hub.roomCount, 1);
+  });
+
   it('two rooms do not interfere', async () => {
     const h = harness();
     const r1 = await h.create('H1');

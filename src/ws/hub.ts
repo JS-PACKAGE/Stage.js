@@ -181,6 +181,9 @@ export class StageHub {
   private createRoom(session: Session, msg: Extract<ClientMessage, { type: 'room:create' }>): void {
     const { config, transport, log } = this.deps;
     if (this.rooms.size >= config.limits.maxRooms) throw new StageError('room_full', 'max rooms');
+    if (config.rooms.createToken && !(msg.token !== undefined && safeEqual(msg.token, config.rooms.createToken))) {
+      throw new StageError('unauthorized', 'bad create token');
+    }
     let roomId: string;
     do roomId = randomBytes(6).toString('base64url');
     while (this.rooms.has(roomId));

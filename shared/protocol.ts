@@ -23,6 +23,8 @@
  *     participants already inside stay. The controller's next `room:state` carries the new code.
  *   - S→C `quality`   : connection quality of everyone publishing audio, every
  *     `rooms.qualityIntervalMs`, sent to the controller and on-stage participants.
+ *   - `room:create.token`: required when the server sets `rooms.createToken`, so anonymous
+ *     clients cannot fill `limits.maxRooms`; a missing or wrong token is `unauthorized`.
  */
 
 export const PROTOCOL_VERSION = 1;
@@ -152,7 +154,7 @@ export type ServerMessage = {
 // ───────────────────────────── Client → Server ─────────────────────────────
 
 export interface ClientMessageMap {
-  'room:create': { requestId: string; name?: string; roomName?: string; codeRequired?: boolean };
+  'room:create': { requestId: string; name?: string; roomName?: string; codeRequired?: boolean; token?: string };
   'room:close': { requestId: string };
   join: { requestId: string; roomId: string; code?: string; name: string; resumeToken?: string };
   'hand:raise': { requestId: string };
