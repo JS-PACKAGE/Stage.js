@@ -54,6 +54,7 @@ const stageHub = new StageHub({
       limiterThreshold: audio.mixer.limiterThreshold,
       speakingThreshold: audio.mixer.speakingThreshold,
       speakingHoldMs: audio.mixer.speakingHoldMs,
+      ...(audio.noiseFilter.enabled && { noiseFilter: audio.noiseFilter }),
     }, mixerCounters);
     mixer.start();
     return mixer;

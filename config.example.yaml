@@ -65,6 +65,12 @@ audio:
   jitter:
     playoutFrames: 3           # 每路上行先緩衝 3 幀（60ms）才開始播；underrun 後重新緩衝（可調整）
     reorderPackets: 2          # 亂序容忍：缺包後再收到幾包即判定遺失並補幀（可調整）
+  noiseFilter:                 # 伺服器端上行降噪（瀏覽器端另有 noiseSuppression）
+    enabled: true
+    highPassHz: 80             # 高通濾波：濾掉低頻嗡嗡聲、碰麥、桌面震動（可調整）
+    gateThreshold: 0.008       # 噪音門：單幀 RMS 低於此值視為背景噪音（約 −42 dBFS，須低於 speakingThreshold）
+    gateHoldMs: 200            # 最後一個有聲幀後維持開啟多久，避免切掉字尾（可調整）
+    gateFloor: 0.1             # 關門時的增益（0.1≈−20 dB；0＝完全靜音，較生硬）
 
 rtc:
   # 下發給瀏覽器的靜態 ICE servers（STUN）。TURN 請用下方 turn 區塊發短期憑證，勿把長期帳密放這裡。

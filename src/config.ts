@@ -69,6 +69,16 @@ export interface AppConfig {
       /** Out-of-order packets held behind a gap before the missing one is declared lost. */
       reorderPackets: number;
     };
+    /** Server-side uplink high-pass + noise gate (in addition to the browser's noiseSuppression). */
+    noiseFilter: {
+      enabled: boolean;
+      highPassHz: number;
+      /** Frame RMS (0..1) below which a source is treated as background noise. */
+      gateThreshold: number;
+      gateHoldMs: number;
+      /** Gain applied while gated (0 = silence). */
+      gateFloor: number;
+    };
   };
   rtc: {
     iceServers: IceServerConfig[];
@@ -197,6 +207,7 @@ export function parseConfig(raw: unknown): AppConfig {
   const o = obj(a.opus, 'audio.opus');
   const m = obj(a.mixer, 'audio.mixer');
   const j = obj(a.jitter, 'audio.jitter');
+  const nf = obj(a.noiseFilter, 'audio.noiseFilter');
   const audio: AppConfig['audio'] = {
     sampleRate: int(a, 'sampleRate', 'audio', 8000, 48000),
     frameMs: int(a, 'frameMs', 'audio', 10, 60),
@@ -222,8 +233,16 @@ export function parseConfig(raw: unknown): AppConfig {
       playoutFrames: int(j, 'playoutFrames', 'audio.jitter', 1, 100),
       reorderPackets: int(j, 'reorderPackets', 'audio.jitter', 0, 50),
     },
+    noiseFilter: {
+      enabled: bool(nf, 'enabled', 'audio.noiseFilter'),
+      highPassHz: num(nf, 'highPassHz', 'audio.noiseFilter', 10, 1000),
+      gateThreshold: num(nf, 'gateThreshold', 'audio.noiseFilter', 0, 0.5),
+      gateHoldMs: int(nf, 'gateHoldMs', 'audio.noiseFilter', 0, 10000),
+      gateFloor: num(nf, 'gateFloor', 'audio.noiseFilter', 0, 1),
+    },
   };
   if (audio.jitter.playoutFrames > audio.mixer.maxBufferedFrames) throw new ConfigError('audio.jitter.playoutFrames: exceeds audio.mixer.maxBufferedFrames');
+  if (audio.noiseFilter.enabled && audio.noiseFilter.gateThreshold >= audio.mixer.speakingThreshold) throw new ConfigError('audio.noiseFilter.gateThreshold: must be below audio.mixer.speakingThreshold');
   if (![10, 20, 40, 60].includes(audio.frameMs)) throw new ConfigError('audio.frameMs: must be 10, 20, 40 or 60 (Opus frame sizes)');
   // libopus only encodes/decodes at these rates; using one end-to-end avoids resampling.
   if (![8000, 12000, 16000, 24000, 48000].includes(audio.sampleRate)) {
