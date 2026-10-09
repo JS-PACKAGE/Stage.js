@@ -44,9 +44,11 @@ export function processSamples(): () => MetricSample[] {
   const delayMs = (ns: number) => Math.max(0, ns / 1e6 - resolutionMs);
   return () => {
     const mem = process.memoryUsage();
+    const cpu = process.cpuUsage();
     return [
       { name: 'stage_event_loop_delay_p99_ms', help: 'Main event-loop delay, 99th percentile since start.', type: 'gauge', value: delayMs(loop.percentile(99)) },
       { name: 'stage_event_loop_delay_max_ms', help: 'Main event-loop delay, maximum since start.', type: 'gauge', value: delayMs(loop.max) },
+      { name: 'stage_process_cpu_seconds_total', help: 'User + system CPU time of all threads.', type: 'counter', value: (cpu.user + cpu.system) / 1e6 },
       { name: 'stage_process_rss_bytes', help: 'Resident set size.', type: 'gauge', value: mem.rss },
       { name: 'stage_process_heap_used_bytes', help: 'V8 heap in use.', type: 'gauge', value: mem.heapUsed },
     ];
