@@ -60,6 +60,8 @@ interface RoomRuntime {
   readonly sessions: Map<string, Session>;
   readonly publishers: Set<string>;
   graceTimer: unknown;
+  /** Pending coalesced `room:state` broadcast (see `presenceChanged`). */
+  stateTimer: unknown;
   lastStatus: 'waiting' | 'live';
   closed: boolean;
 }
@@ -195,6 +197,7 @@ export class StageHub {
       sessions: new Map([[controller.participantId, session]]),
       publishers: new Set(),
       graceTimer: undefined,
+      stateTimer: undefined,
       lastStatus: room.status,
       closed: false,
     };
@@ -244,7 +247,8 @@ export class StageHub {
     this.deps.log.info('participant joined', { roomId: room.roomId, participantId, resumed: msg.resumeToken !== undefined });
 
     session.send({ type: 'rtc:config', iceServers: iceServersFor(this.deps.config.rtc, participantId, this.now()) });
-    this.broadcastState(rt);
+    session.send({ type: 'room:state', ...room.snapshot(participantId) });
+    this.presenceChanged(rt);
     session.send({ type: 'ok', requestId: msg.requestId });
   }
 
@@ -377,7 +381,9 @@ export class StageHub {
       this.broadcastState(rt);
       return;
     }
-    this.apply(rt, room.remove(pid));
+    const events = room.remove(pid);
+    if (events.length) this.apply(rt, events);
+    else this.presenceChanged(rt);
   }
 
   private expireController(rt: RoomRuntime, pid: string): void {
@@ -425,7 +431,23 @@ export class StageHub {
     for (const s of rt.sessions.values()) s.send(msg, encoded);
   }
 
+  /**
+   * An audience member came or went: everyone else's snapshot changes only in `audienceCount` (and
+   * the controller's audience list). A crowd joining or leaving at once would otherwise cost
+   * N broadcasts of N snapshots, so these are folded into one broadcast per `presenceBroadcastMs`.
+   */
+  private presenceChanged(rt: RoomRuntime): void {
+    const delay = this.deps.config.rooms.presenceBroadcastMs;
+    if (delay === 0) { this.broadcastState(rt); return; }
+    rt.stateTimer ??= this.setTimer(() => {
+      rt.stateTimer = undefined;
+      if (!rt.closed) this.broadcastState(rt);
+    }, delay);
+  }
+
   private broadcastState(rt: RoomRuntime): void {
+    // Supersedes a pending coalesced broadcast.
+    if (rt.stateTimer !== undefined) { this.clearTimer(rt.stateTimer); rt.stateTimer = undefined; }
     // Views shared by all recipients are built and serialized once; only `me` & co. are per session.
     const shared = rt.room.sharedSnapshot();
     const prefix = JSON.stringify({ type: 'room:state', ...shared }).slice(0, -1);
@@ -445,6 +467,7 @@ export class StageHub {
     rt.closed = true;
     const { roomId } = rt.room;
     if (rt.graceTimer !== undefined) this.clearTimer(rt.graceTimer);
+    if (rt.stateTimer !== undefined) this.clearTimer(rt.stateTimer);
     for (const s of rt.sessions.values()) {
       s.send({ type: 'room:closed', roomId });
       this.bindings.delete(s);

@@ -179,8 +179,9 @@ describe('flow 3 — control transfer', () => {
 
     const token = host.s.last('room:state')!.resumeToken!;
     await h.hub.detach(host.s);
-    assert.equal(h.timers.length, 1);
-    assert.equal(h.timers[0]!.ms, config.rooms.controllerGraceMs);
+    const grace = h.timers.filter((t) => !t.cleared);
+    assert.equal(grace.length, 1);
+    assert.equal(grace[0]!.ms, config.rooms.controllerGraceMs);
     assert.equal(a.s.last('room:state')!.controllerId, host.id, 'seat held during grace');
 
     // Resume within grace.
@@ -189,7 +190,7 @@ describe('flow 3 — control transfer', () => {
     assert.equal(await h.req(back, { type: 'join', roomId: host.roomId, code: host.code, name: 'Host', resumeToken: token }), 'ok');
     assert.equal(back.last('room:state')!.me.participantId, host.id);
     assert.equal(back.last('room:state')!.me.role, 'controller');
-    assert.equal(h.timers[0]!.cleared, true);
+    assert.equal(grace[0]!.cleared, true);
 
     // Disconnect again and let the grace expire: earliest on-stage speaker (B) wins over earlier audience (A).
     await h.hub.detach(back);
@@ -199,6 +200,33 @@ describe('flow 3 — control transfer', () => {
     assert.equal(st.controllerId, b.id);
     assert.ok(!st.speakers.some((p) => p.participantId === host.id), 'old controller removed');
     assert.deepEqual(a.s.last('control:transferred'), { type: 'control:transferred', fromId: host.id, toId: b.id });
+  });
+});
+
+describe('presence broadcasts', () => {
+  it('folds a burst of audience joins and leaves into one room:state per window; stage changes stay immediate', async () => {
+    const config = testConfig();
+    const h = harness(config);
+    const host = await h.create();
+    host.s.clear();
+    const crowd = [];
+    for (let i = 0; i < 3; i++) crowd.push(await h.join(host.roomId, host.code, `A${i}`));
+    for (const [i, p] of crowd.entries()) assert.equal(p.s.all('room:state')[0]!.audienceCount, i + 1, 'each joiner gets its own snapshot at once');
+    assert.equal(host.s.all('room:state').length, 0, 'held back');
+    const pending = h.timers.filter((t) => !t.cleared);
+    assert.equal(pending.length, 1);
+    assert.equal(pending[0]!.ms, config.rooms.presenceBroadcastMs);
+    pending[0]!.fn();
+    assert.equal(host.s.all('room:state').length, 1);
+    assert.equal(host.s.last('room:state')!.audience!.length, 3);
+
+    host.s.clear();
+    await h.hub.detach(crowd[0]!.s);
+    assert.equal(host.s.all('room:state').length, 0, 'a plain audience leave is coalesced too');
+    // A raised hand changes the queue everyone sees: broadcast now, superseding the pending one.
+    await h.req(crowd[1]!.s, { type: 'hand:raise' });
+    assert.equal(host.s.last('room:state')!.audienceCount, 2);
+    assert.ok(h.timers.every((t) => t.cleared || t === pending[0]), 'pending presence broadcast superseded');
   });
 });
 

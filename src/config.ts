@@ -36,6 +36,8 @@ export interface AppConfig {
     codeLength: number;
     controllerGraceMs: number;
     heartbeatIntervalMs: number;
+    /** Audience joins/leaves are folded into one `room:state` broadcast per this many ms (0 = immediate). */
+    presenceBroadcastMs: number;
   };
   audio: {
     sampleRate: number;
@@ -200,6 +202,7 @@ export function parseConfig(raw: unknown): AppConfig {
     codeLength: int(r, 'codeLength', 'rooms', 4),
     controllerGraceMs: int(r, 'controllerGraceMs', 'rooms', 0),
     heartbeatIntervalMs: int(r, 'heartbeatIntervalMs', 'rooms', 1000),
+    presenceBroadcastMs: int(r, 'presenceBroadcastMs', 'rooms', 0, 10000),
   };
   if (rooms.codeLength > limits.codeMaxLength) throw new ConfigError('rooms.codeLength: exceeds limits.codeMaxLength');
 
