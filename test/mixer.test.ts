@@ -74,6 +74,19 @@ test('jitter buffer sheds standing latency one frame per window until it sits at
   assert.equal(counters.droppedFrames, 2);
   assert.equal(counters.underruns, 0);
 });
+test('muting discards queued audio and does not count as an underrun', () => {
+  const counters = new MixerCounters();
+  const mixer = new RoomMixer({ ...options, maxBufferedFrames: 10, playoutFrames: 1 }, counters); mixer.addSource('a');
+  mixer.push('a', samples(0.1)); mixer.push('a', samples(0.2));
+  assert.ok(Math.abs(mixer.tick()!.full[0]! - 0.1) < 1e-6);
+  mixer.setMuted('a', true);
+  mixer.push('a', samples(0.3));
+  for (let i = 0; i < 5; i++) assert.equal(mixer.tick()!.full[0], 0);
+  mixer.setMuted('a', false);
+  mixer.push('a', samples(0.4));
+  assert.ok(Math.abs(mixer.tick()!.full[0]! - 0.4) < 1e-6, 'neither 0.2 (queued before mute) nor 0.3 (pushed while muted) plays');
+  assert.equal(counters.underruns, 0);
+});
 test('speaking set follows voice activity with a release hold, mute and removal', () => {
   const mixer = new RoomMixer(options); mixer.addSource('a'); mixer.addSource('b');
   const events: string[][] = [];

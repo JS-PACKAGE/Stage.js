@@ -78,6 +78,11 @@ export interface MediaTransport {
   /** Start delivering decoded uplink PCM of `participantId`. Uplink packets are dropped unless registered (fail-closed). */
   addPublisher(roomId: string, participantId: string, onAudioFrame: AudioFrameHandler): void;
   removePublisher(roomId: string, participantId: string): void;
+  /**
+   * The mixer drops a muted publisher's audio anyway, so its uplink is not decoded meanwhile;
+   * decoding restarts from a fresh codec state on unmute. No-op for unknown publishers.
+   */
+  setPublisherMuted(roomId: string, participantId: string, muted: boolean): void;
 
   /** Attach (or detach with null) the room mixer output; encoded to Opus and sent to subscribers. */
   setMixedStream(roomId: string, source: MixedPcmSource | null): void;

@@ -351,8 +351,8 @@ export class StageHub {
     if (sends && !rt.publishers.has(pid)) {
       rt.publishers.add(pid);
       rt.mixer.addSource(pid);
-      rt.mixer.setMuted(pid, p.selfMuted || p.forceMuted);
       transport.addPublisher(room.roomId, pid, (samples) => rt.mixer.push(pid, samples));
+      this.setPublisherMuted(rt, pid, p.selfMuted || p.forceMuted);
       this.broadcast(rt, { type: 'stage:joined', participantId: pid, role: p.role });
     } else if (!sends) {
       this.unpublish(rt, pid);
@@ -402,7 +402,7 @@ export class StageHub {
     for (const ev of events) {
       if (ev.type === 'stage:left') this.unpublish(rt, ev.participantId);
       if (ev.type === 'mic:muted' || ev.type === 'mic:unmuted') {
-        if (rt.publishers.has(ev.participantId)) rt.mixer.setMuted(ev.participantId, ev.type === 'mic:muted');
+        if (rt.publishers.has(ev.participantId)) this.setPublisherMuted(rt, ev.participantId, ev.type === 'mic:muted');
       }
       this.broadcast(rt, ev);
     }
@@ -413,6 +413,11 @@ export class StageHub {
     if (!rt.publishers.delete(pid)) return;
     this.deps.transport.removePublisher(rt.room.roomId, pid);
     rt.mixer.removeSource(pid);
+  }
+
+  private setPublisherMuted(rt: RoomRuntime, pid: string, muted: boolean): void {
+    rt.mixer.setMuted(pid, muted);
+    this.deps.transport.setPublisherMuted(rt.room.roomId, pid, muted);
   }
 
   private broadcast(rt: RoomRuntime, msg: ServerMessage): void {

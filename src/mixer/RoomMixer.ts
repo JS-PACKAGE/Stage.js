@@ -45,6 +45,7 @@ class FrameQueue {
     this.length--;
     return slot;
   }
+  clear(): void { this.head = 0; this.length = 0; }
 }
 /**
  * Once primed, a queue only grows (packet bursts, a source that started mid-burst), and nothing
@@ -90,16 +91,19 @@ export class RoomMixer implements MixedPcmSource {
     this.sources.delete(id);
     if (source && source.hold > 0) this.emitSpeaking();
   }
+  /** A muted source takes no frames, so it neither plays stale audio on unmute nor counts as underrun. */
   setMuted(id: string, muted: boolean): void {
     const source = this.sources.get(id);
-    if (!source) return;
+    if (!source || source.muted === muted) return;
     source.muted = muted;
-    if (muted && source.hold > 0) { source.hold = 0; this.emitSpeaking(); }
+    if (!muted) return;
+    source.frames.clear(); source.primed = false; source.low = Infinity;
+    if (source.hold > 0) { source.hold = 0; this.emitSpeaking(); }
   }
   /** Exact frames only; copied on ingress so callers may reuse their input buffers. */
   push(id: string, samples: Float32Array): void {
     const source = this.sources.get(id);
-    if (!source) return;
+    if (!source || source.muted) return;
     if (samples.length !== this.frameSize) throw new RangeError('PCM frame has incorrect length');
     if (source.frames.full) this.counters.droppedFrames++;
     const slot = source.frames.push(samples);

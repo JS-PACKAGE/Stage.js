@@ -19,6 +19,7 @@ interface MockPeer {
 interface MockRoom {
   peers: Map<string, MockPeer>;
   publishers: Map<string, AudioFrameHandler>;
+  muted: Set<string>;
   subscribers: Set<string>;
   unsubscribeMix?: () => void;
 }
@@ -39,7 +40,7 @@ export class MockMediaTransport implements MediaTransport {
   private room(roomId: string): MockRoom {
     let r = this.rooms.get(roomId);
     if (!r) {
-      r = { peers: new Map(), publishers: new Map(), subscribers: new Set() };
+      r = { peers: new Map(), publishers: new Map(), muted: new Set(), subscribers: new Set() };
       this.rooms.set(roomId, r);
     }
     return r;
@@ -70,7 +71,15 @@ export class MockMediaTransport implements MediaTransport {
   }
 
   removePublisher(roomId: string, participantId: string): void {
-    this.rooms.get(roomId)?.publishers.delete(participantId);
+    const r = this.rooms.get(roomId);
+    r?.publishers.delete(participantId);
+    r?.muted.delete(participantId);
+  }
+
+  setPublisherMuted(roomId: string, participantId: string, muted: boolean): void {
+    const r = this.rooms.get(roomId);
+    if (!r?.publishers.has(participantId)) return;
+    if (muted) r.muted.add(participantId); else r.muted.delete(participantId);
   }
 
   setMixedStream(roomId: string, source: MixedPcmSource | null): void {
@@ -100,6 +109,7 @@ export class MockMediaTransport implements MediaTransport {
     if (!r) return;
     r.peers.delete(participantId);
     r.publishers.delete(participantId);
+    r.muted.delete(participantId);
     r.subscribers.delete(participantId);
   }
 
@@ -112,11 +122,11 @@ export class MockMediaTransport implements MediaTransport {
     for (const id of [...this.rooms.keys()]) this.closeRoom(id);
   }
 
-  /** Test helper: simulate decoded uplink audio. Dropped unless the participant is a registered, uplink-allowed publisher. */
+  /** Test helper: simulate decoded uplink audio. Dropped unless the participant is a registered, uplink-allowed, unmuted publisher. */
   emitUplink(roomId: string, participantId: string, samples: Float32Array): boolean {
     const r = this.rooms.get(roomId);
     const handler = r?.publishers.get(participantId);
-    if (!handler || !r?.peers.get(participantId)?.allowUplink) return false;
+    if (!handler || !r?.peers.get(participantId)?.allowUplink || r.muted.has(participantId)) return false;
     handler(samples);
     return true;
   }

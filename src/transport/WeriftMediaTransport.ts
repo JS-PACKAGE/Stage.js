@@ -10,8 +10,12 @@ import { MediaShard } from './mediaShards.ts';
 import { PcmChunker } from './opus.ts';
 import { WeriftPeerHost, type PeerHost, type PeerHostEvents } from './peerHost.ts';
 
-/** Main-thread uplink state of one publisher: RTP reorder before the stateful decoder, PCM re-chunking after. */
-interface Uplink { reorder: RtpReorderBuffer; chunker: PcmChunker }
+/**
+ * Main-thread uplink state of one publisher: RTP reorder before the stateful decoder, PCM
+ * re-chunking after. While `muted`, packets still pass the reorder buffer (it keeps tracking
+ * sequence numbers) but are not decoded.
+ */
+interface Uplink { reorder: RtpReorderBuffer; chunker: PcmChunker; muted: boolean }
 interface Room {
   id: string;
   /** Which host owns each participant's PeerConnection. */
@@ -74,7 +78,7 @@ export class WeriftMediaTransport implements MediaTransport {
     return room;
   }
   private uplink(): Uplink {
-    return { reorder: new RtpReorderBuffer(this.config.audio.jitter.reorderPackets), chunker: new PcmChunker(samplesPerFrame(this.config.audio)) };
+    return { reorder: new RtpReorderBuffer(this.config.audio.jitter.reorderPackets), chunker: new PcmChunker(samplesPerFrame(this.config.audio)), muted: false };
   }
   private onUplink(roomId: string, id: string, seq: number, payload: Uint8Array): void {
     const room = this.rooms.get(roomId);
@@ -83,7 +87,7 @@ export class WeriftMediaTransport implements MediaTransport {
     if (!room || !uplink || !room.publishers.has(id)) return;
     this.counters.uplinkPackets++;
     const packets = uplink.reorder.push(seq, payload);
-    if (!packets.length) return;
+    if (!packets.length || uplink.muted) return;
     // `null` = declared lost: the worker rebuilds it from the next packet's FEC, in stream order.
     for (const packet of packets) if (packet === null) this.counters.uplinkConcealed++;
     this.codecs.decode(roomId, id, packets).then(decoded => {
@@ -127,6 +131,16 @@ export class WeriftMediaTransport implements MediaTransport {
     room.uplinks.delete(id);
     room.peers.get(id)?.setUplink(roomId, id, false);
     this.codecs.release(roomId, 'encoder', id);
+  }
+  setPublisherMuted(roomId: string, id: string, muted: boolean): void {
+    const room = this.rooms.get(roomId);
+    const uplink = room?.uplinks.get(id);
+    if (!room || !uplink || uplink.muted === muted) return;
+    uplink.muted = muted;
+    if (!muted) return;
+    // A decoder resumed after a gap would extrapolate from stale state; the next packet gets a fresh one.
+    this.codecs.release(roomId, 'decoder', id);
+    room.uplinks.set(id, { ...this.uplink(), reorder: uplink.reorder, muted: true });
   }
   setMixedStream(roomId: string, source: MixedPcmSource | null): void {
     const room = this.room(roomId);
