@@ -1,6 +1,6 @@
 import { parentPort, workerData } from 'node:worker_threads';
 import type { AppConfig } from '../config.ts';
-import type { CodecReply, CodecRequest } from './codecPool.ts';
+import type { CodecBatch, CodecBatchReply, CodecJob, CodecResult } from './codecPool.ts';
 import { OpusDecoder, OpusEncoder } from './opus.ts';
 
 /** Owns the stateful Opus codecs of the rooms assigned to this thread; requests are served in FIFO order. */
@@ -25,40 +25,50 @@ function decodeRun(decoder: OpusDecoder, packets: (Uint8Array | null)[]): Float3
   return pcm;
 }
 
-port.on('message', (msg: CodecRequest) => {
-  switch (msg.op) {
-    case 'encode': {
-      const room = codecs(encoders, msg.room);
-      const payloads = msg.frames.map(({ key, pcm }) => {
-        let encoder = room.get(key);
-        if (!encoder) { encoder = new OpusEncoder(audio); room.set(key, encoder); }
-        return encoder.encode(pcm);
-      });
-      port.postMessage({ op: 'done', job: msg.job, payloads } satisfies CodecReply, payloads.map(p => p.buffer));
-      return;
-    }
-    case 'decode': {
-      const room = codecs(decoders, msg.room);
-      let decoder = room.get(msg.key);
-      if (!decoder) { decoder = new OpusDecoder(audio.sampleRate); room.set(msg.key, decoder); }
+/** Runs one job; jobs that answer push their result (and the buffers it transfers). */
+function run(job: CodecJob, results: CodecResult[], transfer: ArrayBuffer[]): void {
+  switch (job.op) {
+    case 'encode': case 'decode': {
       try {
-        const pcm = decodeRun(decoder, msg.packets);
-        port.postMessage({ op: 'done', job: msg.job, pcm } satisfies CodecReply, [pcm.buffer]);
-      } catch (err) { port.postMessage({ op: 'failed', job: msg.job, message: err instanceof Error ? err.message : String(err) } satisfies CodecReply); }
+        if (job.op === 'encode') {
+          const room = codecs(encoders, job.room);
+          const payloads = job.frames.map(({ key, pcm }) => {
+            let encoder = room.get(key);
+            if (!encoder) { encoder = new OpusEncoder(audio); room.set(key, encoder); }
+            return encoder.encode(pcm);
+          });
+          results.push({ op: 'done', job: job.job, payloads });
+          for (const p of payloads) transfer.push(p.buffer);
+        } else {
+          const room = codecs(decoders, job.room);
+          let decoder = room.get(job.key);
+          if (!decoder) { decoder = new OpusDecoder(audio.sampleRate); room.set(job.key, decoder); }
+          const pcm = decodeRun(decoder, job.packets);
+          results.push({ op: 'done', job: job.job, pcm });
+          transfer.push(pcm.buffer);
+        }
+      } catch (err) { results.push({ op: 'failed', job: job.job, message: err instanceof Error ? err.message : String(err) }); }
       return;
     }
     case 'release': {
-      const room = (msg.kind === 'encoder' ? encoders : decoders).get(msg.room);
-      room?.get(msg.key)?.free();
-      room?.delete(msg.key);
+      const room = (job.kind === 'encoder' ? encoders : decoders).get(job.room);
+      room?.get(job.key)?.free();
+      room?.delete(job.key);
       return;
     }
     case 'closeRoom': {
       for (const all of [encoders, decoders]) {
-        for (const codec of all.get(msg.room)?.values() ?? []) codec.free();
-        all.delete(msg.room);
+        for (const codec of all.get(job.room)?.values() ?? []) codec.free();
+        all.delete(job.room);
       }
       return;
     }
   }
+}
+
+port.on('message', ({ jobs }: CodecBatch) => {
+  const results: CodecResult[] = [];
+  const transfer: ArrayBuffer[] = [];
+  for (const job of jobs) run(job, results, transfer);
+  if (results.length) port.postMessage({ results } satisfies CodecBatchReply, transfer);
 });
