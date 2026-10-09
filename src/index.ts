@@ -4,6 +4,7 @@ import { fileURLToPath } from 'node:url';
 import { ConfigError, loadConfig } from './config.ts';
 import { createLogger } from './log.ts';
 import { MixerCounters, processSamples, renderPrometheus } from './metrics.ts';
+import { MixerClock } from './mixer/MixerClock.ts';
 import { RoomMixer } from './mixer/RoomMixer.ts';
 import { WeriftMediaTransport } from './transport/WeriftMediaTransport.ts';
 import { StageHub } from './ws/hub.ts';
@@ -40,6 +41,7 @@ const transport = new WeriftMediaTransport(
 );
 const audio = config.audio;
 const mixerCounters = new MixerCounters();
+const mixerClock = new MixerClock(audio.frameMs, mixerCounters);
 const stageHub = new StageHub({
   config,
   transport,
@@ -56,7 +58,7 @@ const stageHub = new StageHub({
       speakingHoldMs: audio.mixer.speakingHoldMs,
       ...(audio.noiseFilter.enabled && { noiseFilter: audio.noiseFilter }),
     }, mixerCounters);
-    mixer.start();
+    mixer.start(mixerClock);
     return mixer;
   },
 });

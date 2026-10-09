@@ -3,6 +3,8 @@ import { setTimeout as sleep } from 'node:timers/promises';
 import { MediaStreamTrack, RTCPeerConnection, RtpHeader, RtpPacket } from 'werift';
 import { loadConfig, samplesPerFrame } from '../src/config.ts';
 import { silentLogger } from '../src/log.ts';
+import { MixerCounters } from '../src/metrics.ts';
+import { MixerClock } from '../src/mixer/MixerClock.ts';
 import { RoomMixer } from '../src/mixer/RoomMixer.ts';
 import { opusCodec } from '../src/transport/peerHost.ts';
 import { WeriftMediaTransport } from '../src/transport/WeriftMediaTransport.ts';
@@ -52,7 +54,7 @@ try {
     }
     seq++; timestamp += Math.round(48000 * config.audio.frameMs / 1000);
   }, config.audio.frameMs);
-  mixer.start(); await sleep(1800);
+  mixer.start(new MixerClock(config.audio.frameMs, new MixerCounters())); await sleep(1800);
   assert.ok(received > 20, `received only ${received} packets`);
   assert.ok(audienceEnergy > 0.001, `audience audio silent (${audienceEnergy})`);
   assert.ok(selfEnergy < 0.00001, `mix-minus leaked own audio (${selfEnergy})`);

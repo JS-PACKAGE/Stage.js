@@ -1,6 +1,7 @@
 import type { MixedPcmSource, MixFrame, MixFrameListener } from '../transport/MediaTransport.ts';
 import { MixerCounters } from '../metrics.ts';
 import { limitInPlace } from './limiter.ts';
+import type { MixerClock } from './MixerClock.ts';
 import { NoiseFilter, type NoiseFilterOptions } from './noiseFilter.ts';
 
 /**
@@ -65,8 +66,7 @@ export class RoomMixer implements MixedPcmSource {
   private readonly raw: Float32Array;
   private readonly full: Float32Array;
   private seq = 0;
-  private timer?: NodeJS.Timeout;
-  private running = false;
+  private detachClock: (() => void) | undefined;
   private readonly counters: MixerCounters;
   /** `counters` may be shared by every room's mixer to keep process-wide totals. */
   constructor(opts: RoomMixerOptions, counters = new MixerCounters()) {
@@ -163,25 +163,11 @@ export class RoomMixer implements MixedPcmSource {
     for (const listener of this.listeners) listener(frame);
     return frame;
   }
-  start(): void {
-    if (this.running) return;
-    this.running = true;
-    let deadline = performance.now() + this.opts.frameMs;
-    const run = () => {
-      if (!this.running) return;
-      const lag = performance.now() - deadline;
-      if (lag > this.counters.maxTickLagMs) this.counters.maxTickLagMs = lag;
-      if (lag > this.opts.frameMs) this.counters.lateTicks++;
-      this.tick();
-      deadline += this.opts.frameMs;
-      // Skip missed wall-clock slots instead of bursting old audio after a stall.
-      const now = performance.now();
-      if (deadline < now) deadline += Math.ceil((now - deadline) / this.opts.frameMs) * this.opts.frameMs;
-      this.timer = setTimeout(run, Math.max(0, deadline - now));
-    };
-    this.timer = setTimeout(run, this.opts.frameMs);
+  /** Ticks on `clock` until `stop`. */
+  start(clock: MixerClock): void {
+    this.detachClock ??= clock.add(this);
   }
-  stop(): void { this.running = false; clearTimeout(this.timer); this.timer = undefined; }
+  stop(): void { this.detachClock?.(); this.detachClock = undefined; }
   onFrame(listener: MixFrameListener): () => void { this.listeners.add(listener); return () => { this.listeners.delete(listener); }; }
   /** Called with the full speaking set whenever it changes. */
   onSpeaking(listener: SpeakingListener): () => void { this.speakingListeners.add(listener); return () => { this.speakingListeners.delete(listener); }; }
