@@ -17,6 +17,16 @@ import { WeriftPeerHost, type PeerHost, type PeerHostEvents } from './peerHost.t
  * accepted packets and packets the reorder buffer declared lost.
  */
 interface Uplink { reorder: RtpReorderBuffer; chunker: PcmChunker; muted: boolean; packets: number; lost: number }
+/**
+ * Who gets which encode, in subscriber order. Rebuilt only when that routing changes; otherwise
+ * every tick reuses it, so steady-state fan-out allocates nothing. Never mutated once built:
+ * encodes still in flight may hold it.
+ */
+interface FanoutPlan {
+  ids: string[]; hosts: PeerHost[]; frameOf: number[];
+  frames: EncodeItem[];
+  targets: [PeerHost, [id: string, frame: number][]][];
+}
 interface Room {
   id: string;
   /** Which host owns each participant's PeerConnection. */
@@ -30,6 +40,9 @@ interface Room {
   lowTier: Set<string>;
   /** Consecutive frames each subscribed source contributed nothing (muted or starved). */
   silentFrames: Map<string, number>;
+  plan: FanoutPlan | undefined;
+  /** This tick's routing, reused across ticks; compared against `plan`. */
+  scratch: { ids: string[]; hosts: PeerHost[]; keys: string[]; pcms: Float32Array[] };
   detach?: () => void;
 }
 /** Encoder keys of the audience mixes; participant ids (base64url) key their mix-minus encoders. */
@@ -89,7 +102,10 @@ export class WeriftMediaTransport implements MediaTransport {
   private room(id: string): Room {
     let room = this.rooms.get(id);
     if (!room) {
-      room = { id, peers: new Map(), publishers: new Map(), subscribers: new Set(), uplinks: new Map(), downlinkLoss: new Map(), lowTier: new Set(), silentFrames: new Map() };
+      room = {
+        id, peers: new Map(), publishers: new Map(), subscribers: new Set(), uplinks: new Map(), downlinkLoss: new Map(), lowTier: new Set(), silentFrames: new Map(),
+        plan: undefined, scratch: { ids: [], hosts: [], keys: [], pcms: [] },
+      };
       this.rooms.set(id, room);
     }
     return room;
@@ -178,32 +194,52 @@ export class WeriftMediaTransport implements MediaTransport {
     if (source) room.detach = source.onFrame(frame => this.sendFrame(room, frame));
   }
   private sendFrame(room: Room, frame: MixFrame): void {
-    const frames: EncodeItem[] = [];
-    const index = new Map<string, number>();
-    const targets = new Map<PeerHost, [string, number][]>();
-    for (const id of room.subscribers) {
-      const host = room.peers.get(id);
-      if (!host) continue;
-      const minus = frame.minus(id);
-      const own = minus && this.ownMix(room, id, minus, frame.full);
-      const key = own ? id : !minus && room.lowTier.has(id) ? FULL_MIX_LOW : FULL_MIX;
-      let at = index.get(key);
-      if (at === undefined) { at = frames.length; index.set(key, at); frames.push({ key, pcm: own ?? frame.full, low: key === FULL_MIX_LOW }); }
-      let list = targets.get(host);
-      if (!list) { list = []; targets.set(host, list); }
-      list.push([id, at]);
-    }
-    if (!frames.length) return;
+    const plan = this.fanout(room, frame);
+    if (!plan.frames.length) return;
     // Shed frames instead of queueing unbounded latency when the room's worker falls behind.
     if (this.codecs.backlog(room.id) >= this.config.audio.mixer.maxBufferedFrames) {
       this.counters.shedFrames++;
       this.log.warn('Codec worker behind; dropping mixed frame', { roomId: room.id, seq: frame.seq });
       return;
     }
-    this.codecs.encode(room.id, frames).then(payloads => {
+    this.codecs.encode(room.id, plan.frames).then(payloads => {
       if (this.rooms.get(room.id) !== room) return;
-      for (const [host, list] of targets) host.send({ roomId: room.id, payloads, targets: list });
+      for (const [host, list] of plan.targets) host.send({ roomId: room.id, payloads, targets: list });
     }, (err: Error) => { this.counters.encodeFailures++; this.log.warn('Mixed frame encode failed', { roomId: room.id, error: err.message }); });
+  }
+  /** This tick's routing; the cached plan when nothing about it changed. */
+  private fanout(room: Room, frame: MixFrame): FanoutPlan {
+    const { ids, hosts, keys, pcms } = room.scratch;
+    let n = 0;
+    for (const id of room.subscribers) {
+      const host = room.peers.get(id);
+      if (!host) continue;
+      const minus = frame.minus(id);
+      const own = minus && this.ownMix(room, id, minus, frame.full);
+      ids[n] = id; hosts[n] = host; pcms[n] = own ?? frame.full;
+      keys[n++] = own ? id : !minus && room.lowTier.has(id) ? FULL_MIX_LOW : FULL_MIX;
+    }
+    ids.length = hosts.length = keys.length = pcms.length = n;
+    const cached = room.plan;
+    if (cached && cached.ids.length === n && ids.every((id, i) => {
+      const item = cached.frames[cached.frameOf[i]!]!;
+      return cached.ids[i] === id && cached.hosts[i] === hosts[i] && item.key === keys[i] && item.pcm === pcms[i];
+    })) return cached;
+    const frames: EncodeItem[] = [];
+    const frameOf: number[] = [];
+    const index = new Map<string, number>();
+    const targets = new Map<PeerHost, [string, number][]>();
+    for (let i = 0; i < n; i++) {
+      const key = keys[i]!;
+      let at = index.get(key);
+      if (at === undefined) { at = frames.length; index.set(key, at); frames.push({ key, pcm: pcms[i]!, low: key === FULL_MIX_LOW }); }
+      frameOf.push(at);
+      let list = targets.get(hosts[i]!);
+      if (!list) { list = []; targets.set(hosts[i]!, list); }
+      list.push([ids[i]!, at]);
+    }
+    room.plan = { ids: ids.slice(), hosts: hosts.slice(), frameOf, frames, targets: [...targets] };
+    return room.plan;
   }
   /**
    * A source's own mix-minus, or undefined once it has been silent for SHARE_SILENT_AFTER_MS: its
