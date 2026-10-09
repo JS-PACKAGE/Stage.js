@@ -32,27 +32,29 @@ export class RoomMixer implements MixedPcmSource {
   tick(): MixFrame | null {
     if (!this.sources.size) return null;
     const raw = new Float32Array(this.frameSize);
-    const own = new Map<string, Float32Array | undefined>();
+    // Per source: own contribution (null when silent/muted), replaced by its limited mix-minus once computed.
+    const minus = new Map<string, Float32Array | null>();
+    const own = new Set<string>();
     for (const [id, source] of this.sources) {
       const samples = source.frames.shift();
       const contribution = source.muted ? undefined : samples;
-      own.set(id, contribution);
-      if (contribution) for (let i = 0; i < raw.length; i++) raw[i] = raw[i]! + contribution[i]!;
+      minus.set(id, contribution ?? null);
+      if (contribution) { own.add(id); for (let i = 0; i < raw.length; i++) raw[i] = raw[i]! + contribution[i]!; }
     }
-    const cache = new Map<string, Float32Array>();
     const threshold = this.opts.limiterThreshold;
+    const full = limitInPlace(raw.slice(), threshold);
     const frame: MixFrame = {
-      seq: this.seq++, full: limitInPlace(raw.slice(), threshold),
+      seq: this.seq++, full,
       minus(id) {
-        if (!own.has(id)) return undefined;
-        let result = cache.get(id);
-        if (!result) {
-          result = raw.slice();
-          const samples = own.get(id);
-          if (samples) for (let i = 0; i < result.length; i++) result[i] = result[i]! - samples[i]!;
-          limitInPlace(result, threshold);
-          cache.set(id, result);
-        }
+        const entry = minus.get(id);
+        if (entry === undefined) return undefined;
+        // A silent source's mix-minus equals the full mix.
+        if (entry === null) return full;
+        if (!own.has(id)) return entry;
+        const result = new Float32Array(raw.length);
+        for (let i = 0; i < result.length; i++) result[i] = raw[i]! - entry[i]!;
+        limitInPlace(result, threshold);
+        minus.set(id, result); own.delete(id);
         return result;
       },
     };
