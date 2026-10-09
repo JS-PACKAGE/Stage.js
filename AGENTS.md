@@ -22,6 +22,7 @@ npm start                      # node dist/src/index.js（讀 ./config.yaml 或 
 npm run dev                    # node --watch src/index.ts
 node scripts/werift-loopback.ts  # 真 werift 端到端：上行解碼、混音、不含自己、觀眾上行封鎖、觀眾→發言者重協商
 node scripts/bench-mixer.ts      # Gate 3：8/3 發言者 × 300 訂閱者混音延遲
+node scripts/load-test.ts        # 全端壓測：自起伺服器，K 發言者＋N werift 觀眾（多 process），回報掉包、beep 端到端延遲、/metrics
 ```
 
 改動媒體層（`src/transport/`、`src/mixer/`）後必跑 `werift-loopback`；改動控制面後必跑 `npm test`。

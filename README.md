@@ -150,6 +150,7 @@ npm run typecheck                # 伺服器＋client＋web
 npm test                         # 控制面流程 1–4、不變量、ws 邊界（驗證、限流、尺寸、轉義、靜態檔）、混音器
 node scripts/werift-loopback.ts  # 真 werift 端到端（含觀眾→發言者重協商）
 node scripts/bench-mixer.ts      # 混音壓測：3／8 發言者 × 300 訂閱者
+node scripts/load-test.ts        # 全端壓測：3 發言者＋298 werift 觀眾（--speakers/--audience/--seconds/--procs/--url）
 npm audit
 ```
 
