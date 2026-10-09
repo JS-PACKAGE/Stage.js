@@ -18,7 +18,8 @@ import { SerialQueue } from './serialQueue.ts';
 /** A client connection as seen by the hub (ws in production, fakes in tests). */
 export interface Session {
   readonly id: string;
-  send(msg: ServerMessage): void;
+  /** `encoded` is `msg` already serialized; broadcasts pass it so N recipients cost one JSON.stringify. */
+  send(msg: ServerMessage, encoded?: string): void;
   close(code: number, reason: string): void;
 }
 
@@ -398,11 +399,18 @@ export class StageHub {
   }
 
   private broadcast(rt: RoomRuntime, msg: ServerMessage): void {
-    for (const s of rt.sessions.values()) s.send(msg);
+    const encoded = JSON.stringify(msg);
+    for (const s of rt.sessions.values()) s.send(msg, encoded);
   }
 
   private broadcastState(rt: RoomRuntime): void {
-    for (const [pid, s] of rt.sessions) s.send({ type: 'room:state', ...rt.room.snapshot(pid) });
+    // Views shared by all recipients are built and serialized once; only `me` & co. are per session.
+    const shared = rt.room.sharedSnapshot();
+    const prefix = JSON.stringify({ type: 'room:state', ...shared }).slice(0, -1);
+    for (const [pid, s] of rt.sessions) {
+      const personal = rt.room.personalSnapshot(pid);
+      s.send({ type: 'room:state', ...shared, ...personal }, `${prefix},${JSON.stringify(personal).slice(1)}`);
+    }
     const status = rt.room.status;
     if (status !== rt.lastStatus) {
       rt.lastStatus = status;

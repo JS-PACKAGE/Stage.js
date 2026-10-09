@@ -1,3 +1,4 @@
+import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { parse } from 'yaml';
 import type { ClientMessage, ServerMessage, ServerMessageMap, ServerMessageType } from '../shared/protocol.ts';
@@ -21,7 +22,9 @@ export class FakeSession implements Session {
   readonly id = `s${FakeSession.seq++}`;
   readonly inbox: ServerMessage[] = [];
   closed?: { code: number; reason: string };
-  send(msg: ServerMessage): void {
+  send(msg: ServerMessage, encoded?: string): void {
+    // Pre-serialized broadcasts are what the ws client actually receives; they must match `msg`.
+    if (encoded !== undefined) assert.deepEqual(JSON.parse(encoded), JSON.parse(JSON.stringify(msg)));
     this.inbox.push(msg);
   }
   close(code: number, reason: string): void {

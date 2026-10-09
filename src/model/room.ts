@@ -336,11 +336,10 @@ export class Room {
     };
   }
 
-  /** Personalised snapshot; controller-only and recipient-only fields are added here, nowhere else. */
-  snapshot(forId: string): RoomStatePayload {
-    const me = this.require(forId);
+  /** Snapshot fields identical for every recipient; compute once per broadcast. */
+  sharedSnapshot(): Omit<RoomStatePayload, 'me' | 'resumeToken' | 'audience' | 'code'> {
     const pick = (ids: Iterable<string>) => [...ids].map((id) => this.view(this.require(id)));
-    const state: RoomStatePayload = {
+    return {
       roomId: this.roomId,
       name: this.name,
       controllerId: this.controllerId,
@@ -350,14 +349,22 @@ export class Room {
       codeRequired: this.codeRequired,
       limits: { maxSpeakers: this.limits.maxSpeakers, maxAudience: this.limits.maxAudience },
       status: this.status,
-      me: this.view(me),
-      resumeToken: me.resumeToken,
     };
+  }
+
+  /** Recipient-specific fields; controller-only and recipient-only fields are added here, nowhere else. */
+  personalSnapshot(forId: string): Pick<RoomStatePayload, 'me' | 'resumeToken' | 'audience' | 'code'> {
+    const me = this.require(forId);
+    const state: Pick<RoomStatePayload, 'me' | 'resumeToken' | 'audience' | 'code'> = { me: this.view(me), resumeToken: me.resumeToken };
     if (me.role === 'controller') {
       state.audience = [...this.participants.values()].filter((p) => p.role === 'audience').map((p) => this.view(p));
       if (this.codeRequired) state.code = this.code;
     }
     return state;
+  }
+
+  snapshot(forId: string): RoomStatePayload {
+    return { ...this.sharedSnapshot(), ...this.personalSnapshot(forId) };
   }
 
   // ─────────────────────────────── internals ───────────────────────────────

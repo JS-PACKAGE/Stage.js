@@ -39,8 +39,8 @@ class WsSession implements Session {
   constructor(ws: WebSocket) {
     this.ws = ws;
   }
-  send(msg: ServerMessage): void {
-    if (this.ws.readyState === this.ws.OPEN) this.ws.send(JSON.stringify(msg));
+  send(msg: ServerMessage, encoded?: string): void {
+    if (this.ws.readyState === this.ws.OPEN) this.ws.send(encoded ?? JSON.stringify(msg));
   }
   close(code: number, reason: string): void {
     this.ws.close(code, reason);
