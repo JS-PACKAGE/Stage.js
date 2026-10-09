@@ -173,7 +173,7 @@ export class StageHub {
   }
 
   async shutdown(): Promise<void> {
-    for (const rt of [...this.rooms.values()]) await rt.queue.run(() => this.closeRoom(rt, 'shutdown'));
+    for (const rt of [...this.rooms.values()]) await rt.queue.run(() => this.closeRoom(rt, 'shutdown', true));
   }
 
   // ─────────────────────────────── commands ───────────────────────────────
@@ -553,15 +553,16 @@ export class StageHub {
     }
   }
 
-  private closeRoom(rt: RoomRuntime, reason: string): void {
+  private closeRoom(rt: RoomRuntime, reason: string, shutdown = false): void {
     if (rt.closed) return;
     rt.closed = true;
     const { roomId } = rt.room;
     if (rt.graceTimer !== undefined) this.clearTimer(rt.graceTimer);
     if (rt.stateTimer !== undefined) this.clearTimer(rt.stateTimer);
     if (rt.qualityTimer !== undefined) this.clearTimer(rt.qualityTimer);
+    const closed: ServerMessage = shutdown ? { type: 'room:closed', roomId, reason: 'shutdown' } : { type: 'room:closed', roomId };
     for (const s of rt.sessions.values()) {
-      s.send({ type: 'room:closed', roomId });
+      s.send(closed);
       this.bindings.delete(s);
     }
     rt.sessions.clear();

@@ -171,6 +171,31 @@ describe('ws server boundary', () => {
   });
 });
 
+describe('graceful shutdown', () => {
+  it('tells everyone the room closed for shutdown and closes with 1001', async () => {
+    const config = testConfig((c) => { c.server.port = 0; });
+    const hub = new StageHub({
+      config,
+      transport: new MockMediaTransport({ onLocalCandidate: () => {} }),
+      log: silentLogger,
+      serverVersion: 'test',
+      createMixer: () => new RoomMixer({ sampleRate: 48000, frameMs: 20, maxBufferedFrames: 10, playoutFrames: 1, limiterThreshold: 0.9, speakingThreshold: 0.02, speakingHoldMs: 40 }),
+    });
+    const server = createStageServer({ config, hub, log: silentLogger, baseDir: tmpdir() });
+    const { port } = await server.listen();
+    const host = new Client(`ws://127.0.0.1:${port}${config.server.wsPath}`);
+    await host.open();
+    host.send({ type: 'room:create', requestId: 'c1', name: 'H' });
+    const created = await host.waitFor((m) => m.type === 'room:created');
+    await host.reply('c1');
+
+    await server.close();
+    assert.equal(await host.closed, 1001);
+    const closed = host.inbox.find((m) => m.type === 'room:closed');
+    assert.deepEqual(closed, { type: 'room:closed', roomId: created.type === 'room:created' ? created.roomId : '', reason: 'shutdown' });
+  });
+});
+
 describe('metrics exposure policy', () => {
   it('refuses unauthenticated metrics on a non-loopback host', () => {
     const raw = parse(readFileSync(new URL('../config.example.yaml', import.meta.url), 'utf8'));

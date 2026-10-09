@@ -350,7 +350,7 @@ function updateCooldown(): void {
 client.on('state', ({ detail }) => renderRoom(detail));
 client.on('status', ({ detail }) => { status.textContent = statusLabels[detail]; updateCooldown(); });
 client.on('created', ({ detail }) => { createdRoom = detail; });
-client.on('closed', () => { createdRoom = null; micNotice = ''; invitation = '房間已關閉，歡迎建立或加入其他舞台。'; audioBlocked = false; landing(); });
+client.on('closed', ({ detail }) => { createdRoom = null; micNotice = ''; invitation = detail.reason === 'shutdown' ? '伺服器維護或重新啟動，房間已關閉；請稍後重新建立或加入。' : '房間已關閉，歡迎建立或加入其他舞台。'; audioBlocked = false; landing(); });
 client.on('kicked', () => { createdRoom = null; micNotice = ''; invitation = '你已被主控移出房間。'; audioBlocked = false; landing(); });
 client.on('invite', ({ detail }) => {
   if (detail.participantId === client.me?.participantId) { invitation = '主控已邀請你上台，請允許麥克風權限。'; renderNotices(); }

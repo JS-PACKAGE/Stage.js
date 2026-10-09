@@ -400,7 +400,8 @@ export class StageClient extends EventTarget {
         this.reconnectTimer = undefined;
         this.destroyMedia();
         this.setStatus('disconnected');
-        this.emit(message.type === 'kicked' ? 'kicked' : 'closed', { roomId: message.roomId });
+        if (message.type === 'kicked') this.emit('kicked', { roomId: message.roomId });
+        else this.emit('closed', message.reason ? { roomId: message.roomId, reason: message.reason } : { roomId: message.roomId });
         break;
       case 'status': this.setStatus(message.state); break;
       case 'hand:raise': case 'hand:withdraw': this.emit('hand', { participantId: message.participantId, raised: message.type === 'hand:raise' }); break;

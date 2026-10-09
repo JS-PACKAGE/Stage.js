@@ -25,6 +25,8 @@
  *     `rooms.qualityIntervalMs`, sent to the controller and on-stage participants.
  *   - `room:create.token`: required when the server sets `rooms.createToken`, so anonymous
  *     clients cannot fill `limits.maxRooms`; a missing or wrong token is `unauthorized`.
+ *   - `room:closed.reason`: `'shutdown'` when the server is stopping (restart or maintenance) rather
+ *     than the controller closing the room; the socket then closes with 1001 (going away).
  */
 
 export const PROTOCOL_VERSION = 1;
@@ -122,7 +124,7 @@ export interface ServerMessageMap {
   hello: { protocol: number; serverVersion: string };
   'room:state': RoomStatePayload;
   'room:created': { roomId: string; code?: string };
-  'room:closed': { roomId: string };
+  'room:closed': { roomId: string; reason?: 'shutdown' };
   'role:update': { participantId: string; role: Role; reason?: string };
   'hand:raise': { participantId: string };
   'hand:withdraw': { participantId: string };

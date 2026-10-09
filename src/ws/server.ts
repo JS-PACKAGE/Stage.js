@@ -3,6 +3,7 @@ import { createServer as createHttpServer, type IncomingMessage, type Server, ty
 import { createServer as createHttpsServer } from 'node:https';
 import type { AddressInfo } from 'node:net';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
+import { once } from 'node:events';
 import { WebSocketServer, type WebSocket } from 'ws';
 import type { ServerMessage } from '../../shared/protocol.ts';
 import type { AppConfig } from '../config.ts';
@@ -31,6 +32,10 @@ export interface StageServerDeps {
 
 /** Policy-violation close code (RFC 6455) used for rate-limit disconnects. */
 const CLOSE_POLICY = 1008;
+/** Going-away close code (RFC 6455) sent on shutdown, so clients can tell it from a dropped link. */
+const CLOSE_GOING_AWAY = 1001;
+/** How long shutdown waits for clients to finish the close handshake before cutting them off. */
+const SHUTDOWN_DRAIN_MS = 1000;
 
 class WsSession implements Session {
   readonly id = randomBytes(6).toString('base64url');
@@ -168,7 +173,12 @@ export function createStageServer(deps: StageServerDeps): StageServer {
     close: async () => {
       clearInterval(heartbeat);
       await hub.shutdown();
-      for (const s of sessions) s.ws.terminate();
+      // A graceful close flushes the `room:closed` frames queued above; terminate() could drop them.
+      const drained = Promise.all([...sessions].map((s) => once(s.ws, 'close')));
+      for (const s of sessions) s.close(CLOSE_GOING_AWAY, 'server shutdown');
+      const deadline = setTimeout(() => { for (const s of sessions) s.ws.terminate(); }, SHUTDOWN_DRAIN_MS);
+      await drained;
+      clearTimeout(deadline);
       const wssClosed = Promise.withResolvers<void>();
       wss.close(() => wssClosed.resolve());
       await wssClosed.promise;
