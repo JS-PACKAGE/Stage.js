@@ -154,7 +154,7 @@ export class StageElement extends HTMLElement {
     const state = client?.state ?? null;
     if (state && me) {
       const where = me.onStage ? (me.muted ? '台上（已靜音）' : '台上') : me.handRaised ? '已舉手' : '收聽中';
-      this.status.textContent = `${decodeName(state.name)} · ${STATUS_LABELS[client!.status]} · ${where}`;
+      this.status.textContent = `${decodeName(state.name)} · ${STATUS_LABELS[client!.status]} · ${where}${state.recording ? ' · ● 錄音中' : ''}`;
     } else if (!client) {
       this.status.textContent = this.getAttribute('room') && this.getAttribute('name') ? '' : '請設定 room 與 name 屬性。';
     }

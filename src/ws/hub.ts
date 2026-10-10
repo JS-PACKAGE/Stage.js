@@ -16,6 +16,7 @@ import { ERROR_MESSAGES, InvariantViolation, StageError } from '../model/errors.
 import { Room, type RoomEvent } from '../model/room.ts';
 import { offerSendsAudio, summarizeOffer } from '../rtc/sdp.ts';
 import { iceServersFor } from '../rtc/turn.ts';
+import type { Recording } from '../recording/recorder.ts';
 import type { MediaTransport, MixedPcmSource } from '../transport/MediaTransport.ts';
 import { SerialQueue } from './serialQueue.ts';
 
@@ -46,6 +47,8 @@ export interface HubDeps {
   serverVersion: string;
   /** Returns a running mixer for a new room. */
   createMixer(roomId: string): Mixer;
+  /** Opens a recording file for a room; absent = recording unavailable whatever the config says. */
+  startRecording?(roomId: string): Recording;
   now?: () => number;
   setTimer?: (fn: () => void, ms: number) => unknown;
   clearTimer?: (handle: unknown) => void;
@@ -74,6 +77,8 @@ interface RoomRuntime {
   /** Last `rooms.chatHistory` messages, oldest first. */
   readonly chat: ChatMessage[];
   nextMessageId: number;
+  /** Open recording file and its `recording.maxDurationMinutes` stop timer. */
+  recording: { file: Recording; timer: unknown } | undefined;
   lastStatus: 'waiting' | 'live';
   closed: boolean;
 }
@@ -100,6 +105,8 @@ export class StageHub {
   private readonly now: () => number;
   private readonly setTimer: (fn: () => void, ms: number) => unknown;
   private readonly clearTimer: (handle: unknown) => void;
+  /** Recording files still flushing; shutdown waits for them. */
+  private readonly closingRecordings = new Set<Promise<void>>();
 
   constructor(deps: HubDeps) {
     this.deps = deps;
@@ -200,6 +207,7 @@ export class StageHub {
 
   async shutdown(): Promise<void> {
     for (const rt of [...this.rooms.values()]) await rt.queue.run(() => this.closeRoom(rt, 'shutdown', true));
+    await Promise.all(this.closingRecordings);
   }
 
   // ─────────────────────────────── commands ───────────────────────────────
@@ -222,6 +230,7 @@ export class StageHub {
       code,
       codeRequired,
       limits: { maxSpeakers: config.limits.maxSpeakersPerRoom, maxAudience: config.limits.maxAudiencePerRoom },
+      recordingAvailable: config.recording.enabled && this.deps.startRecording !== undefined,
       now: this.now(),
       controller,
     });
@@ -239,6 +248,7 @@ export class StageHub {
       uplinkCounts: new Map(),
       chat: [],
       nextMessageId: 1,
+      recording: undefined,
       lastStatus: room.status,
       closed: false,
     };
@@ -376,6 +386,22 @@ export class StageHub {
         this.broadcast(rt, { type: 'reaction', participantId: pid, name: room.get(pid)!.name, emoji: msg.emoji });
         session.send({ type: 'ok', requestId: msg.requestId });
         return;
+      case 'recording:start': {
+        room.setRecording(pid, true);
+        try {
+          this.startRecording(rt);
+        } catch (err) {
+          room.recording = false;
+          throw err;
+        }
+        events = [];
+        break;
+      }
+      case 'recording:stop':
+        room.setRecording(pid, false);
+        this.stopRecording(rt);
+        events = [];
+        break;
       case 'rtc:answer':
         // The server never sends offers, so an answer is always out of protocol.
         throw new StageError('bad_request', 'unexpected rtc:answer');
@@ -385,6 +411,40 @@ export class StageHub {
     this.apply(rt, events);
     session.send({ type: 'ok', requestId: msg.requestId });
     if (msg.type === 'control:transfer') this.deps.log.info('control transferred', { roomId: room.roomId, fromId: pid, toId: msg.targetId });
+  }
+
+  private startRecording(rt: RoomRuntime): void {
+    const { roomId } = rt.room;
+    let file: Recording;
+    try {
+      file = this.deps.startRecording!(roomId);
+    } catch (err) {
+      this.deps.log.error('recording failed to start', { roomId, error: err instanceof Error ? err.message : String(err) });
+      throw new StageError('internal', 'recording open failed');
+    }
+    const timer = this.setTimer(() => {
+      void rt.queue.run(() => {
+        if (rt.closed || rt.recording?.file !== file) return;
+        rt.room.recording = false;
+        this.stopRecording(rt);
+        this.deps.log.info('recording reached its time limit', { roomId });
+        this.broadcastState(rt);
+      }).catch((err) => this.internalFailure(rt, err));
+    }, this.deps.config.recording.maxDurationMinutes * 60_000);
+    rt.recording = { file, timer };
+    this.deps.transport.setRecording(roomId, file.sink);
+    this.deps.log.info('recording started', { roomId, file: file.file });
+  }
+
+  private stopRecording(rt: RoomRuntime): void {
+    const recording = rt.recording;
+    if (!recording) return;
+    rt.recording = undefined;
+    this.clearTimer(recording.timer);
+    this.deps.transport.setRecording(rt.room.roomId, null);
+    const closing = recording.file.stop().finally(() => this.closingRecordings.delete(closing));
+    this.closingRecordings.add(closing);
+    this.deps.log.info('recording stopped', { roomId: rt.room.roomId, file: recording.file.file });
   }
 
   private newCode(): string {
@@ -671,6 +731,7 @@ export class StageHub {
     }
     rt.sessions.clear();
     rt.publishers.clear();
+    this.stopRecording(rt);
     this.deps.transport.setMixedStream(roomId, null);
     this.deps.transport.closeRoom(roomId);
     rt.mixer.stop();

@@ -401,6 +401,9 @@ export class StageClient extends EventTarget {
   setGain(id: string, gainDb: number): Promise<void> { return this.request('mic:gain', { targetId: id, gainDb }); }
   /** Controller only: issue a new room code (code-protected rooms); people already inside stay. */
   rotateCode(): Promise<void> { return this.request('room:rotate-code', {}); }
+  /** Controller only, when `state.recordingAvailable`: record the room's mix on the server (`state.recording` turns true for everyone). */
+  startRecording(): Promise<void> { return this.request('recording:start', {}); }
+  stopRecording(): Promise<void> { return this.request('recording:stop', {}); }
   closeRoom(): Promise<void> { return this.request('room:close', {}); }
   async disconnect(): Promise<void> {
     this.intentional = true;

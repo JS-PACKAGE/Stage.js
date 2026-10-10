@@ -121,6 +121,14 @@ export interface AppConfig {
     /** Ephemeral TURN (coturn use-auth-secret); empty `urls` disables it. */
     turn: { urls: string[]; secret: string; ttlSeconds: number };
   };
+  recording: {
+    /** Whether controllers may record their room's mix. */
+    enabled: boolean;
+    /** Where `.opus` files go; relative paths resolve against the repo root. */
+    dir: string;
+    /** A recording stops on its own after this long, bounding disk use. */
+    maxDurationMinutes: number;
+  };
   log: { level: 'debug' | 'info' | 'warn' | 'error' };
 }
 
@@ -352,11 +360,19 @@ export function parseConfig(raw: unknown): AppConfig {
     turn,
   };
 
+  const rc = obj(root.recording, 'recording');
+  const recording: AppConfig['recording'] = {
+    enabled: bool(rc, 'enabled', 'recording'),
+    dir: str(rc, 'dir', 'recording'),
+    maxDurationMinutes: int(rc, 'maxDurationMinutes', 'recording', 1, 24 * 60),
+  };
+  if (recording.enabled && recording.dir === '') throw new ConfigError('recording.dir: required when recording is enabled');
+
   const lg = obj(root.log, 'log');
   const level = str(lg, 'level', 'log');
   if (!['debug', 'info', 'warn', 'error'].includes(level)) throw new ConfigError('log.level: debug|info|warn|error');
 
-  return { server, limits, rooms, audio, rtc, log: { level: level as AppConfig['log']['level'] } };
+  return { server, limits, rooms, audio, rtc, recording, log: { level: level as AppConfig['log']['level'] } };
 }
 
 export function loadConfig(path: string): AppConfig {

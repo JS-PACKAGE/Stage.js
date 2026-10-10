@@ -70,6 +70,9 @@ export class Room {
   /** On-stage participant ids in stage-entry order (controller included while on stage). */
   readonly speakers = new Set<string>();
   readonly handQueue: string[] = [];
+  readonly recordingAvailable: boolean;
+  /** The mix is being recorded; the hub owns the file, the room owns the state everyone sees. */
+  recording = false;
 
   constructor(init: {
     roomId: string;
@@ -77,6 +80,7 @@ export class Room {
     code: string;
     codeRequired: boolean;
     limits: RoomLimits;
+    recordingAvailable?: boolean;
     now: number;
     controller: NewParticipant;
   }) {
@@ -85,6 +89,7 @@ export class Room {
     this.code = init.code;
     this.codeRequired = init.codeRequired;
     this.limits = init.limits;
+    this.recordingAvailable = init.recordingAvailable ?? false;
     this.createdAt = init.now;
     const c = init.controller;
     this.participants.set(c.participantId, {
@@ -182,6 +187,14 @@ export class Room {
     this.requireController(byId);
     if (!this.codeRequired) throw new StageError('conflict', 'room has no code');
     this.code = code;
+  }
+
+  /** Controller turns recording on or off; the hub starts or stops the file around this. */
+  setRecording(byId: string, on: boolean): void {
+    this.requireController(byId);
+    if (!this.recordingAvailable) throw new StageError('forbidden', 'recording disabled on this server');
+    if (this.recording === on) throw new StageError('conflict', on ? 'already recording' : 'not recording');
+    this.recording = on;
   }
 
   // ─────────────────────────────── hands ───────────────────────────────
@@ -387,6 +400,8 @@ export class Room {
       codeRequired: this.codeRequired,
       limits: { maxSpeakers: this.limits.maxSpeakers, maxAudience: this.limits.maxAudience },
       status: this.status,
+      recording: this.recording,
+      recordingAvailable: this.recordingAvailable,
     };
   }
 

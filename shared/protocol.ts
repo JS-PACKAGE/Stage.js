@@ -34,6 +34,9 @@
  *     sanitized and HTML-escaped like names. The last `rooms.chatHistory` messages arrive as
  *     `chat:history` right after joining.
  *   - C→S `reaction {emoji}` / S→C `reaction {participantId, emoji}`: fire-and-forget emoji from REACTIONS.
+ *   - C→S `recording:start` / `recording:stop` (controller, server `recording.enabled`): records the
+ *     audience mix to an Ogg/Opus file on the server. `room:state.recording` tells everyone it is on;
+ *     `recordingAvailable` whether the server allows it at all.
  */
 
 export const PROTOCOL_VERSION = 1;
@@ -95,6 +98,10 @@ export interface RoomStatePayload {
   codeRequired: boolean;
   limits: { maxSpeakers: number; maxAudience: number };
   status: Exclude<StageStatus, 'reconnecting'>;
+  /** The room's mix is being recorded on the server; clients must show it. */
+  recording: boolean;
+  /** The server allows recording (`recording.enabled`). */
+  recordingAvailable: boolean;
   me: ParticipantView;
   /** Controller only: full audience list (role `audience`, plus off-stage controller is in `me`). */
   audience?: ParticipantView[];
@@ -220,6 +227,8 @@ export interface ClientMessageMap {
   'rtc:ice': { requestId: string; payload: IceCandidatePayload | null };
   'chat:send': { requestId: string; text: string };
   reaction: { requestId: string; emoji: Reaction };
+  'recording:start': { requestId: string };
+  'recording:stop': { requestId: string };
   ping: Record<never, never>;
 }
 
@@ -252,5 +261,7 @@ export const CLIENT_MESSAGE_TYPES: readonly ClientMessageType[] = [
   'rtc:ice',
   'chat:send',
   'reaction',
+  'recording:start',
+  'recording:stop',
   'ping',
 ];

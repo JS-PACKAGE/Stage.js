@@ -118,5 +118,12 @@ rtc:
     secret: ""                 # 與 coturn static-auth-secret 相同（≥16 字元）
     ttlSeconds: 86400          # 建議長於最長場次：瀏覽器在 allocation refresh 時沿用同一組帳密（可調整）
 
+recording:
+  # 主控可錄下房間的完整混音（觀眾聽到的那一路），存成 Ogg/Opus（.opus）；直接封裝共用編碼、不另外編碼。
+  # 錄音期間所有人的 room:state 都帶 recording: true，前端會顯示錄音中。
+  enabled: false
+  dir: recordings              # 相對路徑以專案根目錄為準；檔名 <roomId>-<UTC 時間>.opus
+  maxDurationMinutes: 240      # 單次錄音上限，逾時自動停止（防止塞滿磁碟；可調整）
+
 log:
   level: info                  # debug | info | warn | error

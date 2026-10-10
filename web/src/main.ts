@@ -239,6 +239,7 @@ function renderRoom(state: RoomStatePayload): void {
   const controller = state.me.role === 'controller';
   const summary = element('section', 'panel room-summary');
   summary.append(element('h2', '', '房間資訊'), element('p', '', `房間 ID：${state.roomId}`));
+  if (state.recording) summary.append(element('p', 'badge recording', '● 錄音中：此房間的混音正在被錄下'));
   const roomCode = state.code ?? (createdRoom?.roomId === state.roomId ? createdRoom.code : undefined);
   if (controller) {
     summary.append(element('p', '', state.codeRequired ? `房間代碼：${roomCode ?? '未提供'}` : '不需要房間代碼'));
@@ -259,6 +260,11 @@ function renderRoom(state: RoomStatePayload): void {
       await client.rotateCode();
       invitation = '已更換房間代碼，請重新分享邀請連結。'; renderNotices();
     }));
+    if (state.recordingAvailable) summary.append(state.recording
+      ? button('停止錄音', () => client.stopRecording(), 'danger')
+      : button('開始錄音', async () => {
+        if (window.confirm('錄音會把所有人聽到的混音存到伺服器，房內每個人都會看到「錄音中」。確定開始？')) await client.startRecording();
+      }));
   }
   const controls = element('section', 'panel');
   controls.append(element('h2', '', `你好，${decodeName(state.me.name)}`), element('p', '', `${roleLabels[state.me.role]}${state.me.forceMuted ? ' · 主控已鎖定靜音' : ''}`), connectionLine);

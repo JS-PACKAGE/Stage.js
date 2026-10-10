@@ -621,3 +621,59 @@ describe('chat and reactions', () => {
     assert.equal(await h.req(stranger, { type: 'chat:send', text: 'hi' }), 'not_joined');
   });
 });
+
+describe('recording', () => {
+  function recorderHarness(enabled = true) {
+    const files: { roomId: string; packets: (Uint8Array | null)[]; stopped: boolean }[] = [];
+    const h = harness(testConfig((c) => { c.recording.enabled = enabled; c.recording.maxDurationMinutes = 1; }), {
+      startRecording: (roomId) => {
+        const file = { roomId, packets: [] as (Uint8Array | null)[], stopped: false };
+        files.push(file);
+        return { file: `${roomId}.opus`, sink: (p) => { if (!file.stopped) file.packets.push(p); }, stop: async () => { file.stopped = true; } };
+      },
+    });
+    return { h, files };
+  }
+
+  it('lets only the controller record, shows it to everyone and feeds the mix to the file until stopped', async () => {
+    const { h, files } = recorderHarness();
+    const host = await h.create();
+    const aud = await h.join(host.roomId, host.code, 'Alice');
+    assert.equal(aud.s.last('room:state')!.recordingAvailable, true);
+    assert.equal(await h.req(aud.s, { type: 'recording:start' }), 'forbidden');
+    assert.equal(await h.req(host.s, { type: 'recording:stop' }), 'conflict', 'nothing to stop');
+    assert.equal(await h.req(host.s, { type: 'recording:start' }), 'ok');
+    assert.equal(aud.s.last('room:state')!.recording, true, 'the audience is told');
+    assert.equal(await h.req(host.s, { type: 'recording:start' }), 'conflict');
+    // Frames exist only while someone feeds the mixer: the controller publishes.
+    assert.equal(await h.req(host.s, { type: 'rtc:offer', payload: SENDRECV_OFFER }), 'ok');
+    h.mixers.get(host.roomId)!.tick();
+    h.mixers.get(host.roomId)!.tick();
+    assert.equal(files[0]!.packets.length, 2, 'one packet per mixed frame');
+    assert.equal(await h.req(host.s, { type: 'recording:stop' }), 'ok');
+    assert.equal(files[0]!.stopped, true);
+    assert.equal(aud.s.last('room:state')!.recording, false);
+    h.mixers.get(host.roomId)!.tick();
+    assert.equal(files[0]!.packets.length, 2, 'nothing after stop');
+  });
+
+  it('stops on its own after maxDurationMinutes and when the room closes', async () => {
+    const { h, files } = recorderHarness();
+    const host = await h.create();
+    assert.equal(await h.req(host.s, { type: 'recording:start' }), 'ok');
+    h.timers.find((t) => !t.cleared && t.ms === 60_000)!.fn();
+    await nextTurn();
+    assert.equal(files[0]!.stopped, true);
+    assert.equal(host.s.last('room:state')!.recording, false);
+    assert.equal(await h.req(host.s, { type: 'recording:start' }), 'ok', 'can record again');
+    assert.equal(await h.req(host.s, { type: 'room:close' }), 'ok');
+    assert.equal(files[1]!.stopped, true);
+  });
+
+  it('is unavailable when the server disables it', async () => {
+    const { h } = recorderHarness(false);
+    const host = await h.create();
+    assert.equal(host.s.last('room:state')!.recordingAvailable, false);
+    assert.equal(await h.req(host.s, { type: 'recording:start' }), 'forbidden');
+  });
+});

@@ -1,11 +1,12 @@
 import { readFileSync } from 'node:fs';
 import { basename, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { ConfigError, loadConfig } from './config.ts';
+import { ConfigError, loadConfig, samplesPerFrame } from './config.ts';
 import { createLogger } from './log.ts';
 import { MixerCounters, processSamples, renderPrometheus } from './metrics.ts';
 import { MixerClock } from './mixer/MixerClock.ts';
 import { RoomMixer } from './mixer/RoomMixer.ts';
+import { startRecording } from './recording/recorder.ts';
 import { WeriftMediaTransport } from './transport/WeriftMediaTransport.ts';
 import { StageHub } from './ws/hub.ts';
 import { createStageServer } from './ws/server.ts';
@@ -62,6 +63,14 @@ const stageHub = new StageHub({
     mixer.start(mixerClock);
     return mixer;
   },
+  startRecording: (roomId) => startRecording({
+    dir: resolve(root, config.recording.dir),
+    roomId,
+    frameSamples: samplesPerFrame(audio),
+    vendor: `Stage.js ${version}`,
+    now: Date.now(),
+    log,
+  }),
 });
 hub = stageHub;
 

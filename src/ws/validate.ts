@@ -130,6 +130,8 @@ export function parseClientMessage(text: string, limits: ValidationLimits): Clie
     case 'stage:leave':
     case 'mic:mute':
     case 'mic:unmute':
+    case 'recording:start':
+    case 'recording:stop':
       return { type: t, requestId: rid };
     case 'stage:approve':
     case 'stage:reject':
