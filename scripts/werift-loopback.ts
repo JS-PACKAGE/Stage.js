@@ -25,7 +25,7 @@ try {
   transport.setMixedStream('room', mixer);
   const tracks = new Map<string, MediaStreamTrack>();
   for (const id of ['speaker', 'audience', 'blocked']) {
-    const client = new RTCPeerConnection({ codecs: { audio: [opusCodec()], video: [] }, iceServers: [] }); clients.set(id, client);
+    const client = new RTCPeerConnection({ codecs: { audio: [opusCodec(config.audio)], video: [] }, iceServers: [] }); clients.set(id, client);
     const decoder = new OpusDecoder(config.audio.sampleRate);
     client.onTrack.subscribe(track => track.onReceiveRtp.subscribe(packet => {
       const samples = decoder.decode(packet.payload);

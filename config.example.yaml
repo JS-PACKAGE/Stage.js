@@ -53,10 +53,10 @@ audio:
   opus:
     vbr: true
     minBitrate: 32000
-    maxBitrate: 128000
+    maxBitrate: 128000         # 下行 VBR 上限；也作為 SDP maxaveragebitrate 限制瀏覽器上行
     bitrate: 64000             # VBR 目標，須落在 min..max
     complexity: 9
-    fec: true                  # in-band FEC：觀眾端可由下一包還原遺失包
+    fec: true                  # in-band FEC：觀眾端可由下一包還原遺失包；同時在 SDP 以 useinbandfec 告知瀏覽器上行也帶 FEC
     packetLossPercent: 10      # 預期下行掉包率（%），FEC 依此配置冗餘位元（可調整）
     dtx: true                  # 靜音不送包（≤2 bytes 的 DTX 幀不傳），省觀眾頻寬
   lowTier:                     # 網路差的觀眾改收第二路共用混音：較低位元率＋較多 FEC（台上者不受影響）

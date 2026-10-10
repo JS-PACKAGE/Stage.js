@@ -46,7 +46,7 @@ type ChildReport = { peers: number; connected: number; packets: number; lost: nu
 /** Minimal Stage.js signaling client over ws (Node stands in for the browser client library). */
 class Participant {
   readonly ws: WebSocket;
-  readonly pc = new RTCPeerConnection({ codecs: { audio: [opusCodec()], video: [] }, iceServers: [] });
+  readonly pc = new RTCPeerConnection({ codecs: { audio: [opusCodec(config.audio)], video: [] }, iceServers: [] });
   id = '';
   state: Extract<ServerMessage, { type: 'room:state' }> | undefined;
   private next = 0;
