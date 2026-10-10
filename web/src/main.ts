@@ -70,7 +70,7 @@ const testButton = button('測試麥克風', async () => {
     else micTest = await client.startMicTest();
     testButton.textContent = micTest ? '停止測試' : '測試麥克風';
     testButton.setAttribute('aria-pressed', String(Boolean(micTest)));
-  } finally { testingBusy = false; micSelect.disabled = false; }
+  } finally { testingBusy = false; micSelect.disabled = false; syncMeter(); }
 });
 testButton.id = 'mic-test';
 testButton.setAttribute('aria-pressed', 'false');
@@ -119,14 +119,23 @@ async function refreshDevices(): Promise<void> {
 client.on('micready', () => { void refreshDevices().catch(() => {}); });
 navigator.mediaDevices?.addEventListener('devicechange', () => { void refreshDevices().catch(() => {}); });
 void refreshDevices().catch(() => {});
-setInterval(() => {
+/** The level meter polls only while there is something to meter: a mic test or an on-stage mic. */
+let meterTimer: ReturnType<typeof setInterval> | undefined;
+function syncMeter(): void {
   if (client.me?.onStage && micTest) {
     micTest.stop(); micTest = null;
     testButton.textContent = '測試麥克風'; testButton.setAttribute('aria-pressed', 'false');
   }
   testButton.disabled = testingBusy || Boolean(client.me?.onStage);
-  level.value = client.me?.onStage ? client.micLevel : micTest?.level() ?? 0;
-}, 50);
+  const metering = Boolean(micTest) || Boolean(client.me?.onStage);
+  if (metering && meterTimer === undefined) {
+    meterTimer = setInterval(() => { level.value = client.me?.onStage ? client.micLevel : micTest?.level() ?? 0; }, 50);
+  } else if (!metering && meterTimer !== undefined) {
+    clearInterval(meterTimer); meterTimer = undefined; level.value = 0;
+  }
+}
+client.on('state', syncMeter);
+client.on('status', syncMeter);
 
 function element<K extends keyof HTMLElementTagNameMap>(tag: K, className = '', text?: string): HTMLElementTagNameMap[K] {
   const node = document.createElement(tag);
@@ -386,8 +395,7 @@ client.on('quality', ({ detail }) => {
   quality = new Map(detail.participants.map((q) => [q.participantId, q]));
   for (const row of content.querySelectorAll<HTMLElement>('.person[data-participant-id]')) applyQuality(row);
 });
-setInterval(() => {
-  if (!client.state) { connectionLine.textContent = ''; return; }
+function refreshConnectionLine(): void {
   void client.getStats().then(({ inbound, outbound }) => {
     const parts: string[] = [];
     if (inbound?.lossPercent !== undefined) parts.push(`收聽掉包 ${inbound.lossPercent.toFixed(1)}%`);
@@ -398,6 +406,14 @@ setInterval(() => {
     connectionLine.textContent = parts.length ? `你的連線：${parts.join(' · ')}` : '';
     connectionLine.classList.toggle('error', Math.max(inbound?.lossPercent ?? 0, outbound?.lossPercent ?? 0) >= POOR_LOSS_PERCENT);
   }, () => {});
-}, 2000);
-setInterval(updateCooldown, 250);
+}
+/** Stats and the hand cooldown matter only inside a room; nothing polls on the landing page. */
+let roomTimers: ReturnType<typeof setInterval>[] = [];
+function syncRoomTimers(): void {
+  const inRoom = client.state !== null;
+  if (inRoom && !roomTimers.length) roomTimers = [setInterval(refreshConnectionLine, 2000), setInterval(updateCooldown, 250)];
+  else if (!inRoom && roomTimers.length) { roomTimers.forEach(clearInterval); roomTimers = []; connectionLine.textContent = ''; }
+}
+client.on('state', syncRoomTimers);
+client.on('status', syncRoomTimers);
 landing();
