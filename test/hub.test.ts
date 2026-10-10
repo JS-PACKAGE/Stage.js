@@ -204,6 +204,23 @@ describe('ws drop with the seat held (rooms.participantGraceMs)', () => {
     assert.equal(immediate.transport.rooms.get(host2.roomId)!.peers.has(c.id), false);
     assert.equal(immediate.timers.some((t) => !t.cleared && t.ms === 0), false, 'no grace timer');
   });
+
+  it('does not hold the seat of someone who left on purpose (normal close), except the controller\'s', async () => {
+    const config = testConfig();
+    const h = harness(config);
+    const host = await h.create();
+    const sp = await h.join(host.roomId, host.code, 'Sam');
+    await h.req(sp.s, { type: 'hand:raise' });
+    await h.req(host.s, { type: 'stage:approve', targetId: sp.id });
+    await h.req(sp.s, { type: 'rtc:offer', payload: SENDRECV_OFFER });
+    await h.hub.detach(sp.s, true);
+    assert.deepEqual(host.s.last('stage:left'), { type: 'stage:left', participantId: sp.id, role: 'audience', reason: 'leave' }, 'off stage at once');
+    assert.equal(h.transport.rooms.get(host.roomId)!.peers.has(sp.id), false, 'media released at once');
+    assert.equal(h.timers.some((t) => !t.cleared && t.ms === config.rooms.participantGraceMs), false);
+
+    await h.hub.detach(host.s, true);
+    assert.equal(h.timers.filter((t) => !t.cleared && t.ms === config.rooms.controllerGraceMs).length, 1, 'controller keeps the PLAN grace period');
+  });
 });
 
 describe('signaling outside the room queue', () => {

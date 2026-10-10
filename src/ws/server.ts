@@ -33,6 +33,8 @@ export interface StageServerDeps {
 
 /** Policy-violation close code (RFC 6455) used for rate-limit disconnects. */
 const CLOSE_POLICY = 1008;
+/** Normal-closure code (RFC 6455): from a client it means "I am leaving", so no seat is held. */
+const CLOSE_NORMAL = 1000;
 /** Going-away close code (RFC 6455) sent on shutdown, so clients can tell it from a dropped link. */
 const CLOSE_GOING_AWAY = 1001;
 /** How long shutdown waits for clients to finish the close handshake before cutting them off. */
@@ -191,13 +193,14 @@ export function createStageServer(deps: StageServerDeps): StageServer {
       const m = msg;
       session.chain = session.chain.then(() => hub.handle(session, m));
     });
-    ws.on('close', () => {
+    ws.on('close', (code) => {
       clearTimeout(joinDeadline);
       sessions.delete(session);
-      const left = (perIp.get(ip) ?? 1) - 1;
-      if (left > 0) perIp.set(ip, left); else perIp.delete(ip);
-      log.debug('connection closed', { session: session.id });
-      session.chain = session.chain.then(() => hub.detach(session));
+      const remaining = (perIp.get(ip) ?? 1) - 1;
+      if (remaining > 0) perIp.set(ip, remaining); else perIp.delete(ip);
+      log.debug('connection closed', { session: session.id, code });
+      // 1000 from the client = it chose to leave; anything else (1001 page hide, 1006 drop…) holds the seat.
+      session.chain = session.chain.then(() => hub.detach(session, code === CLOSE_NORMAL));
     });
     ws.on('error', (err) => log.debug('ws error', { session: session.id, error: String(err) }));
   });

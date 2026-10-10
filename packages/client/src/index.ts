@@ -110,6 +110,8 @@ const KEEPALIVE_INTERVAL_MS = 15000;
 const KEEPALIVE_TIMEOUT_MS = 2 * KEEPALIVE_INTERVAL_MS + 5000;
 /** `disconnected` this long → ICE restart (browsers take 15 s+ to reach `failed` on their own). */
 const ICE_RESTART_AFTER_MS = 3000;
+/** Application close code (browsers only allow 1000 and 3000–4999): page hidden, hold my seat. */
+const CLOSE_PAGE_HIDDEN = 4002;
 
 export class StageClient extends EventTarget {
   private readonly options: StageClientOptions;
@@ -162,11 +164,12 @@ export class StageClient extends EventTarget {
     if (this.ownsAudio) { this.audio.hidden = true; document.body.append(this.audio); }
   }
   /**
-   * Tell the server we are going instead of letting it find out at the next heartbeat; the session
-   * is kept so a page restored from the back/forward cache reconnects and resumes. Registered only
-   * while connected, so a discarded client is not kept alive by the window.
+   * Tell the server we are going instead of letting it find out at the next heartbeat. Not 1000
+   * (that means "leaving"): the seat is held, so a page restored from the back/forward cache
+   * reconnects and resumes. Registered only while connected, so a discarded client is not kept
+   * alive by the window.
    */
-  private readonly onPageHide = (): void => { this.socket?.close(1000); };
+  private readonly onPageHide = (): void => { this.socket?.close(CLOSE_PAGE_HIDDEN, 'page hidden'); };
 
   get state(): RoomStatePayload | null { return this.snapshot; }
   get status(): ClientStatus { return this.currentStatus; }

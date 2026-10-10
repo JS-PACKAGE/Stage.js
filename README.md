@@ -117,7 +117,7 @@ JSON frame，型別定義在 [`shared/protocol.ts`](shared/protocol.ts)。每個
 | `rtc:answer`、`rtc:ice` | 伺服器端信令 |
 | `status` | `waiting`／`live` |
 
-限制：frame ≤ 64KB；控制訊息 ≤ 20/s、`rtc:ice` ≤ 30/s；超過即以 close code 1008 斷線。房間不存在或代碼錯誤一律回 `unauthorized`。名稱以 HTML 轉義形式傳送。
+限制：frame ≤ 64KB；控制訊息 ≤ 20/s、`rtc:ice` ≤ 30/s；超過即以 close code 1008 斷線。房間不存在或代碼錯誤一律回 `unauthorized`。名稱以 HTML 轉義形式傳送。client 以 close code 1000 關閉＝主動離開（立即移出房間）；其他關閉碼或斷線＝保留席位至寬限期結束（主控一律保留 `controllerGraceMs`）。
 
 ## 整合到其他網站（client 函式庫）
 

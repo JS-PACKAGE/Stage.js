@@ -160,14 +160,14 @@ export class StageHub {
     }
   }
 
-  /** Connection closed. */
-  async detach(session: Session): Promise<void> {
+  /** Connection closed; `left` = the client closed normally (1000) to leave, not a dropped link. */
+  async detach(session: Session, left = false): Promise<void> {
     const b = this.bindings.get(session);
     if (!b) return;
     this.bindings.delete(session);
     const rt = this.rooms.get(b.roomId);
     if (!rt) return;
-    await rt.queue.run(() => this.disconnect(rt, session, b.participantId)).catch((err) => this.internalFailure(rt, err));
+    await rt.queue.run(() => this.disconnect(rt, session, b.participantId, left)).catch((err) => this.internalFailure(rt, err));
   }
 
   /** MediaTransport callback: trickle server ICE to the participant. */
@@ -458,11 +458,13 @@ export class StageHub {
   }
 
   /**
-   * The ws dropped. The media plane is left alone: a short ws outage must not cost the participant
-   * their PeerConnection (PLAN 九), so audio keeps flowing while the seat is held. The seat, stage
-   * position and raised hand survive the grace period; a `join` with the resume token reclaims them.
+   * The ws closed. After a drop the media plane is left alone: a short ws outage must not cost the
+   * participant their PeerConnection (PLAN 九), so audio keeps flowing while the seat is held. The
+   * seat, stage position and raised hand survive the grace period; a `join` with the resume token
+   * reclaims them. `left` (the client closed with 1000) means they meant to go: no seat is held —
+   * except the controller's, whose grace period PLAN 假設 4 fixes for every disconnect.
    */
-  private disconnect(rt: RoomRuntime, session: Session, pid: string): void {
+  private disconnect(rt: RoomRuntime, session: Session, pid: string, left: boolean): void {
     if (rt.closed || rt.sessions.get(pid) !== session) return;
     const { room } = rt;
     rt.sessions.delete(pid);
@@ -471,7 +473,7 @@ export class StageHub {
     const { controllerGraceMs, participantGraceMs } = this.deps.config.rooms;
     const controller = p.role === 'controller';
     const graceMs = controller ? controllerGraceMs : participantGraceMs;
-    if (controller || graceMs > 0) {
+    if (controller || (graceMs > 0 && !left)) {
       p.connected = false;
       const timer = this.setTimer(() => {
         void rt.queue.run(() => (controller ? this.expireController(rt, pid) : this.expireParticipant(rt, pid))).catch((err) => this.internalFailure(rt, err));
