@@ -83,13 +83,23 @@ log.info('Stage.js listening', {
 });
 
 let stopping = false;
-const stop = async (signal: string) => {
+const stop = async (signal: string, code = 0) => {
   if (stopping) return;
   stopping = true;
   log.info('shutting down', { signal });
   await server.close();
   await transport.close();
-  process.exit(0);
+  process.exit(code);
 };
 process.on('SIGINT', () => void stop('SIGINT'));
 process.on('SIGTERM', () => void stop('SIGTERM'));
+// A stray rejection (typically a WebRTC stack timer firing after a peer closed) is logged, not fatal:
+// Node's default would take every room down. An uncaught exception may have left state inconsistent,
+// so the rooms are told the server is going away and the process exits non-zero for the supervisor.
+process.on('unhandledRejection', (reason) => {
+  log.error('unhandled rejection', { error: reason instanceof Error ? reason.stack ?? reason.message : String(reason) });
+});
+process.on('uncaughtException', (err) => {
+  log.error('uncaught exception, shutting down', { error: err.stack ?? String(err) });
+  void stop('uncaughtException', 1);
+});
