@@ -165,10 +165,11 @@ JSON frame，型別定義在 [`shared/protocol.ts`](shared/protocol.ts)。每個
 
 ```bash
 npm run typecheck                # 伺服器＋client＋web
-npm test                         # 控制面流程 1–4、不變量、斷線寬限與回座、信令與政策競態、ws 邊界（驗證、限流、尺寸、轉義、靜態檔、准入）、混音器與時鐘、下行分級／共用編碼／靜音 DTX、worker 重生
-node scripts/werift-loopback.ts  # 真 werift 端到端（含觀眾→發言者重協商、client 端 ICE restart）
+npm test                         # 控制面流程 1–4、不變量、斷線寬限與回座、重啟恢復、聊天／反應／錄音、信令與政策競態、ws 邊界（驗證、限流、尺寸、轉義、靜態檔、准入）、混音器與時鐘、下行分級／共用編碼／靜音 DTX、Ogg/Opus 封裝、worker 重生
+node scripts/werift-loopback.ts  # 真 werift 端到端（含錄音取用共用編碼、觀眾→發言者重協商、client 端 ICE restart）
 node scripts/bench-mixer.ts      # 混音壓測：3／8 發言者 × 300 訂閱者
 node scripts/load-test.ts        # 全端壓測：3 發言者＋298 werift 觀眾（--speakers/--audience/--seconds/--procs/--url）
+node scripts/load-test.ts --seconds 3600 --sample-seconds 60 --max-heap-growth-mb 50  # 長時間 soak：每分鐘記 RSS／heap／late ticks／編碼 p99，heap 成長超過門檻即失敗
 npm audit
 ```
 
