@@ -71,7 +71,7 @@ node scripts/load-test.ts        # 全端壓測：自起伺服器，K 發言者�
 
 **S5. 憑證不入庫、不入日誌。** STUN/TURN（coturn）設定只放 `config.yaml`（已在 `.gitignore`），入庫的是 `config.example.yaml`。TURN 一律用 `rtc.turn` 短期憑證（`src/rtc/turn.ts`：`<到期秒>:<participantId>`＋HMAC-SHA1），只經 `rtc:config` 發給已進房者；`rtc.turn.secret` 永不離開伺服器。不得把長期 TURN 帳密放進 `rtc.iceServers`。
 
-**S6. 競態保證。** 每房一條 `SerialQueue`：所有狀態變更與該房信令依序原子套用；每連線訊息依序處理。狀態機每次轉換後檢查不變量；「雙主控」等違例拋 `InvariantViolation` → 關房（fail-closed）。單一 client 的信令錯誤只回該請求錯誤，不得關房。
+**S6. 競態保證。** 每房一條 `SerialQueue`：所有狀態變更依序原子套用；每連線訊息依序處理。WebRTC 信令的傳輸層工作（套用 SDP、ICE）在佇列外、依連線順序執行，只有讀寫房間狀態的部分（方向政策檢查、登錄 publisher／`stage:joined`）回到房間佇列，且協商完成後**重新檢查**政策（期間被移下台就不登錄上行）。狀態機每次轉換後檢查不變量；「雙主控」等違例拋 `InvariantViolation` → 關房（fail-closed）。單一 client 的信令錯誤只回該請求錯誤，不得關房。
 
 **S7. 資源防護。** 每房主控以外的台上者 ≤ 8、主控以外人數 ≤ 300（裁示定值；主控席位皆另計）；全域 `maxRooms`、`maxConnections`；混音每路 PCM 緩衝上限 `mixer.maxBufferedFrames`（超過丟最舊）、limiter 防爆音；超過上限拒絕新上行／新連線（`stage_full`／`room_full`／HTTP 503）。
 

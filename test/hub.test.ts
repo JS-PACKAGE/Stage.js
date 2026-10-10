@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { createHmac } from 'node:crypto';
 import { describe, it } from 'node:test';
 import { setImmediate as nextTurn } from 'node:timers/promises';
-import { FakeSession, harness, RECVONLY_OFFER, SENDRECV_OFFER, sine, testConfig } from './helpers.ts';
+import { FakeSession, harness, RECVONLY_OFFER, SENDRECV_OFFER, sine, testConfig, type Harness } from './helpers.ts';
 
 const FRAME = 960;
 
@@ -203,6 +203,47 @@ describe('ws drop with the seat held (rooms.participantGraceMs)', () => {
     await immediate.hub.detach(c.s);
     assert.equal(immediate.transport.rooms.get(host2.roomId)!.peers.has(c.id), false);
     assert.equal(immediate.timers.some((t) => !t.cleared && t.ms === 0), false, 'no grace timer');
+  });
+});
+
+describe('signaling outside the room queue', () => {
+  /** Holds the next transport negotiation until `release` is called (a slow worker round-trip). */
+  function gateNegotiation(h: Harness) {
+    const original = h.transport.negotiate.bind(h.transport);
+    const gate = Promise.withResolvers<void>();
+    h.transport.negotiate = async (...args) => { await gate.promise; h.transport.negotiate = original; return original(...args); };
+    return gate.resolve;
+  }
+
+  it('a slow negotiation does not hold up the room\'s control commands', async () => {
+    const h = harness();
+    const host = await h.create();
+    const a = await h.join(host.roomId, host.code, 'A');
+    const b = await h.join(host.roomId, host.code, 'B');
+    const release = gateNegotiation(h);
+    const offer = h.req(a.s, { type: 'rtc:offer', payload: RECVONLY_OFFER });
+    assert.equal(await h.req(b.s, { type: 'hand:raise' }), 'ok', 'handled while A\'s offer is still being applied');
+    assert.equal(await h.req(host.s, { type: 'stage:approve', targetId: b.id }), 'ok');
+    release();
+    assert.equal(await offer, 'ok');
+    assert.ok(a.s.last('rtc:answer'));
+  });
+
+  it('does not publish an uplink whose owner left the stage while their offer was being applied', async () => {
+    const h = harness();
+    const host = await h.create();
+    const sp = await h.join(host.roomId, host.code, 'Sam');
+    await h.req(sp.s, { type: 'hand:raise' });
+    await h.req(host.s, { type: 'stage:approve', targetId: sp.id });
+    const release = gateNegotiation(h);
+    const offer = h.req(sp.s, { type: 'rtc:offer', payload: SENDRECV_OFFER });
+    await nextTurn();
+    assert.equal(await h.req(host.s, { type: 'stage:remove', targetId: sp.id }), 'ok');
+    host.s.clear();
+    release();
+    assert.equal(await offer, 'ok');
+    assert.equal(host.s.last('stage:joined'), undefined, 'never announced on stage');
+    assert.equal(h.transport.emitUplink(host.roomId, sp.id, sine(FRAME, 0.5)), false, 'uplink stays out of the mix');
   });
 });
 

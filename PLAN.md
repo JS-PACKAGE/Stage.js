@@ -306,7 +306,7 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 6. **進場錯誤**：房間不存在與代碼錯誤一律 `unauthorized`（不洩漏房間是否存在）；代碼不分大小寫、以常數時間比較。
 7. **name 轉義**：伺服器儲存並輸出 HTML 轉義後的名稱（`& < > " '`）；client 提供 `decodeName()`，範例前端以 `textContent` 顯示。
 8. **限流**：任一限流違規（含 `hand:raise` 10 秒內重複）即以 close code 1008 斷線；client 函式庫在本地先擋舉手冷卻並對送出節流且**保持送出順序**（ICE 不得超前其 offer）。
-9. **單序事件佇列**：每房一條 `SerialQueue`，狀態變更與該房信令全經此佇列；每連線另保證訊息依序處理。不變量違例 → 關房（fail-closed）；單一 client 的信令錯誤（壞 SDP、過早 ICE）只回該請求 `bad_request`，不影響房間。
+9. **單序事件佇列**：每房一條 `SerialQueue`，狀態變更全經此佇列；每連線另保證訊息依序處理。信令的傳輸層工作（套用 offer、加入 ICE candidate，可能跨 worker 往返）在房間佇列**之外**依連線順序執行，避免大量同時進場時互相排隊、卡住控制命令；政策檢查（觀眾只能 recvonly）與協商後的效果（登錄 publisher、`stage:joined`）在房間佇列內原子套用，並於協商完成後重新檢查台上狀態。不變量違例 → 關房（fail-closed）；單一 client 的信令錯誤（壞 SDP、過早 ICE）只回該請求 `bad_request`，不影響房間。
 10. **明文 ws**：`server.allowInsecure: true` 且 host 為 loopback 才允許；否則必須提供 TLS 憑證，啟動即檢查。
 11. **werift 注意**：伺服器 transceiver 於套用 offer **之前**須先設成政策方向，否則 werift 不登錄瀏覽器重協商時新出現的 SSRC（觀眾升發言者後上行被丟棄）；`scripts/werift-loopback.ts` 以「去除 recvonly offer 的 SSRC」模擬瀏覽器並驗證此情境。werift 在 answer 為 recvonly 時仍可能送出 RTP，故上行一律以 publisher 註冊＋政策雙重把關。
 12. **踢人與更換代碼**：C→S `participant:kick {targetId}`（主控限定，不可踢自己）把參與者移出房間（台上者等同下台並移除），對方收到 S→C `kicked {roomId}` 後伺服器以 close code 4001 關閉連線，client 不自動重連；`room:rotate-code`（主控限定、需代碼的房間）換發新代碼，舊代碼立即失效、已在房內者不受影響。兩者合用＝封鎖鬧場者（無帳號制度下的「ban」）。

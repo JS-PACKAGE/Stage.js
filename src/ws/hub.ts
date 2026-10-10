@@ -153,7 +153,8 @@ export class StageHub {
       if (!binding) throw new StageError('not_joined', msg.type);
       const rt = this.rooms.get(binding.roomId);
       if (!rt) throw new StageError('not_joined', 'room gone');
-      await rt.queue.run(() => this.command(rt, session, binding.participantId, msg));
+      if (msg.type === 'rtc:offer' || msg.type === 'rtc:ice') await this.signal(rt, session, binding.participantId, msg);
+      else await rt.queue.run(() => this.command(rt, session, binding.participantId, msg));
     } catch (err) {
       this.fail(session, requestId, err);
     }
@@ -348,20 +349,6 @@ export class StageHub {
         session.send({ type: 'ok', requestId: msg.requestId });
         this.deps.log.info('room code rotated', { roomId: room.roomId });
         return;
-      case 'rtc:offer':
-        await this.negotiate(rt, session, pid, msg.payload);
-        session.send({ type: 'ok', requestId: msg.requestId });
-        return;
-      case 'rtc:ice':
-        try {
-          await this.deps.transport.addRemoteCandidate(room.roomId, pid, msg.payload);
-        } catch (err) {
-          // e.g. a candidate before any offer: that client's signaling error, not a room failure.
-          this.deps.log.debug('remote candidate rejected', { roomId: room.roomId, participantId: pid, error: String(err) });
-          throw new StageError('bad_request', 'candidate rejected');
-        }
-        session.send({ type: 'ok', requestId: msg.requestId });
-        return;
       case 'rtc:answer':
         // The server never sends offers, so an answer is always out of protocol.
         throw new StageError('bad_request', 'unexpected rtc:answer');
@@ -393,48 +380,81 @@ export class StageHub {
     session.close(CLOSE_KICKED, 'kicked');
   }
 
-  private async negotiate(
-    rt: RoomRuntime,
-    session: Session,
-    pid: string,
-    offer: SessionDescriptionPayload,
-  ): Promise<void> {
-    const { room } = rt;
+  /**
+   * WebRTC signaling. The transport work (SDP application, ICE) can take a worker round-trip per
+   * message, so it runs outside the room queue — 300 people joining at once must not stall the
+   * room's control commands behind each other's handshakes. Per-participant order still holds
+   * (each connection's messages are handled one at a time, so a candidate never overtakes its
+   * offer). Only the parts that read or change room state run in the room queue: the policy check
+   * before, and publishing after — with the policy checked again, since the participant may have
+   * left the stage while their offer was being applied (AGENTS.md §S2: both gates must hold).
+   */
+  private async signal(rt: RoomRuntime, session: Session, pid: string, msg: Extract<ClientMessage, { type: 'rtc:offer' | 'rtc:ice' }>): Promise<void> {
     const { transport, log } = this.deps;
-    const p = room.get(pid);
-    if (!p) throw new StageError('not_joined', 'participant gone');
-    const summary = summarizeOffer(offer.sdp);
+    const { roomId } = rt.room;
+    const stale = () => rt.closed || rt.sessions.get(pid) !== session;
+    if (stale()) throw new StageError('not_joined', 'stale binding');
+    if (msg.type === 'rtc:ice') {
+      try {
+        await transport.addRemoteCandidate(roomId, pid, msg.payload);
+      } catch (err) {
+        // e.g. a candidate before any offer: that client's signaling error, not a room failure.
+        log.debug('remote candidate rejected', { roomId, participantId: pid, error: String(err) });
+        throw new StageError('bad_request', 'candidate rejected');
+      }
+      session.send({ type: 'ok', requestId: msg.requestId });
+      return;
+    }
+    const summary = summarizeOffer(msg.payload.sdp);
     if (summary.audioDirections.length === 0) throw new StageError('bad_request', 'offer without audio');
     const sends = offerSendsAudio(summary);
-    if (sends && !p.onStage) {
-      // Audience may only receive (AGENTS.md §S2): reject the whole offer, fail-closed.
-      log.warn('uplink offer from off-stage participant rejected', { roomId: room.roomId, participantId: pid });
-      throw new StageError('forbidden', 'audience offer must be recvonly');
-    }
+    const allowUplink = await rt.queue.run(() => {
+      if (stale()) throw new StageError('not_joined', 'stale binding');
+      const p = rt.room.get(pid);
+      if (!p) throw new StageError('not_joined', 'participant gone');
+      if (sends && !p.onStage) {
+        // Audience may only receive (AGENTS.md §S2): reject the whole offer, fail-closed.
+        log.warn('uplink offer from off-stage participant rejected', { roomId, participantId: pid });
+        throw new StageError('forbidden', 'audience offer must be recvonly');
+      }
+      return p.onStage;
+    });
     let answer: SessionDescriptionPayload;
     try {
-      answer = await transport.negotiate(room.roomId, pid, offer, { allowUplink: p.onStage });
+      answer = await transport.negotiate(roomId, pid, msg.payload, { allowUplink });
     } catch (err) {
       // A bad offer is that client's problem, not a reason to tear down the room.
-      log.warn('negotiation failed', { roomId: room.roomId, participantId: pid, error: String(err) });
-      this.unpublish(rt, pid);
-      transport.closePeer(room.roomId, pid);
+      log.warn('negotiation failed', { roomId, participantId: pid, error: String(err) });
+      await rt.queue.run(() => {
+        if (rt.closed || !rt.room.get(pid)) return;
+        this.unpublish(rt, pid);
+        transport.closePeer(roomId, pid);
+      });
       throw new StageError('bad_request', 'negotiation failed');
     }
-    if (rt.closed) return;
-    session.send({ type: 'rtc:answer', fromId: SERVER_PEER_ID, payload: answer });
-    transport.subscribe(room.roomId, pid);
-    if (sends && !rt.publishers.has(pid)) {
-      rt.publishers.add(pid);
-      rt.mixer.addSource(pid);
-      rt.mixer.setGain(pid, p.gainDb);
-      this.scheduleQuality(rt);
-      transport.addPublisher(room.roomId, pid, (samples) => rt.mixer.push(pid, samples));
-      this.setPublisherMuted(rt, pid, p.selfMuted || p.forceMuted);
-      this.broadcast(rt, { type: 'stage:joined', participantId: pid, role: p.role });
-    } else if (!sends) {
-      this.unpublish(rt, pid);
-    }
+    await rt.queue.run(() => {
+      // The room closed or the participant left meanwhile: whatever tore them down already closed
+      // their peer, unless it ran before this negotiation created it — close it again to be sure.
+      if (rt.closed) { transport.closeRoom(roomId); return; }
+      const p = rt.room.get(pid);
+      if (!p) { transport.closePeer(roomId, pid); return; }
+      // Resumed on another connection meanwhile: that one renegotiates; this answer has no reader.
+      if (rt.sessions.get(pid) !== session) return;
+      session.send({ type: 'rtc:answer', fromId: SERVER_PEER_ID, payload: answer });
+      transport.subscribe(roomId, pid);
+      if (sends && p.onStage && !rt.publishers.has(pid)) {
+        rt.publishers.add(pid);
+        rt.mixer.addSource(pid);
+        rt.mixer.setGain(pid, p.gainDb);
+        this.scheduleQuality(rt);
+        transport.addPublisher(roomId, pid, (samples) => rt.mixer.push(pid, samples));
+        this.setPublisherMuted(rt, pid, p.selfMuted || p.forceMuted);
+        this.broadcast(rt, { type: 'stage:joined', participantId: pid, role: p.role });
+      } else if (!sends || !p.onStage) {
+        this.unpublish(rt, pid);
+      }
+      session.send({ type: 'ok', requestId: msg.requestId });
+    });
   }
 
   /**
