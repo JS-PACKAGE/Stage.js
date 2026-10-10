@@ -20,7 +20,7 @@ npm test                       # node --test（MockMediaTransport，無需 WebRT
 npm run build                  # tsc → dist/，vite → packages/client/dist、web/dist
 npm start                      # node dist/src/index.js（讀 ./config.yaml 或 $STAGE_CONFIG）
 npm run dev                    # node --watch src/index.ts
-node scripts/werift-loopback.ts [N]  # 真 werift 端到端：上行解碼、混音、不含自己、觀眾上行封鎖、觀眾→發言者重協商；N＝rtc.mediaWorkers
+node scripts/werift-loopback.ts [N]  # 真 werift 端到端：上行解碼、混音、不含自己、觀眾上行封鎖、觀眾→發言者重協商、client 端 ICE restart；N＝rtc.mediaWorkers
 node scripts/bench-mixer.ts      # Gate 3：8/3 發言者 × 300 訂閱者混音延遲
 node scripts/load-test.ts        # 全端壓測：自起伺服器，K 發言者＋N werift 觀眾（多 process），回報掉包、beep 端到端延遲、/metrics
 ```
@@ -46,7 +46,7 @@ node scripts/load-test.ts        # 全端壓測：自起伺服器，K 發言者�
 | `src/transport/jitter.ts` | 上行 RTP 重排（`audio.jitter.reorderPackets`）；遺失包以 `null` 送解碼器，由下一包的 in-band FEC 還原，沒有 FEC 時走 libopus PLC |
 | `src/transport/MockMediaTransport.ts` | 測試／無 WebRTC 開發用 |
 | `src/mixer/` | `RoomMixer`（N 路疊加、mix-minus-self、每路 playout 預緩衝／underrun 重緩衝／漂移排空／常駐延遲收斂、預配置 ring buffer、緩衝上限）、`MixerClock`（全部房間共用一個 tick 時鐘）、`noiseFilter`、`loudness`（每路音量正規化）、`limiter` |
-| `packages/client/` | 可嵌入的瀏覽器 ESM 函式庫 `StageClient` |
+| `packages/client/` | 可嵌入的瀏覽器 ESM 函式庫 `StageClient`；`src/element.ts`＝Web Component `<stage-client>`（入口 `stage-element.ts` 自動註冊） |
 | `web/` | 完整範例前端（建於 client 之上） |
 | `src/metrics.ts` | Prometheus 文字輸出、跨房共用的 `MixerCounters`、event loop／記憶體取樣；`/metrics` 由 `server.metrics` 控制（對外 host 必須設 token） |
 
@@ -71,9 +71,9 @@ node scripts/load-test.ts        # 全端壓測：自起伺服器，K 發言者�
 
 **S5. 憑證不入庫、不入日誌。** STUN/TURN（coturn）設定只放 `config.yaml`（已在 `.gitignore`），入庫的是 `config.example.yaml`。TURN 一律用 `rtc.turn` 短期憑證（`src/rtc/turn.ts`：`<到期秒>:<participantId>`＋HMAC-SHA1），只經 `rtc:config` 發給已進房者；`rtc.turn.secret` 永不離開伺服器。不得把長期 TURN 帳密放進 `rtc.iceServers`。
 
-**S6. 競態保證。** 每房一條 `SerialQueue`：所有狀態變更與該房信令依序原子套用；每連線訊息依序處理。狀態機每次轉換後檢查不變量；「雙主控」等違例拋 `InvariantViolation` → 關房（fail-closed）。單一 client 的信令錯誤只回該請求錯誤，不得關房。
+**S6. 競態保證。** 每房一條 `SerialQueue`：所有狀態變更依序原子套用；每連線訊息依序處理。WebRTC 信令的傳輸層工作（套用 SDP、ICE）在佇列外、依連線順序執行，只有讀寫房間狀態的部分（方向政策檢查、登錄 publisher／`stage:joined`）回到房間佇列，且協商完成後**重新檢查**政策（期間被移下台就不登錄上行）。狀態機每次轉換後檢查不變量；「雙主控」等違例拋 `InvariantViolation` → 關房（fail-closed）。單一 client 的信令錯誤只回該請求錯誤，不得關房。
 
-**S7. 資源防護。** 每房發言者 ≤ 8、主控以外人數 ≤ 300（裁示定值）；全域 `maxRooms`、`maxConnections`；混音每路 PCM 緩衝上限 `mixer.maxBufferedFrames`（超過丟最舊）、limiter 防爆音；超過上限拒絕新上行／新連線（`stage_full`／`room_full`／HTTP 503）。
+**S7. 資源防護。** 每房主控以外的台上者 ≤ 8、主控以外人數 ≤ 300（裁示定值；主控席位皆另計）；全域 `maxRooms`、`maxConnections`；混音每路 PCM 緩衝上限 `mixer.maxBufferedFrames`（超過丟最舊）、limiter 防爆音；超過上限拒絕新上行／新連線（`stage_full`／`room_full`／HTTP 503）。
 
 **S8. 對外一律 generic 錯誤。** client 只收到 `ERROR_MESSAGES` 的固定訊息；內部原因（`StageError.detail`、例外字串）只入本地日誌。使用者可控文字（name、roomName）一律轉義後輸出。
 

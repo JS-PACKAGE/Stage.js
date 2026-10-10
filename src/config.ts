@@ -18,6 +18,8 @@ export interface AppConfig {
     static: StaticMount[];
     /** `GET /metrics` (Prometheus text). Non-empty `token` requires `Authorization: Bearer <token>`. */
     metrics: { enabled: boolean; token: string };
+    /** Behind a reverse proxy: take the client address from `X-Forwarded-For` for per-IP limits. */
+    trustProxy: boolean;
   };
   limits: {
     maxRooms: number;
@@ -31,10 +33,16 @@ export interface AppConfig {
     nameMaxLength: number;
     codeMaxLength: number;
     sdpMaxLength: number;
+    /** Connections that have not created or joined a room within this time are closed (0 = never). */
+    joinTimeoutMs: number;
+    /** Concurrent ws connections per client address (0 = unlimited). */
+    maxConnectionsPerIp: number;
   };
   rooms: {
     codeLength: number;
     controllerGraceMs: number;
+    /** Non-controllers keep their seat, stage position, hand and media this long after a ws drop (0 = removed at once). */
+    participantGraceMs: number;
     heartbeatIntervalMs: number;
     /** Audience joins/leaves are folded into one `room:state` broadcast per this many ms (0 = immediate). */
     presenceBroadcastMs: number;
@@ -69,6 +77,7 @@ export interface AppConfig {
     mixer: {
       maxBufferedFrames: number;
       limiterThreshold: number;
+      /** Acceptance gate for scripts/bench-mixer.ts and load-test.ts only; the server does not use it. */
       latencyTargetMs: number;
       /** Frame RMS (0..1) at which a publisher counts as speaking. */
       speakingThreshold: number;
@@ -181,6 +190,7 @@ export function parseConfig(raw: unknown): AppConfig {
       return { mount, dir: str(o, 'dir', p), cors: bool(o, 'cors', p) };
     }),
     metrics: { enabled: bool(mt, 'enabled', 'server.metrics'), token: str(mt, 'token', 'server.metrics') },
+    trustProxy: bool(s, 'trustProxy', 'server'),
   };
   if (server.metrics.enabled && server.metrics.token === '' && LOOPBACK[server.host] !== true) {
     throw new ConfigError('server.metrics.token: required when metrics are enabled on a non-loopback host');
@@ -207,12 +217,15 @@ export function parseConfig(raw: unknown): AppConfig {
     nameMaxLength: int(l, 'nameMaxLength', 'limits', 1),
     codeMaxLength: int(l, 'codeMaxLength', 'limits', 1),
     sdpMaxLength: int(l, 'sdpMaxLength', 'limits', 256),
+    joinTimeoutMs: int(l, 'joinTimeoutMs', 'limits', 0),
+    maxConnectionsPerIp: int(l, 'maxConnectionsPerIp', 'limits', 0),
   };
 
   const r = obj(root.rooms, 'rooms');
   const rooms: AppConfig['rooms'] = {
     codeLength: int(r, 'codeLength', 'rooms', 4),
     controllerGraceMs: int(r, 'controllerGraceMs', 'rooms', 0),
+    participantGraceMs: int(r, 'participantGraceMs', 'rooms', 0),
     heartbeatIntervalMs: int(r, 'heartbeatIntervalMs', 'rooms', 1000),
     presenceBroadcastMs: int(r, 'presenceBroadcastMs', 'rooms', 0, 10000),
     qualityIntervalMs: int(r, 'qualityIntervalMs', 'rooms', 0, 60000),

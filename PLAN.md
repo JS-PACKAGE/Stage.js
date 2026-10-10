@@ -186,7 +186,7 @@ Participant { participantId, name, role: "controller"｜"speaker"｜"audience",
 ```
 - **不變量**：每房 `controllerId` 恰 1 人；`speakers` 皆在台；audience 無上行音軌；`handQueue` 不含在台者；各房間狀態獨立；每房上限＝發言者 ≤ 8、觀眾 ≤ 300。
 - **房間生命週期**：`room:create` 建立（建立者為第一位主控，代碼隨機產生、可關閉）；`room:close`（僅主控）→ 廣播 `room:closed`、全員離房、資源釋放。
-- **生命週期**：連線 `join`（roomId＋代碼）即註冊（預設 audience）；斷線即移除；**主控下台不觸發移交**，主控斷線逾 **60 秒**（可調整）才自動移交（台上最早發言者 → 最早觀眾，見假設 4）。
+- **生命週期**：連線 `join`（roomId＋代碼）即註冊（預設 audience）；斷線後席位保留一段寬限（主控 **60 秒**、其他人 `rooms.participantGraceMs`，皆可調整），以 `resumeToken` 回座；**主控下台不觸發移交**，主控斷線逾寬限才自動移交（台上最早發言者 → 最早觀眾，見假設 4），其他人逾寬限即移除（見「十二」18）。
 - **狀態變更**：全部經單序事件佇列原子套用，同一 participant 的上下台／移交不得交錯（安全節 6）。
 - **持久化**：無（記憶體，重啟即失；與範圍外一致）。
 
@@ -276,7 +276,7 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 2. 上台核准＝**主控核准**（觀眾舉手 → 主控 `stage:approve`；裁示確認 2026-10-09）。
 3. 主控亦在台發言（依「一位主控及一到多位發言者發言」）。
 4. 台上者下行混音**不含自己**（避免回音）。**主控下台僅停止發言、保有控制權遠端管理**（裁示 2026-10-09），移交由主控自行決定；主控**斷線逾 60 秒**（可調整）才自動移交給台上最早發言者（無則最早觀眾）。
-5. 前端＝vanilla TypeScript＋Vite、UI 繁體中文；client 以 **ESM 函式庫**交付（可嵌入其他網站程式；Web Component 包裝為延伸項，**可調整**）；完整範例前端建於其上（裁示 2026-10-09）。
+5. 前端＝vanilla TypeScript＋Vite、UI 繁體中文；client 以 **ESM 函式庫**交付（可嵌入其他網站程式）；Web Component 包裝 `<stage-client>`（`/lib/stage-element.js`，見「十二」21）；完整範例前端建於其上（裁示 2026-10-09）。
 6. 不發布 npm 套件：倉庫公開供 clone（沿用前作裁示慣例）。
 7. 新創數值（限流、延遲目標 300ms、frame 64KB）標「**可調整**」，值入 `config.yaml`；同時發言者 ≤ 8、觀眾 ≤ 300 為裁示定值（見未定項 2）。
 8. Opus 編碼參數（mono、VBR 32–128kbps、48kHz）依 R3 為硬性；WebRTC Opus RTP 時鐘亦為 48kHz（RFC 7587），全程無重取樣（v1.7 裁示）。
@@ -298,15 +298,15 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 
 以下為實作時補足、未違反上文之決策；協定型別單一真值來源為 `shared/protocol.ts`。
 
-1. **協定擴充**（第四節之外）：S→C `ok {requestId}`（請求成功回覆）、`pong`、`rtc:config {iceServers}`（join／開房後下發，TURN 憑證僅給已進房者，為每人簽發的短期憑證）、`speaking {participantIds}`（伺服器混音端 VAD，集合變動時廣播）；C→S `room:create` 增 `roomName?`、`codeRequired?`（假設 9：代碼可關閉）；`join` 增 `resumeToken?`（主控斷線寬限期內回座）；`room:state` 每人帶 `onStage`／`forceMuted`，另有 `audienceCount`、`status`、`limits`，`audience` 全名單與 `code` 僅主控收到，`resumeToken` 僅本人收到。
+1. **協定擴充**（第四節之外）：S→C `ok {requestId}`（請求成功回覆）、`pong`、`rtc:config {iceServers}`（join／開房後下發，TURN 憑證僅給已進房者，為每人簽發的短期憑證）、`speaking {participantIds}`（伺服器混音端 VAD，集合變動時廣播）、`hello` 增 `limits {controlPerSecond, icePerSecond, handRaiseIntervalMs}`（client 據此節流與舉手冷卻，不再寫死）；C→S `room:create` 增 `roomName?`、`codeRequired?`（假設 9：代碼可關閉）；`join` 增 `resumeToken?`（主控斷線寬限期內回座）；`room:state` 每人帶 `onStage`／`forceMuted`，另有 `audienceCount`、`status`、`limits`，`audience` 全名單與 `code` 僅主控收到，`resumeToken` 僅本人收到。
 2. **信令方向**：一人一條 PeerConnection 連伺服器，**一律由 client 發 offer**、伺服器 answer；伺服器收到 `rtc:answer` 回 `bad_request`。上台（`me.onStage` 轉 true）→ client 掛麥克風改 `sendrecv` 重協商 → 伺服器 `stage:joined`；下台反向改 `recvonly`。
 3. **主控返回舞台**：主控下台後以 `stage:approve` 指定自己即回台（不需舉手；主控不可舉手）。
 4. **強制靜音**：`mic:force-unmute` 只解除主控鎖定，保留本人的自我靜音狀態（不遠端打開他人麥克風）。
-5. **觀眾上限**：「主控以外的人數 ≤ 300」，使觀眾數在上下台、移交等所有轉換中恆 ≤ 300；每房實際容量＝300＋主控。
+5. **上限算法**：「主控以外的人數 ≤ 300」、「主控以外的台上者 ≤ 8」，使觀眾數與發言者數在上下台、移交等所有轉換中恆守上限；每房實際容量＝300＋主控、台上＝8＋主控。主控在台時把控制權移交給台下者會使主控席位變成受上限的發言者席位，台上已滿時回 `stage_full`（先下台再移交）。
 6. **進場錯誤**：房間不存在與代碼錯誤一律 `unauthorized`（不洩漏房間是否存在）；代碼不分大小寫、以常數時間比較。
 7. **name 轉義**：伺服器儲存並輸出 HTML 轉義後的名稱（`& < > " '`）；client 提供 `decodeName()`，範例前端以 `textContent` 顯示。
 8. **限流**：任一限流違規（含 `hand:raise` 10 秒內重複）即以 close code 1008 斷線；client 函式庫在本地先擋舉手冷卻並對送出節流且**保持送出順序**（ICE 不得超前其 offer）。
-9. **單序事件佇列**：每房一條 `SerialQueue`，狀態變更與該房信令全經此佇列；每連線另保證訊息依序處理。不變量違例 → 關房（fail-closed）；單一 client 的信令錯誤（壞 SDP、過早 ICE）只回該請求 `bad_request`，不影響房間。
+9. **單序事件佇列**：每房一條 `SerialQueue`，狀態變更全經此佇列；每連線另保證訊息依序處理。信令的傳輸層工作（套用 offer、加入 ICE candidate，可能跨 worker 往返）在房間佇列**之外**依連線順序執行，避免大量同時進場時互相排隊、卡住控制命令；政策檢查（觀眾只能 recvonly）與協商後的效果（登錄 publisher、`stage:joined`）在房間佇列內原子套用，並於協商完成後重新檢查台上狀態。不變量違例 → 關房（fail-closed）；單一 client 的信令錯誤（壞 SDP、過早 ICE）只回該請求 `bad_request`，不影響房間。
 10. **明文 ws**：`server.allowInsecure: true` 且 host 為 loopback 才允許；否則必須提供 TLS 憑證，啟動即檢查。
 11. **werift 注意**：伺服器 transceiver 於套用 offer **之前**須先設成政策方向，否則 werift 不登錄瀏覽器重協商時新出現的 SSRC（觀眾升發言者後上行被丟棄）；`scripts/werift-loopback.ts` 以「去除 recvonly offer 的 SSRC」模擬瀏覽器並驗證此情境。werift 在 answer 為 recvonly 時仍可能送出 RTP，故上行一律以 publisher 註冊＋政策雙重把關。
 12. **踢人與更換代碼**：C→S `participant:kick {targetId}`（主控限定，不可踢自己）把參與者移出房間（台上者等同下台並移除），對方收到 S→C `kicked {roomId}` 後伺服器以 close code 4001 關閉連線，client 不自動重連；`room:rotate-code`（主控限定、需代碼的房間）換發新代碼，舊代碼立即失效、已在房內者不受影響。兩者合用＝封鎖鬧場者（無帳號制度下的「ban」）。
@@ -315,6 +315,10 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 15. **停機通知**：伺服器停止（SIGTERM／SIGINT）時對每個房間送 `room:closed {roomId, reason: 'shutdown'}`，再以 close code 1001 優雅關閉連線（最多等 1 秒完成關閉握手，逾時才強制切斷），確保通知送達；client 據此顯示「伺服器維護／重啟」而非一般關房。房間狀態只存在記憶體，重啟後不保留（第〇節範圍外）。
 16. **手動音量微調**：C→S `mic:gain {targetId, gainDb}`（主控限定，`|gainDb| ≤ MAX_GAIN_DB`＝20，伺服器取到 0.1 dB）設定某人在混音中的增益，疊加在 `audio.loudness` 自動正規化之後、限幅器之前；新值在下一個上行幀內線性過渡避免爆音。設定隨參與者保存到離開房間為止（上下台不重置），`ParticipantView.gainDb` 對全員可見。
 17. **下行省工**（效能決策）：(a) 台上者靜音或斷流超過 1 秒時，其 mix-minus 就是完整混音，改收共用的完整混音編碼並釋放自己的 encoder，一出聲立即換回（切換時該台上者的下行換一個 encoder 串流）；(b) 全房無人上行超過 1 秒（且 `opus.dtx` 開啟）時不再編碼，主機收到空 payload 即按 DTX 處理（時間戳前進、不送包，與 DTX 的差別只在不再送週期性靜音更新幀）；(c) 分送計畫（誰收哪個編碼）只在路由變動時重建；(d) werift 每包把 SRTP 金鑰以 Buffer 交給 node:crypto、每次重新匯入，改由 `src/transport/srtpKeys.ts` 在 cipher 建立時換成 `KeyObject`（輸出逐位元相同，由測試守住；werift 版本固定 0.25.0）。
+18. **斷線韌性**（落實第九節「WebRTC 連線獨立存活」）：ws 斷線時伺服器**不關 PeerConnection、不停混音**，席位、台位、舉手順位保留 `rooms.participantGraceMs`（主控 `controllerGraceMs`），`ParticipantView.connected` 對全員顯示 false；`join` 帶 `resumeToken` 回座即清除寬限計時並沿用既有媒體；逾時才移除（台上者等同下台）並關閉 peer。client 以 close code **1000 表示主動離開**（`disconnect()`），非主控者立即移除、不保留席位；其他關閉（`pagehide` 用 4002、網路中斷 1006 等）一律保留。client 端：ws 斷線不拆 PeerConnection，只有身分改變才重建；每 15 秒送 `ping`、35 秒無任何訊息即視為斷線；`pagehide` 主動關閉；WebRTC `disconnected` 持續 3 秒即 ICE restart（werift 以 ufrag 變更辨識遠端 restart），`failed` 時伺服器丟棄該 peer、client 以新 PeerConnection 重發 offer。
+19. **連線准入**：`limits.joinTimeoutMs` 內未開房／進房的連線以 1008 關閉；`limits.maxConnectionsPerIp` 限制同一位址同時連線（反向代理後 `server.trustProxy` 改讀 `X-Forwarded-For`）。
+20. **程序層錯誤**：`unhandledRejection` 只記 error 不中止（werift 關閉 peer 後的計時器可能漏 rejection，Node 預設會讓整個 process 連同所有房間一起死）；`uncaughtException` 走優雅停機（`room:closed {reason:'shutdown'}`）後以非零碼退出。TLS 憑證檔變更後約 2 秒自動 `setSecureContext`，失敗則沿用舊憑證。
+21. **Web Component**：`/lib/stage-element.js` 註冊 `<stage-client room code name url>`（shadow DOM 小工具：狀態、錯誤、啟用音訊、舉手、台上靜音／下台），進入文件即進房、移除即以 1000 離開；client 事件以 `stage-<type>` 派發，`element.client` 暴露底層 `StageClient` 供主控功能；它從穩定檔名 `stage-client.js` 匯入，嵌入頁同時使用兩者時只載入一份。
 
 ---
 

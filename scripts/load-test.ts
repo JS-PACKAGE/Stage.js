@@ -46,7 +46,7 @@ type ChildReport = { peers: number; connected: number; packets: number; lost: nu
 /** Minimal Stage.js signaling client over ws (Node stands in for the browser client library). */
 class Participant {
   readonly ws: WebSocket;
-  readonly pc = new RTCPeerConnection({ codecs: { audio: [opusCodec()], video: [] }, iceServers: [] });
+  readonly pc = new RTCPeerConnection({ codecs: { audio: [opusCodec(config.audio)], video: [] }, iceServers: [] });
   id = '';
   state: Extract<ServerMessage, { type: 'room:state' }> | undefined;
   private next = 0;
@@ -130,6 +130,7 @@ async function audienceChild(init: ChildInit): Promise<ChildReport> {
 async function startServer(): Promise<{ url: string; metricsUrl: string; child: ChildProcess }> {
   const raw = parse(readFileSync('config.example.yaml', 'utf8'));
   raw.server.port = 0; raw.server.static = []; raw.rtc.serverIceServers = []; raw.rtc.iceServers = []; raw.log.level = 'info';
+  raw.limits.maxConnectionsPerIp = 0; // every simulated peer connects from 127.0.0.1
   if (args['media-workers'] !== undefined) raw.rtc.mediaWorkers = Number(args['media-workers']);
   const dir = mkdtempSync(join(tmpdir(), 'stage-load-'));
   writeFileSync(join(dir, 'config.yaml'), stringify(raw));

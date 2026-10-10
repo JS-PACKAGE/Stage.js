@@ -45,20 +45,34 @@ export function createStaticHandler(mounts: StaticMount[], baseDir: string) {
     if (rel === '' || rel.endsWith('/')) rel += 'index.html';
     const file = resolve(mount.root, rel);
     if (file !== mount.root && !file.startsWith(mount.root + sep)) return false;
-    let size: number;
+    let size: number, mtime: Date;
     try {
       const st = await stat(file);
       if (!st.isFile()) return false;
       size = st.size;
+      mtime = st.mtime;
     } catch {
       return false;
+    }
+    // Weak validator from size + mtime: enough for built assets, and the client library is fetched
+    // by every embedding page, so revalidation must be a 304 rather than a full download.
+    const etag = `W/"${size.toString(16)}-${mtime.getTime().toString(16)}"`;
+    res.setHeader('ETag', etag);
+    res.setHeader('Last-Modified', mtime.toUTCString());
+    res.setHeader('Cache-Control', extname(file) === '.html' ? 'no-cache' : 'public, max-age=300');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    if (mount.cors) res.setHeader('Access-Control-Allow-Origin', '*');
+    const since = req.headers['if-modified-since'];
+    const fresh = req.headers['if-none-match'] === etag
+      || (req.headers['if-none-match'] === undefined && since !== undefined && Math.floor(mtime.getTime() / 1000) <= Math.floor(new Date(since).getTime() / 1000));
+    if (fresh) {
+      res.statusCode = 304;
+      res.end();
+      return true;
     }
     res.statusCode = 200;
     res.setHeader('Content-Type', CONTENT_TYPES[extname(file)] ?? 'application/octet-stream');
     res.setHeader('Content-Length', size);
-    res.setHeader('X-Content-Type-Options', 'nosniff');
-    res.setHeader('Cache-Control', extname(file) === '.html' ? 'no-cache' : 'public, max-age=300');
-    if (mount.cors) res.setHeader('Access-Control-Allow-Origin', '*');
     if (req.method === 'HEAD') {
       res.end();
       return true;

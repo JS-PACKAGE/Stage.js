@@ -114,6 +114,11 @@ export class Room {
     return this.speakers.size > 0 ? 'live' : 'waiting';
   }
 
+  /** On-stage participants other than the controller: what `limits.maxSpeakers` caps (the controller's seat is extra, like the audience cap). */
+  get speakerCount(): number {
+    return this.speakers.size - (this.speakers.has(this.controllerId) ? 1 : 0);
+  }
+
   get(participantId: string): Participant | undefined {
     return this.participants.get(participantId);
   }
@@ -208,7 +213,8 @@ export class Room {
     const t = this.require(targetId);
     if (t.onStage) throw new StageError('conflict', 'target already on stage');
     if (targetId !== byId && !t.handRaised) throw new StageError('conflict', 'target has not raised hand');
-    if (this.speakers.size >= this.limits.maxSpeakers) throw new StageError('stage_full', 'speaker cap');
+    if (!t.connected) throw new StageError('conflict', 'target disconnected');
+    if (targetId !== byId && this.speakerCount >= this.limits.maxSpeakers) throw new StageError('stage_full', 'speaker cap');
 
     const events: RoomEvent[] = [{ type: 'stage:invite', participantId: targetId, byId }];
     if (t.handRaised) {
@@ -274,20 +280,25 @@ export class Room {
     const t = this.require(targetId);
     if (!t.connected) throw new StageError('conflict', 'target disconnected');
     const from = this.require(byId);
+    // The old controller's seat becomes a capped speaker seat; refuse rather than exceed the cap (step down first).
+    if (from.onStage && !t.onStage && this.speakerCount >= this.limits.maxSpeakers) throw new StageError('stage_full', 'stage full for the outgoing controller');
 
+    const events: RoomEvent[] = [];
     if (t.handRaised) {
       t.handRaised = false;
       this.dequeueHand(targetId);
+      events.push({ type: 'hand:withdraw', participantId: targetId });
     }
     from.role = from.onStage ? 'speaker' : 'audience';
     t.role = 'controller';
     this.controllerId = targetId;
     this.assertInvariants();
-    return [
+    events.push(
       { type: 'control:transferred', fromId: byId, toId: targetId },
       { type: 'role:update', participantId: byId, role: from.role, reason },
       { type: 'role:update', participantId: targetId, role: 'controller', reason },
-    ];
+    );
+    return events;
   }
 
   /**
@@ -358,6 +369,7 @@ export class Room {
       muted: p.selfMuted || p.forceMuted,
       forceMuted: p.forceMuted,
       gainDb: p.gainDb,
+      connected: p.connected,
       joinedAt: p.joinedAt,
     };
   }
@@ -430,7 +442,7 @@ export class Room {
     if (this.participants.get(this.controllerId)?.role !== 'controller') fail('controllerId mismatch');
     for (const id of this.speakers) if (!this.participants.has(id)) fail('unknown speaker');
     if (new Set(this.handQueue).size !== this.handQueue.length) fail('duplicate hand');
-    if (this.speakers.size > this.limits.maxSpeakers) fail('speaker cap exceeded');
+    if (this.speakerCount > this.limits.maxSpeakers) fail('speaker cap exceeded');
     if (nonController > this.limits.maxAudience) fail('audience cap exceeded');
   }
 }

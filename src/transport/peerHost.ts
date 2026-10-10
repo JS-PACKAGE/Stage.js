@@ -6,8 +6,13 @@ import type { IceCandidatePayload, SessionDescriptionPayload } from '../../share
 import type { TransportStats } from './MediaTransport.ts';
 import { installSrtpKeyObjects } from './srtpKeys.ts';
 
-export function opusCodec(): RTCRtpCodecParameters {
-  return new RTCRtpCodecParameters({ mimeType: 'audio/opus', clockRate: 48000, channels: 2, payloadType: 111, parameters: 'minptime=10;useinbandfec=1;stereo=0;sprop-stereo=0;maxaveragebitrate=128000' });
+/**
+ * The Opus RTP codec both sides negotiate. `clockRate`/`channels` are fixed by RFC 7587 (48 kHz, "2"
+ * on the wire even for mono); the fmtp caps the browser's uplink encoder to the configured range.
+ */
+export function opusCodec(audio: AppConfig['audio']): RTCRtpCodecParameters {
+  const fmtp = [`minptime=${audio.frameMs}`, `useinbandfec=${audio.opus.fec ? 1 : 0}`, 'stereo=0', 'sprop-stereo=0', `maxaveragebitrate=${audio.opus.maxBitrate}`];
+  return new RTCRtpCodecParameters({ mimeType: 'audio/opus', clockRate: 48000, channels: 2, payloadType: 111, parameters: fmtp.join(';') });
 }
 
 export interface PeerHostEvents {
@@ -68,7 +73,7 @@ export class WeriftPeerHost implements PeerHost {
     const key = peerKey(roomId, id);
     let peer = this.peers.get(key);
     if (!peer) {
-      const pc = new RTCPeerConnection({ codecs: { audio: [opusCodec()], video: [] }, iceServers: this.config.rtc.serverIceServers, icePortRange: this.config.rtc.portRange.length === 2 ? this.config.rtc.portRange : undefined });
+      const pc = new RTCPeerConnection({ codecs: { audio: [opusCodec(this.config.audio)], video: [] }, iceServers: this.config.rtc.serverIceServers, icePortRange: this.config.rtc.portRange.length === 2 ? this.config.rtc.portRange : undefined });
       peer = { roomId, id, pc, track: new MediaStreamTrack({ kind: 'audio' }), allowUplink, uplinkEnabled: false, sequence: randomInt(65536), timestamp: randomInt(0x100000000), started: performance.now(), talkspurt: true, outboundBytes: 0, outboundPackets: 0, inboundBytes: 0, inboundPackets: 0 };
       this.peers.set(key, peer);
       const current = peer;

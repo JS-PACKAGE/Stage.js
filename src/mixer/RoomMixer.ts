@@ -71,7 +71,8 @@ export class RoomMixer implements MixedPcmSource {
   /** Unlimited sum and limited full mix, rewritten every tick. */
   private readonly raw: Float32Array;
   private readonly full: Float32Array;
-  private seq = 0;
+  /** The one frame handed to listeners; its fields are rewritten each tick (see MixFrame contract). */
+  private readonly frame: { seq: number; readonly full: Float32Array; silent: boolean; minus: MixFrame['minus'] };
   private detachClock: (() => void) | undefined;
   private readonly counters: MixerCounters;
   /** `counters` may be shared by every room's mixer to keep process-wide totals. */
@@ -82,6 +83,9 @@ export class RoomMixer implements MixedPcmSource {
     this.frameSize = Math.round(opts.sampleRate * opts.frameMs / 1000);
     this.raw = new Float32Array(this.frameSize);
     this.full = new Float32Array(this.frameSize);
+    const { sources, full } = this;
+    // A silent source's mix-minus equals the full mix.
+    this.frame = { seq: -1, full, silent: true, minus: (id) => { const source = sources.get(id); return source && (source.contribution ? source.minus : full); } };
     this.holdFrames = Math.max(1, Math.ceil(opts.speakingHoldMs / opts.frameMs));
     this.convergeTicks = Math.ceil(CONVERGE_WINDOW_MS / opts.frameMs);
   }
@@ -182,14 +186,8 @@ export class RoomMixer implements MixedPcmSource {
       for (let i = 0; i < minus.length; i++) minus[i] = raw[i]! - contribution[i]!;
       limitInPlace(minus, threshold);
     }
-    const frame: MixFrame = {
-      seq: this.seq++, full, silent,
-      minus(id) {
-        const source = sources.get(id);
-        // A silent source's mix-minus equals the full mix.
-        return source && (source.contribution ? source.minus : full);
-      },
-    };
+    const { frame } = this;
+    frame.seq++; frame.silent = silent;
     for (const listener of this.listeners) listener(frame);
     return frame;
   }

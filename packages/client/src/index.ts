@@ -1,4 +1,4 @@
-import type { ClientMessageMap, ClientMessageType, ErrorCode, IceCandidatePayload, ParticipantView, RoomStatePayload, ServerMessage, ServerMessageMap } from '../../../shared/protocol.ts';
+import type { ClientMessageMap, ClientMessageType, ErrorCode, IceCandidatePayload, ParticipantView, RateLimits, RoomStatePayload, ServerMessage, ServerMessageMap } from '../../../shared/protocol.ts';
 export type { ParticipantView, RoomStatePayload, Role, StageStatus, ErrorCode, IceServerConfig, ConnectionQuality } from '../../../shared/protocol.ts';
 export { MAX_GAIN_DB } from '../../../shared/protocol.ts';
 
@@ -103,6 +103,15 @@ export interface StageEventMap {
 interface Pending { resolve: () => void; reject: (error: StageError) => void; timer: ReturnType<typeof setTimeout> }
 type JoinOptions = { roomId: string; code?: string; name: string; resumeToken?: string };
 const REQUEST_TIMEOUT = 15000;
+/** Until the server's `hello` says otherwise: the config.example.yaml defaults. */
+const DEFAULT_LIMITS: RateLimits = { controlPerSecond: 20, icePerSecond: 30, handRaiseIntervalMs: 10000 };
+const KEEPALIVE_INTERVAL_MS = 15000;
+/** Two missed keepalive rounds. */
+const KEEPALIVE_TIMEOUT_MS = 2 * KEEPALIVE_INTERVAL_MS + 5000;
+/** `disconnected` this long → ICE restart (browsers take 15 s+ to reach `failed` on their own). */
+const ICE_RESTART_AFTER_MS = 3000;
+/** Application close code (browsers only allow 1000 and 3000–4999): page hidden, hold my seat. */
+const CLOSE_PAGE_HIDDEN = 4002;
 
 export class StageClient extends EventTarget {
   private readonly options: StageClientOptions;
@@ -133,6 +142,7 @@ export class StageClient extends EventTarget {
   private negotiating = false;
   private answerWait: { resolve: () => void; reject: (error: Error) => void } | null = null;
   private answerTimer: ReturnType<typeof setTimeout> | undefined;
+  private limits: RateLimits = DEFAULT_LIMITS;
   private lastHandAt = -Infinity;
   private nextControlAt = 0;
   private nextIceAt = 0;
@@ -140,6 +150,10 @@ export class StageClient extends EventTarget {
   private lastSendAt = 0;
   private previousStats = new Map<string, { bytes: number; timestamp: number; received: number; lost: number; bufferDelay: number; emitted: number }>();
   private speakingIds: ReadonlySet<string> = new Set();
+  private keepaliveTimer: ReturnType<typeof setInterval> | undefined;
+  private lastHeardAt = 0;
+  private iceServers: RTCIceServer[] = [];
+  private iceRestartTimer: ReturnType<typeof setTimeout> | undefined;
 
   constructor(options: StageClientOptions) {
     super();
@@ -149,12 +163,22 @@ export class StageClient extends EventTarget {
     this.audio.autoplay = true;
     if (this.ownsAudio) { this.audio.hidden = true; document.body.append(this.audio); }
   }
+  /**
+   * Tell the server we are going instead of letting it find out at the next heartbeat. Not 1000
+   * (that means "leaving"): the seat is held, so a page restored from the back/forward cache
+   * reconnects and resumes. Registered only while connected, so a discarded client is not kept
+   * alive by the window.
+   */
+  private readonly onPageHide = (): void => { this.socket?.close(CLOSE_PAGE_HIDDEN, 'page hidden'); };
+
   get state(): RoomStatePayload | null { return this.snapshot; }
   get status(): ClientStatus { return this.currentStatus; }
   get me(): ParticipantView | null { return this.snapshot?.me ?? null; }
   /** Participants currently audible in the mix (server voice activity). */
   get speaking(): ReadonlySet<string> { return this.speakingIds; }
-  get handCooldownMs(): number { return Math.max(0, 10000 - (Date.now() - this.lastHandAt)); }
+  get handCooldownMs(): number { return Math.max(0, this.limits.handRaiseIntervalMs - (Date.now() - this.lastHandAt)); }
+  /** Limits the connected server enforces per connection (from `hello`; defaults before connecting). */
+  get rateLimits(): RateLimits { return this.limits; }
   get outputDeviceSupported(): boolean { return typeof this.audio.setSinkId === 'function'; }
   /** RMS amplitude in [0, 1]; zero when not publishing or muted. */
   get micLevel(): number { return this.mic?.getAudioTracks()[0]?.enabled ? this.micMeter?.level() ?? 0 : 0; }
@@ -235,6 +259,7 @@ export class StageClient extends EventTarget {
     if (this.socket?.readyState === WebSocket.OPEN) return Promise.resolve();
     this.intentional = false;
     if (this.ownsAudio && !this.audio.isConnected) document.body.append(this.audio);
+    window.addEventListener('pagehide', this.onPageHide);
     const promise = new Promise<void>((resolve, reject) => {
       const ws = new WebSocket(this.options.url);
       this.socket = ws;
@@ -242,9 +267,10 @@ export class StageClient extends EventTarget {
       const timer = setTimeout(() => { reject(new StageError('timeout', '連線逾時，請稍後再試。')); ws.close(); }, REQUEST_TIMEOUT);
       ws.onmessage = (event) => {
         if (this.socket !== ws) return;
+        this.lastHeardAt = Date.now();
         try {
           const message = JSON.parse(String(event.data)) as ServerMessage;
-          if (message.type === 'hello') { ready = true; clearTimeout(timer); resolve(); }
+          if (message.type === 'hello') { this.limits = message.limits; ready = true; clearTimeout(timer); this.startKeepalive(ws); resolve(); }
           void this.receive(message).catch((error: unknown) => this.report(error));
         } catch { this.report(new StageError('bad_request', '收到無法解析的伺服器訊息。')); }
       };
@@ -252,17 +278,49 @@ export class StageClient extends EventTarget {
       ws.onclose = () => {
         clearTimeout(timer);
         if (!ready) reject(new StageError('disconnected', '連線已中斷。'));
-        if (this.socket !== ws) return;
-        this.socket = null;
-        this.rejectPending();
-        this.destroyMedia();
-        if (!this.intentional && this.session) this.scheduleReconnect();
-        else this.setStatus('disconnected');
+        this.socketLost(ws);
       };
     });
     this.connecting = promise;
     void promise.finally(() => { if (this.connecting === promise) this.connecting = null; }).catch(() => {});
     return promise;
+  }
+  /**
+   * The control connection is gone. Media is deliberately kept: the server holds the seat and the
+   * PeerConnection for the grace period, so audio continues while we reconnect and resume. Media is
+   * torn down only when the session itself ends (intentional disconnect, kick, room closed, resume refused).
+   */
+  private socketLost(ws: WebSocket): void {
+    if (this.socket !== ws) return;
+    this.socket = null;
+    this.stopKeepalive();
+    this.rejectPending();
+    if (!this.intentional && this.session) this.scheduleReconnect();
+    else { this.destroyMedia(); this.setStatus('disconnected'); }
+  }
+  /**
+   * Application-level liveness: a half-open TCP connection (network switch, sleep) would otherwise
+   * look alive for minutes. Silence past the timeout counts as a drop; `close()` on a dead socket can
+   * itself hang, so the socket is abandoned first and closed best-effort.
+   */
+  private startKeepalive(ws: WebSocket): void {
+    this.stopKeepalive();
+    this.lastHeardAt = Date.now();
+    this.keepaliveTimer = setInterval(() => {
+      if (this.socket !== ws || ws.readyState !== WebSocket.OPEN) { this.stopKeepalive(); return; }
+      if (Date.now() - this.lastHeardAt > KEEPALIVE_TIMEOUT_MS) {
+        this.report(new StageError('timeout', '伺服器沒有回應，正在重新連線。'));
+        ws.onclose = null;
+        this.socketLost(ws);
+        try { ws.close(); } catch { /* already dead */ }
+        return;
+      }
+      ws.send(JSON.stringify({ type: 'ping' }));
+    }, KEEPALIVE_INTERVAL_MS);
+  }
+  private stopKeepalive(): void {
+    clearInterval(this.keepaliveTimer);
+    this.keepaliveTimer = undefined;
   }
   async createRoom(options: { name: string; roomName?: string; codeRequired?: boolean; token?: string }): Promise<{ roomId: string; code?: string }> {
     await this.connect();
@@ -279,7 +337,7 @@ export class StageClient extends EventTarget {
     this.session = { ...options };
   }
   raiseHand(): Promise<void> {
-    if (this.handCooldownMs > 0) return Promise.reject(new StageError('rate_limited', '每次舉手需間隔 10 秒。'));
+    if (this.handCooldownMs > 0) return Promise.reject(new StageError('rate_limited', `每次舉手需間隔 ${Math.ceil(this.limits.handRaiseIntervalMs / 1000)} 秒。`));
     this.lastHandAt = Date.now();
     return this.request('hand:raise', {});
   }
@@ -314,12 +372,14 @@ export class StageClient extends EventTarget {
     this.session = null;
     this.snapshot = null;
     this.speakingIds = new Set();
+    this.stopKeepalive();
     this.socket?.close(1000);
     this.socket = null;
     this.rejectPending();
     this.destroyMedia();
     this.setStatus('disconnected');
     if (this.ownsAudio) this.audio.remove();
+    window.removeEventListener('pagehide', this.onPageHide);
   }
   async unlockAudio(): Promise<void> { await this.audio.play(); }
 
@@ -329,10 +389,12 @@ export class StageClient extends EventTarget {
     const requestId = crypto.randomUUID();
     const now = Date.now();
     const ice = type === 'rtc:ice';
+    // The server's buckets refill at the advertised rate; pacing at half (control) / two thirds (ICE)
+    // of it leaves headroom for clock skew and for frames the page sends outside this client.
     const sendAt = Math.max(now, this.lastSendAt, ice ? this.nextIceAt : this.nextControlAt);
     this.lastSendAt = sendAt;
-    if (ice) this.nextIceAt = sendAt + 50;
-    else this.nextControlAt = sendAt + 100;
+    if (ice) this.nextIceAt = sendAt + Math.ceil(1500 / this.limits.icePerSecond);
+    else this.nextControlAt = sendAt + Math.ceil(2000 / this.limits.controlPerSecond);
     return new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(requestId);
@@ -375,16 +437,21 @@ export class StageClient extends EventTarget {
       case 'room:created': this.created = { roomId: message.roomId, code: message.code }; this.emit('created', this.created); break;
       case 'room:state': {
         const { type: _, ...state } = message;
+        const previousId = this.snapshot?.me.participantId;
         this.snapshot = state;
         if (this.session) this.session.resumeToken = state.resumeToken;
         this.reconnectAttempt = 0;
         this.setStatus(state.status);
         this.emit('state', state);
         for (const track of this.mic?.getAudioTracks() ?? []) track.enabled = !state.me.muted;
+        // First snapshot of a (new) identity → fresh PeerConnection. A resumed seat keeps the one that
+        // survived the ws drop unless the network side died meanwhile.
+        const pcState = this.pc?.connectionState;
+        if (!this.pc || previousId !== state.me.participantId || pcState === 'failed' || pcState === 'closed') this.createMedia();
         this.syncMedia();
         break;
       }
-      case 'rtc:config': this.createMedia(message.iceServers); break;
+      case 'rtc:config': this.iceServers = message.iceServers; break;
       case 'rtc:answer': {
         const pc = this.pc;
         if (!pc || !this.answerWait) break;
@@ -449,9 +516,9 @@ export class StageClient extends EventTarget {
       })();
     }, delay);
   }
-  private createMedia(iceServers: RTCIceServer[]): void {
+  private createMedia(): void {
     this.destroyMedia();
-    const pc = new RTCPeerConnection({ iceServers });
+    const pc = new RTCPeerConnection({ iceServers: this.iceServers });
     this.pc = pc;
     this.transceiver = pc.addTransceiver('audio', { direction: 'recvonly' });
     pc.onicecandidate = (event) => {
@@ -464,9 +531,19 @@ export class StageClient extends EventTarget {
       void this.audio.play().catch(() => this.emit('audioblocked', { message: '瀏覽器已阻擋自動播放，請點擊啟用音訊。' }));
     };
     pc.onconnectionstatechange = () => {
-      if (this.pc === pc && pc.connectionState === 'failed') {
-        pc.restartIce();
-        this.negotiate();
+      if (this.pc !== pc) return;
+      clearTimeout(this.iceRestartTimer);
+      this.iceRestartTimer = undefined;
+      // `failed`: the server discards its side too (a failed werift peer cannot be renegotiated), so
+      // both ends start over. `disconnected`: usually a network change; an ICE restart on the same
+      // connection recovers in a few hundred ms instead of waiting for the browser's `failed` verdict.
+      if (pc.connectionState === 'failed') {
+        if (this.socket?.readyState === WebSocket.OPEN && this.session) { this.createMedia(); this.syncMedia(); }
+      } else if (pc.connectionState === 'disconnected') {
+        this.iceRestartTimer = setTimeout(() => {
+          this.iceRestartTimer = undefined;
+          if (this.pc === pc && pc.connectionState === 'disconnected' && this.socket?.readyState === WebSocket.OPEN) { pc.restartIce(); this.negotiate(); }
+        }, ICE_RESTART_AFTER_MS);
       }
     };
     // Wait for the personalised snapshot before choosing the publishing direction.
@@ -507,7 +584,7 @@ export class StageClient extends EventTarget {
       await transceiver.sender.replaceTrack(track);
       if (pc !== this.pc) return;
       transceiver.direction = direction;
-      if (changed || !pc.localDescription) this.negotiate();
+      if (changed || !pc.localDescription || pc.signalingState !== 'stable') this.negotiate();
     }).catch((error: unknown) => this.report(error));
   }
   private negotiate(): void {
@@ -520,6 +597,9 @@ export class StageClient extends EventTarget {
       try {
         while (this.negotiationDirty && this.pc === pc) {
           this.negotiationDirty = false;
+          // An offer whose answer never arrived (ws dropped mid-negotiation) must be rolled back first.
+          if (pc.signalingState === 'have-local-offer') await pc.setLocalDescription({ type: 'rollback' });
+          if (this.pc !== pc) return;
           const offer = await pc.createOffer();
           if (this.pc !== pc) return;
           offer.sdp = opusMonoSdp(offer.sdp ?? '');
@@ -548,6 +628,8 @@ export class StageClient extends EventTarget {
   }
   private destroyMedia(): void {
     ++this.mediaRevision;
+    clearTimeout(this.iceRestartTimer);
+    this.iceRestartTimer = undefined;
     this.pc?.close();
     this.pc = null;
     this.transceiver = null;

@@ -57,6 +57,8 @@ export interface ParticipantView {
   forceMuted: boolean;
   /** Controller-set level trim applied to this participant's voice in the mix (0 = unchanged). */
   gainDb: number;
+  /** False while the participant's ws is down and their seat is held for the grace period. */
+  connected: boolean;
   /** ms since epoch */
   joinedAt: number;
 }
@@ -110,6 +112,13 @@ export interface ConnectionQuality {
   rttMs?: number;
 }
 
+/** Per-connection limits the server enforces (close code 1008 on violation); clients pace themselves by these. */
+export interface RateLimits {
+  controlPerSecond: number;
+  icePerSecond: number;
+  handRaiseIntervalMs: number;
+}
+
 export type StageLeftReason = 'leave' | 'removed';
 
 export type ErrorCode =
@@ -129,7 +138,7 @@ export type ErrorCode =
 // ───────────────────────────── Server → Client ─────────────────────────────
 
 export interface ServerMessageMap {
-  hello: { protocol: number; serverVersion: string };
+  hello: { protocol: number; serverVersion: string; limits: RateLimits };
   'room:state': RoomStatePayload;
   'room:created': { roomId: string; code?: string };
   'room:closed': { roomId: string; reason?: 'shutdown' };

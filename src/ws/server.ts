@@ -1,7 +1,8 @@
-import { readFileSync } from 'node:fs';
+import { readFileSync, watch, type FSWatcher } from 'node:fs';
 import { createServer as createHttpServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
-import { createServer as createHttpsServer } from 'node:https';
+import { createServer as createHttpsServer, type Server as HttpsServer } from 'node:https';
 import type { AddressInfo } from 'node:net';
+import { basename, dirname } from 'node:path';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { once } from 'node:events';
 import { WebSocketServer, type WebSocket } from 'ws';
@@ -32,10 +33,14 @@ export interface StageServerDeps {
 
 /** Policy-violation close code (RFC 6455) used for rate-limit disconnects. */
 const CLOSE_POLICY = 1008;
+/** Normal-closure code (RFC 6455): from a client it means "I am leaving", so no seat is held. */
+const CLOSE_NORMAL = 1000;
 /** Going-away close code (RFC 6455) sent on shutdown, so clients can tell it from a dropped link. */
 const CLOSE_GOING_AWAY = 1001;
 /** How long shutdown waits for clients to finish the close handshake before cutting them off. */
 const SHUTDOWN_DRAIN_MS = 1000;
+/** Cert and key are usually rewritten one after the other; wait for both before reloading. */
+const TLS_RELOAD_DEBOUNCE_MS = 2000;
 
 class WsSession implements Session {
   readonly id = randomBytes(6).toString('base64url');
@@ -90,19 +95,65 @@ export function createStageServer(deps: StageServerDeps): StageServer {
   };
 
   const { certFile, keyFile } = config.server.tls;
-  const server: Server =
-    certFile && keyFile
-      ? createHttpsServer({ cert: readFileSync(certFile), key: readFileSync(keyFile) }, onRequest)
-      : createHttpServer(onRequest);
+  const secure = certFile !== '' && keyFile !== '';
+  const server: Server = secure
+    ? createHttpsServer({ cert: readFileSync(certFile), key: readFileSync(keyFile) }, onRequest)
+    : createHttpServer(onRequest);
+  // Certificates get renewed in place (ACME); pick the new pair up without a restart. Watching the
+  // directory survives tools that write a new file and rename or re-point a symlink (a file watch
+  // would follow the old inode). Cert and key land separately, so reload a moment after the last
+  // change, and keep the old context when the pair does not load (half-written or mismatched).
+  const watchers: FSWatcher[] = [];
+  let reloadTimer: NodeJS.Timeout | undefined;
+  if (secure) {
+    const reload = () => {
+      reloadTimer = undefined;
+      try {
+        (server as HttpsServer).setSecureContext({ cert: readFileSync(certFile), key: readFileSync(keyFile) });
+        log.info('TLS certificate reloaded');
+      } catch (err) {
+        log.error('TLS certificate reload failed, keeping the previous one', { error: String(err) });
+      }
+    };
+    const names: Record<string, string[]> = {};
+    for (const file of [certFile, keyFile]) (names[dirname(file)] ??= []).push(basename(file));
+    for (const [dir, files] of Object.entries(names)) {
+      try {
+        const w = watch(dir, (_event, name) => {
+          if (name !== null && !files.includes(String(name))) return;
+          clearTimeout(reloadTimer);
+          reloadTimer = setTimeout(reload, TLS_RELOAD_DEBOUNCE_MS);
+        });
+        w.unref();
+        w.on('error', (err) => log.warn('TLS certificate watch failed', { dir, error: String(err) }));
+        watchers.push(w);
+      } catch (err) {
+        log.warn('TLS certificate watch failed', { dir, error: String(err) });
+      }
+    }
+  }
 
   // Client is embedded on third-party sites, so no Origin allow-list (AGENTS.md §S10);
   // protection is room code + rate limits + caps.
   const wss = new WebSocketServer({ noServer: true, maxPayload: config.limits.maxFrameBytes });
   const sessions = new Set<WsSession>();
+  /** Open connections per client address, for `limits.maxConnectionsPerIp`. */
+  const perIp = new Map<string, number>();
+
+  const clientAddress = (req: IncomingMessage): string => {
+    if (config.server.trustProxy) {
+      const forwarded = req.headers['x-forwarded-for'];
+      const first = (Array.isArray(forwarded) ? forwarded[0] : forwarded)?.split(',')[0]?.trim();
+      if (first) return first;
+    }
+    return req.socket.remoteAddress ?? '';
+  };
 
   server.on('upgrade', (req, socket, head) => {
     const path = new URL(req.url ?? '/', 'http://x').pathname;
-    if (path !== config.server.wsPath || sessions.size >= config.limits.maxConnections) {
+    const ip = clientAddress(req);
+    const perIpCap = config.limits.maxConnectionsPerIp;
+    if (path !== config.server.wsPath || sessions.size >= config.limits.maxConnections || (perIpCap > 0 && (perIp.get(ip) ?? 0) >= perIpCap)) {
       socket.write('HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n');
       socket.destroy();
       return;
@@ -110,12 +161,19 @@ export function createStageServer(deps: StageServerDeps): StageServer {
     wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req));
   });
 
-  wss.on('connection', (ws: WebSocket) => {
+  wss.on('connection', (ws: WebSocket, req: IncomingMessage) => {
     const session = new WsSession(ws);
     const limiter = new ConnectionRateLimiter(config.limits, now());
+    const ip = clientAddress(req);
     sessions.add(session);
+    perIp.set(ip, (perIp.get(ip) ?? 0) + 1);
     log.debug('connection opened', { session: session.id });
     hub.attach(session);
+
+    // A connection that never enters a room only holds a `maxConnections` slot; drop it.
+    const joinDeadline = config.limits.joinTimeoutMs > 0
+      ? setTimeout(() => { if (!hub.isJoined(session)) violate(session, 'join timeout'); }, config.limits.joinTimeoutMs)
+      : undefined;
 
     ws.on('pong', () => {
       session.alive = true;
@@ -135,10 +193,14 @@ export function createStageServer(deps: StageServerDeps): StageServer {
       const m = msg;
       session.chain = session.chain.then(() => hub.handle(session, m));
     });
-    ws.on('close', () => {
+    ws.on('close', (code) => {
+      clearTimeout(joinDeadline);
       sessions.delete(session);
-      log.debug('connection closed', { session: session.id });
-      session.chain = session.chain.then(() => hub.detach(session));
+      const remaining = (perIp.get(ip) ?? 1) - 1;
+      if (remaining > 0) perIp.set(ip, remaining); else perIp.delete(ip);
+      log.debug('connection closed', { session: session.id, code });
+      // 1000 from the client = it chose to leave; anything else (1001 page hide, 1006 drop…) holds the seat.
+      session.chain = session.chain.then(() => hub.detach(session, code === CLOSE_NORMAL));
     });
     ws.on('error', (err) => log.debug('ws error', { session: session.id, error: String(err) }));
   });
@@ -172,6 +234,8 @@ export function createStageServer(deps: StageServerDeps): StageServer {
     },
     close: async () => {
       clearInterval(heartbeat);
+      clearTimeout(reloadTimer);
+      for (const w of watchers) w.close();
       await hub.shutdown();
       // A graceful close flushes the `room:closed` frames queued above; terminate() could drop them.
       const drained = Promise.all([...sessions].map((s) => once(s.ws, 'close')));

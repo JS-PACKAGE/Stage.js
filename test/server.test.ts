@@ -94,7 +94,9 @@ describe('ws server boundary', () => {
   it('greets, rejects unknown types and malformed input with generic errors', async () => {
     const c = new Client(url);
     await c.open();
-    await c.waitFor((m) => m.type === 'hello');
+    const hello = await c.waitFor((m) => m.type === 'hello');
+    assert.ok(hello.type === 'hello');
+    assert.deepEqual(hello.limits, { controlPerSecond: 5, icePerSecond: 30, handRaiseIntervalMs: 10000 }, 'client paces itself by the advertised limits');
     c.send({ type: 'nuke', requestId: 'r1' });
     assert.deepEqual(await c.reply('r1'), { type: 'error', requestId: 'r1', code: 'unknown_type', message: 'Unknown message type' });
     c.send({ type: 'join', requestId: 'r2', roomId: 'x', name: 'a'.repeat(33) });
@@ -162,6 +164,20 @@ describe('ws server boundary', () => {
     assert.equal((await fetch(`${base}/healthz`)).status, 200);
   });
 
+  it('revalidates static files with ETag / Last-Modified and answers 304', async () => {
+    const first = await fetch(`${base}/`);
+    const etag = first.headers.get('etag')!;
+    assert.match(etag, /^W\/"/);
+    assert.ok(first.headers.get('last-modified'));
+    const same = await fetch(`${base}/`, { headers: { 'if-none-match': etag } });
+    assert.equal(same.status, 304);
+    assert.equal(await same.text(), '');
+    const stale = await fetch(`${base}/`, { headers: { 'if-none-match': 'W/"other"' } });
+    assert.equal(stale.status, 200);
+    const dated = await fetch(`${base}/`, { headers: { 'if-modified-since': first.headers.get('last-modified')! } });
+    assert.equal(dated.status, 304);
+  });
+
   it('serves /metrics only with the bearer token', async () => {
     assert.equal((await fetch(`${base}/metrics`)).status, 401);
     assert.equal((await fetch(`${base}/metrics`, { headers: { authorization: 'Bearer wrong-token-x' } })).status, 401);
@@ -193,6 +209,44 @@ describe('graceful shutdown', () => {
     assert.equal(await host.closed, 1001);
     const closed = host.inbox.find((m) => m.type === 'room:closed');
     assert.deepEqual(closed, { type: 'room:closed', roomId: created.type === 'room:created' ? created.roomId : '', reason: 'shutdown' });
+  });
+});
+
+describe('connection admission', () => {
+  it('caps connections per address and drops connections that never join', async () => {
+    const config = testConfig((c) => { c.server.port = 0; c.limits.maxConnectionsPerIp = 2; c.limits.joinTimeoutMs = 200; });
+    const hub = new StageHub({
+      config,
+      transport: new MockMediaTransport({ onLocalCandidate: () => {} }),
+      log: silentLogger,
+      serverVersion: 'test',
+      createMixer: () => new RoomMixer({ sampleRate: 48000, frameMs: 20, maxBufferedFrames: 10, playoutFrames: 1, limiterThreshold: 0.9, speakingThreshold: 0.02, speakingHoldMs: 40 }),
+    });
+    const server = createStageServer({ config, hub, log: silentLogger, baseDir: tmpdir() });
+    const { port } = await server.listen();
+    const url = `ws://127.0.0.1:${port}${config.server.wsPath}`;
+    try {
+      const host = new Client(url);
+      await host.open();
+      host.send({ type: 'room:create', requestId: 'c1', name: 'H' });
+      await host.reply('c1');
+      const idle = new Client(url);
+      await idle.open();
+      // Third connection from the same address is refused at the upgrade.
+      const third = new WebSocket(url);
+      const refused = await new Promise<number>((resolve) => third.once('unexpected-response', (_req, res) => resolve(res.statusCode ?? 0)));
+      assert.equal(refused, 503);
+      // The idle one is dropped at the join deadline; the joined one stays.
+      assert.equal(await idle.closed, 1008);
+      assert.equal(host.ws.readyState, WebSocket.OPEN);
+      // Its slot is free again.
+      const again = new Client(url);
+      await again.open();
+      again.ws.close();
+      host.ws.close();
+    } finally {
+      await server.close();
+    }
   });
 });
 

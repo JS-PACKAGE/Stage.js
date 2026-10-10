@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { createHmac } from 'node:crypto';
 import { describe, it } from 'node:test';
 import { setImmediate as nextTurn } from 'node:timers/promises';
-import { FakeSession, harness, RECVONLY_OFFER, SENDRECV_OFFER, sine, testConfig } from './helpers.ts';
+import { FakeSession, harness, RECVONLY_OFFER, SENDRECV_OFFER, sine, testConfig, type Harness } from './helpers.ts';
 
 const FRAME = 960;
 
@@ -46,17 +46,19 @@ describe('flow 1 — raise hand → approve → on stage with uplink', () => {
     assert.deepEqual(other.s.last('speaking'), { type: 'speaking', participantIds: [aud.id] }, 'audience sees who is talking');
   });
 
-  it('rejects approve without a raised hand and beyond the 8-speaker cap', async () => {
+  it('rejects approve without a raised hand and beyond the 8-speaker cap (controller seat not counted)', async () => {
     const h = harness();
     const host = await h.create();
     const people = [];
-    for (let i = 0; i < 8; i++) people.push(await h.join(host.roomId, host.code, `P${i}`));
+    for (let i = 0; i < 9; i++) people.push(await h.join(host.roomId, host.code, `P${i}`));
     assert.equal(await h.req(host.s, { type: 'stage:approve', targetId: people[0]!.id }), 'conflict');
     for (const p of people) assert.equal(await h.req(p.s, { type: 'hand:raise' }), 'ok');
-    // Host already occupies one of the 8 seats.
-    for (let i = 0; i < 7; i++) assert.equal(await h.req(host.s, { type: 'stage:approve', targetId: people[i]!.id }), 'ok');
-    assert.equal(await h.req(host.s, { type: 'stage:approve', targetId: people[7]!.id }), 'stage_full');
-    assert.equal(host.s.last('room:state')!.speakers.length, 8);
+    for (let i = 0; i < 8; i++) assert.equal(await h.req(host.s, { type: 'stage:approve', targetId: people[i]!.id }), 'ok');
+    assert.equal(await h.req(host.s, { type: 'stage:approve', targetId: people[8]!.id }), 'stage_full');
+    assert.equal(host.s.last('room:state')!.speakers.length, 9, 'controller plus 8 speakers');
+    // The controller's own seat is outside the cap: stepping down and returning never hits stage_full.
+    assert.equal(await h.req(host.s, { type: 'stage:leave' }), 'ok');
+    assert.equal(await h.req(host.s, { type: 'stage:approve', targetId: host.id }), 'ok');
   });
 });
 
@@ -128,6 +130,140 @@ describe('flow 2 — leave stage', () => {
   });
 });
 
+describe('ws drop with the seat held (rooms.participantGraceMs)', () => {
+  it('keeps a speaker on stage with audio flowing, lets them resume, and removes them only when the grace expires', async () => {
+    const config = testConfig();
+    const h = harness(config);
+    const host = await h.create();
+    const sp = await h.join(host.roomId, host.code, 'Sam');
+    const aud = await h.join(host.roomId, host.code, 'Al');
+    await h.req(sp.s, { type: 'hand:raise' });
+    await h.req(host.s, { type: 'stage:approve', targetId: sp.id });
+    await h.req(sp.s, { type: 'rtc:offer', payload: SENDRECV_OFFER });
+    await h.req(aud.s, { type: 'rtc:offer', payload: RECVONLY_OFFER });
+    const token = sp.s.last('room:state')!.resumeToken!;
+
+    host.s.clear();
+    await h.hub.detach(sp.s);
+    const grace = h.timers.filter((t) => !t.cleared && t.ms === config.rooms.participantGraceMs);
+    assert.equal(grace.length, 1, 'seat-hold timer started');
+    const held = host.s.last('room:state')!;
+    assert.equal(held.speakers.find((p) => p.participantId === sp.id)?.connected, false, 'still on stage, shown as disconnected');
+    assert.equal(host.s.last('stage:left'), undefined);
+    assert.equal(h.transport.emitUplink(host.roomId, sp.id, sine(FRAME, 0.5)), true, 'media untouched while the seat is held');
+    h.mixers.get(host.roomId)!.tick();
+    assert.ok(energy(h.transport.rooms.get(host.roomId)!.peers.get(aud.id)!.received.at(-1)!) > 0.05, 'audience still hears them');
+
+    // Someone else's token does not take the seat; the right one does, and the timer is cancelled.
+    const thief = new FakeSession();
+    h.hub.attach(thief);
+    assert.equal(await h.req(thief, { type: 'join', roomId: host.roomId, code: host.code, name: 'X', resumeToken: 'not-the-token' }), 'ok');
+    assert.notEqual(thief.last('room:state')!.me.participantId, sp.id, 'a bad token joins as a new participant');
+    const back = new FakeSession();
+    h.hub.attach(back);
+    assert.equal(await h.req(back, { type: 'join', roomId: host.roomId, code: host.code, name: 'Sam', resumeToken: token }), 'ok');
+    const resumed = back.last('room:state')!.me;
+    assert.equal(resumed.participantId, sp.id);
+    assert.equal(resumed.onStage, true);
+    assert.equal(resumed.connected, true);
+    assert.equal(grace[0]!.cleared, true);
+    assert.equal(await h.req(back, { type: 'mic:mute' }), 'ok', 'the new session drives the old seat');
+
+    // Drop again and let the grace run out: now the stage change happens and the media is torn down.
+    host.s.clear();
+    await h.hub.detach(back);
+    assert.equal(await h.req(host.s, { type: 'stage:approve', targetId: sp.id }), 'conflict', 'cannot be put on stage while disconnected');
+    h.timers.filter((t) => !t.cleared && t.ms === config.rooms.participantGraceMs).at(-1)!.fn();
+    await nextTurn();
+    assert.deepEqual(host.s.last('stage:left'), { type: 'stage:left', participantId: sp.id, role: 'audience', reason: 'leave' });
+    assert.equal(host.s.last('room:state')!.speakers.some((p) => p.participantId === sp.id), false);
+    assert.equal(h.transport.rooms.get(host.roomId)!.peers.has(sp.id), false, 'peer closed');
+    assert.equal(h.transport.emitUplink(host.roomId, sp.id, sine(FRAME, 0.5)), false);
+  });
+
+  it('holds a raised hand through the grace and with participantGraceMs 0 removes at once', async () => {
+    const h = harness();
+    const host = await h.create();
+    const a = await h.join(host.roomId, host.code, 'A');
+    const b = await h.join(host.roomId, host.code, 'B');
+    await h.req(a.s, { type: 'hand:raise' });
+    await h.req(b.s, { type: 'hand:raise' });
+    const token = a.s.last('room:state')!.resumeToken!;
+    await h.hub.detach(a.s);
+    assert.deepEqual(host.s.last('room:state')!.hands.map((p) => p.participantId), [a.id, b.id], 'queue position kept');
+    const back = new FakeSession();
+    h.hub.attach(back);
+    await h.req(back, { type: 'join', roomId: host.roomId, code: host.code, name: 'A', resumeToken: token });
+    assert.equal(await h.req(host.s, { type: 'stage:approve', targetId: a.id }), 'ok');
+
+    const immediate = harness(testConfig((c) => { c.rooms.participantGraceMs = 0; }));
+    const host2 = await immediate.create();
+    const c = await immediate.join(host2.roomId, host2.code, 'C');
+    await immediate.req(c.s, { type: 'rtc:offer', payload: RECVONLY_OFFER });
+    await immediate.hub.detach(c.s);
+    assert.equal(immediate.transport.rooms.get(host2.roomId)!.peers.has(c.id), false);
+    assert.equal(immediate.timers.some((t) => !t.cleared && t.ms === 0), false, 'no grace timer');
+  });
+
+  it('does not hold the seat of someone who left on purpose (normal close), except the controller\'s', async () => {
+    const config = testConfig();
+    const h = harness(config);
+    const host = await h.create();
+    const sp = await h.join(host.roomId, host.code, 'Sam');
+    await h.req(sp.s, { type: 'hand:raise' });
+    await h.req(host.s, { type: 'stage:approve', targetId: sp.id });
+    await h.req(sp.s, { type: 'rtc:offer', payload: SENDRECV_OFFER });
+    await h.hub.detach(sp.s, true);
+    assert.deepEqual(host.s.last('stage:left'), { type: 'stage:left', participantId: sp.id, role: 'audience', reason: 'leave' }, 'off stage at once');
+    assert.equal(h.transport.rooms.get(host.roomId)!.peers.has(sp.id), false, 'media released at once');
+    assert.equal(h.timers.some((t) => !t.cleared && t.ms === config.rooms.participantGraceMs), false);
+
+    await h.hub.detach(host.s, true);
+    assert.equal(h.timers.filter((t) => !t.cleared && t.ms === config.rooms.controllerGraceMs).length, 1, 'controller keeps the PLAN grace period');
+  });
+});
+
+describe('signaling outside the room queue', () => {
+  /** Holds the next transport negotiation until `release` is called (a slow worker round-trip). */
+  function gateNegotiation(h: Harness) {
+    const original = h.transport.negotiate.bind(h.transport);
+    const gate = Promise.withResolvers<void>();
+    h.transport.negotiate = async (...args) => { await gate.promise; h.transport.negotiate = original; return original(...args); };
+    return gate.resolve;
+  }
+
+  it('a slow negotiation does not hold up the room\'s control commands', async () => {
+    const h = harness();
+    const host = await h.create();
+    const a = await h.join(host.roomId, host.code, 'A');
+    const b = await h.join(host.roomId, host.code, 'B');
+    const release = gateNegotiation(h);
+    const offer = h.req(a.s, { type: 'rtc:offer', payload: RECVONLY_OFFER });
+    assert.equal(await h.req(b.s, { type: 'hand:raise' }), 'ok', 'handled while A\'s offer is still being applied');
+    assert.equal(await h.req(host.s, { type: 'stage:approve', targetId: b.id }), 'ok');
+    release();
+    assert.equal(await offer, 'ok');
+    assert.ok(a.s.last('rtc:answer'));
+  });
+
+  it('does not publish an uplink whose owner left the stage while their offer was being applied', async () => {
+    const h = harness();
+    const host = await h.create();
+    const sp = await h.join(host.roomId, host.code, 'Sam');
+    await h.req(sp.s, { type: 'hand:raise' });
+    await h.req(host.s, { type: 'stage:approve', targetId: sp.id });
+    const release = gateNegotiation(h);
+    const offer = h.req(sp.s, { type: 'rtc:offer', payload: SENDRECV_OFFER });
+    await nextTurn();
+    assert.equal(await h.req(host.s, { type: 'stage:remove', targetId: sp.id }), 'ok');
+    host.s.clear();
+    release();
+    assert.equal(await offer, 'ok');
+    assert.equal(host.s.last('stage:joined'), undefined, 'never announced on stage');
+    assert.equal(h.transport.emitUplink(host.roomId, sp.id, sine(FRAME, 0.5)), false, 'uplink stays out of the mix');
+  });
+});
+
 describe('flow 3 — control transfer', () => {
   it('moves control; old controller on stage becomes speaker and loses powers', async () => {
     const h = harness();
@@ -149,6 +285,18 @@ describe('flow 3 — control transfer', () => {
     await h.req(b.s, { type: 'hand:raise' });
     assert.equal(await h.req(host.s, { type: 'stage:approve', targetId: b.id }), 'forbidden');
     assert.equal(await h.req(a.s, { type: 'stage:approve', targetId: b.id }), 'ok');
+  });
+
+  it('transferring to someone with a raised hand withdraws it and tells the room', async () => {
+    const h = harness();
+    const host = await h.create();
+    const a = await h.join(host.roomId, host.code, 'A');
+    const b = await h.join(host.roomId, host.code, 'B');
+    await h.req(a.s, { type: 'hand:raise' });
+    b.s.clear();
+    assert.equal(await h.req(host.s, { type: 'control:transfer', targetId: a.id }), 'ok');
+    assert.deepEqual(b.s.last('hand:withdraw'), { type: 'hand:withdraw', participantId: a.id });
+    assert.deepEqual(b.s.last('room:state')!.hands, []);
   });
 
   it('concurrent transfers never yield two controllers', async () => {
@@ -205,7 +353,7 @@ describe('flow 3 — control transfer', () => {
 
 describe('presence broadcasts', () => {
   it('folds a burst of audience joins and leaves into one room:state per window; stage changes stay immediate', async () => {
-    const config = testConfig();
+    const config = testConfig((c) => { c.rooms.participantGraceMs = 0; });
     const h = harness(config);
     const host = await h.create();
     host.s.clear();

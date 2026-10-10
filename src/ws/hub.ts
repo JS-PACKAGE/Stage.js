@@ -62,6 +62,8 @@ interface RoomRuntime {
   readonly sessions: Map<string, Session>;
   readonly publishers: Set<string>;
   graceTimer: unknown;
+  /** Seat-hold timers of disconnected non-controllers (`rooms.participantGraceMs`). */
+  readonly graceTimers: Map<string, unknown>;
   /** Pending coalesced `room:state` broadcast (see `presenceChanged`). */
   stateTimer: unknown;
   /** Next connection-quality report; scheduled only while someone publishes. */
@@ -118,7 +120,13 @@ export class StageHub {
   }
 
   attach(session: Session): void {
-    session.send({ type: 'hello', protocol: PROTOCOL_VERSION, serverVersion: this.deps.serverVersion });
+    const { controlPerSecond, icePerSecond, handRaiseIntervalMs } = this.deps.config.limits;
+    session.send({ type: 'hello', protocol: PROTOCOL_VERSION, serverVersion: this.deps.serverVersion, limits: { controlPerSecond, icePerSecond, handRaiseIntervalMs } });
+  }
+
+  /** Whether the session has created or joined a room (and not been evicted since). */
+  isJoined(session: Session): boolean {
+    return this.bindings.has(session);
   }
 
   /** Handle one validated message. Never throws; failures become `error` frames. */
@@ -145,20 +153,21 @@ export class StageHub {
       if (!binding) throw new StageError('not_joined', msg.type);
       const rt = this.rooms.get(binding.roomId);
       if (!rt) throw new StageError('not_joined', 'room gone');
-      await rt.queue.run(() => this.command(rt, session, binding.participantId, msg));
+      if (msg.type === 'rtc:offer' || msg.type === 'rtc:ice') await this.signal(rt, session, binding.participantId, msg);
+      else await rt.queue.run(() => this.command(rt, session, binding.participantId, msg));
     } catch (err) {
       this.fail(session, requestId, err);
     }
   }
 
-  /** Connection closed. */
-  async detach(session: Session): Promise<void> {
+  /** Connection closed; `left` = the client closed normally (1000) to leave, not a dropped link. */
+  async detach(session: Session, left = false): Promise<void> {
     const b = this.bindings.get(session);
     if (!b) return;
     this.bindings.delete(session);
     const rt = this.rooms.get(b.roomId);
     if (!rt) return;
-    await rt.queue.run(() => this.disconnect(rt, session, b.participantId)).catch((err) => this.internalFailure(rt, err));
+    await rt.queue.run(() => this.disconnect(rt, session, b.participantId, left)).catch((err) => this.internalFailure(rt, err));
   }
 
   /** MediaTransport callback: trickle server ICE to the participant. */
@@ -166,11 +175,18 @@ export class StageHub {
     this.rooms.get(roomId)?.sessions.get(participantId)?.send({ type: 'rtc:ice', fromId: SERVER_PEER_ID, payload: candidate });
   }
 
-  /** MediaTransport callback: the peer died on the network side; stop mixing its uplink. */
+  /**
+   * MediaTransport callback: the peer died on the network side. Stop mixing its uplink and discard
+   * the PeerConnection: a failed werift peer cannot be renegotiated, so the participant's next offer
+   * must create a new one (their seat and session are untouched).
+   */
   onPeerClosed(roomId: string, participantId: string): void {
     const rt = this.rooms.get(roomId);
     if (!rt) return;
-    void rt.queue.run(() => this.unpublish(rt, participantId)).catch((err) => this.internalFailure(rt, err));
+    void rt.queue.run(() => {
+      this.unpublish(rt, participantId);
+      this.deps.transport.closePeer(roomId, participantId);
+    }).catch((err) => this.internalFailure(rt, err));
   }
 
   async shutdown(): Promise<void> {
@@ -208,6 +224,7 @@ export class StageHub {
       sessions: new Map([[controller.participantId, session]]),
       publishers: new Set(),
       graceTimer: undefined,
+      graceTimers: new Map(),
       stateTimer: undefined,
       qualityTimer: undefined,
       uplinkCounts: new Map(),
@@ -244,9 +261,14 @@ export class StageHub {
           break;
         }
       }
-      if (participantId !== undefined && participantId === room.controllerId && rt.graceTimer !== undefined) {
-        this.clearTimer(rt.graceTimer);
-        rt.graceTimer = undefined;
+      if (participantId !== undefined) {
+        if (participantId === room.controllerId) {
+          if (rt.graceTimer !== undefined) this.clearTimer(rt.graceTimer);
+          rt.graceTimer = undefined;
+        } else {
+          const timer = rt.graceTimers.get(participantId);
+          if (timer !== undefined) { this.clearTimer(timer); rt.graceTimers.delete(participantId); }
+        }
       }
     }
     if (participantId === undefined) {
@@ -327,20 +349,6 @@ export class StageHub {
         session.send({ type: 'ok', requestId: msg.requestId });
         this.deps.log.info('room code rotated', { roomId: room.roomId });
         return;
-      case 'rtc:offer':
-        await this.negotiate(rt, session, pid, msg.payload);
-        session.send({ type: 'ok', requestId: msg.requestId });
-        return;
-      case 'rtc:ice':
-        try {
-          await this.deps.transport.addRemoteCandidate(room.roomId, pid, msg.payload);
-        } catch (err) {
-          // e.g. a candidate before any offer: that client's signaling error, not a room failure.
-          this.deps.log.debug('remote candidate rejected', { roomId: room.roomId, participantId: pid, error: String(err) });
-          throw new StageError('bad_request', 'candidate rejected');
-        }
-        session.send({ type: 'ok', requestId: msg.requestId });
-        return;
       case 'rtc:answer':
         // The server never sends offers, so an answer is always out of protocol.
         throw new StageError('bad_request', 'unexpected rtc:answer');
@@ -362,6 +370,8 @@ export class StageHub {
   private evict(rt: RoomRuntime, pid: string): void {
     const session = rt.sessions.get(pid);
     rt.sessions.delete(pid);
+    const grace = rt.graceTimers.get(pid);
+    if (grace !== undefined) { this.clearTimer(grace); rt.graceTimers.delete(pid); }
     this.unpublish(rt, pid);
     this.deps.transport.closePeer(rt.room.roomId, pid);
     if (!session) return;
@@ -370,69 +380,126 @@ export class StageHub {
     session.close(CLOSE_KICKED, 'kicked');
   }
 
-  private async negotiate(
-    rt: RoomRuntime,
-    session: Session,
-    pid: string,
-    offer: SessionDescriptionPayload,
-  ): Promise<void> {
-    const { room } = rt;
+  /**
+   * WebRTC signaling. The transport work (SDP application, ICE) can take a worker round-trip per
+   * message, so it runs outside the room queue — 300 people joining at once must not stall the
+   * room's control commands behind each other's handshakes. Per-participant order still holds
+   * (each connection's messages are handled one at a time, so a candidate never overtakes its
+   * offer). Only the parts that read or change room state run in the room queue: the policy check
+   * before, and publishing after — with the policy checked again, since the participant may have
+   * left the stage while their offer was being applied (AGENTS.md §S2: both gates must hold).
+   */
+  private async signal(rt: RoomRuntime, session: Session, pid: string, msg: Extract<ClientMessage, { type: 'rtc:offer' | 'rtc:ice' }>): Promise<void> {
     const { transport, log } = this.deps;
-    const p = room.get(pid);
-    if (!p) throw new StageError('not_joined', 'participant gone');
-    const summary = summarizeOffer(offer.sdp);
+    const { roomId } = rt.room;
+    const stale = () => rt.closed || rt.sessions.get(pid) !== session;
+    if (stale()) throw new StageError('not_joined', 'stale binding');
+    if (msg.type === 'rtc:ice') {
+      try {
+        await transport.addRemoteCandidate(roomId, pid, msg.payload);
+      } catch (err) {
+        // e.g. a candidate before any offer: that client's signaling error, not a room failure.
+        log.debug('remote candidate rejected', { roomId, participantId: pid, error: String(err) });
+        throw new StageError('bad_request', 'candidate rejected');
+      }
+      session.send({ type: 'ok', requestId: msg.requestId });
+      return;
+    }
+    const summary = summarizeOffer(msg.payload.sdp);
     if (summary.audioDirections.length === 0) throw new StageError('bad_request', 'offer without audio');
     const sends = offerSendsAudio(summary);
-    if (sends && !p.onStage) {
-      // Audience may only receive (AGENTS.md §S2): reject the whole offer, fail-closed.
-      log.warn('uplink offer from off-stage participant rejected', { roomId: room.roomId, participantId: pid });
-      throw new StageError('forbidden', 'audience offer must be recvonly');
-    }
+    const allowUplink = await rt.queue.run(() => {
+      if (stale()) throw new StageError('not_joined', 'stale binding');
+      const p = rt.room.get(pid);
+      if (!p) throw new StageError('not_joined', 'participant gone');
+      if (sends && !p.onStage) {
+        // Audience may only receive (AGENTS.md §S2): reject the whole offer, fail-closed.
+        log.warn('uplink offer from off-stage participant rejected', { roomId, participantId: pid });
+        throw new StageError('forbidden', 'audience offer must be recvonly');
+      }
+      return p.onStage;
+    });
     let answer: SessionDescriptionPayload;
     try {
-      answer = await transport.negotiate(room.roomId, pid, offer, { allowUplink: p.onStage });
+      answer = await transport.negotiate(roomId, pid, msg.payload, { allowUplink });
     } catch (err) {
       // A bad offer is that client's problem, not a reason to tear down the room.
-      log.warn('negotiation failed', { roomId: room.roomId, participantId: pid, error: String(err) });
-      this.unpublish(rt, pid);
-      transport.closePeer(room.roomId, pid);
+      log.warn('negotiation failed', { roomId, participantId: pid, error: String(err) });
+      await rt.queue.run(() => {
+        if (rt.closed || !rt.room.get(pid)) return;
+        this.unpublish(rt, pid);
+        transport.closePeer(roomId, pid);
+      });
       throw new StageError('bad_request', 'negotiation failed');
     }
-    if (rt.closed) return;
-    session.send({ type: 'rtc:answer', fromId: SERVER_PEER_ID, payload: answer });
-    transport.subscribe(room.roomId, pid);
-    if (sends && !rt.publishers.has(pid)) {
-      rt.publishers.add(pid);
-      rt.mixer.addSource(pid);
-      rt.mixer.setGain(pid, p.gainDb);
-      this.scheduleQuality(rt);
-      transport.addPublisher(room.roomId, pid, (samples) => rt.mixer.push(pid, samples));
-      this.setPublisherMuted(rt, pid, p.selfMuted || p.forceMuted);
-      this.broadcast(rt, { type: 'stage:joined', participantId: pid, role: p.role });
-    } else if (!sends) {
-      this.unpublish(rt, pid);
-    }
+    await rt.queue.run(() => {
+      // The room closed or the participant left meanwhile: whatever tore them down already closed
+      // their peer, unless it ran before this negotiation created it — close it again to be sure.
+      if (rt.closed) { transport.closeRoom(roomId); return; }
+      const p = rt.room.get(pid);
+      if (!p) { transport.closePeer(roomId, pid); return; }
+      // Resumed on another connection meanwhile: that one renegotiates; this answer has no reader.
+      if (rt.sessions.get(pid) !== session) return;
+      session.send({ type: 'rtc:answer', fromId: SERVER_PEER_ID, payload: answer });
+      transport.subscribe(roomId, pid);
+      if (sends && p.onStage && !rt.publishers.has(pid)) {
+        rt.publishers.add(pid);
+        rt.mixer.addSource(pid);
+        rt.mixer.setGain(pid, p.gainDb);
+        this.scheduleQuality(rt);
+        transport.addPublisher(roomId, pid, (samples) => rt.mixer.push(pid, samples));
+        this.setPublisherMuted(rt, pid, p.selfMuted || p.forceMuted);
+        this.broadcast(rt, { type: 'stage:joined', participantId: pid, role: p.role });
+      } else if (!sends || !p.onStage) {
+        this.unpublish(rt, pid);
+      }
+      session.send({ type: 'ok', requestId: msg.requestId });
+    });
   }
 
-  private disconnect(rt: RoomRuntime, session: Session, pid: string): void {
+  /**
+   * The ws closed. After a drop the media plane is left alone: a short ws outage must not cost the
+   * participant their PeerConnection (PLAN 九), so audio keeps flowing while the seat is held. The
+   * seat, stage position and raised hand survive the grace period; a `join` with the resume token
+   * reclaims them. `left` (the client closed with 1000) means they meant to go: no seat is held —
+   * except the controller's, whose grace period PLAN 假設 4 fixes for every disconnect.
+   */
+  private disconnect(rt: RoomRuntime, session: Session, pid: string, left: boolean): void {
     if (rt.closed || rt.sessions.get(pid) !== session) return;
     const { room } = rt;
     rt.sessions.delete(pid);
-    this.unpublish(rt, pid);
-    this.deps.transport.closePeer(room.roomId, pid);
     const p = room.get(pid);
     if (!p) return;
-    if (p.role === 'controller') {
-      // Hold the seat; auto-transfer only after the grace period (PLAN 假設 4).
+    const { controllerGraceMs, participantGraceMs } = this.deps.config.rooms;
+    const controller = p.role === 'controller';
+    const graceMs = controller ? controllerGraceMs : participantGraceMs;
+    if (controller || (graceMs > 0 && !left)) {
       p.connected = false;
-      rt.graceTimer = this.setTimer(() => {
-        void rt.queue.run(() => this.expireController(rt, pid)).catch((err) => this.internalFailure(rt, err));
-      }, this.deps.config.rooms.controllerGraceMs);
-      this.deps.log.info('controller disconnected, grace started', { roomId: room.roomId, participantId: pid });
-      this.broadcastState(rt);
+      const timer = this.setTimer(() => {
+        void rt.queue.run(() => (controller ? this.expireController(rt, pid) : this.expireParticipant(rt, pid))).catch((err) => this.internalFailure(rt, err));
+      }, graceMs);
+      if (controller) rt.graceTimer = timer; else rt.graceTimers.set(pid, timer);
+      this.deps.log.info('participant disconnected, grace started', { roomId: room.roomId, participantId: pid, role: p.role });
+      if (p.onStage) this.broadcastState(rt); else this.presenceChanged(rt);
       return;
     }
+    this.dropMedia(rt, pid);
     const events = room.remove(pid);
+    if (events.length) this.apply(rt, events);
+    else this.presenceChanged(rt);
+  }
+
+  private dropMedia(rt: RoomRuntime, pid: string): void {
+    this.unpublish(rt, pid);
+    this.deps.transport.closePeer(rt.room.roomId, pid);
+  }
+
+  private expireParticipant(rt: RoomRuntime, pid: string): void {
+    rt.graceTimers.delete(pid);
+    const p = rt.room.get(pid);
+    if (rt.closed || !p || p.connected || p.role === 'controller') return;
+    this.dropMedia(rt, pid);
+    const events = rt.room.remove(pid);
     if (events.length) this.apply(rt, events);
     else this.presenceChanged(rt);
   }
@@ -448,6 +515,7 @@ export class StageHub {
       return;
     }
     this.deps.log.info('controller auto-transfer', { roomId: room.roomId, fromId: pid, toId: successor.participantId });
+    this.dropMedia(rt, pid);
     const events = room.transfer(pid, successor.participantId, 'auto');
     this.apply(rt, [...events, ...room.remove(pid)]);
   }
@@ -565,6 +633,8 @@ export class StageHub {
     rt.closed = true;
     const { roomId } = rt.room;
     if (rt.graceTimer !== undefined) this.clearTimer(rt.graceTimer);
+    for (const timer of rt.graceTimers.values()) this.clearTimer(timer);
+    rt.graceTimers.clear();
     if (rt.stateTimer !== undefined) this.clearTimer(rt.stateTimer);
     if (rt.qualityTimer !== undefined) this.clearTimer(rt.qualityTimer);
     const closed: ServerMessage = shutdown ? { type: 'room:closed', roomId, reason: 'shutdown' } : { type: 'room:closed', roomId };

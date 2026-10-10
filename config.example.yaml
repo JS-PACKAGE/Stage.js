@@ -24,11 +24,13 @@ server:
   metrics:
     enabled: true
     token: ""
+  # 反向代理之後設 true：每 IP 連線上限改以 X-Forwarded-For 第一個位址計算。直接對外時務必保持 false（標頭可偽造）。
+  trustProxy: false
 
 limits:
   maxRooms: 100                # 可調整
   maxConnections: 2000         # 可調整
-  maxSpeakersPerRoom: 8        # 裁示定值
+  maxSpeakersPerRoom: 8        # 裁示定值（主控以外的台上者；主控席位另計）
   maxAudiencePerRoom: 300      # 裁示定值
   maxFrameBytes: 65536         # 可調整（64KB）
   controlPerSecond: 20         # 可調整
@@ -37,10 +39,13 @@ limits:
   nameMaxLength: 32
   codeMaxLength: 16
   sdpMaxLength: 16384
+  joinTimeoutMs: 30000         # 連上 ws 後逾此時間仍未開房／進房即以 1008 斷線（0＝不限；可調整）
+  maxConnectionsPerIp: 0       # 同一位址同時連線上限（0＝不限）。學校／公司 NAT 或未設 server.trustProxy 的反向代理會讓大量使用者共用一個位址，設定前請估算（可調整）
 
 rooms:
   codeLength: 8                # 房間代碼長度（可調整）
   controllerGraceMs: 60000     # 主控斷線逾此時間才自動移交（可調整）
+  participantGraceMs: 15000    # 發言者／觀眾斷線後保留席位、台位、舉手順位與音訊連線的時間；逾時才移除（0＝立即移除；可調整）
   heartbeatIntervalMs: 30000   # ws ping 間隔
   presenceBroadcastMs: 250     # 觀眾進出時合併 room:state 廣播的時間窗（0＝即時；大量同時進場時避免 N² 廣播，可調整）
   qualityIntervalMs: 2000      # 每隔多久把台上者的連線品質（上下行掉包、RTT）送給主控與台上者（0＝停用，可調整）
@@ -53,10 +58,10 @@ audio:
   opus:
     vbr: true
     minBitrate: 32000
-    maxBitrate: 128000
+    maxBitrate: 128000         # 下行 VBR 上限；也作為 SDP maxaveragebitrate 限制瀏覽器上行
     bitrate: 64000             # VBR 目標，須落在 min..max
     complexity: 9
-    fec: true                  # in-band FEC：觀眾端可由下一包還原遺失包
+    fec: true                  # in-band FEC：觀眾端可由下一包還原遺失包；同時在 SDP 以 useinbandfec 告知瀏覽器上行也帶 FEC
     packetLossPercent: 10      # 預期下行掉包率（%），FEC 依此配置冗餘位元（可調整）
     dtx: true                  # 靜音不送包（≤2 bytes 的 DTX 幀不傳），省觀眾頻寬
   lowTier:                     # 網路差的觀眾改收第二路共用混音：較低位元率＋較多 FEC（台上者不受影響）
@@ -68,7 +73,7 @@ audio:
   mixer:
     maxBufferedFrames: 10      # 每路 PCM 緩衝上限（10×20ms=200ms），超過丟最舊
     limiterThreshold: 0.9      # soft-clip 起點（0..1）
-    latencyTargetMs: 300       # 可調整（Gate 3 目標）
+    latencyTargetMs: 300       # 可調整（僅供 bench-mixer／load-test 當驗收門檻；伺服器執行時不使用）
     speakingThreshold: 0.02    # 單幀 RMS 超過即視為「正在說話」（約 −34 dBFS，可調整）
     speakingHoldMs: 400        # 說話狀態在最後一個有聲幀後維持多久，避免指示燈閃爍（可調整）
   jitter:

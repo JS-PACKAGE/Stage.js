@@ -12,6 +12,10 @@
     ".": {
       "types": "./dist/types/packages/client/src/index.d.ts",
       "import": "./dist/stage-client.js"
+    },
+    "./element": {
+      "types": "./dist/types/packages/client/src/stage-element.d.ts",
+      "import": "./dist/stage-element.js"
     }
   },
   "files": ["dist"],
