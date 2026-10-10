@@ -121,6 +121,11 @@ export class StageHub {
     session.send({ type: 'hello', protocol: PROTOCOL_VERSION, serverVersion: this.deps.serverVersion });
   }
 
+  /** Whether the session has created or joined a room (and not been evicted since). */
+  isJoined(session: Session): boolean {
+    return this.bindings.has(session);
+  }
+
   /** Handle one validated message. Never throws; failures become `error` frames. */
   async handle(session: Session, msg: ClientMessage): Promise<void> {
     const requestId = msg.type === 'ping' ? undefined : msg.requestId;

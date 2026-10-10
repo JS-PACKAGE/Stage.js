@@ -24,6 +24,8 @@ server:
   metrics:
     enabled: true
     token: ""
+  # 反向代理之後設 true：每 IP 連線上限改以 X-Forwarded-For 第一個位址計算。直接對外時務必保持 false（標頭可偽造）。
+  trustProxy: false
 
 limits:
   maxRooms: 100                # 可調整
@@ -37,6 +39,8 @@ limits:
   nameMaxLength: 32
   codeMaxLength: 16
   sdpMaxLength: 16384
+  joinTimeoutMs: 30000         # 連上 ws 後逾此時間仍未開房／進房即以 1008 斷線（0＝不限；可調整）
+  maxConnectionsPerIp: 50      # 同一位址同時連線上限（0＝不限；反向代理後需 server.trustProxy；可調整）
 
 rooms:
   codeLength: 8                # 房間代碼長度（可調整）

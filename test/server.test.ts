@@ -210,6 +210,44 @@ describe('graceful shutdown', () => {
   });
 });
 
+describe('connection admission', () => {
+  it('caps connections per address and drops connections that never join', async () => {
+    const config = testConfig((c) => { c.server.port = 0; c.limits.maxConnectionsPerIp = 2; c.limits.joinTimeoutMs = 200; });
+    const hub = new StageHub({
+      config,
+      transport: new MockMediaTransport({ onLocalCandidate: () => {} }),
+      log: silentLogger,
+      serverVersion: 'test',
+      createMixer: () => new RoomMixer({ sampleRate: 48000, frameMs: 20, maxBufferedFrames: 10, playoutFrames: 1, limiterThreshold: 0.9, speakingThreshold: 0.02, speakingHoldMs: 40 }),
+    });
+    const server = createStageServer({ config, hub, log: silentLogger, baseDir: tmpdir() });
+    const { port } = await server.listen();
+    const url = `ws://127.0.0.1:${port}${config.server.wsPath}`;
+    try {
+      const host = new Client(url);
+      await host.open();
+      host.send({ type: 'room:create', requestId: 'c1', name: 'H' });
+      await host.reply('c1');
+      const idle = new Client(url);
+      await idle.open();
+      // Third connection from the same address is refused at the upgrade.
+      const third = new WebSocket(url);
+      const refused = await new Promise<number>((resolve) => third.once('unexpected-response', (_req, res) => resolve(res.statusCode ?? 0)));
+      assert.equal(refused, 503);
+      // The idle one is dropped at the join deadline; the joined one stays.
+      assert.equal(await idle.closed, 1008);
+      assert.equal(host.ws.readyState, WebSocket.OPEN);
+      // Its slot is free again.
+      const again = new Client(url);
+      await again.open();
+      again.ws.close();
+      host.ws.close();
+    } finally {
+      await server.close();
+    }
+  });
+});
+
 describe('metrics exposure policy', () => {
   it('refuses unauthenticated metrics on a non-loopback host', () => {
     const raw = parse(readFileSync(new URL('../config.example.yaml', import.meta.url), 'utf8'));

@@ -135,10 +135,23 @@ export function createStageServer(deps: StageServerDeps): StageServer {
   // protection is room code + rate limits + caps.
   const wss = new WebSocketServer({ noServer: true, maxPayload: config.limits.maxFrameBytes });
   const sessions = new Set<WsSession>();
+  /** Open connections per client address, for `limits.maxConnectionsPerIp`. */
+  const perIp = new Map<string, number>();
+
+  const clientAddress = (req: IncomingMessage): string => {
+    if (config.server.trustProxy) {
+      const forwarded = req.headers['x-forwarded-for'];
+      const first = (Array.isArray(forwarded) ? forwarded[0] : forwarded)?.split(',')[0]?.trim();
+      if (first) return first;
+    }
+    return req.socket.remoteAddress ?? '';
+  };
 
   server.on('upgrade', (req, socket, head) => {
     const path = new URL(req.url ?? '/', 'http://x').pathname;
-    if (path !== config.server.wsPath || sessions.size >= config.limits.maxConnections) {
+    const ip = clientAddress(req);
+    const perIpCap = config.limits.maxConnectionsPerIp;
+    if (path !== config.server.wsPath || sessions.size >= config.limits.maxConnections || (perIpCap > 0 && (perIp.get(ip) ?? 0) >= perIpCap)) {
       socket.write('HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\n\r\n');
       socket.destroy();
       return;
@@ -146,12 +159,19 @@ export function createStageServer(deps: StageServerDeps): StageServer {
     wss.handleUpgrade(req, socket, head, (ws) => wss.emit('connection', ws, req));
   });
 
-  wss.on('connection', (ws: WebSocket) => {
+  wss.on('connection', (ws: WebSocket, req: IncomingMessage) => {
     const session = new WsSession(ws);
     const limiter = new ConnectionRateLimiter(config.limits, now());
+    const ip = clientAddress(req);
     sessions.add(session);
+    perIp.set(ip, (perIp.get(ip) ?? 0) + 1);
     log.debug('connection opened', { session: session.id });
     hub.attach(session);
+
+    // A connection that never enters a room only holds a `maxConnections` slot; drop it.
+    const joinDeadline = config.limits.joinTimeoutMs > 0
+      ? setTimeout(() => { if (!hub.isJoined(session)) violate(session, 'join timeout'); }, config.limits.joinTimeoutMs)
+      : undefined;
 
     ws.on('pong', () => {
       session.alive = true;
@@ -172,7 +192,10 @@ export function createStageServer(deps: StageServerDeps): StageServer {
       session.chain = session.chain.then(() => hub.handle(session, m));
     });
     ws.on('close', () => {
+      clearTimeout(joinDeadline);
       sessions.delete(session);
+      const left = (perIp.get(ip) ?? 1) - 1;
+      if (left > 0) perIp.set(ip, left); else perIp.delete(ip);
       log.debug('connection closed', { session: session.id });
       session.chain = session.chain.then(() => hub.detach(session));
     });
