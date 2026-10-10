@@ -677,3 +677,74 @@ describe('recording', () => {
     assert.equal(await h.req(host.s, { type: 'recording:start' }), 'forbidden');
   });
 });
+
+describe('persistence across a restart', () => {
+  async function savedRoom() {
+    const config = testConfig((c) => { c.persistence.restoreGraceMs = 120_000; });
+    const before = harness(config);
+    const host = await before.create('Host');
+    const sp = await before.join(host.roomId, host.code, 'Sam');
+    const aud = await before.join(host.roomId, host.code, 'Ann');
+    await before.req(sp.s, { type: 'hand:raise' });
+    await before.req(host.s, { type: 'stage:approve', targetId: sp.id });
+    await before.req(aud.s, { type: 'hand:raise' });
+    await before.req(aud.s, { type: 'chat:send', text: 'hello' });
+    const tokens = { host: host.s.last('room:state')!.resumeToken!, sp: sp.s.last('room:state')!.resumeToken!, aud: aud.s.last('room:state')!.resumeToken! };
+    await before.hub.shutdown(true);
+    assert.equal(host.s.all('room:closed').length, 0, 'nobody is told the room closed');
+    // Round-trip through JSON like the state file does.
+    const state = JSON.parse(JSON.stringify(before.hub.exportState()));
+    return { config, state, host, sp, aud, tokens };
+  }
+
+  it('restores seats, stage, hands and chat; people resume with their tokens', async () => {
+    const { config, state, host, sp, aud, tokens } = await savedRoom();
+    const after = harness(config);
+    assert.equal(after.hub.restore(state), 1);
+    const resume = async (name: string, resumeToken: string) => {
+      const s = new FakeSession();
+      after.hub.attach(s);
+      assert.equal(await after.req(s, { type: 'join', roomId: host.roomId, code: host.code, name, resumeToken }), 'ok');
+      return s;
+    };
+    const hs = await resume('Host', tokens.host);
+    const ss = await resume('Sam', tokens.sp);
+    const as = await resume('Ann', tokens.aud);
+    const st = as.last('room:state')!;
+    assert.equal(hs.last('room:state')!.me.participantId, host.id);
+    assert.equal(ss.last('room:state')!.me.participantId, sp.id);
+    assert.equal(st.me.participantId, aud.id);
+    assert.deepEqual(st.speakers.map((p) => p.participantId), [host.id, sp.id]);
+    assert.deepEqual(st.hands.map((p) => p.participantId), [aud.id]);
+    assert.deepEqual(as.last('chat:history')!.messages.map((m) => m.text), ['hello']);
+    assert.ok(st.speakers.every((p) => p.connected));
+    assert.equal(await after.req(ss, { type: 'rtc:offer', payload: SENDRECV_OFFER }), 'ok', 'restored speaker may publish again');
+  });
+
+  it('drops participants who do not come back within restoreGraceMs and closes an abandoned room', async () => {
+    const { config, state, host, tokens } = await savedRoom();
+    const after = harness(config);
+    after.hub.restore(state);
+    const s = new FakeSession();
+    after.hub.attach(s);
+    assert.equal(await after.req(s, { type: 'join', roomId: host.roomId, code: host.code, name: 'Host', resumeToken: tokens.host }), 'ok');
+    for (const t of after.timers.filter((x) => !x.cleared && x.ms === 120_000)) t.fn();
+    await nextTurn();
+    const st = s.last('room:state')!;
+    assert.deepEqual(st.speakers.map((p) => p.participantId), [host.id], 'the others are gone');
+    assert.equal(st.hands.length, 0);
+
+    const nobody = harness(config);
+    nobody.hub.restore(state);
+    for (const t of nobody.timers.filter((x) => !x.cleared)) t.fn();
+    await nextTurn();
+    assert.equal(nobody.hub.roomCount, 0, 'no one returned: room closed');
+  });
+
+  it('skips a saved room that no longer fits the configured limits', async () => {
+    const { state } = await savedRoom();
+    const after = harness(testConfig((c) => { c.limits.maxAudiencePerRoom = 1; }));
+    assert.equal(after.hub.restore(state), 0);
+    assert.equal(after.hub.roomCount, 0);
+  });
+});

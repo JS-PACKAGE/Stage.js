@@ -429,7 +429,13 @@ client.on('reaction', ({ detail }) => {
   setTimeout(() => bubble.remove(), 3000);
 });
 client.on('state', ({ detail }) => renderRoom(detail));
-client.on('status', ({ detail }) => { status.textContent = statusLabels[detail]; updateCooldown(); });
+let lastStatus = client.status;
+client.on('status', ({ detail }) => {
+  // Failed reconnect attempts leave "cannot connect" behind; once back in the room it no longer applies.
+  if (lastStatus === 'reconnecting' && (detail === 'live' || detail === 'waiting')) errorBox.hidden = true;
+  lastStatus = detail;
+  status.textContent = statusLabels[detail]; updateCooldown();
+});
 client.on('created', ({ detail }) => { createdRoom = detail; });
 client.on('closed', ({ detail }) => { createdRoom = null; micNotice = ''; invitation = detail.reason === 'shutdown' ? '伺服器維護或重新啟動，房間已關閉；請稍後重新建立或加入。' : '房間已關閉，歡迎建立或加入其他舞台。'; audioBlocked = false; landing(); });
 client.on('kicked', () => { createdRoom = null; micNotice = ''; invitation = '你已被主控移出房間。'; audioBlocked = false; landing(); });

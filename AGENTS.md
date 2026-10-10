@@ -47,6 +47,7 @@ node scripts/load-test.ts        # 全端壓測：自起伺服器，K 發言者�
 | `src/transport/MockMediaTransport.ts` | 測試／無 WebRTC 開發用 |
 | `src/mixer/` | `RoomMixer`（N 路疊加、mix-minus-self、每路 playout 預緩衝／underrun 重緩衝／漂移排空／常駐延遲收斂、預配置 ring buffer、緩衝上限）、`MixerClock`（全部房間共用一個 tick 時鐘）、`noiseFilter`、`loudness`（每路音量正規化）、`limiter` |
 | `src/recording/` | `oggOpus.ts`（RFC 7845 Ogg/Opus 封裝，`null` 幀補 TOC-only 封包）、`recorder.ts`（寫 `recording.dir`）；封包來自 `MediaTransport.setRecording`，即共用的完整混音編碼，不另開 encoder |
+| `src/persistence.ts` | `persistence.stateFile` 讀寫（原子 rename、mode 600、過期不採用）；內容由 `StageHub.exportState()`／`restore()` 產生與重建，含房間代碼與 resumeToken，屬機密 |
 | `packages/client/` | 可嵌入的瀏覽器 ESM 函式庫 `StageClient`；`src/element.ts`＝Web Component `<stage-client>`（入口 `stage-element.ts` 自動註冊） |
 | `web/` | 完整範例前端（建於 client 之上） |
 | `src/metrics.ts` | Prometheus 文字輸出、跨房共用的 `MixerCounters`、event loop／記憶體取樣；`/metrics` 由 `server.metrics` 控制（對外 host 必須設 token） |

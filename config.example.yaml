@@ -125,5 +125,12 @@ recording:
   dir: recordings              # 相對路徑以專案根目錄為準；檔名 <roomId>-<UTC 時間>.opus
   maxDurationMinutes: 240      # 單次錄音上限，逾時自動停止（防止塞滿磁碟；可調整）
 
+persistence:
+  # 非空時把房間狀態（含房間代碼與 resumeToken，屬機密，檔案權限 600）存到此 JSON 檔，重啟後恢復：
+  # 停機時不關房，client 自動重連並以 resumeToken 回座（台位、舉手順位、聊天紀錄保留，音訊連線重建）。
+  stateFile: ""                # 例：.run/stage-state.json（相對路徑以專案根目錄為準；空字串＝停用）
+  saveIntervalMs: 2000         # 狀態有變動時多久寫一次（停機時另寫一次；可調整）
+  restoreGraceMs: 120000       # 恢復後等參與者回來的時間；停機比這更久的狀態檔不採用（可調整）
+
 log:
   level: info                  # debug | info | warn | error

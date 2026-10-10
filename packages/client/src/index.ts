@@ -179,6 +179,9 @@ export class StageClient extends EventTarget {
   private lastHeardAt = 0;
   private iceServers: RTCIceServer[] = [];
   private iceRestartTimer: ReturnType<typeof setTimeout> | undefined;
+  private serverInstance: string | undefined;
+  /** Set when we reconnected to a restarted server: the next snapshot rebuilds the PeerConnection. */
+  private mediaStale = false;
 
   constructor(options: StageClientOptions) {
     super();
@@ -297,7 +300,12 @@ export class StageClient extends EventTarget {
         this.lastHeardAt = Date.now();
         try {
           const message = JSON.parse(String(event.data)) as ServerMessage;
-          if (message.type === 'hello') { this.limits = message.limits; ready = true; clearTimeout(timer); this.startKeepalive(ws); resolve(); }
+          if (message.type === 'hello') {
+            // A different server process (restart with persisted rooms): our PeerConnection's other end is gone.
+            if (this.serverInstance !== undefined && this.serverInstance !== message.instance) this.mediaStale = true;
+            this.serverInstance = message.instance;
+            this.limits = message.limits; ready = true; clearTimeout(timer); this.startKeepalive(ws); resolve();
+          }
           void this.receive(message).catch((error: unknown) => this.report(error));
         } catch { this.report(new StageError('bad_request', '收到無法解析的伺服器訊息。')); }
       };
@@ -490,7 +498,7 @@ export class StageClient extends EventTarget {
         // First snapshot of a (new) identity → fresh PeerConnection. A resumed seat keeps the one that
         // survived the ws drop unless the network side died meanwhile.
         const pcState = this.pc?.connectionState;
-        if (!this.pc || previousId !== state.me.participantId || pcState === 'failed' || pcState === 'closed') this.createMedia();
+        if (!this.pc || this.mediaStale || previousId !== state.me.participantId || pcState === 'failed' || pcState === 'closed') { this.mediaStale = false; this.createMedia(); }
         this.syncMedia();
         break;
       }

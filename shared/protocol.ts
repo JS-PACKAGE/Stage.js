@@ -167,7 +167,8 @@ export type ErrorCode =
 // ───────────────────────────── Server → Client ─────────────────────────────
 
 export interface ServerMessageMap {
-  hello: { protocol: number; serverVersion: string; limits: RateLimits };
+  /** `instance` changes on every server start: a client resuming its seat across a restart knows to rebuild its PeerConnection. */
+  hello: { protocol: number; serverVersion: string; instance: string; limits: RateLimits };
   'room:state': RoomStatePayload;
   'room:created': { roomId: string; code?: string };
   'room:closed': { roomId: string; reason?: 'shutdown' };

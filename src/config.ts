@@ -129,6 +129,14 @@ export interface AppConfig {
     /** A recording stops on its own after this long, bounding disk use. */
     maxDurationMinutes: number;
   };
+  persistence: {
+    /** JSON file the rooms are saved to and restored from; empty disables persistence. */
+    stateFile: string;
+    /** How often a changed state is written (also written on shutdown). */
+    saveIntervalMs: number;
+    /** Restored participants get this long to reconnect; a file older than this is ignored. */
+    restoreGraceMs: number;
+  };
   log: { level: 'debug' | 'info' | 'warn' | 'error' };
 }
 
@@ -368,11 +376,18 @@ export function parseConfig(raw: unknown): AppConfig {
   };
   if (recording.enabled && recording.dir === '') throw new ConfigError('recording.dir: required when recording is enabled');
 
+  const ps = obj(root.persistence, 'persistence');
+  const persistence: AppConfig['persistence'] = {
+    stateFile: str(ps, 'stateFile', 'persistence'),
+    saveIntervalMs: int(ps, 'saveIntervalMs', 'persistence', 500, 600_000),
+    restoreGraceMs: int(ps, 'restoreGraceMs', 'persistence', 1000),
+  };
+
   const lg = obj(root.log, 'log');
   const level = str(lg, 'level', 'log');
   if (!['debug', 'info', 'warn', 'error'].includes(level)) throw new ConfigError('log.level: debug|info|warn|error');
 
-  return { server, limits, rooms, audio, rtc, recording, log: { level: level as AppConfig['log']['level'] } };
+  return { server, limits, rooms, audio, rtc, recording, persistence, log: { level: level as AppConfig['log']['level'] } };
 }
 
 export function loadConfig(path: string): AppConfig {
