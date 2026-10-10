@@ -105,7 +105,7 @@ rtc:
   # 0＝全在主執行緒：werift 每送一包約 70µs CPU，單一執行緒約在 250–300 位聽眾時吃滿 20ms tick，
   # 大批進場時的 DTLS 握手也會卡住混音時鐘；1 條 worker 一樣會被 300 位聽眾吃滿而延誤上行轉送。
   # 預設 2 對應每房 300 聽眾的裁示上限（與 audio.codecWorkers 合計勿超過核心數；核心少時調低），
-  # 用 load-test 驗證。
+  # 用 load-test 驗證。auto＝核心數 − 1 − codecWorkers，至少 2、至多 8。
   mediaWorkers: 2
   # 短期 TURN 憑證（coturn：use-auth-secret + static-auth-secret）。每次進房以 HMAC 簽發，
   # 帳密逾 ttlSeconds 失效；secret 只放 config.yaml，不入庫、不入日誌。urls 空陣列＝停用。

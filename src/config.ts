@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import { availableParallelism } from 'node:os';
 import { parse } from 'yaml';
 import type { IceServerConfig } from '../shared/protocol.ts';
 
@@ -167,6 +168,14 @@ function iceServers(v: unknown, path: string): IceServerConfig[] {
   });
 }
 
+/**
+ * `rtc.mediaWorkers: auto`: cores left after the main thread and the codec workers, never below the
+ * 2 that the 300-listener cap needs (load-test), capped at 8 to bound idle threads on large hosts.
+ */
+export function autoMediaWorkers(codecWorkers: number, cores = availableParallelism()): number {
+  return Math.min(8, Math.max(2, cores - 1 - codecWorkers));
+}
+
 const LOOPBACK: Record<string, true> = { '127.0.0.1': true, '::1': true, localhost: true };
 
 export function parseConfig(raw: unknown): AppConfig {
@@ -327,7 +336,7 @@ export function parseConfig(raw: unknown): AppConfig {
     iceServers: iceServers(t.iceServers, 'rtc.iceServers'),
     serverIceServers: iceServers(t.serverIceServers, 'rtc.serverIceServers'),
     portRange,
-    mediaWorkers: int(t, 'mediaWorkers', 'rtc', 0, 64),
+    mediaWorkers: t.mediaWorkers === 'auto' ? autoMediaWorkers(audio.codecWorkers) : int(t, 'mediaWorkers', 'rtc', 0, 64),
     turn,
   };
 
