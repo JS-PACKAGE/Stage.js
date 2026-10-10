@@ -278,7 +278,9 @@ function renderRoom(state: RoomStatePayload): void {
   }, 'danger'));
   controls.append(actions);
   const grid = element('div', 'stage-grid');
-  const speakers = panelList(`舞台 · ${state.speakers.length}/${state.limits.maxSpeakers}`, state.speakers, controller, 'speaker');
+  // The cap counts speakers other than the controller, whose seat is extra.
+  const capped = state.speakers.filter((p) => p.participantId !== state.controllerId).length;
+  const speakers = panelList(`舞台 · 發言者 ${capped}/${state.limits.maxSpeakers}`, state.speakers, controller, 'speaker');
   const hands = panelList(`舉手佇列 · ${state.hands.length}`, state.hands, controller, 'hand');
   grid.append(speakers, hands);
   const audience = element('section', 'panel');
