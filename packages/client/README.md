@@ -30,6 +30,21 @@
 - `micLevel: number`：目前上台麥克風的 RMS 振幅（0–1，非分貝），未上台或靜音時為 0；可定期讀取以更新音量表。
 - `startMicTest(): Promise<MicTest>`：不需連線或上台，使用所選麥克風，回傳 `{ level(): number, stop(): void }`；`level()` 同樣為 0–1 RMS，不會播放測試音訊。`stop()` 可重複呼叫，停止軌道並關閉 AudioContext；`disconnect()` 也會停止所有測試（包含仍等待授權的測試）。測試期間切換裝置後，請停止並重啟測試。
 
+## Web Component：`<stage-client>`
+
+不寫 JavaScript 也能嵌入：載入 `stage-element.js`（會自動註冊元素，並重新匯出 `stage-client.js` 的全部 API）即可。
+
+```html
+<script type="module" src="https://host/lib/stage-element.js"></script>
+<stage-client room="房間 ID" code="房間代碼" name="訪客"></stage-client>
+```
+
+- 屬性：`room`、`name`（兩者都有才進房）、`code`、`url`（ws 位址，預設為載入此模組的伺服器 `/ws`）。進入文件即進房、移除即離開（close 1000，立即讓出席位）；屬性變更會重新進房。
+- 內建介面：狀態列（房名．直播狀態．收聽中／已舉手／台上）、錯誤列、`啟用音訊`（自動播放被擋時出現）、觀眾的舉手／收回（含冷卻倒數）、台上的靜音／離開舞台。主控功能請改用 `element.client`（底層 `StageClient`，未進房時為 null）。
+- 事件：所有 client 事件以 `stage-<type>` 從元素派發（`bubbles`、`composed`，`detail` 相同），例如 `stage-state`、`stage-hand`、`stage-kicked`。
+- 樣式：`::part(panel)`、`::part(status)`、`::part(error)`、`::part(actions)`，以及 CSS 變數 `--stage-fg`、`--stage-bg`、`--stage-border`、`--stage-radius`、`--stage-button-bg`、`--stage-accent`、`--stage-accent-fg`、`--stage-error`。
+- 自訂標籤名：`import { defineStageElement } from 'https://host/lib/stage-element.js'` 後呼叫 `defineStageElement('my-stage')`（`stage-client` 已於載入時註冊，兩個標籤可並存）。
+
 ## 嵌入與瀏覽器政策
 
 - 正式環境須 HTTPS/WSS；CSP `script-src` 允許函式庫來源，`connect-src wss://host`（視 WebRTC 部署增加允許來源），`media-src blob: mediastream:`。若自行傳入音訊元件，仍須允許串流播放。

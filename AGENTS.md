@@ -46,7 +46,7 @@ node scripts/load-test.ts        # 全端壓測：自起伺服器，K 發言者�
 | `src/transport/jitter.ts` | 上行 RTP 重排（`audio.jitter.reorderPackets`）；遺失包以 `null` 送解碼器，由下一包的 in-band FEC 還原，沒有 FEC 時走 libopus PLC |
 | `src/transport/MockMediaTransport.ts` | 測試／無 WebRTC 開發用 |
 | `src/mixer/` | `RoomMixer`（N 路疊加、mix-minus-self、每路 playout 預緩衝／underrun 重緩衝／漂移排空／常駐延遲收斂、預配置 ring buffer、緩衝上限）、`MixerClock`（全部房間共用一個 tick 時鐘）、`noiseFilter`、`loudness`（每路音量正規化）、`limiter` |
-| `packages/client/` | 可嵌入的瀏覽器 ESM 函式庫 `StageClient` |
+| `packages/client/` | 可嵌入的瀏覽器 ESM 函式庫 `StageClient`；`src/element.ts`＝Web Component `<stage-client>`（入口 `stage-element.ts` 自動註冊） |
 | `web/` | 完整範例前端（建於 client 之上） |
 | `src/metrics.ts` | Prometheus 文字輸出、跨房共用的 `MixerCounters`、event loop／記憶體取樣；`/metrics` 由 `server.metrics` 控制（對外 host 必須設 token） |
 

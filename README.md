@@ -149,6 +149,8 @@ JSON frame，型別定義在 [`shared/protocol.ts`](shared/protocol.ts)。每個
 - 瀏覽器自動播放限制：收到 `audioblocked` 時，必須在使用者點擊事件中呼叫 `unlockAudio()`。
 - 邀請連結含房間代碼，請視為敏感資訊。
 
+不想寫 JavaScript 的頁面可改用 Web Component：`<script type="module" src="https://stage.example.com/lib/stage-element.js"></script>` 後放 `<stage-client room="…" code="…" name="…"></stage-client>`（內建狀態列、啟用音訊、舉手、台上靜音／下台；事件以 `stage-<type>` 派發，`element.client` 取得底層 `StageClient`）。
+
 完整 API 見 [`packages/client/README.md`](packages/client/README.md)；`web/embed.html` 是最小嵌入範例。
 
 ## 測試與驗證

@@ -276,7 +276,7 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 2. 上台核准＝**主控核准**（觀眾舉手 → 主控 `stage:approve`；裁示確認 2026-10-09）。
 3. 主控亦在台發言（依「一位主控及一到多位發言者發言」）。
 4. 台上者下行混音**不含自己**（避免回音）。**主控下台僅停止發言、保有控制權遠端管理**（裁示 2026-10-09），移交由主控自行決定；主控**斷線逾 60 秒**（可調整）才自動移交給台上最早發言者（無則最早觀眾）。
-5. 前端＝vanilla TypeScript＋Vite、UI 繁體中文；client 以 **ESM 函式庫**交付（可嵌入其他網站程式；Web Component 包裝為延伸項，**可調整**）；完整範例前端建於其上（裁示 2026-10-09）。
+5. 前端＝vanilla TypeScript＋Vite、UI 繁體中文；client 以 **ESM 函式庫**交付（可嵌入其他網站程式）；Web Component 包裝 `<stage-client>`（`/lib/stage-element.js`，見「十二」21）；完整範例前端建於其上（裁示 2026-10-09）。
 6. 不發布 npm 套件：倉庫公開供 clone（沿用前作裁示慣例）。
 7. 新創數值（限流、延遲目標 300ms、frame 64KB）標「**可調整**」，值入 `config.yaml`；同時發言者 ≤ 8、觀眾 ≤ 300 為裁示定值（見未定項 2）。
 8. Opus 編碼參數（mono、VBR 32–128kbps、48kHz）依 R3 為硬性；WebRTC Opus RTP 時鐘亦為 48kHz（RFC 7587），全程無重取樣（v1.7 裁示）。
@@ -318,6 +318,7 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 18. **斷線韌性**（落實第九節「WebRTC 連線獨立存活」）：ws 斷線時伺服器**不關 PeerConnection、不停混音**，席位、台位、舉手順位保留 `rooms.participantGraceMs`（主控 `controllerGraceMs`），`ParticipantView.connected` 對全員顯示 false；`join` 帶 `resumeToken` 回座即清除寬限計時並沿用既有媒體；逾時才移除（台上者等同下台）並關閉 peer。client 以 close code **1000 表示主動離開**（`disconnect()`），非主控者立即移除、不保留席位；其他關閉（`pagehide` 用 4002、網路中斷 1006 等）一律保留。client 端：ws 斷線不拆 PeerConnection，只有身分改變才重建；每 15 秒送 `ping`、35 秒無任何訊息即視為斷線；`pagehide` 主動關閉；WebRTC `disconnected` 持續 3 秒即 ICE restart（werift 以 ufrag 變更辨識遠端 restart），`failed` 時伺服器丟棄該 peer、client 以新 PeerConnection 重發 offer。
 19. **連線准入**：`limits.joinTimeoutMs` 內未開房／進房的連線以 1008 關閉；`limits.maxConnectionsPerIp` 限制同一位址同時連線（反向代理後 `server.trustProxy` 改讀 `X-Forwarded-For`）。
 20. **程序層錯誤**：`unhandledRejection` 只記 error 不中止（werift 關閉 peer 後的計時器可能漏 rejection，Node 預設會讓整個 process 連同所有房間一起死）；`uncaughtException` 走優雅停機（`room:closed {reason:'shutdown'}`）後以非零碼退出。TLS 憑證檔變更後約 2 秒自動 `setSecureContext`，失敗則沿用舊憑證。
+21. **Web Component**：`/lib/stage-element.js` 註冊 `<stage-client room code name url>`（shadow DOM 小工具：狀態、錯誤、啟用音訊、舉手、台上靜音／下台），進入文件即進房、移除即以 1000 離開；client 事件以 `stage-<type>` 派發，`element.client` 暴露底層 `StageClient` 供主控功能；它從穩定檔名 `stage-client.js` 匯入，嵌入頁同時使用兩者時只載入一份。
 
 ---
 
