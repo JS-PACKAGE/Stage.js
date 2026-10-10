@@ -20,7 +20,7 @@ npm test                       # node --test（MockMediaTransport，無需 WebRT
 npm run build                  # tsc → dist/，vite → packages/client/dist、web/dist
 npm start                      # node dist/src/index.js（讀 ./config.yaml 或 $STAGE_CONFIG）
 npm run dev                    # node --watch src/index.ts
-node scripts/werift-loopback.ts [N]  # 真 werift 端到端：上行解碼、混音、不含自己、觀眾上行封鎖、觀眾→發言者重協商；N＝rtc.mediaWorkers
+node scripts/werift-loopback.ts [N]  # 真 werift 端到端：上行解碼、混音、不含自己、觀眾上行封鎖、觀眾→發言者重協商、client 端 ICE restart；N＝rtc.mediaWorkers
 node scripts/bench-mixer.ts      # Gate 3：8/3 發言者 × 300 訂閱者混音延遲
 node scripts/load-test.ts        # 全端壓測：自起伺服器，K 發言者＋N werift 觀眾（多 process），回報掉包、beep 端到端延遲、/metrics
 ```
