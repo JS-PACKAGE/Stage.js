@@ -73,7 +73,7 @@ node scripts/load-test.ts        # 全端壓測：自起伺服器，K 發言者�
 
 **S6. 競態保證。** 每房一條 `SerialQueue`：所有狀態變更與該房信令依序原子套用；每連線訊息依序處理。狀態機每次轉換後檢查不變量；「雙主控」等違例拋 `InvariantViolation` → 關房（fail-closed）。單一 client 的信令錯誤只回該請求錯誤，不得關房。
 
-**S7. 資源防護。** 每房發言者 ≤ 8、主控以外人數 ≤ 300（裁示定值）；全域 `maxRooms`、`maxConnections`；混音每路 PCM 緩衝上限 `mixer.maxBufferedFrames`（超過丟最舊）、limiter 防爆音；超過上限拒絕新上行／新連線（`stage_full`／`room_full`／HTTP 503）。
+**S7. 資源防護。** 每房主控以外的台上者 ≤ 8、主控以外人數 ≤ 300（裁示定值；主控席位皆另計）；全域 `maxRooms`、`maxConnections`；混音每路 PCM 緩衝上限 `mixer.maxBufferedFrames`（超過丟最舊）、limiter 防爆音；超過上限拒絕新上行／新連線（`stage_full`／`room_full`／HTTP 503）。
 
 **S8. 對外一律 generic 錯誤。** client 只收到 `ERROR_MESSAGES` 的固定訊息；內部原因（`StageError.detail`、例外字串）只入本地日誌。使用者可控文字（name、roomName）一律轉義後輸出。
 

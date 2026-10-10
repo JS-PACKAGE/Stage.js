@@ -46,17 +46,19 @@ describe('flow 1 — raise hand → approve → on stage with uplink', () => {
     assert.deepEqual(other.s.last('speaking'), { type: 'speaking', participantIds: [aud.id] }, 'audience sees who is talking');
   });
 
-  it('rejects approve without a raised hand and beyond the 8-speaker cap', async () => {
+  it('rejects approve without a raised hand and beyond the 8-speaker cap (controller seat not counted)', async () => {
     const h = harness();
     const host = await h.create();
     const people = [];
-    for (let i = 0; i < 8; i++) people.push(await h.join(host.roomId, host.code, `P${i}`));
+    for (let i = 0; i < 9; i++) people.push(await h.join(host.roomId, host.code, `P${i}`));
     assert.equal(await h.req(host.s, { type: 'stage:approve', targetId: people[0]!.id }), 'conflict');
     for (const p of people) assert.equal(await h.req(p.s, { type: 'hand:raise' }), 'ok');
-    // Host already occupies one of the 8 seats.
-    for (let i = 0; i < 7; i++) assert.equal(await h.req(host.s, { type: 'stage:approve', targetId: people[i]!.id }), 'ok');
-    assert.equal(await h.req(host.s, { type: 'stage:approve', targetId: people[7]!.id }), 'stage_full');
-    assert.equal(host.s.last('room:state')!.speakers.length, 8);
+    for (let i = 0; i < 8; i++) assert.equal(await h.req(host.s, { type: 'stage:approve', targetId: people[i]!.id }), 'ok');
+    assert.equal(await h.req(host.s, { type: 'stage:approve', targetId: people[8]!.id }), 'stage_full');
+    assert.equal(host.s.last('room:state')!.speakers.length, 9, 'controller plus 8 speakers');
+    // The controller's own seat is outside the cap: stepping down and returning never hits stage_full.
+    assert.equal(await h.req(host.s, { type: 'stage:leave' }), 'ok');
+    assert.equal(await h.req(host.s, { type: 'stage:approve', targetId: host.id }), 'ok');
   });
 });
 
@@ -149,6 +151,18 @@ describe('flow 3 — control transfer', () => {
     await h.req(b.s, { type: 'hand:raise' });
     assert.equal(await h.req(host.s, { type: 'stage:approve', targetId: b.id }), 'forbidden');
     assert.equal(await h.req(a.s, { type: 'stage:approve', targetId: b.id }), 'ok');
+  });
+
+  it('transferring to someone with a raised hand withdraws it and tells the room', async () => {
+    const h = harness();
+    const host = await h.create();
+    const a = await h.join(host.roomId, host.code, 'A');
+    const b = await h.join(host.roomId, host.code, 'B');
+    await h.req(a.s, { type: 'hand:raise' });
+    b.s.clear();
+    assert.equal(await h.req(host.s, { type: 'control:transfer', targetId: a.id }), 'ok');
+    assert.deepEqual(b.s.last('hand:withdraw'), { type: 'hand:withdraw', participantId: a.id });
+    assert.deepEqual(b.s.last('room:state')!.hands, []);
   });
 
   it('concurrent transfers never yield two controllers', async () => {

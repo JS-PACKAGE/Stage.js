@@ -28,7 +28,7 @@ server:
 limits:
   maxRooms: 100                # 可調整
   maxConnections: 2000         # 可調整
-  maxSpeakersPerRoom: 8        # 裁示定值
+  maxSpeakersPerRoom: 8        # 裁示定值（主控以外的台上者；主控席位另計）
   maxAudiencePerRoom: 300      # 裁示定值
   maxFrameBytes: 65536         # 可調整（64KB）
   controlPerSecond: 20         # 可調整
