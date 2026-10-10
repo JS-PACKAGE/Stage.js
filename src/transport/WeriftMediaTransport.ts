@@ -239,10 +239,7 @@ export class WeriftMediaTransport implements MediaTransport {
     }
     ids.length = hosts.length = keys.length = pcms.length = n;
     const cached = room.plan;
-    if (cached && cached.ids.length === n && ids.every((id, i) => {
-      const item = cached.frames[cached.frameOf[i]!]!;
-      return cached.ids[i] === id && cached.hosts[i] === hosts[i] && item.key === keys[i] && item.pcm === pcms[i];
-    })) return cached;
+    if (cached && this.planMatches(cached, n, ids, hosts, keys, pcms)) return cached;
     const frames: EncodeItem[] = [];
     const frameOf: number[] = [];
     const index = new Map<string, number>();
@@ -258,6 +255,14 @@ export class WeriftMediaTransport implements MediaTransport {
     }
     room.plan = { ids: ids.slice(), hosts: hosts.slice(), frameOf, frames, silence: frames.map(() => new Uint8Array(0)), targets: [...targets] };
     return room.plan;
+  }
+  private planMatches(plan: FanoutPlan, n: number, ids: string[], hosts: PeerHost[], keys: string[], pcms: Float32Array[]): boolean {
+    if (plan.ids.length !== n) return false;
+    for (let i = 0; i < n; i++) {
+      const item = plan.frames[plan.frameOf[i]!]!;
+      if (plan.ids[i] !== ids[i] || plan.hosts[i] !== hosts[i] || item.key !== keys[i] || item.pcm !== pcms[i]) return false;
+    }
+    return true;
   }
   /**
    * A source's own mix-minus, or undefined once it has been silent for SHARE_SILENT_AFTER_MS: its
