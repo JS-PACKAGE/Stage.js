@@ -15,6 +15,21 @@ export class StageError extends Error {
     this.code = code;
   }
 }
+/** 繁中 text for server error codes; the server only sends fixed generic English (AGENTS.md §S8), so clients localize by `code`. */
+export const ERROR_MESSAGES: Record<ErrorCode, string> = {
+  bad_request: '請求格式錯誤。',
+  unknown_type: '不支援的操作。',
+  not_joined: '尚未加入房間。',
+  already_joined: '已在房間中。',
+  unauthorized: '無法加入房間，請確認房間 ID 與代碼。',
+  forbidden: '沒有權限執行此操作。',
+  not_found: '找不到對象。',
+  conflict: '目前狀態無法執行此操作。',
+  room_full: '房間已滿。',
+  stage_full: '舞台已滿。',
+  rate_limited: '操作過於頻繁，請稍後再試。',
+  internal: '伺服器發生錯誤。',
+};
 export interface StageClientOptions {
   url: string;
   reconnect?: { initialDelayMs: number; maxDelayMs: number };
@@ -429,7 +444,7 @@ export class StageClient extends EventTarget {
     switch (message.type) {
       case 'ok': this.finish(message.requestId); break;
       case 'error': {
-        const error = new StageError(message.code, message.message);
+        const error = new StageError(message.code, ERROR_MESSAGES[message.code] ?? message.message);
         if (message.requestId) this.finish(message.requestId, error);
         this.emit('error', error);
         break;
