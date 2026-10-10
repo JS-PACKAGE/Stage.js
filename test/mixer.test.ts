@@ -24,6 +24,25 @@ test('sum, minus-self, missing frames and muted membership', () => {
   assert.equal(mixer.tick()!.full[0], 0);
   mixer.removeSource('a'); mixer.removeSource('b'); assert.equal(mixer.tick(), null);
 });
+test('zero PCM shares the full mix without discarding quiet audio or underrunning', () => {
+  const counters = new MixerCounters();
+  const mixer = new RoomMixer(options, counters); mixer.addSource('a'); mixer.addSource('b');
+  mixer.push('a', samples(0)); mixer.push('b', samples(0.3));
+  let frame = mixer.tick()!;
+  assert.equal(frame.silent, false);
+  assert.equal(frame.minus('a'), frame.full, 'zero source contributes nothing to subtract');
+  assert.equal(frame.minus('b')![0], 0);
+  mixer.push('a', samples(0)); mixer.push('b', samples(0));
+  frame = mixer.tick()!;
+  assert.equal(frame.silent, true, 'buffered zero PCM is silence too');
+  assert.equal(frame.minus('a'), frame.full);
+  mixer.push('a', samples(0.000001)); mixer.push('b', samples(0));
+  frame = mixer.tick()!;
+  assert.equal(frame.silent, false, 'audio below the speaking threshold must still be played');
+  assert.equal(frame.full[0], Math.fround(0.000001));
+  assert.equal(frame.minus('a')![0], 0, 'quiet audio is still excluded from its own mix');
+  assert.equal(counters.underruns, 0, 'zero frames still advance the playout queue');
+});
 test('FIFO drops oldest and rejects malformed frames', () => {
   const mixer = new RoomMixer(options); mixer.addSource('a');
   mixer.push('a', samples(0.1)); mixer.push('a', samples(0.2)); mixer.push('a', samples(0.3));

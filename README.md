@@ -23,7 +23,7 @@ Stage.js 伺服器（Node v24）
         └─ codec workers Opus 編解碼（audio.codecWorkers 條 thread，libopus WASM；遺失包以 FEC／PLC 還原；同 worker 的工作合併成一則訊息）
 ```
 
-混音：每 20ms 一個 tick，各發言者取一個 960-sample frame 疊加。觀眾共用一次編碼（下行掉包持續偏高的觀眾改收另一路共用的低位元率＋高 FEC 編碼）；台上者各自一路 mix-minus-self 編碼。編好的封包送到持有該房 peer 的各 media worker，由它們各自打包、加密、送出。
+混音：每 20ms 一個 tick，各發言者取一個 960-sample frame 疊加。觀眾共用一次編碼（下行掉包持續偏高的觀眾改收另一路共用的低位元率＋高 FEC 編碼）；台上者有聲時各自一路 mix-minus-self 編碼，持續無聲超過 1 秒則共用完整混音。全零 PCM 同樣算無聲，但低於說話偵測門檻的非零音訊仍照常播放；全房無聲超過 1 秒且啟用 DTX 時停止編碼。編好的封包送到持有該房 peer 的各 media worker，由它們各自打包、加密、送出。移除 publisher 時釋放其 encoder 與 decoder，再上台使用全新解碼狀態。
 
 ## 需求
 
@@ -81,7 +81,7 @@ Windows 用 `.\stage.ps1 <command>`，指令相同；Windows 無法對背景 nod
 
 對外部署：`allowInsecure: false`、`host: 0.0.0.0`、填 `tls`；開放 `rtc.portRange` 的 UDP；設定 `rtc.turn`（coturn 需 `use-auth-secret` 與相同的 `static-auth-secret`）。憑證檔更新（含 ACME 工具的改名／symlink 替換）後約 2 秒自動重載，不需重啟；新憑證載入失敗時沿用舊憑證並記 error。
 
-監控：`GET /healthz` 回 `ok`；`GET /metrics` 回 Prometheus 文字格式（`Authorization: Bearer <server.metrics.token>`），包含房間／連線／發言者數、上下行封包與補幀數、DTX 省略幀、全房無聲時跳過編碼的幀數（`opus.dtx` 開啟且台上全員靜音或沒有上行超過 1 秒時，混音不再編碼、直接以 DTX 處理）、low tier 聽眾數、codec backlog 與丟幀、mixer underrun／漂移丟幀／tick 延遲、event loop delay 與記憶體。
+監控：`GET /healthz` 回 `ok`；`GET /metrics` 回 Prometheus 文字格式（`Authorization: Bearer <server.metrics.token>`），包含房間／連線／發言者數、上下行封包與補幀數、DTX 省略幀、全房無聲時跳過編碼的幀數（`opus.dtx` 開啟且台上全員靜音、沒有上行或持續全零 PCM 超過 1 秒時，混音不再編碼、直接以 DTX 處理）、low tier 聽眾數、codec backlog 與丟幀、mixer underrun／漂移丟幀／tick 延遲、event loop delay 與記憶體。
 
 ## WebSocket 協定摘要
 

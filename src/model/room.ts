@@ -427,6 +427,9 @@ export class Room {
     const fail = (why: string): never => {
       throw new InvariantViolation(`room ${this.roomId}: ${why}`);
     };
+    const hands = new Set(this.handQueue);
+    if (hands.size !== this.handQueue.length) fail('duplicate hand');
+    for (const id of hands) if (!this.participants.has(id)) fail('unknown hand');
     let controllers = 0;
     let nonController = 0;
     for (const p of this.participants.values()) {
@@ -434,14 +437,14 @@ export class Room {
       else nonController++;
       if (p.onStage !== this.speakers.has(p.participantId)) fail('onStage/speakers mismatch');
       if (p.role === 'speaker' && !p.onStage) fail('speaker off stage');
-      if (p.handRaised !== this.handQueue.includes(p.participantId)) fail('hand flag/queue mismatch');
+      if (p.role === 'audience' && p.onStage) fail('audience on stage');
+      if (p.handRaised !== hands.has(p.participantId)) fail('hand flag/queue mismatch');
       if (p.handRaised && p.role !== 'audience') fail('non-audience in hand queue');
       if (!p.onStage && (p.selfMuted || p.forceMuted)) fail('mute flags off stage');
     }
     if (controllers !== 1) fail(`expected 1 controller, found ${controllers}`);
     if (this.participants.get(this.controllerId)?.role !== 'controller') fail('controllerId mismatch');
     for (const id of this.speakers) if (!this.participants.has(id)) fail('unknown speaker');
-    if (new Set(this.handQueue).size !== this.handQueue.length) fail('duplicate hand');
     if (this.speakerCount > this.limits.maxSpeakers) fail('speaker cap exceeded');
     if (nonController > this.limits.maxAudience) fail('audience cap exceeded');
   }

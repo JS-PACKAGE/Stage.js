@@ -6,6 +6,7 @@ import { RoomMixer } from '../src/mixer/RoomMixer.ts';
 import type { TransportStats } from '../src/transport/MediaTransport.ts';
 import type { DownlinkFrame, HostCounters, PeerHost, PeerHostEvents } from '../src/transport/peerHost.ts';
 import { WeriftMediaTransport } from '../src/transport/WeriftMediaTransport.ts';
+import { OpusDecoder, OpusEncoder } from '../src/transport/opus.ts';
 import { sine, testConfig } from './helpers.ts';
 
 /** Records what the transport hands to the network layer instead of sending it. */
@@ -44,9 +45,9 @@ async function setup() {
     transport.subscribe(ROOM, id);
   }
   /** One mixer tick with `a` speaking or silent; returns which encode each participant was sent. */
-  const tick = async (aSpeaks: boolean) => {
+  const tick = async (aSpeaks: boolean | Float32Array) => {
     const sent = host.next();
-    if (aSpeaks) mixer.push('a', sine(960, 0.3));
+    if (aSpeaks) mixer.push('a', aSpeaks === true ? sine(960, 0.3) : aSpeaks);
     mixer.tick();
     const frame = await sent;
     const route = new Map(frame.targets);
@@ -93,5 +94,46 @@ describe('downlink fan-out', () => {
       assert.ok(t.payloads.some((p) => p.length > 2), 'encodes again as soon as someone speaks');
       assert.ok(!t.same('a', 'b'), 'and the speaker is back on its own mix-minus');
     } finally { await transport.close(); }
+  });
+
+  it('stops encoding silence even when the publisher keeps supplying zero PCM', async () => {
+    const { transport, tick } = await setup();
+    try {
+      await tick(true);
+      const zero = new Float32Array(960);
+      let t;
+      for (let i = 0; i < 50; i++) t = await tick(zero);
+      assert.ok(t!.same('a', 'b'), 'zero PCM shares the full mix after a second');
+      t = await tick(zero);
+      assert.ok(t.payloads.every(p => p.length === 0), 'zero PCM reaches the idle DTX fast path');
+      const skipped = (await transport.metrics()).find(m => m.name === 'stage_mix_frames_silent_skipped_total')!;
+      assert.equal(skipped.value, 1);
+    } finally { await transport.close(); }
+  });
+
+  it('starts a fresh decoder when a removed publisher returns', { timeout: 10000 }, async () => {
+    const { config, transport, events } = await setup();
+    const oldEncoder = new OpusEncoder(config.audio);
+    const newEncoder = new OpusEncoder(config.audio);
+    const reference = new OpusDecoder(config.audio.sampleRate);
+    let received = Promise.withResolvers<Float32Array>();
+    transport.addPublisher(ROOM, 'a', pcm => received.resolve(pcm.slice()));
+    try {
+      for (let i = 0; i < 10; i++) {
+        received = Promise.withResolvers<Float32Array>();
+        events.uplink(ROOM, 'a', i, oldEncoder.encode(sine(960, 0.7)));
+        await received.promise;
+      }
+      transport.removePublisher(ROOM, 'a');
+      const packet = newEncoder.encode(sine(960, 0.15));
+      const expected = reference.decode(packet);
+      received = Promise.withResolvers<Float32Array>();
+      transport.addPublisher(ROOM, 'a', pcm => received.resolve(pcm.slice()));
+      events.uplink(ROOM, 'a', 100, packet);
+      assert.deepEqual(await received.promise, expected, 'previous uplink prediction state must not leak into the new stream');
+    } finally {
+      oldEncoder.free(); newEncoder.free(); reference.free();
+      await transport.close();
+    }
   });
 });

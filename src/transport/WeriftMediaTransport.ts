@@ -188,6 +188,7 @@ export class WeriftMediaTransport implements MediaTransport {
     room.uplinks.delete(id);
     room.peers.get(id)?.setUplink(roomId, id, false);
     this.codecs.release(roomId, 'encoder', id);
+    this.codecs.release(roomId, 'decoder', id);
     room.silentFrames.delete(id);
   }
   setPublisherMuted(roomId: string, id: string, muted: boolean): void {
@@ -304,7 +305,7 @@ export class WeriftMediaTransport implements MediaTransport {
     if (!room || !host) return;
     room.peers.delete(id); room.downlinkLoss.delete(id); room.lowTier.delete(id);
     this.removePublisher(roomId, id); this.unsubscribe(roomId, id);
-    host.closePeer(roomId, id); this.codecs.release(roomId, 'decoder', id);
+    host.closePeer(roomId, id);
   }
   closeRoom(id: string): void {
     const room = this.rooms.get(id);
