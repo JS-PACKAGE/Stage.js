@@ -20,30 +20,43 @@ class TokenBucket {
   }
 }
 
+/** At most one event per `intervalMs`. */
+class Interval {
+  private readonly intervalMs: number;
+  private last = Number.NEGATIVE_INFINITY;
+  constructor(intervalMs: number) {
+    this.intervalMs = intervalMs;
+  }
+  take(now: number): boolean {
+    if (now - this.last < this.intervalMs) return false;
+    this.last = now;
+    return true;
+  }
+}
+
 /**
  * Per-connection limits (AGENTS.md §S4): control ≤ N/s, `rtc:ice` ≤ M/s,
- * `hand:raise` at most once per interval. Any violation → caller disconnects.
+ * `hand:raise`, `chat:send` and `reaction` at most once per their interval. Any violation → caller disconnects.
  */
 export class ConnectionRateLimiter {
   private readonly control: TokenBucket;
   private readonly ice: TokenBucket;
-  private readonly handIntervalMs: number;
-  private lastHandRaise = Number.NEGATIVE_INFINITY;
+  private readonly spaced: Partial<Record<ClientMessageType, Interval>>;
 
   constructor(limits: AppConfig['limits'], now: number) {
     this.control = new TokenBucket(limits.controlPerSecond, now);
     this.ice = new TokenBucket(limits.icePerSecond, now);
-    this.handIntervalMs = limits.handRaiseIntervalMs;
+    this.spaced = {
+      'hand:raise': new Interval(limits.handRaiseIntervalMs),
+      'chat:send': new Interval(limits.chatIntervalMs),
+      reaction: new Interval(limits.reactionIntervalMs),
+    };
   }
 
   /** Returns false if the message exceeds a limit. */
   allow(type: ClientMessageType, now: number): boolean {
     if (type === 'rtc:ice') return this.ice.take(now);
     if (!this.control.take(now)) return false;
-    if (type === 'hand:raise') {
-      if (now - this.lastHandRaise < this.handIntervalMs) return false;
-      this.lastHandRaise = now;
-    }
-    return true;
+    return this.spaced[type]?.take(now) ?? true;
   }
 }

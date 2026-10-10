@@ -38,6 +38,12 @@ export interface AppConfig {
     joinTimeoutMs: number;
     /** Concurrent ws connections per client address (0 = unlimited). */
     maxConnectionsPerIp: number;
+    /** Longest chat message in characters after sanitizing. */
+    chatMaxLength: number;
+    /** Minimum gap between one connection's chat messages (violation closes with 1008, like hand:raise). */
+    chatIntervalMs: number;
+    /** Minimum gap between one connection's reactions. */
+    reactionIntervalMs: number;
   };
   rooms: {
     codeLength: number;
@@ -49,6 +55,8 @@ export interface AppConfig {
     presenceBroadcastMs: number;
     /** How often publishers' connection quality goes to the controller and stage (0 = never). */
     qualityIntervalMs: number;
+    /** Chat messages kept per room and replayed to joiners (0 = no history). */
+    chatHistory: number;
     /** Non-empty: `room:create` must carry this token (empty = anyone may create rooms). */
     createToken: string;
   };
@@ -228,6 +236,9 @@ export function parseConfig(raw: unknown): AppConfig {
     sdpMaxLength: int(l, 'sdpMaxLength', 'limits', 256),
     joinTimeoutMs: int(l, 'joinTimeoutMs', 'limits', 0),
     maxConnectionsPerIp: int(l, 'maxConnectionsPerIp', 'limits', 0),
+    chatMaxLength: int(l, 'chatMaxLength', 'limits', 1, 2000),
+    chatIntervalMs: int(l, 'chatIntervalMs', 'limits', 0),
+    reactionIntervalMs: int(l, 'reactionIntervalMs', 'limits', 0),
   };
 
   const r = obj(root.rooms, 'rooms');
@@ -238,6 +249,7 @@ export function parseConfig(raw: unknown): AppConfig {
     heartbeatIntervalMs: int(r, 'heartbeatIntervalMs', 'rooms', 1000),
     presenceBroadcastMs: int(r, 'presenceBroadcastMs', 'rooms', 0, 10000),
     qualityIntervalMs: int(r, 'qualityIntervalMs', 'rooms', 0, 60000),
+    chatHistory: int(r, 'chatHistory', 'rooms', 0, 1000),
     createToken: str(r, 'createToken', 'rooms'),
   };
   if (rooms.codeLength > limits.codeMaxLength) throw new ConfigError('rooms.codeLength: exceeds limits.codeMaxLength');

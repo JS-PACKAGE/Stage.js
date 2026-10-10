@@ -1,10 +1,11 @@
 import { StageClient, decodeName, type StageEventMap } from './index.ts';
 
-/** Every StageClient event, re-dispatched from the element as `stage-<type>`. */
-const EVENTS: (keyof StageEventMap)[] = [
-  'state', 'status', 'created', 'closed', 'kicked', 'hand', 'invite', 'stagejoined', 'stageleft',
-  'transferred', 'mic', 'role', 'error', 'micerror', 'micready', 'audioblocked', 'speaking', 'quality',
-];
+/** Every StageClient event, re-dispatched from the element as `stage-<type>`; a Record so a new event cannot be missed. */
+const EVENTS = Object.keys({
+  state: true, status: true, created: true, closed: true, kicked: true, hand: true, invite: true, stagejoined: true, stageleft: true,
+  transferred: true, mic: true, role: true, error: true, micerror: true, micready: true, audioblocked: true, speaking: true, quality: true,
+  chat: true, chathistory: true, reaction: true,
+} satisfies Record<keyof StageEventMap, true>) as (keyof StageEventMap)[];
 const STATUS_LABELS = { waiting: '等待發言', live: '直播中', reconnecting: '重新連線中', disconnected: '未連線' };
 
 const STYLE = `

@@ -1,6 +1,6 @@
-import type { ClientMessageMap, ClientMessageType, ErrorCode, IceCandidatePayload, ParticipantView, RateLimits, RoomStatePayload, ServerMessage, ServerMessageMap } from '../../../shared/protocol.ts';
-export type { ParticipantView, RoomStatePayload, Role, StageStatus, ErrorCode, IceServerConfig, ConnectionQuality } from '../../../shared/protocol.ts';
-export { MAX_GAIN_DB } from '../../../shared/protocol.ts';
+import type { ChatMessage, ClientMessageMap, ClientMessageType, ErrorCode, IceCandidatePayload, ParticipantView, RateLimits, Reaction, RoomStatePayload, ServerMessage, ServerMessageMap } from '../../../shared/protocol.ts';
+export type { ParticipantView, RoomStatePayload, Role, StageStatus, ErrorCode, IceServerConfig, ConnectionQuality, ChatMessage, Reaction } from '../../../shared/protocol.ts';
+export { MAX_GAIN_DB, REACTIONS } from '../../../shared/protocol.ts';
 
 export function decodeName(value: string): string {
   const entities: Record<string, string> = { '&amp;': '&', '&lt;': '<', '&gt;': '>', '&quot;': '"', '&#39;': "'" };
@@ -114,12 +114,19 @@ export interface StageEventMap {
   speaking: { participantIds: string[] };
   /** Connection quality of everyone publishing (controller and on-stage participants only). */
   quality: ServerMessageMap['quality'];
+  /** One new chat message (text and name are HTML-escaped: render with textContent after `decodeName`). */
+  chat: ChatMessage;
+  /** Recent chat replayed on join or rejoin; replaces `chatMessages`. */
+  chathistory: { messages: ChatMessage[] };
+  reaction: ServerMessageMap['reaction'];
 }
 interface Pending { resolve: () => void; reject: (error: StageError) => void; timer: ReturnType<typeof setTimeout> }
 type JoinOptions = { roomId: string; code?: string; name: string; resumeToken?: string };
 const REQUEST_TIMEOUT = 15000;
 /** Until the server's `hello` says otherwise: the config.example.yaml defaults. */
-const DEFAULT_LIMITS: RateLimits = { controlPerSecond: 20, icePerSecond: 30, handRaiseIntervalMs: 10000 };
+const DEFAULT_LIMITS: RateLimits = { controlPerSecond: 20, icePerSecond: 30, handRaiseIntervalMs: 10000, chatIntervalMs: 1000, reactionIntervalMs: 250 };
+/** Client-side cap on kept chat messages; the server's own history is usually shorter. */
+const MAX_CHAT_MESSAGES = 200;
 const KEEPALIVE_INTERVAL_MS = 15000;
 /** Two missed keepalive rounds. */
 const KEEPALIVE_TIMEOUT_MS = 2 * KEEPALIVE_INTERVAL_MS + 5000;
@@ -159,6 +166,9 @@ export class StageClient extends EventTarget {
   private answerTimer: ReturnType<typeof setTimeout> | undefined;
   private limits: RateLimits = DEFAULT_LIMITS;
   private lastHandAt = -Infinity;
+  private lastChatAt = -Infinity;
+  private lastReactionAt = -Infinity;
+  private chatLog: ChatMessage[] = [];
   private nextControlAt = 0;
   private nextIceAt = 0;
   /** Latest scheduled send of any kind: the server processes frames in arrival order, so ICE must never overtake its offer. */
@@ -191,6 +201,8 @@ export class StageClient extends EventTarget {
   get me(): ParticipantView | null { return this.snapshot?.me ?? null; }
   /** Participants currently audible in the mix (server voice activity). */
   get speaking(): ReadonlySet<string> { return this.speakingIds; }
+  /** Chat messages since joining (plus replayed history), oldest first. */
+  get chatMessages(): readonly ChatMessage[] { return this.chatLog; }
   get handCooldownMs(): number { return Math.max(0, this.limits.handRaiseIntervalMs - (Date.now() - this.lastHandAt)); }
   /** Limits the connected server enforces per connection (from `hello`; defaults before connecting). */
   get rateLimits(): RateLimits { return this.limits; }
@@ -356,6 +368,18 @@ export class StageClient extends EventTarget {
     this.lastHandAt = Date.now();
     return this.request('hand:raise', {});
   }
+  /** Send a chat message (≤ `limits.chatMaxLength` characters on the server; paced by `rateLimits.chatIntervalMs`). */
+  sendChat(text: string): Promise<void> {
+    if (Date.now() - this.lastChatAt < this.limits.chatIntervalMs) return Promise.reject(new StageError('rate_limited', '訊息傳送過快，請稍候。'));
+    this.lastChatAt = Date.now();
+    return this.request('chat:send', { text });
+  }
+  /** Send an emoji reaction from `REACTIONS`; paced by `rateLimits.reactionIntervalMs`. */
+  react(emoji: Reaction): Promise<void> {
+    if (Date.now() - this.lastReactionAt < this.limits.reactionIntervalMs) return Promise.reject(new StageError('rate_limited', '反應送出過快，請稍候。'));
+    this.lastReactionAt = Date.now();
+    return this.request('reaction', { emoji });
+  }
   withdrawHand(): Promise<void> { return this.request('hand:withdraw', {}); }
   approve(id: string): Promise<void> { return this.request('stage:approve', { targetId: id }); }
   reject(id: string): Promise<void> { return this.request('stage:reject', { targetId: id }); }
@@ -387,6 +411,7 @@ export class StageClient extends EventTarget {
     this.session = null;
     this.snapshot = null;
     this.speakingIds = new Set();
+    this.chatLog = [];
     this.stopKeepalive();
     this.socket?.close(1000);
     this.socket = null;
@@ -487,6 +512,7 @@ export class StageClient extends EventTarget {
         this.session = null;
         this.snapshot = null;
         this.speakingIds = new Set();
+        this.chatLog = [];
         clearTimeout(this.reconnectTimer);
         this.reconnectTimer = undefined;
         this.destroyMedia();
@@ -504,6 +530,15 @@ export class StageClient extends EventTarget {
       case 'role:update': this.emit('role', { participantId: message.participantId, role: message.role, reason: message.reason }); break;
       case 'speaking': this.speakingIds = new Set(message.participantIds); this.emit('speaking', { participantIds: message.participantIds }); break;
       case 'quality': this.emit('quality', { participants: message.participants }); break;
+      case 'chat': {
+        const { type: _type, ...chat } = message;
+        this.chatLog.push(chat);
+        if (this.chatLog.length > MAX_CHAT_MESSAGES) this.chatLog.shift();
+        this.emit('chat', chat);
+        break;
+      }
+      case 'chat:history': this.chatLog = message.messages.slice(-MAX_CHAT_MESSAGES); this.emit('chathistory', { messages: this.chatLog }); break;
+      case 'reaction': this.emit('reaction', { participantId: message.participantId, name: message.name, emoji: message.emoji }); break;
     }
   }
   private scheduleReconnect(): void {

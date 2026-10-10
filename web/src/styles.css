@@ -57,6 +57,19 @@ button.danger { color: var(--danger); border-color: var(--danger); }
 .audio-settings select { width: 100%; min-width: 0; }
 .mic-level-label { display: grid; gap: 8px; margin-top: 16px; }
 .mic-level { width: 100%; height: 24px; accent-color: var(--accent); }
+.chat { display: grid; gap: 10px; position: relative; }
+.chat-log { margin: 0; padding: 0; list-style: none; max-height: 320px; overflow-y: auto; }
+.chat-log li { padding: 8px 0; border-top: 1px solid var(--border); }
+.chat-log li.mine strong { color: var(--accent); }
+.chat-log time { margin-left: 8px; font-size: .85rem; }
+.chat-log p { margin: 4px 0 0; white-space: pre-wrap; overflow-wrap: anywhere; }
+.chat-form { display: grid; grid-template-columns: 1fr auto; gap: 8px; }
+.chat-form textarea { resize: vertical; min-width: 0; font: inherit; }
+.reactions button { min-width: 44px; font-size: 1.2rem; }
+.reaction-feed { display: flex; flex-wrap: wrap; gap: 6px; min-height: 1.5em; }
+.reaction { padding: 2px 8px; border-radius: 99px; background: var(--panel); border: 1px solid var(--border); animation: reaction-fade 3s ease-out forwards; }
+@keyframes reaction-fade { 0%, 70% { opacity: 1; } 100% { opacity: 0; } }
+@media (prefers-reduced-motion: reduce) { .reaction { animation: none; } }
 @media (min-width: 760px) {
   #app { padding: 24px; }
   .landing-grid, .stage-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }

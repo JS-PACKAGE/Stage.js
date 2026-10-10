@@ -2,6 +2,7 @@ import { randomBytes, randomInt, timingSafeEqual } from 'node:crypto';
 import {
   PROTOCOL_VERSION,
   SERVER_PEER_ID,
+  type ChatMessage,
   type ClientMessage,
   type ConnectionQuality,
   type IceCandidatePayload,
@@ -70,6 +71,9 @@ interface RoomRuntime {
   qualityTimer: unknown;
   /** Uplink counters at the previous report, so each report covers one interval. */
   readonly uplinkCounts: Map<string, { received: number; lost: number }>;
+  /** Last `rooms.chatHistory` messages, oldest first. */
+  readonly chat: ChatMessage[];
+  nextMessageId: number;
   lastStatus: 'waiting' | 'live';
   closed: boolean;
 }
@@ -120,8 +124,13 @@ export class StageHub {
   }
 
   attach(session: Session): void {
-    const { controlPerSecond, icePerSecond, handRaiseIntervalMs } = this.deps.config.limits;
-    session.send({ type: 'hello', protocol: PROTOCOL_VERSION, serverVersion: this.deps.serverVersion, limits: { controlPerSecond, icePerSecond, handRaiseIntervalMs } });
+    const { controlPerSecond, icePerSecond, handRaiseIntervalMs, chatIntervalMs, reactionIntervalMs } = this.deps.config.limits;
+    session.send({
+      type: 'hello',
+      protocol: PROTOCOL_VERSION,
+      serverVersion: this.deps.serverVersion,
+      limits: { controlPerSecond, icePerSecond, handRaiseIntervalMs, chatIntervalMs, reactionIntervalMs },
+    });
   }
 
   /** Whether the session has created or joined a room (and not been evicted since). */
@@ -228,6 +237,8 @@ export class StageHub {
       stateTimer: undefined,
       qualityTimer: undefined,
       uplinkCounts: new Map(),
+      chat: [],
+      nextMessageId: 1,
       lastStatus: room.status,
       closed: false,
     };
@@ -283,6 +294,7 @@ export class StageHub {
 
     session.send({ type: 'rtc:config', iceServers: iceServersFor(this.deps.config.rtc, participantId, this.now()) });
     session.send({ type: 'room:state', ...room.snapshot(participantId) });
+    if (rt.chat.length) session.send({ type: 'chat:history', messages: rt.chat });
     this.presenceChanged(rt);
     session.send({ type: 'ok', requestId: msg.requestId });
   }
@@ -348,6 +360,21 @@ export class StageHub {
         session.send({ type: 'room:state', ...room.snapshot(pid) });
         session.send({ type: 'ok', requestId: msg.requestId });
         this.deps.log.info('room code rotated', { roomId: room.roomId });
+        return;
+      case 'chat:send': {
+        const message: ChatMessage = { messageId: rt.nextMessageId++, participantId: pid, name: room.get(pid)!.name, text: msg.text, sentAt: now };
+        const keep = this.deps.config.rooms.chatHistory;
+        if (keep > 0) {
+          rt.chat.push(message);
+          if (rt.chat.length > keep) rt.chat.shift();
+        }
+        this.broadcast(rt, { type: 'chat', ...message });
+        session.send({ type: 'ok', requestId: msg.requestId });
+        return;
+      }
+      case 'reaction':
+        this.broadcast(rt, { type: 'reaction', participantId: pid, name: room.get(pid)!.name, emoji: msg.emoji });
+        session.send({ type: 'ok', requestId: msg.requestId });
         return;
       case 'rtc:answer':
         // The server never sends offers, so an answer is always out of protocol.

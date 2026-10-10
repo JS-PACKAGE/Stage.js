@@ -30,6 +30,10 @@
  *   - C→S `mic:gain {targetId, gainDb}` (controller): manual level trim for one participant's
  *     voice in the mix, on top of automatic loudness normalization; kept while they stay in the
  *     room and shown to everyone as `ParticipantView.gainDb`.
+ *   - C→S `chat:send {text}` / S→C `chat` (ChatMessage): room text chat for everyone joined; text is
+ *     sanitized and HTML-escaped like names. The last `rooms.chatHistory` messages arrive as
+ *     `chat:history` right after joining.
+ *   - C→S `reaction {emoji}` / S→C `reaction {participantId, emoji}`: fire-and-forget emoji from REACTIONS.
  */
 
 export const PROTOCOL_VERSION = 1;
@@ -39,6 +43,22 @@ export const SERVER_PEER_ID = 'server';
 
 /** `mic:gain` accepts gains within ±MAX_GAIN_DB. */
 export const MAX_GAIN_DB = 20;
+
+/** The only emoji `reaction` accepts. */
+export const REACTIONS = ['👏', '❤️', '😂', '😮', '👍', '🎉'] as const;
+export type Reaction = (typeof REACTIONS)[number];
+
+export interface ChatMessage {
+  /** Increases per room; unique within the room. */
+  messageId: number;
+  participantId: string;
+  /** Sender name at send time, HTML-escaped. */
+  name: string;
+  /** HTML-escaped. */
+  text: string;
+  /** ms since epoch */
+  sentAt: number;
+}
 
 export type Role = 'controller' | 'speaker' | 'audience';
 
@@ -117,6 +137,8 @@ export interface RateLimits {
   controlPerSecond: number;
   icePerSecond: number;
   handRaiseIntervalMs: number;
+  chatIntervalMs: number;
+  reactionIntervalMs: number;
 }
 
 export type StageLeftReason = 'leave' | 'removed';
@@ -162,6 +184,9 @@ export interface ServerMessageMap {
   pong: Record<never, never>;
   kicked: { roomId: string };
   quality: { participants: ConnectionQuality[] };
+  chat: ChatMessage;
+  'chat:history': { messages: ChatMessage[] };
+  reaction: { participantId: string; name: string; emoji: Reaction };
 }
 
 export type ServerMessageType = keyof ServerMessageMap;
@@ -193,6 +218,8 @@ export interface ClientMessageMap {
   'rtc:offer': { requestId: string; payload: SessionDescriptionPayload };
   'rtc:answer': { requestId: string; payload: SessionDescriptionPayload };
   'rtc:ice': { requestId: string; payload: IceCandidatePayload | null };
+  'chat:send': { requestId: string; text: string };
+  reaction: { requestId: string; emoji: Reaction };
   ping: Record<never, never>;
 }
 
@@ -223,5 +250,7 @@ export const CLIENT_MESSAGE_TYPES: readonly ClientMessageType[] = [
   'rtc:offer',
   'rtc:answer',
   'rtc:ice',
+  'chat:send',
+  'reaction',
   'ping',
 ];

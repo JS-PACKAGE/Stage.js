@@ -34,7 +34,7 @@
 - 交付必要文件四件（README／AGENTS／CLAUDE／PLAN）後才收尾實作。
 
 ### 範圍外
-- 影片、螢幕分享、文字聊天室。
+- 影片、螢幕分享。（文字聊天與表情反應已於 2026-10-10 依需求加入，見十二-22。）
 - 錄音存檔與回放、直播轉推（RTMP／HLS）。
 - 帳號系統與持久化（使用者、舞台、操作紀錄均記憶體保存，重啟即失）。
 - 套件發布（npm）：只開源倉庫供 clone，不發套件（見假設 6）。
@@ -319,6 +319,7 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 19. **連線准入**：`limits.joinTimeoutMs` 內未開房／進房的連線以 1008 關閉；`limits.maxConnectionsPerIp` 限制同一位址同時連線（反向代理後 `server.trustProxy` 改讀 `X-Forwarded-For`）。
 20. **程序層錯誤**：`unhandledRejection` 只記 error 不中止（werift 關閉 peer 後的計時器可能漏 rejection，Node 預設會讓整個 process 連同所有房間一起死）；`uncaughtException` 走優雅停機（`room:closed {reason:'shutdown'}`）後以非零碼退出。TLS 憑證檔變更後約 2 秒自動 `setSecureContext`，失敗則沿用舊憑證。
 21. **Web Component**：`/lib/stage-element.js` 註冊 `<stage-client room code name url>`（shadow DOM 小工具：狀態、錯誤、啟用音訊、舉手、台上靜音／下台），進入文件即進房、移除即以 1000 離開；client 事件以 `stage-<type>` 派發，`element.client` 暴露底層 `StageClient` 供主控功能；它從穩定檔名 `stage-client.js` 匯入，嵌入頁同時使用兩者時只載入一份。
+22. **文字聊天與表情反應**（2026-10-10 依需求加入）：C→S `chat:send {text}`、`reaction {emoji}`；S→C `chat {messageId, participantId, name, text, sentAt}`、`reaction {participantId, name, emoji}`、`chat:history {messages}`（進房與回座時補送最近 `rooms.chatHistory` 則，記憶體保存）。聊天內容比照 name 清洗（保留換行、最多連續兩個空行）後 HTML 轉義，長度 ≤ `limits.chatMaxLength`；emoji 限 `REACTIONS` 白名單。每連線聊天每 `limits.chatIntervalMs`、反應每 `limits.reactionIntervalMs` 至多一次，超過比照 `hand:raise` 以 1008 斷線，兩值經 `hello.limits` 下發供 client 自行節流。聊天內容不入日誌。伺服器錯誤訊息維持固定英文，client 依 `code` 換成繁中（`ERROR_MESSAGES`）。
 
 ---
 

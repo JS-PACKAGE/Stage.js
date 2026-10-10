@@ -41,6 +41,9 @@ limits:
   sdpMaxLength: 16384
   joinTimeoutMs: 30000         # 連上 ws 後逾此時間仍未開房／進房即以 1008 斷線（0＝不限；可調整）
   maxConnectionsPerIp: 0       # 同一位址同時連線上限（0＝不限）。學校／公司 NAT 或未設 server.trustProxy 的反向代理會讓大量使用者共用一個位址，設定前請估算（可調整）
+  chatMaxLength: 500           # 聊天訊息字元上限（清洗後；可調整）
+  chatIntervalMs: 1000         # 每連線兩則聊天訊息的最短間隔；過快以 1008 斷線（client 依 hello.limits 自行節流；可調整）
+  reactionIntervalMs: 250      # 每連線兩次表情反應的最短間隔（同上；可調整）
 
 rooms:
   codeLength: 8                # 房間代碼長度（可調整）
@@ -49,6 +52,7 @@ rooms:
   heartbeatIntervalMs: 30000   # ws ping 間隔
   presenceBroadcastMs: 250     # 觀眾進出時合併 room:state 廣播的時間窗（0＝即時；大量同時進場時避免 N² 廣播，可調整）
   qualityIntervalMs: 2000      # 每隔多久把台上者的連線品質（上下行掉包、RTT）送給主控與台上者（0＝停用，可調整）
+  chatHistory: 50              # 每房保留的最近聊天訊息數，新進房者會收到（0＝不保留；可調整）
   createToken: ""              # 非空時建立房間須附此權杖（防止匿名占滿 maxRooms）；只放 config.yaml，對外部署建議設定
 
 audio:

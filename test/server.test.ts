@@ -96,7 +96,7 @@ describe('ws server boundary', () => {
     await c.open();
     const hello = await c.waitFor((m) => m.type === 'hello');
     assert.ok(hello.type === 'hello');
-    assert.deepEqual(hello.limits, { controlPerSecond: 5, icePerSecond: 30, handRaiseIntervalMs: 10000 }, 'client paces itself by the advertised limits');
+    assert.deepEqual(hello.limits, { controlPerSecond: 5, icePerSecond: 30, handRaiseIntervalMs: 10000, chatIntervalMs: 1000, reactionIntervalMs: 250 }, 'client paces itself by the advertised limits');
     c.send({ type: 'nuke', requestId: 'r1' });
     assert.deepEqual(await c.reply('r1'), { type: 'error', requestId: 'r1', code: 'unknown_type', message: 'Unknown message type' });
     c.send({ type: 'join', requestId: 'r2', roomId: 'x', name: 'a'.repeat(33) });
@@ -149,6 +149,25 @@ describe('ws server boundary', () => {
     a.send({ type: 'hand:raise', requestId: 'h3' });
     assert.equal(await a.closed, 1008);
     host.ws.close();
+  });
+
+  it('sanitizes chat text, rejects unknown emoji and disconnects chat faster than the interval', async () => {
+    const host = new Client(url);
+    await host.open();
+    host.send({ type: 'room:create', requestId: 'c', name: 'H' });
+    const st = await host.waitFor((m) => m.type === 'room:state');
+    assert.ok(st.type === 'room:state');
+    host.send({ type: 'reaction', requestId: 'e1', emoji: '💩' });
+    assert.equal((await host.reply('e1')).type, 'error');
+    host.send({ type: 'chat:send', requestId: 'm0', text: ' \u202e\n\n\n ' });
+    assert.equal((await host.reply('m0')).type, 'error', 'blank after stripping is rejected');
+    host.send({ type: 'chat:send', requestId: 'm1', text: '<b>hi</b>\u200b\r\n\r\n\r\nthere ' });
+    assert.equal((await host.reply('m1')).type, 'ok');
+    const chat = await host.waitFor((m) => m.type === 'chat');
+    assert.ok(chat.type === 'chat');
+    assert.equal(chat.text, '&lt;b&gt;hi&lt;/b&gt;\n\nthere');
+    host.send({ type: 'chat:send', requestId: 'm2', text: 'again' });
+    assert.equal(await host.closed, 1008);
   });
 
   it('closes connections that send frames over the size limit', async () => {

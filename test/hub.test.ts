@@ -588,3 +588,36 @@ describe('ephemeral TURN credentials', () => {
     assert.notEqual(usernames[0], usernames[1]);
   });
 });
+
+describe('chat and reactions', () => {
+  it('broadcasts chat to the room, keeps only the last rooms.chatHistory and replays them to joiners', async () => {
+    const h = harness(testConfig((c) => { c.rooms.chatHistory = 2; }));
+    const host = await h.create('Host');
+    const alice = await h.join(host.roomId, host.code, 'Alice');
+    for (const text of ['one', 'two', 'three']) assert.equal(await h.req(alice.s, { type: 'chat:send', text }), 'ok');
+    const seen = host.s.all('chat');
+    assert.deepEqual(seen.map((m) => [m.participantId, m.name, m.text]), [[alice.id, 'Alice', 'one'], [alice.id, 'Alice', 'two'], [alice.id, 'Alice', 'three']]);
+    assert.ok(seen[0]!.messageId < seen[1]!.messageId && seen[1]!.messageId < seen[2]!.messageId, 'ids increase');
+    const bob = await h.join(host.roomId, host.code, 'Bob');
+    assert.deepEqual(bob.s.last('chat:history')!.messages.map((m) => m.text), ['two', 'three']);
+  });
+
+  it('sends no history when there is none or it is disabled', async () => {
+    const h = harness(testConfig((c) => { c.rooms.chatHistory = 0; }));
+    const host = await h.create();
+    assert.equal(await h.req(host.s, { type: 'chat:send', text: 'hi' }), 'ok');
+    const late = await h.join(host.roomId, host.code, 'Late');
+    assert.equal(late.s.all('chat:history').length, 0);
+  });
+
+  it('broadcasts reactions with the sender name and needs a joined session', async () => {
+    const h = harness();
+    const host = await h.create('Host');
+    const alice = await h.join(host.roomId, host.code, 'Alice');
+    assert.equal(await h.req(alice.s, { type: 'reaction', emoji: '👏' }), 'ok');
+    assert.deepEqual(host.s.last('reaction'), { type: 'reaction', participantId: alice.id, name: 'Alice', emoji: '👏' });
+    const stranger = new FakeSession();
+    h.hub.attach(stranger);
+    assert.equal(await h.req(stranger, { type: 'chat:send', text: 'hi' }), 'not_joined');
+  });
+});
