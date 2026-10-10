@@ -60,7 +60,11 @@ export class StageElement extends HTMLElement {
     this.error.hidden = true;
     const actions = document.createElement('div');
     actions.part.add('actions');
-    this.unlock = this.button('啟用音訊', () => this.current?.unlockAudio(), 'primary');
+    this.unlock = this.button('啟用音訊', async () => {
+      const client = this.current;
+      await client?.unlockAudio();
+      if (this.current === client) this.unlock.hidden = true;
+    }, 'primary');
     this.unlock.hidden = true;
     this.hand = this.button('舉手發言', () => (this.current?.me?.handRaised ? this.current.withdrawHand() : this.current?.raiseHand()));
     this.mic = this.button('靜音', () => (this.current?.me?.muted ? this.current.unmute() : this.current?.mute()));
@@ -75,7 +79,7 @@ export class StageElement extends HTMLElement {
   get client(): StageClient | null { return this.current; }
 
   connectedCallback(): void { this.rejoin(); }
-  disconnectedCallback(): void { void this.leave(); }
+  disconnectedCallback(): void { ++this.generation; void this.leave(); }
   attributeChangedCallback(_name: string, previous: string | null, next: string | null): void {
     if (previous !== next && this.isConnected) this.rejoin();
   }
@@ -86,9 +90,14 @@ export class StageElement extends HTMLElement {
     b.textContent = label;
     if (className) b.className = className;
     b.onclick = () => {
+      const generation = this.generation;
       b.disabled = true;
       this.error.hidden = true;
-      void Promise.resolve(action()).catch((error: unknown) => this.show(error)).finally(() => this.render());
+      void Promise.resolve(action()).catch((error: unknown) => {
+        if (generation === this.generation) this.show(error);
+      }).finally(() => {
+        if (generation === this.generation) { b.disabled = false; this.render(); }
+      });
     };
     return b;
   }
@@ -102,11 +111,12 @@ export class StageElement extends HTMLElement {
       this.current = client;
       for (const type of EVENTS) {
         client.on(type, ({ detail }) => {
+          if (generation !== this.generation || this.current !== client) return;
           if (type === 'audioblocked') this.unlock.hidden = false;
           if (type === 'closed' || type === 'kicked') this.status.textContent = type === 'kicked' ? '你已被主控移出房間。' : '房間已關閉。';
           if (type === 'error' || type === 'micerror') this.show(detail);
           this.dispatchEvent(new CustomEvent(`stage-${type}`, { detail, bubbles: true, composed: true }));
-          if (type === 'state' || type === 'status' || type === 'mic') this.render();
+          if (type === 'state' || type === 'status' || type === 'mic' || type === 'closed' || type === 'kicked') this.render();
         });
       }
       this.cooldownTimer = setInterval(() => this.render(), 1000);
@@ -114,6 +124,7 @@ export class StageElement extends HTMLElement {
       this.render();
       try {
         await client.connect();
+        if (generation !== this.generation || this.current !== client || !this.isConnected) return;
         const code = this.getAttribute('code')?.trim();
         await client.join({ roomId: room, name, ...(code ? { code } : {}) });
       } catch (error) {
@@ -128,6 +139,7 @@ export class StageElement extends HTMLElement {
     const client = this.current;
     this.current = null;
     this.unlock.hidden = true;
+    this.render();
     await client?.disconnect();
   }
 

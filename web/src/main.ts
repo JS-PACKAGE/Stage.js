@@ -94,7 +94,7 @@ micSelect.onchange = () => {
       micTest = await client.startMicTest();
       testButton.textContent = '停止測試'; testButton.setAttribute('aria-pressed', 'true');
     }
-  }).finally(() => { testingBusy = false; micSelect.disabled = false; micSelect.value = selectedInput; });
+  }).finally(() => { testingBusy = false; micSelect.disabled = false; micSelect.value = selectedInput; syncMeter(); });
 };
 speakerSelect.onchange = () => {
   const deviceId = speakerSelect.value;
@@ -116,7 +116,7 @@ async function refreshDevices(): Promise<void> {
     select.value = chosen;
   }
 }
-client.on('micready', () => { void refreshDevices().catch(() => {}); });
+client.on('micready', () => { micNotice = ''; renderNotices(); void refreshDevices().catch(() => {}); });
 navigator.mediaDevices?.addEventListener('devicechange', () => { void refreshDevices().catch(() => {}); });
 void refreshDevices().catch(() => {});
 /** The level meter polls only while there is something to meter: a mic test or an on-stage mic. */
@@ -154,7 +154,7 @@ async function run(action: () => Promise<unknown>, target?: HTMLButtonElement): 
   errorBox.hidden = true;
   try { await action(); }
   catch (error) { showError(error instanceof Error ? error.message : '操作失敗，請稍後再試。'); }
-  finally { if (target?.isConnected) target.disabled = false; updateCooldown(); }
+  finally { if (target?.isConnected) target.disabled = false; updateCooldown(); syncMeter(); }
 }
 function showError(message: string): void { errorBox.textContent = message; errorBox.hidden = false; }
 function field(form: HTMLFormElement, label: string, name: string, value = '', required = true, maxLength = 32): HTMLInputElement {
@@ -373,7 +373,17 @@ function updateCooldown(): void {
   if (returnButton) returnButton.disabled = client.status === 'reconnecting';
 }
 client.on('state', ({ detail }) => renderRoom(detail));
-client.on('status', ({ detail }) => { status.textContent = statusLabels[detail]; updateCooldown(); });
+client.on('status', ({ detail }) => {
+  status.textContent = statusLabels[detail];
+  if (detail === 'disconnected' && !client.state) {
+    micTest?.stop(); micTest = null;
+    testButton.textContent = '測試麥克風'; testButton.setAttribute('aria-pressed', 'false');
+    createdRoom = null; micNotice = invitation = ''; audioBlocked = false;
+    quality.clear();
+    syncMeter(); landing();
+  }
+  updateCooldown();
+});
 client.on('created', ({ detail }) => { createdRoom = detail; });
 client.on('closed', ({ detail }) => { createdRoom = null; micNotice = ''; invitation = detail.reason === 'shutdown' ? '伺服器維護或重新啟動，房間已關閉；請稍後重新建立或加入。' : '房間已關閉，歡迎建立或加入其他舞台。'; audioBlocked = false; landing(); });
 client.on('kicked', () => { createdRoom = null; micNotice = ''; invitation = '你已被主控移出房間。'; audioBlocked = false; landing(); });

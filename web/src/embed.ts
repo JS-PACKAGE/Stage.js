@@ -21,6 +21,7 @@ join.onsubmit = (event) => {
   submit.disabled = true;
   void (async () => {
     try {
+      hand.disabled = leave.disabled = true;
       await client?.disconnect();
       const host = new URL(input('host').value);
       if (!['https:', 'http:'].includes(host.protocol)) throw new Error('請輸入 HTTP 或 HTTPS 主機網址。');
@@ -36,9 +37,14 @@ join.onsubmit = (event) => {
         leave.disabled = false;
       });
       client.on('micerror', ({ detail }) => { status.textContent = `${detail.message}（${detail.name}）`; });
+      client.on('status', ({ detail }) => {
+        if (detail === 'reconnecting') { status.textContent = '重新連線中'; hand.disabled = true; }
+        else if (detail === 'disconnected') { status.textContent = '未連線'; hand.disabled = leave.disabled = true; }
+      });
       client.on('error', ({ detail }) => report(detail));
       client.on('audioblocked', () => { status.textContent = '請點擊啟用音訊。'; });
       client.on('closed', () => { status.textContent = '房間已關閉。'; hand.disabled = leave.disabled = true; });
+      client.on('kicked', () => { status.textContent = '你已被主控移出房間。'; hand.disabled = leave.disabled = true; });
       await client.connect();
       await client.join({ roomId: input('room').value.trim(), code: input('code').value.trim() || undefined, name: input('name').value.trim() });
     } catch (error) { report(error); }
@@ -57,6 +63,6 @@ leave.onclick = () => {
 setInterval(() => {
   if (!client?.me || client.me.onStage) return;
   const remaining = Math.ceil(client.handCooldownMs / 1000);
-  hand.disabled = !client.me.handRaised && remaining > 0;
+  hand.disabled = client.status === 'reconnecting' || (!client.me.handRaised && remaining > 0);
   hand.textContent = client.me.handRaised ? '收回舉手' : remaining ? `舉手發言（${remaining} 秒）` : '舉手發言';
 }, 250);

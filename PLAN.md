@@ -320,6 +320,7 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 20. **程序層錯誤**：`unhandledRejection` 只記 error 不中止（werift 關閉 peer 後的計時器可能漏 rejection，Node 預設會讓整個 process 連同所有房間一起死）；`uncaughtException` 走優雅停機（`room:closed {reason:'shutdown'}`）後以非零碼退出。TLS 憑證檔變更後約 2 秒自動 `setSecureContext`，失敗則沿用舊憑證。
 21. **Web Component**：`/lib/stage-element.js` 註冊 `<stage-client room code name url>`（shadow DOM 小工具：狀態、錯誤、啟用音訊、舉手、台上靜音／下台），進入文件即進房、移除即以 1000 離開；client 事件以 `stage-<type>` 派發，`element.client` 暴露底層 `StageClient` 供主控功能；它從穩定檔名 `stage-client.js` 匯入，嵌入頁同時使用兩者時只載入一份。
 22. **狀態與 codec 生命週期**：房間不變量以同一個舉手集合檢查所有參與者，避免每次轉換重複掃描整條佇列；未知／重複舉手、旗標與佇列不一致、觀眾在台及多主控皆 fail-closed。移除 publisher 時依 codec 工作順序釋放 encoder 與 decoder，再上台不得沿用先前上行的解碼預測狀態。
+23. **client／UI 取消安全**：`disconnect()` 使尚未完成的開房／進房失效，清除連線 promise 後可重用；關房／被踢在派發終止事件前完整清除媒體、mic test、待回覆請求及頁面監聽。ws 遺失 answer 時立即拒絕協商等待，回座後替換 pending offer 而非 rollback，避免首次 offer 的 MID 改變讓既有伺服器 peer 多出 transceiver。下台 snapshot 立即清除麥克風權限失敗旗標，再上台可重試；過期授權失敗不得污染新狀態。Web Component 以掛載 generation 忽略舊操作及事件，操作失敗解除 disabled，音訊解鎖成功隱藏按鈕；完整前端同步停止不再適用的 mic test、清除舊權限提示，最小嵌入頁在終止及重連時停用操作。
 
 ---
 

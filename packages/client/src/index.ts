@@ -125,6 +125,7 @@ export class StageClient extends EventTarget {
   private session: JoinOptions | null = null;
   private created: ServerMessageMap['room:created'] | null = null;
   private intentional = false;
+  private sessionRevision = 0;
   private reconnectTimer: ReturnType<typeof setTimeout> | undefined;
   private reconnectAttempt = 0;
   private pc: RTCPeerConnection | null = null;
@@ -295,6 +296,8 @@ export class StageClient extends EventTarget {
     this.socket = null;
     this.stopKeepalive();
     this.rejectPending();
+    // An acknowledged offer may still be waiting for its answer; do not let it block resume.
+    this.answerWait?.reject(new StageError('disconnected', '音訊協商已中斷。'));
     if (!this.intentional && this.session) this.scheduleReconnect();
     else { this.destroyMedia(); this.setStatus('disconnected'); }
   }
@@ -323,17 +326,23 @@ export class StageClient extends EventTarget {
     this.keepaliveTimer = undefined;
   }
   async createRoom(options: { name: string; roomName?: string; codeRequired?: boolean; token?: string }): Promise<{ roomId: string; code?: string }> {
+    const revision = this.sessionRevision;
     await this.connect();
+    if (revision !== this.sessionRevision) throw new StageError('disconnected', '連線已中斷。');
     this.created = null;
     await this.request('room:create', options);
+    if (revision !== this.sessionRevision) throw new StageError('disconnected', '連線已中斷。');
     if (!this.created) throw new StageError('internal', '伺服器未回傳房間資訊。');
     const result = this.created as ServerMessageMap['room:created'];
     this.session = { roomId: result.roomId, code: result.code, name: options.name };
     return result;
   }
   async join(options: { roomId: string; code?: string; name: string }): Promise<void> {
+    const revision = this.sessionRevision;
     await this.connect();
+    if (revision !== this.sessionRevision) throw new StageError('disconnected', '連線已中斷。');
     await this.request('join', options);
+    if (revision !== this.sessionRevision) throw new StageError('disconnected', '連線已中斷。');
     this.session = { ...options };
   }
   raiseHand(): Promise<void> {
@@ -365,6 +374,8 @@ export class StageClient extends EventTarget {
   closeRoom(): Promise<void> { return this.request('room:close', {}); }
   async disconnect(): Promise<void> {
     this.intentional = true;
+    ++this.sessionRevision;
+    this.connecting = null;
     ++this.testRevision;
     for (const test of this.micTests) test.stop();
     clearTimeout(this.reconnectTimer);
@@ -439,6 +450,7 @@ export class StageClient extends EventTarget {
         const { type: _, ...state } = message;
         const previousId = this.snapshot?.me.participantId;
         this.snapshot = state;
+        if (!state.me.onStage) this.micFailed = false;
         if (this.session) this.session.resumeToken = state.resumeToken;
         this.reconnectAttempt = 0;
         this.setStatus(state.status);
@@ -469,13 +481,7 @@ export class StageClient extends EventTarget {
         break;
       // Either way the seat is gone: forget the session so the socket close does not trigger a rejoin.
       case 'room:closed': case 'kicked':
-        this.session = null;
-        this.snapshot = null;
-        this.speakingIds = new Set();
-        clearTimeout(this.reconnectTimer);
-        this.reconnectTimer = undefined;
-        this.destroyMedia();
-        this.setStatus('disconnected');
+        await this.disconnect();
         if (message.type === 'kicked') this.emit('kicked', { roomId: message.roomId });
         else this.emit('closed', message.reason ? { roomId: message.roomId, reason: message.reason } : { roomId: message.roomId });
         break;
@@ -555,7 +561,6 @@ export class StageClient extends EventTarget {
       const transceiver = this.transceiver;
       const me = this.me;
       if (!pc || !transceiver || !me || revision !== this.mediaRevision) return;
-      if (!me.onStage) this.micFailed = false;
       if (me.onStage && !this.mic && !this.micFailed) {
         try {
           const stream = await navigator.mediaDevices.getUserMedia({ audio: this.audioConstraints(this.inputDeviceId) });
@@ -565,7 +570,7 @@ export class StageClient extends EventTarget {
           catch (error) { this.mic = null; stream.getTracks().forEach((track) => track.stop()); throw error; }
           this.emit('micready', undefined);
         } catch (error) {
-          if (pc !== this.pc) return;
+          if (pc !== this.pc || !this.me?.onStage) return;
           this.micFailed = true;
           const name = error instanceof Error ? error.name : 'UnknownError';
           const message = name === 'NotAllowedError' ? '麥克風權限遭拒，請在瀏覽器網站設定允許麥克風後重新上台。' : name === 'NotFoundError' ? '找不到麥克風，請連接音訊裝置後重新上台。' : '無法啟用麥克風，請確認 HTTPS、裝置及瀏覽器權限後重新上台。';
@@ -597,8 +602,8 @@ export class StageClient extends EventTarget {
       try {
         while (this.negotiationDirty && this.pc === pc) {
           this.negotiationDirty = false;
-          // An offer whose answer never arrived (ws dropped mid-negotiation) must be rolled back first.
-          if (pc.signalingState === 'have-local-offer') await pc.setLocalDescription({ type: 'rollback' });
+          // Replace the pending offer without rollback: an initial rollback changes its MID,
+          // while the server still holds the transceiver from the unanswered offer.
           if (this.pc !== pc) return;
           const offer = await pc.createOffer();
           if (this.pc !== pc) return;
