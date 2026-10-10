@@ -162,6 +162,20 @@ describe('ws server boundary', () => {
     assert.equal((await fetch(`${base}/healthz`)).status, 200);
   });
 
+  it('revalidates static files with ETag / Last-Modified and answers 304', async () => {
+    const first = await fetch(`${base}/`);
+    const etag = first.headers.get('etag')!;
+    assert.match(etag, /^W\/"/);
+    assert.ok(first.headers.get('last-modified'));
+    const same = await fetch(`${base}/`, { headers: { 'if-none-match': etag } });
+    assert.equal(same.status, 304);
+    assert.equal(await same.text(), '');
+    const stale = await fetch(`${base}/`, { headers: { 'if-none-match': 'W/"other"' } });
+    assert.equal(stale.status, 200);
+    const dated = await fetch(`${base}/`, { headers: { 'if-modified-since': first.headers.get('last-modified')! } });
+    assert.equal(dated.status, 304);
+  });
+
   it('serves /metrics only with the bearer token', async () => {
     assert.equal((await fetch(`${base}/metrics`)).status, 401);
     assert.equal((await fetch(`${base}/metrics`, { headers: { authorization: 'Bearer wrong-token-x' } })).status, 401);
