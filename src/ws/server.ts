@@ -1,7 +1,8 @@
-import { readFileSync } from 'node:fs';
+import { readFileSync, watch, type FSWatcher } from 'node:fs';
 import { createServer as createHttpServer, type IncomingMessage, type Server, type ServerResponse } from 'node:http';
-import { createServer as createHttpsServer } from 'node:https';
+import { createServer as createHttpsServer, type Server as HttpsServer } from 'node:https';
 import type { AddressInfo } from 'node:net';
+import { basename, dirname } from 'node:path';
 import { randomBytes, timingSafeEqual } from 'node:crypto';
 import { once } from 'node:events';
 import { WebSocketServer, type WebSocket } from 'ws';
@@ -36,6 +37,8 @@ const CLOSE_POLICY = 1008;
 const CLOSE_GOING_AWAY = 1001;
 /** How long shutdown waits for clients to finish the close handshake before cutting them off. */
 const SHUTDOWN_DRAIN_MS = 1000;
+/** Cert and key are usually rewritten one after the other; wait for both before reloading. */
+const TLS_RELOAD_DEBOUNCE_MS = 2000;
 
 class WsSession implements Session {
   readonly id = randomBytes(6).toString('base64url');
@@ -90,10 +93,43 @@ export function createStageServer(deps: StageServerDeps): StageServer {
   };
 
   const { certFile, keyFile } = config.server.tls;
-  const server: Server =
-    certFile && keyFile
-      ? createHttpsServer({ cert: readFileSync(certFile), key: readFileSync(keyFile) }, onRequest)
-      : createHttpServer(onRequest);
+  const secure = certFile !== '' && keyFile !== '';
+  const server: Server = secure
+    ? createHttpsServer({ cert: readFileSync(certFile), key: readFileSync(keyFile) }, onRequest)
+    : createHttpServer(onRequest);
+  // Certificates get renewed in place (ACME); pick the new pair up without a restart. Watching the
+  // directory survives tools that write a new file and rename or re-point a symlink (a file watch
+  // would follow the old inode). Cert and key land separately, so reload a moment after the last
+  // change, and keep the old context when the pair does not load (half-written or mismatched).
+  const watchers: FSWatcher[] = [];
+  let reloadTimer: NodeJS.Timeout | undefined;
+  if (secure) {
+    const reload = () => {
+      reloadTimer = undefined;
+      try {
+        (server as HttpsServer).setSecureContext({ cert: readFileSync(certFile), key: readFileSync(keyFile) });
+        log.info('TLS certificate reloaded');
+      } catch (err) {
+        log.error('TLS certificate reload failed, keeping the previous one', { error: String(err) });
+      }
+    };
+    const names: Record<string, string[]> = {};
+    for (const file of [certFile, keyFile]) (names[dirname(file)] ??= []).push(basename(file));
+    for (const [dir, files] of Object.entries(names)) {
+      try {
+        const w = watch(dir, (_event, name) => {
+          if (name !== null && !files.includes(String(name))) return;
+          clearTimeout(reloadTimer);
+          reloadTimer = setTimeout(reload, TLS_RELOAD_DEBOUNCE_MS);
+        });
+        w.unref();
+        w.on('error', (err) => log.warn('TLS certificate watch failed', { dir, error: String(err) }));
+        watchers.push(w);
+      } catch (err) {
+        log.warn('TLS certificate watch failed', { dir, error: String(err) });
+      }
+    }
+  }
 
   // Client is embedded on third-party sites, so no Origin allow-list (AGENTS.md §S10);
   // protection is room code + rate limits + caps.
@@ -172,6 +208,8 @@ export function createStageServer(deps: StageServerDeps): StageServer {
     },
     close: async () => {
       clearInterval(heartbeat);
+      clearTimeout(reloadTimer);
+      for (const w of watchers) w.close();
       await hub.shutdown();
       // A graceful close flushes the `room:closed` frames queued above; terminate() could drop them.
       const drained = Promise.all([...sessions].map((s) => once(s.ws, 'close')));
