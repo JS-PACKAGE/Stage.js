@@ -3,6 +3,8 @@ import assert from 'node:assert/strict';
 import { RoomMixer } from '../src/mixer/RoomMixer.ts';
 import { MixerCounters } from '../src/metrics.ts';
 import { limitInPlace } from '../src/mixer/limiter.ts';
+import { MixerClock } from '../src/mixer/MixerClock.ts';
+import { setTimeout as sleep } from 'node:timers/promises';
 const options = { sampleRate: 48000, frameMs: 20, maxBufferedFrames: 2, playoutFrames: 1, limiterThreshold: 0.9, speakingThreshold: 0.02, speakingHoldMs: 40 };
 const samples = (value: number) => new Float32Array(960).fill(value);
 test('sum, minus-self, missing frames and muted membership', () => {
@@ -104,4 +106,24 @@ test('speaking set follows voice activity with a release hold, mute and removal'
   assert.deepEqual(events.at(-1), ['a', 'b']);
   mixer.removeSource('a');
   assert.deepEqual(events.at(-1), ['b'], 'removal of a speaking source is reported');
+});
+// Real clock on purpose: MixerClock schedules by performance.now(), which node:test's mock timers
+// do not control, and the behaviour under test is how it reacts to the event loop being blocked.
+test('the shared clock skips the slots it missed after a stall instead of bursting them', async () => {
+  const counters = new MixerCounters();
+  const clock = new MixerClock(20, counters);
+  const ticks: number[] = [];
+  const detach = clock.add({ tick() { ticks.push(performance.now()); } });
+  let stalledAt = 0;
+  // Something else blocks the thread for ~5 frames (GC pause, a burst of DTLS handshakes).
+  setTimeout(() => { stalledAt = performance.now(); const end = stalledAt + 100; while (performance.now() < end); }, 70);
+  try {
+    await sleep(400);
+  } finally { detach(); }
+  const afterStall = ticks.filter((t) => t > stalledAt);
+  // Catching up would fire ~5 ticks back to back; skipping keeps the gaps near one frame.
+  const tightGaps = afterStall.slice(1).filter((t, i) => t - afterStall[i]! < 5).length;
+  assert.ok(tightGaps <= 1, `burst of ${tightGaps} near-zero gaps after the stall`);
+  assert.ok(counters.lateTicks >= 1 && counters.maxTickLagMs >= 60, `stall reported (late ${counters.lateTicks}, max lag ${counters.maxTickLagMs})`);
+  assert.ok(ticks.length <= 20, `${ticks.length} ticks in 400 ms: missed slots were not replayed`);
 });

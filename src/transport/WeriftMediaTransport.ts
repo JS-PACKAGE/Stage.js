@@ -79,7 +79,8 @@ export class WeriftMediaTransport implements MediaTransport {
   private readonly codecs: CodecPool;
   private readonly hosts: PeerHost[];
   private readonly counters = { uplinkPackets: 0, uplinkConcealed: 0, shedFrames: 0, encodeFailures: 0, silentSkipped: 0 };
-  constructor(config: AppConfig, callbacks: MediaTransportCallbacks, log: Logger) {
+  /** `createHosts` replaces the configured werift hosts (tests drive the fan-out through fakes). */
+  constructor(config: AppConfig, callbacks: MediaTransportCallbacks, log: Logger, createHosts?: (events: PeerHostEvents) => PeerHost[]) {
     this.config = config; this.callbacks = callbacks; this.log = log;
     this.codecs = new CodecPool(config.audio, log);
     const events: PeerHostEvents = {
@@ -89,7 +90,7 @@ export class WeriftMediaTransport implements MediaTransport {
       downlinkLoss: (roomId, id, fraction) => this.onDownlinkLoss(roomId, id, fraction),
     };
     const shards = config.rtc.mediaWorkers;
-    this.hosts = shards === 0 ? [new WeriftPeerHost(config, events)] : Array.from({ length: shards }, () => new MediaShard(config, events, log));
+    this.hosts = createHosts?.(events) ?? (shards === 0 ? [new WeriftPeerHost(config, events)] : Array.from({ length: shards }, () => new MediaShard(config, events, log)));
   }
   async metrics(): Promise<MetricSample[]> {
     let peers = 0, subscribers = 0, backlog = 0, lowTier = 0;
