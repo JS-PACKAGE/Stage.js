@@ -94,7 +94,9 @@ describe('ws server boundary', () => {
   it('greets, rejects unknown types and malformed input with generic errors', async () => {
     const c = new Client(url);
     await c.open();
-    await c.waitFor((m) => m.type === 'hello');
+    const hello = await c.waitFor((m) => m.type === 'hello');
+    assert.ok(hello.type === 'hello');
+    assert.deepEqual(hello.limits, { controlPerSecond: 5, icePerSecond: 30, handRaiseIntervalMs: 10000 }, 'client paces itself by the advertised limits');
     c.send({ type: 'nuke', requestId: 'r1' });
     assert.deepEqual(await c.reply('r1'), { type: 'error', requestId: 'r1', code: 'unknown_type', message: 'Unknown message type' });
     c.send({ type: 'join', requestId: 'r2', roomId: 'x', name: 'a'.repeat(33) });

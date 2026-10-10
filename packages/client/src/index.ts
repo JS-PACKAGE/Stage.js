@@ -1,4 +1,4 @@
-import type { ClientMessageMap, ClientMessageType, ErrorCode, IceCandidatePayload, ParticipantView, RoomStatePayload, ServerMessage, ServerMessageMap } from '../../../shared/protocol.ts';
+import type { ClientMessageMap, ClientMessageType, ErrorCode, IceCandidatePayload, ParticipantView, RateLimits, RoomStatePayload, ServerMessage, ServerMessageMap } from '../../../shared/protocol.ts';
 export type { ParticipantView, RoomStatePayload, Role, StageStatus, ErrorCode, IceServerConfig, ConnectionQuality } from '../../../shared/protocol.ts';
 export { MAX_GAIN_DB } from '../../../shared/protocol.ts';
 
@@ -103,6 +103,8 @@ export interface StageEventMap {
 interface Pending { resolve: () => void; reject: (error: StageError) => void; timer: ReturnType<typeof setTimeout> }
 type JoinOptions = { roomId: string; code?: string; name: string; resumeToken?: string };
 const REQUEST_TIMEOUT = 15000;
+/** Until the server's `hello` says otherwise: the config.example.yaml defaults. */
+const DEFAULT_LIMITS: RateLimits = { controlPerSecond: 20, icePerSecond: 30, handRaiseIntervalMs: 10000 };
 
 export class StageClient extends EventTarget {
   private readonly options: StageClientOptions;
@@ -133,6 +135,7 @@ export class StageClient extends EventTarget {
   private negotiating = false;
   private answerWait: { resolve: () => void; reject: (error: Error) => void } | null = null;
   private answerTimer: ReturnType<typeof setTimeout> | undefined;
+  private limits: RateLimits = DEFAULT_LIMITS;
   private lastHandAt = -Infinity;
   private nextControlAt = 0;
   private nextIceAt = 0;
@@ -154,7 +157,9 @@ export class StageClient extends EventTarget {
   get me(): ParticipantView | null { return this.snapshot?.me ?? null; }
   /** Participants currently audible in the mix (server voice activity). */
   get speaking(): ReadonlySet<string> { return this.speakingIds; }
-  get handCooldownMs(): number { return Math.max(0, 10000 - (Date.now() - this.lastHandAt)); }
+  get handCooldownMs(): number { return Math.max(0, this.limits.handRaiseIntervalMs - (Date.now() - this.lastHandAt)); }
+  /** Limits the connected server enforces per connection (from `hello`; defaults before connecting). */
+  get rateLimits(): RateLimits { return this.limits; }
   get outputDeviceSupported(): boolean { return typeof this.audio.setSinkId === 'function'; }
   /** RMS amplitude in [0, 1]; zero when not publishing or muted. */
   get micLevel(): number { return this.mic?.getAudioTracks()[0]?.enabled ? this.micMeter?.level() ?? 0 : 0; }
@@ -244,7 +249,7 @@ export class StageClient extends EventTarget {
         if (this.socket !== ws) return;
         try {
           const message = JSON.parse(String(event.data)) as ServerMessage;
-          if (message.type === 'hello') { ready = true; clearTimeout(timer); resolve(); }
+          if (message.type === 'hello') { this.limits = message.limits; ready = true; clearTimeout(timer); resolve(); }
           void this.receive(message).catch((error: unknown) => this.report(error));
         } catch { this.report(new StageError('bad_request', '收到無法解析的伺服器訊息。')); }
       };
@@ -279,7 +284,7 @@ export class StageClient extends EventTarget {
     this.session = { ...options };
   }
   raiseHand(): Promise<void> {
-    if (this.handCooldownMs > 0) return Promise.reject(new StageError('rate_limited', '每次舉手需間隔 10 秒。'));
+    if (this.handCooldownMs > 0) return Promise.reject(new StageError('rate_limited', `每次舉手需間隔 ${Math.ceil(this.limits.handRaiseIntervalMs / 1000)} 秒。`));
     this.lastHandAt = Date.now();
     return this.request('hand:raise', {});
   }
@@ -329,10 +334,12 @@ export class StageClient extends EventTarget {
     const requestId = crypto.randomUUID();
     const now = Date.now();
     const ice = type === 'rtc:ice';
+    // The server's buckets refill at the advertised rate; pacing at half (control) / two thirds (ICE)
+    // of it leaves headroom for clock skew and for frames the page sends outside this client.
     const sendAt = Math.max(now, this.lastSendAt, ice ? this.nextIceAt : this.nextControlAt);
     this.lastSendAt = sendAt;
-    if (ice) this.nextIceAt = sendAt + 50;
-    else this.nextControlAt = sendAt + 100;
+    if (ice) this.nextIceAt = sendAt + Math.ceil(1500 / this.limits.icePerSecond);
+    else this.nextControlAt = sendAt + Math.ceil(2000 / this.limits.controlPerSecond);
     return new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(requestId);

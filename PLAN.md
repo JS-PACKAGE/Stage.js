@@ -298,7 +298,7 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 
 以下為實作時補足、未違反上文之決策；協定型別單一真值來源為 `shared/protocol.ts`。
 
-1. **協定擴充**（第四節之外）：S→C `ok {requestId}`（請求成功回覆）、`pong`、`rtc:config {iceServers}`（join／開房後下發，TURN 憑證僅給已進房者，為每人簽發的短期憑證）、`speaking {participantIds}`（伺服器混音端 VAD，集合變動時廣播）；C→S `room:create` 增 `roomName?`、`codeRequired?`（假設 9：代碼可關閉）；`join` 增 `resumeToken?`（主控斷線寬限期內回座）；`room:state` 每人帶 `onStage`／`forceMuted`，另有 `audienceCount`、`status`、`limits`，`audience` 全名單與 `code` 僅主控收到，`resumeToken` 僅本人收到。
+1. **協定擴充**（第四節之外）：S→C `ok {requestId}`（請求成功回覆）、`pong`、`rtc:config {iceServers}`（join／開房後下發，TURN 憑證僅給已進房者，為每人簽發的短期憑證）、`speaking {participantIds}`（伺服器混音端 VAD，集合變動時廣播）、`hello` 增 `limits {controlPerSecond, icePerSecond, handRaiseIntervalMs}`（client 據此節流與舉手冷卻，不再寫死）；C→S `room:create` 增 `roomName?`、`codeRequired?`（假設 9：代碼可關閉）；`join` 增 `resumeToken?`（主控斷線寬限期內回座）；`room:state` 每人帶 `onStage`／`forceMuted`，另有 `audienceCount`、`status`、`limits`，`audience` 全名單與 `code` 僅主控收到，`resumeToken` 僅本人收到。
 2. **信令方向**：一人一條 PeerConnection 連伺服器，**一律由 client 發 offer**、伺服器 answer；伺服器收到 `rtc:answer` 回 `bad_request`。上台（`me.onStage` 轉 true）→ client 掛麥克風改 `sendrecv` 重協商 → 伺服器 `stage:joined`；下台反向改 `recvonly`。
 3. **主控返回舞台**：主控下台後以 `stage:approve` 指定自己即回台（不需舉手；主控不可舉手）。
 4. **強制靜音**：`mic:force-unmute` 只解除主控鎖定，保留本人的自我靜音狀態（不遠端打開他人麥克風）。

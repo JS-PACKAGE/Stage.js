@@ -106,7 +106,7 @@ JSON frame，型別定義在 [`shared/protocol.ts`](shared/protocol.ts)。每個
 
 | Server → Client | 說明 |
 |---|---|
-| `hello` | `{protocol, serverVersion}` |
+| `hello` | `{protocol, serverVersion, limits: {controlPerSecond, icePerSecond, handRaiseIntervalMs}}`：client 依 `limits` 自行節流與舉手冷卻 |
 | `room:state` | 個人化 snapshot（每次變動重送）；`code`、`audience` 名單只給主控，`resumeToken` 只給本人 |
 | `room:created`、`room:closed` | 開房（只有建立者收到 code）、關房（全員離房）；伺服器停止時 `room:closed` 帶 `reason: 'shutdown'`，連線隨後以 close code 1001 關閉 |
 | `kicked` | `{roomId}`：你被主控踢出，伺服器隨即以 close code 4001 關閉連線 |

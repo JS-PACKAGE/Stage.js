@@ -118,7 +118,8 @@ export class StageHub {
   }
 
   attach(session: Session): void {
-    session.send({ type: 'hello', protocol: PROTOCOL_VERSION, serverVersion: this.deps.serverVersion });
+    const { controlPerSecond, icePerSecond, handRaiseIntervalMs } = this.deps.config.limits;
+    session.send({ type: 'hello', protocol: PROTOCOL_VERSION, serverVersion: this.deps.serverVersion, limits: { controlPerSecond, icePerSecond, handRaiseIntervalMs } });
   }
 
   /** Whether the session has created or joined a room (and not been evicted since). */
