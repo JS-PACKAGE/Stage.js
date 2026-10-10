@@ -160,10 +160,14 @@ export class StageClient extends EventTarget {
     this.audio = options.audioElement ?? document.createElement('audio');
     this.audio.autoplay = true;
     if (this.ownsAudio) { this.audio.hidden = true; document.body.append(this.audio); }
-    // Tell the server we are going instead of letting it find out at the next heartbeat; the
-    // session is kept so a page restored from the back/forward cache reconnects and resumes.
-    window.addEventListener('pagehide', () => this.socket?.close(1000));
   }
+  /**
+   * Tell the server we are going instead of letting it find out at the next heartbeat; the session
+   * is kept so a page restored from the back/forward cache reconnects and resumes. Registered only
+   * while connected, so a discarded client is not kept alive by the window.
+   */
+  private readonly onPageHide = (): void => { this.socket?.close(1000); };
+
   get state(): RoomStatePayload | null { return this.snapshot; }
   get status(): ClientStatus { return this.currentStatus; }
   get me(): ParticipantView | null { return this.snapshot?.me ?? null; }
@@ -252,6 +256,7 @@ export class StageClient extends EventTarget {
     if (this.socket?.readyState === WebSocket.OPEN) return Promise.resolve();
     this.intentional = false;
     if (this.ownsAudio && !this.audio.isConnected) document.body.append(this.audio);
+    window.addEventListener('pagehide', this.onPageHide);
     const promise = new Promise<void>((resolve, reject) => {
       const ws = new WebSocket(this.options.url);
       this.socket = ws;
@@ -371,6 +376,7 @@ export class StageClient extends EventTarget {
     this.destroyMedia();
     this.setStatus('disconnected');
     if (this.ownsAudio) this.audio.remove();
+    window.removeEventListener('pagehide', this.onPageHide);
   }
   async unlockAudio(): Promise<void> { await this.audio.play(); }
 
