@@ -69,6 +69,7 @@ export interface AppConfig {
     mixer: {
       maxBufferedFrames: number;
       limiterThreshold: number;
+      /** Acceptance gate for scripts/bench-mixer.ts and load-test.ts only; the server does not use it. */
       latencyTargetMs: number;
       /** Frame RMS (0..1) at which a publisher counts as speaking. */
       speakingThreshold: number;
