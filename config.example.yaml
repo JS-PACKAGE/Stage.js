@@ -40,7 +40,7 @@ limits:
   codeMaxLength: 16
   sdpMaxLength: 16384
   joinTimeoutMs: 30000         # 連上 ws 後逾此時間仍未開房／進房即以 1008 斷線（0＝不限；可調整）
-  maxConnectionsPerIp: 50      # 同一位址同時連線上限（0＝不限；反向代理後需 server.trustProxy；可調整）
+  maxConnectionsPerIp: 0       # 同一位址同時連線上限（0＝不限）。學校／公司 NAT 或未設 server.trustProxy 的反向代理會讓大量使用者共用一個位址，設定前請估算（可調整）
 
 rooms:
   codeLength: 8                # 房間代碼長度（可調整）
