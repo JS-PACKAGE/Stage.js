@@ -1,7 +1,7 @@
 import type { AppConfig } from '../config.ts';
 import { samplesPerFrame } from '../config.ts';
 import type { Logger } from '../log.ts';
-import type { MetricSample } from '../metrics.ts';
+import { Histogram, type MetricSample } from '../metrics.ts';
 import type { IceCandidatePayload, SessionDescriptionPayload } from '../../shared/protocol.ts';
 import type { AudioFrameHandler, MediaTransport, MediaTransportCallbacks, MixedPcmSource, MixFrame, MixPacketSink, NegotiationPolicy, TransportStats } from './MediaTransport.ts';
 import { CodecPool, type EncodeItem } from './codecPool.ts';
@@ -84,6 +84,8 @@ export class WeriftMediaTransport implements MediaTransport {
   private readonly codecs: CodecPool;
   private readonly hosts: PeerHost[];
   private readonly counters = { uplinkPackets: 0, uplinkConcealed: 0, shedFrames: 0, encodeFailures: 0, silentSkipped: 0 };
+  /** Mixer tick → encoded payloads back from the codec worker: the server's own share of downlink latency. */
+  private readonly encodeLatency = new Histogram([0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.25]);
   /** `createHosts` replaces the configured werift hosts (tests drive the fan-out through fakes). */
   constructor(config: AppConfig, callbacks: MediaTransportCallbacks, log: Logger, createHosts?: (events: PeerHostEvents) => PeerHost[]) {
     this.config = config; this.callbacks = callbacks; this.log = log;
@@ -114,6 +116,7 @@ export class WeriftMediaTransport implements MediaTransport {
       { name: 'stage_mix_frames_shed_total', help: 'Mixed frames dropped because a codec worker fell behind.', type: 'counter', value: c.shedFrames },
       { name: 'stage_encode_failures_total', help: 'Mixed frames whose encode failed.', type: 'counter', value: c.encodeFailures },
       { name: 'stage_mix_frames_silent_skipped_total', help: 'Mixed frames not encoded because nobody had been audible for a while (sent as DTX).', type: 'counter', value: c.silentSkipped },
+      { name: 'stage_mix_encode_seconds', help: 'Time from a mixer tick to its encoded downlink payloads (codec worker round trip).', type: 'histogram', histogram: this.encodeLatency },
     ];
   }
   private room(id: string): Room {
@@ -233,8 +236,10 @@ export class WeriftMediaTransport implements MediaTransport {
       this.record(room, plan, undefined);
       return;
     }
+    const started = performance.now();
     const encoded = this.codecs.encode(room.id, plan.frames);
     encoded.then(payloads => {
+      this.encodeLatency.observe((performance.now() - started) / 1000);
       if (this.rooms.get(room.id) !== room) return;
       for (const [host, list] of plan.targets) host.send({ roomId: room.id, payloads, targets: list });
     }, (err: Error) => { this.counters.encodeFailures++; this.log.warn('Mixed frame encode failed', { roomId: room.id, error: err.message }); });

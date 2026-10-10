@@ -88,7 +88,7 @@ describe('downlink fan-out', () => {
       t = await tick(false);
       assert.ok(t.payloads.every((p) => p.length === 0), 'silent room: empty payloads (DTX) instead of encoding');
       const skipped = (await transport.metrics()).find((m) => m.name === 'stage_mix_frames_silent_skipped_total')!;
-      assert.equal(skipped.value, 1);
+      assert.ok(skipped.type === 'counter' && skipped.value === 1);
       t = await tick(true);
       assert.ok(t.payloads.some((p) => p.length > 2), 'encodes again as soon as someone speaks');
       assert.ok(!t.same('a', 'b'), 'and the speaker is back on its own mix-minus');

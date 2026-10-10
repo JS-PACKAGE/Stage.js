@@ -11,7 +11,7 @@ import {
 } from '../../shared/protocol.ts';
 import type { AppConfig } from '../config.ts';
 import type { Logger } from '../log.ts';
-import type { MetricSample } from '../metrics.ts';
+import { Histogram, type MetricSample } from '../metrics.ts';
 import { ERROR_MESSAGES, InvariantViolation, StageError } from '../model/errors.ts';
 import { Room, type RoomEvent, type RoomSnapshot } from '../model/room.ts';
 import { offerSendsAudio, summarizeOffer } from '../rtc/sdp.ts';
@@ -126,6 +126,7 @@ export class StageHub {
   private readonly retired: PersistedRoom[] = [];
   /** Identifies this process in `hello`, so resuming clients notice a restart. */
   private readonly instance = randomBytes(8).toString('base64url');
+  private readonly negotiateLatency = new Histogram([0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5]);
 
   constructor(deps: HubDeps) {
     this.deps = deps;
@@ -146,6 +147,7 @@ export class StageHub {
       { name: 'stage_participants', help: 'Participants in all rooms, including disconnected ones within grace.', type: 'gauge', value: participants },
       { name: 'stage_sessions', help: 'Connected ws sessions bound to a room.', type: 'gauge', value: sessions },
       { name: 'stage_publishers', help: 'Participants whose uplink feeds a mixer.', type: 'gauge', value: publishers },
+      { name: 'stage_negotiate_seconds', help: 'Time to apply a client offer and produce the answer (includes worker round trip).', type: 'histogram', histogram: this.negotiateLatency },
     ];
   }
 
@@ -599,7 +601,9 @@ export class StageHub {
     });
     let answer: SessionDescriptionPayload;
     try {
+      const started = performance.now();
       answer = await transport.negotiate(roomId, pid, msg.payload, { allowUplink });
+      this.negotiateLatency.observe((performance.now() - started) / 1000);
     } catch (err) {
       // A bad offer is that client's problem, not a reason to tear down the room.
       log.warn('negotiation failed', { roomId, participantId: pid, error: String(err) });
