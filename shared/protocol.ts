@@ -57,6 +57,8 @@ export interface ParticipantView {
   forceMuted: boolean;
   /** Controller-set level trim applied to this participant's voice in the mix (0 = unchanged). */
   gainDb: number;
+  /** False while the participant's ws is down and their seat is held for the grace period. */
+  connected: boolean;
   /** ms since epoch */
   joinedAt: number;
 }

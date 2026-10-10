@@ -93,7 +93,20 @@ try {
   const framesAtDemotion = promotedFrames;
   await sendPromoted(300);
   assert.equal(promotedFrames, framesAtDemotion, 'demoted participant uplink still reaches the mixer');
-  console.log(`PASS mediaWorkers=${config.rtc.mediaWorkers} packets=${received} audienceEnergy=${audienceEnergy.toFixed(6)} selfEnergy=${selfEnergy.toFixed(6)} blockedPacketsSent=${blockedPacketsSent} blockedFrames=${rejectedFrames}; renegotiation promotedFrames=${promotedFrames} PASS`);
+  // ICE restart from the client side (what StageClient does after 3 s of `disconnected`): the server
+  // peer must notice the new ufrag, re-run ICE on the same PeerConnection and keep delivering audio.
+  const speaker = clients.get('speaker')!;
+  const packetsBeforeRestart = received;
+  const restartOffer = await speaker.createOffer({ iceRestart: true });
+  await speaker.setLocalDescription(restartOffer);
+  await speaker.setRemoteDescription(await transport.negotiate('room', 'speaker', { type: 'offer', sdp: speaker.localDescription!.sdp }, { allowUplink: true }));
+  const restartDeadline = performance.now() + 10000;
+  while (speaker.connectionState !== 'connected') { if (performance.now() > restartDeadline) throw new Error('ICE restart did not reconnect'); await sleep(50); }
+  const audienceBefore = received;
+  audienceEnergy = 0;
+  await sleep(600);
+  assert.ok(received > audienceBefore + 10 && audienceEnergy > 0.001, `audience lost the speaker after their ICE restart (${received - audienceBefore} packets, energy ${audienceEnergy})`);
+  console.log(`PASS mediaWorkers=${config.rtc.mediaWorkers} packets=${received} audienceEnergy=${audienceEnergy.toFixed(6)} selfEnergy=${selfEnergy.toFixed(6)} blockedPacketsSent=${blockedPacketsSent} blockedFrames=${rejectedFrames}; renegotiation promotedFrames=${promotedFrames}; iceRestart packetsAfter=${received - packetsBeforeRestart} PASS`);
 } catch (error) { console.error('FAIL', error); process.exitCode = 1; }
 finally {
   clearInterval(timer); mixer.stop();

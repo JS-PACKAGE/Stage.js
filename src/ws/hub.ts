@@ -62,6 +62,8 @@ interface RoomRuntime {
   readonly sessions: Map<string, Session>;
   readonly publishers: Set<string>;
   graceTimer: unknown;
+  /** Seat-hold timers of disconnected non-controllers (`rooms.participantGraceMs`). */
+  readonly graceTimers: Map<string, unknown>;
   /** Pending coalesced `room:state` broadcast (see `presenceChanged`). */
   stateTimer: unknown;
   /** Next connection-quality report; scheduled only while someone publishes. */
@@ -172,11 +174,18 @@ export class StageHub {
     this.rooms.get(roomId)?.sessions.get(participantId)?.send({ type: 'rtc:ice', fromId: SERVER_PEER_ID, payload: candidate });
   }
 
-  /** MediaTransport callback: the peer died on the network side; stop mixing its uplink. */
+  /**
+   * MediaTransport callback: the peer died on the network side. Stop mixing its uplink and discard
+   * the PeerConnection: a failed werift peer cannot be renegotiated, so the participant's next offer
+   * must create a new one (their seat and session are untouched).
+   */
   onPeerClosed(roomId: string, participantId: string): void {
     const rt = this.rooms.get(roomId);
     if (!rt) return;
-    void rt.queue.run(() => this.unpublish(rt, participantId)).catch((err) => this.internalFailure(rt, err));
+    void rt.queue.run(() => {
+      this.unpublish(rt, participantId);
+      this.deps.transport.closePeer(roomId, participantId);
+    }).catch((err) => this.internalFailure(rt, err));
   }
 
   async shutdown(): Promise<void> {
@@ -214,6 +223,7 @@ export class StageHub {
       sessions: new Map([[controller.participantId, session]]),
       publishers: new Set(),
       graceTimer: undefined,
+      graceTimers: new Map(),
       stateTimer: undefined,
       qualityTimer: undefined,
       uplinkCounts: new Map(),
@@ -250,9 +260,14 @@ export class StageHub {
           break;
         }
       }
-      if (participantId !== undefined && participantId === room.controllerId && rt.graceTimer !== undefined) {
-        this.clearTimer(rt.graceTimer);
-        rt.graceTimer = undefined;
+      if (participantId !== undefined) {
+        if (participantId === room.controllerId) {
+          if (rt.graceTimer !== undefined) this.clearTimer(rt.graceTimer);
+          rt.graceTimer = undefined;
+        } else {
+          const timer = rt.graceTimers.get(participantId);
+          if (timer !== undefined) { this.clearTimer(timer); rt.graceTimers.delete(participantId); }
+        }
       }
     }
     if (participantId === undefined) {
@@ -368,6 +383,8 @@ export class StageHub {
   private evict(rt: RoomRuntime, pid: string): void {
     const session = rt.sessions.get(pid);
     rt.sessions.delete(pid);
+    const grace = rt.graceTimers.get(pid);
+    if (grace !== undefined) { this.clearTimer(grace); rt.graceTimers.delete(pid); }
     this.unpublish(rt, pid);
     this.deps.transport.closePeer(rt.room.roomId, pid);
     if (!session) return;
@@ -420,25 +437,47 @@ export class StageHub {
     }
   }
 
+  /**
+   * The ws dropped. The media plane is left alone: a short ws outage must not cost the participant
+   * their PeerConnection (PLAN 九), so audio keeps flowing while the seat is held. The seat, stage
+   * position and raised hand survive the grace period; a `join` with the resume token reclaims them.
+   */
   private disconnect(rt: RoomRuntime, session: Session, pid: string): void {
     if (rt.closed || rt.sessions.get(pid) !== session) return;
     const { room } = rt;
     rt.sessions.delete(pid);
-    this.unpublish(rt, pid);
-    this.deps.transport.closePeer(room.roomId, pid);
     const p = room.get(pid);
     if (!p) return;
-    if (p.role === 'controller') {
-      // Hold the seat; auto-transfer only after the grace period (PLAN 假設 4).
+    const { controllerGraceMs, participantGraceMs } = this.deps.config.rooms;
+    const controller = p.role === 'controller';
+    const graceMs = controller ? controllerGraceMs : participantGraceMs;
+    if (controller || graceMs > 0) {
       p.connected = false;
-      rt.graceTimer = this.setTimer(() => {
-        void rt.queue.run(() => this.expireController(rt, pid)).catch((err) => this.internalFailure(rt, err));
-      }, this.deps.config.rooms.controllerGraceMs);
-      this.deps.log.info('controller disconnected, grace started', { roomId: room.roomId, participantId: pid });
-      this.broadcastState(rt);
+      const timer = this.setTimer(() => {
+        void rt.queue.run(() => (controller ? this.expireController(rt, pid) : this.expireParticipant(rt, pid))).catch((err) => this.internalFailure(rt, err));
+      }, graceMs);
+      if (controller) rt.graceTimer = timer; else rt.graceTimers.set(pid, timer);
+      this.deps.log.info('participant disconnected, grace started', { roomId: room.roomId, participantId: pid, role: p.role });
+      if (p.onStage) this.broadcastState(rt); else this.presenceChanged(rt);
       return;
     }
+    this.dropMedia(rt, pid);
     const events = room.remove(pid);
+    if (events.length) this.apply(rt, events);
+    else this.presenceChanged(rt);
+  }
+
+  private dropMedia(rt: RoomRuntime, pid: string): void {
+    this.unpublish(rt, pid);
+    this.deps.transport.closePeer(rt.room.roomId, pid);
+  }
+
+  private expireParticipant(rt: RoomRuntime, pid: string): void {
+    rt.graceTimers.delete(pid);
+    const p = rt.room.get(pid);
+    if (rt.closed || !p || p.connected || p.role === 'controller') return;
+    this.dropMedia(rt, pid);
+    const events = rt.room.remove(pid);
     if (events.length) this.apply(rt, events);
     else this.presenceChanged(rt);
   }
@@ -454,6 +493,7 @@ export class StageHub {
       return;
     }
     this.deps.log.info('controller auto-transfer', { roomId: room.roomId, fromId: pid, toId: successor.participantId });
+    this.dropMedia(rt, pid);
     const events = room.transfer(pid, successor.participantId, 'auto');
     this.apply(rt, [...events, ...room.remove(pid)]);
   }
@@ -571,6 +611,8 @@ export class StageHub {
     rt.closed = true;
     const { roomId } = rt.room;
     if (rt.graceTimer !== undefined) this.clearTimer(rt.graceTimer);
+    for (const timer of rt.graceTimers.values()) this.clearTimer(timer);
+    rt.graceTimers.clear();
     if (rt.stateTimer !== undefined) this.clearTimer(rt.stateTimer);
     if (rt.qualityTimer !== undefined) this.clearTimer(rt.qualityTimer);
     const closed: ServerMessage = shutdown ? { type: 'room:closed', roomId, reason: 'shutdown' } : { type: 'room:closed', roomId };

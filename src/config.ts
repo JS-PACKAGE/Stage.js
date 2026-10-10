@@ -41,6 +41,8 @@ export interface AppConfig {
   rooms: {
     codeLength: number;
     controllerGraceMs: number;
+    /** Non-controllers keep their seat, stage position, hand and media this long after a ws drop (0 = removed at once). */
+    participantGraceMs: number;
     heartbeatIntervalMs: number;
     /** Audience joins/leaves are folded into one `room:state` broadcast per this many ms (0 = immediate). */
     presenceBroadcastMs: number;
@@ -223,6 +225,7 @@ export function parseConfig(raw: unknown): AppConfig {
   const rooms: AppConfig['rooms'] = {
     codeLength: int(r, 'codeLength', 'rooms', 4),
     controllerGraceMs: int(r, 'controllerGraceMs', 'rooms', 0),
+    participantGraceMs: int(r, 'participantGraceMs', 'rooms', 0),
     heartbeatIntervalMs: int(r, 'heartbeatIntervalMs', 'rooms', 1000),
     presenceBroadcastMs: int(r, 'presenceBroadcastMs', 'rooms', 0, 10000),
     qualityIntervalMs: int(r, 'qualityIntervalMs', 'rooms', 0, 60000),

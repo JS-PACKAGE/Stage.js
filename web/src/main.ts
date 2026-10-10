@@ -309,6 +309,7 @@ function personRow(person: ParticipantView, controller: boolean, kind: 'speaker'
   row.classList.toggle('speaking', client.speaking.has(person.participantId));
   const identity = element('div', 'identity');
   identity.append(element('strong', '', decodeName(person.name)), element('span', 'badge', roleLabels[person.role]));
+  if (!person.connected) identity.append(element('span', 'badge', '連線中斷'));
   if (person.muted) identity.append(element('span', 'badge', person.forceMuted ? '強制靜音' : '已靜音'));
   if (person.gainDb) identity.append(element('span', 'badge', `音量 ${person.gainDb > 0 ? '+' : ''}${person.gainDb} dB`));
   if (person.participantId === client.me?.participantId) identity.append(element('span', 'badge', '我'));

@@ -213,6 +213,7 @@ export class Room {
     const t = this.require(targetId);
     if (t.onStage) throw new StageError('conflict', 'target already on stage');
     if (targetId !== byId && !t.handRaised) throw new StageError('conflict', 'target has not raised hand');
+    if (!t.connected) throw new StageError('conflict', 'target disconnected');
     if (targetId !== byId && this.speakerCount >= this.limits.maxSpeakers) throw new StageError('stage_full', 'speaker cap');
 
     const events: RoomEvent[] = [{ type: 'stage:invite', participantId: targetId, byId }];
@@ -368,6 +369,7 @@ export class Room {
       muted: p.selfMuted || p.forceMuted,
       forceMuted: p.forceMuted,
       gainDb: p.gainDb,
+      connected: p.connected,
       joinedAt: p.joinedAt,
     };
   }

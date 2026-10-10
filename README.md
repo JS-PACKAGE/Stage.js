@@ -74,7 +74,7 @@ Windows 用 `.\stage.ps1 <command>`，指令相同；Windows 無法對背景 nod
 |---|---|
 | `server` | `host`、`port`、`wsPath`；`allowInsecure`（明文 ws，僅限 loopback host）；`tls.certFile`／`keyFile`；`static` 靜態掛載（`/` → `web/dist`，`/lib/` → `packages/client/dist` 附 CORS）；`metrics.{enabled,token}`（`GET /metrics`，對外 host 須設 token）；`trustProxy`（反向代理後以 `X-Forwarded-For` 計算每 IP 連線） |
 | `limits` | `maxRooms`、`maxConnections`、`maxConnectionsPerIp`（同一位址同時連線，0＝不限）、`joinTimeoutMs`（連上後未開房／進房的逾時，0＝不限）、`maxSpeakersPerRoom`（8，主控以外的台上者；主控席位另計）、`maxAudiencePerRoom`（300）、`maxFrameBytes`（64KB）、`controlPerSecond`（20）、`handRaiseIntervalMs`（10000）、`icePerSecond`（30）、`nameMaxLength`（32）、`codeMaxLength`（16）、`sdpMaxLength` |
-| `rooms` | `codeLength`（8）、`controllerGraceMs`（主控斷線寬限 60000）、`heartbeatIntervalMs`、`presenceBroadcastMs`（觀眾進出合併 `room:state` 廣播的時間窗，250；進場者本人仍立即收到自己的 snapshot）、`qualityIntervalMs`（台上者連線品質回報間隔，2000；0＝停用）、`createToken`（非空時 `room:create` 須帶相同 `token`，否則 `unauthorized`；空字串＝任何人可開房，對外部署建議設定） |
+| `rooms` | `codeLength`（8）、`controllerGraceMs`（主控斷線寬限 60000）、`participantGraceMs`（其他人斷線寬限 15000；期間保留席位、台位、舉手順位與 PeerConnection，音訊不中斷；0＝立即移除）、`heartbeatIntervalMs`、`presenceBroadcastMs`（觀眾進出合併 `room:state` 廣播的時間窗，250；進場者本人仍立即收到自己的 snapshot）、`qualityIntervalMs`（台上者連線品質回報間隔，2000；0＝停用）、`createToken`（非空時 `room:create` 須帶相同 `token`，否則 `unauthorized`；空字串＝任何人可開房，對外部署建議設定） |
 | `audio` | `sampleRate`（48000；只接受 Opus 原生取樣率）、`frameMs`（20）、`codecWorkers`（Opus 編解碼 worker 數，房間平均分配到各 worker）、`opus.{vbr,minBitrate,maxBitrate,bitrate,complexity}`、`opus.fec`／`opus.packetLossPercent`（下行 in-band FEC 與預期掉包率）、`opus.dtx`（靜音不送包）、`lowTier.{enabled,bitrate,packetLossPercent,enterLossPercent,exitLossPercent}`（RTCP 接收報告顯示持續掉包的觀眾改收第二路共用混音：較低位元率＋較多 FEC，掉包回落後切回）、`mixer.{maxBufferedFrames,limiterThreshold}`、`mixer.latencyTargetMs`（僅供 `bench-mixer`／`load-test` 當驗收門檻）、`mixer.speakingThreshold`／`speakingHoldMs`（說話指示的 RMS 門檻與釋放延遲）、`jitter.playoutFrames`（每路上行預緩衝幀數）、`jitter.reorderPackets`（亂序容忍包數，超過即判定遺失並補幀）、`noiseFilter.{enabled,highPassHz,gateThreshold,gateHoldMs,gateFloor}`（伺服器端上行降噪：高通濾掉低頻雜音＋噪音門壓低說話間隙的背景音；瀏覽器端另開 `noiseSuppression`）、`loudness.{enabled,targetRms,maxGainDb,speechRms,adaptMs}`（伺服器端每路音量正規化：依說話時的平均音量把各發言者拉到相近大小，增益上限 ±maxGainDb） |
 | `rtc` | `iceServers`（下發給瀏覽器的靜態 STUN）、`serverIceServers`（伺服器端 ICE）、`portRange`（`[]` 或 `[min, max]`）、`mediaWorkers`（承載 PeerConnection 的 worker thread 數，預設 2 對應 300 聽眾；0＝主執行緒）、`turn.{urls,secret,ttlSeconds}`（coturn `use-auth-secret` 短期憑證，每次進房以 HMAC 簽發；`urls: []` 停用） |
 | `log` | `level`：`debug`／`info`／`warn`／`error`（房間代碼、token、憑證、SDP 一律不入日誌） |
@@ -90,7 +90,7 @@ JSON frame，型別定義在 [`shared/protocol.ts`](shared/protocol.ts)。每個
 | Client → Server | 說明 |
 |---|---|
 | `room:create {name?, roomName?, codeRequired?, token?}` | 開房，建立者成為主控（預設在台）；伺服器設定 `rooms.createToken` 時須帶相同 `token` |
-| `join {roomId, code?, name, resumeToken?}` | 進房（預設觀眾）；`resumeToken` 供主控斷線後回座 |
+| `join {roomId, code?, name, resumeToken?}` | 進房（預設觀眾）；`resumeToken` 供斷線後在寬限期內回座（席位、台位、舉手順位、音訊連線都保留） |
 | `hand:raise`／`hand:withdraw` | 觀眾舉手／收回（舉手 10 秒最多 1 次） |
 | `stage:approve {targetId}`／`stage:reject {targetId}` | 主控核准／婉拒；`targetId` 為自己＝主控返回舞台 |
 | `stage:leave` | 下台（主控下台仍保有控制權） |
@@ -107,7 +107,7 @@ JSON frame，型別定義在 [`shared/protocol.ts`](shared/protocol.ts)。每個
 | Server → Client | 說明 |
 |---|---|
 | `hello` | `{protocol, serverVersion, limits: {controlPerSecond, icePerSecond, handRaiseIntervalMs}}`：client 依 `limits` 自行節流與舉手冷卻 |
-| `room:state` | 個人化 snapshot（每次變動重送）；`code`、`audience` 名單只給主控，`resumeToken` 只給本人 |
+| `room:state` | 個人化 snapshot（每次變動重送）；每人帶 `connected`（ws 斷線、席位保留中為 false）；`code`、`audience` 名單只給主控，`resumeToken` 只給本人 |
 | `room:created`、`room:closed` | 開房（只有建立者收到 code）、關房（全員離房）；伺服器停止時 `room:closed` 帶 `reason: 'shutdown'`，連線隨後以 close code 1001 關閉 |
 | `kicked` | `{roomId}`：你被主控踢出，伺服器隨即以 close code 4001 關閉連線 |
 | `rtc:config` | 瀏覽器用的 ICE servers（設定 `rtc.turn` 時含該參與者專屬的短期 TURN 憑證） |
