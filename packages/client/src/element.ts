@@ -42,7 +42,7 @@ export class StageElement extends HTMLElement {
   private readonly leaveStage: HTMLButtonElement;
   private readonly listen: HTMLButtonElement;
   private readonly pendingActions = new Set<HTMLButtonElement>();
-  private cooldownTimer: ReturnType<typeof setInterval> | undefined;
+  private cooldownTimer: ReturnType<typeof setTimeout> | undefined;
   /** Bumped on every (re)join, so a superseded join cannot touch the widget. */
   private generation = 0;
 
@@ -142,7 +142,6 @@ export class StageElement extends HTMLElement {
           if (type === 'state' || type === 'status' || type === 'mic' || type === 'closed' || type === 'kicked') this.render();
         });
       }
-      this.cooldownTimer = setInterval(() => this.render(), 1000);
       this.error.hidden = true;
       this.render();
       try {
@@ -159,7 +158,7 @@ export class StageElement extends HTMLElement {
   private async leave(): Promise<void> {
     for (const button of this.pendingActions) button.removeAttribute('aria-busy');
     this.pendingActions.clear();
-    clearInterval(this.cooldownTimer);
+    clearTimeout(this.cooldownTimer);
     this.cooldownTimer = undefined;
     const client = this.current;
     this.current = null;
@@ -184,6 +183,21 @@ export class StageElement extends HTMLElement {
     this.error.hidden = false;
   }
 
+  /** Only a visible countdown needs clock-driven renders; other changes arrive as SDK events. */
+  private scheduleCooldown(active: boolean, remaining: number): void {
+    if (!active) {
+      clearTimeout(this.cooldownTimer);
+      this.cooldownTimer = undefined;
+    } else if (this.cooldownTimer === undefined) {
+      // Wake at the next displayed-second boundary (or expiry), never postpone an existing wake.
+      const delay = Math.max(1, Math.ceil(remaining - (Math.ceil(remaining / 1000) - 1) * 1000));
+      this.cooldownTimer = setTimeout(() => {
+        this.cooldownTimer = undefined;
+        this.render();
+      }, delay);
+    }
+  }
+
   private render(): void {
     const client = this.current;
     const me = client?.me ?? null;
@@ -195,7 +209,9 @@ export class StageElement extends HTMLElement {
       this.status.textContent = this.getAttribute('room') && this.getAttribute('name') ? '' : '請設定 room 與 name 屬性。';
     }
     const audience = Boolean(me && !me.onStage && me.role !== 'controller');
-    const cooldown = Math.ceil((client?.handCooldownMs ?? 0) / 1000);
+    const remaining = client?.handCooldownMs ?? 0;
+    const cooldown = Math.ceil(remaining / 1000);
+    this.scheduleCooldown(audience && !me?.handRaised && remaining > 0, remaining);
     this.hand.hidden = !audience;
     this.listen.hidden = !me;
     this.listen.disabled = !client || this.pendingActions.has(this.listen);

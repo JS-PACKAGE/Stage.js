@@ -100,3 +100,5 @@
 ## 信令整合測試
 
 `npm test -w packages/client` 也會啟動獨立 Node 子程序的 loopback 伺服器，讓實際 StageClient 經真實 WebSocket 完成建立／加入房間、舉手核准、個人／主控靜音、下台、同席位與同媒體 peer 自動恢復、被踢與伺服器關閉。測試檢查個人化快照、ACK 錯誤、收聽偏好保留，以及終止後不重連；伺服器使用 MockMediaTransport，瀏覽器 PeerConnection／音軌／AudioContext 為 fake，不代表實際 ICE、音訊品質或瀏覽器權限驗證。需允許本機 loopback listener 與 Node 子程序；不使用外部服務。
+
+嵌入元件只在可見的舉手冷卻倒數需要更新時安排單一 timer，於顯示秒數邊界更新；舉手中、台上、主控、閒置或房間結束時不做週期重繪。狀態事件仍即時更新 UI，倒數結束也不會提前解除尚未完成操作的停用狀態。

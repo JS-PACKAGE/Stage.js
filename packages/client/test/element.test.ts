@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { after, describe, it } from 'node:test';
+import { after, afterEach, describe, it } from 'node:test';
 import { StageClient } from '../src/index.ts';
 
 /** Minimal DOM surface for widget state tests; this does not simulate a browser layout or input system. */
@@ -39,8 +39,11 @@ function deferred() {
   return { promise, resolve, reject };
 }
 const settle = async () => { for (let i = 0; i < 5; i++) await Promise.resolve(); };
+const widgets: InstanceType<typeof StageElement>[] = [];
+afterEach(async () => { for (const element of widgets.splice(0)) { element.disconnectedCallback(); await settle(); } });
 function widget(onStage = false) {
   const element = new StageElement();
+  widgets.push(element);
   const pending = deferred();
   let calls = 0;
   const action = () => { calls++; return pending.promise; };
@@ -277,4 +280,101 @@ describe('custom widget tag registration', () => {
     assert.equal(custom.get('stage-client'), StageElement);
   });
 
+});
+
+
+describe('widget countdown scheduling', () => {
+  it('does no clock-driven rendering during an idle mounted minute', async t => {
+    t.mock.timers.enable({ apis: ['setInterval', 'setTimeout'] });
+    t.mock.method(StageClient.prototype, 'connect', async () => {});
+    t.mock.method(StageClient.prototype, 'join', async () => {});
+    t.mock.method(StageClient.prototype, 'disconnect', async () => {});
+    const element = new StageElement(); widgets.push(element);
+    element.setAttribute('room', 'one'); element.setAttribute('name', 'Listener'); await settle();
+    const render = t.mock.method(element as unknown as { render(): void }, 'render');
+    t.mock.timers.tick(60000);
+    assert.equal(render.mock.callCount(), 0);
+    assert.equal(element['cooldownTimer'], undefined);
+  });
+
+  it('keeps one non-postponed timer and updates only at displayed-second boundaries until expiry', t => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    let now = 0;
+    const { element, client } = widget();
+    Object.defineProperty(client, 'handCooldownMs', { get: () => Math.max(0, 1500 - now) });
+    element['render']();
+    const timer = element['cooldownTimer']; assert.ok(timer);
+    element['render'](); assert.equal(element['cooldownTimer'], timer);
+    assert.equal(element['hand'].textContent, '舉手發言（2 秒）');
+    const render = t.mock.method(element as unknown as { render(): void }, 'render');
+    now += 499; t.mock.timers.tick(499); assert.equal(render.mock.callCount(), 0);
+    now += 1; t.mock.timers.tick(1); assert.equal(render.mock.callCount(), 1);
+    assert.equal(element['hand'].textContent, '舉手發言（1 秒）');
+    now += 999; t.mock.timers.tick(999); assert.equal(render.mock.callCount(), 1);
+    now += 1; t.mock.timers.tick(1); assert.equal(render.mock.callCount(), 2);
+    assert.equal(element['hand'].textContent, '舉手發言'); assert.equal(element['hand'].disabled, false);
+    assert.equal(element['cooldownTimer'], undefined);
+    t.mock.timers.tick(60000); assert.equal(render.mock.callCount(), 2);
+  });
+
+  it('rounds fractional deadlines up so timer truncation cannot cause an early extra render', t => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const schedule = t.mock.method(globalThis, 'setTimeout');
+    let now = 0;
+    const { element, client } = widget();
+    Object.defineProperty(client, 'handCooldownMs', { get: () => Math.max(0, 1500.4 - now) });
+    element['render']();
+    assert.equal(schedule.mock.calls[0]!.arguments[1], 501);
+    const render = t.mock.method(element as unknown as { render(): void }, 'render');
+    now = 500; t.mock.timers.tick(500); assert.equal(render.mock.callCount(), 0);
+    now = 501; t.mock.timers.tick(1); assert.equal(render.mock.callCount(), 1);
+    assert.equal(element['hand'].textContent, '舉手發言（1 秒）');
+    assert.equal(schedule.mock.calls[1]!.arguments[1], 1000);
+    now = 1501; t.mock.timers.tick(1000); assert.equal(render.mock.callCount(), 2);
+    assert.equal(element['cooldownTimer'], undefined);
+  });
+
+  it('recomputes an expired cooldown after a delayed wake without replaying missed ticks', t => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    let remaining = 1500;
+    const { element, client } = widget();
+    Object.defineProperty(client, 'handCooldownMs', { get: () => remaining });
+    element['render']();
+    const render = t.mock.method(element as unknown as { render(): void }, 'render');
+    remaining = 0; // The monotonic deadline elapsed while the page could not run its timer.
+    t.mock.timers.tick(30000);
+    assert.equal(render.mock.callCount(), 1);
+    assert.equal(element['hand'].textContent, '舉手發言'); assert.equal(element['hand'].disabled, false);
+    assert.equal(element['cooldownTimer'], undefined);
+  });
+
+  it('clears countdown work when raised, on stage, controller, closed or disconnected', async t => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    for (const stop of ['raised', 'stage', 'controller', 'closed', 'disconnected']) {
+      const { element, client } = widget(); client.handCooldownMs = 10000; element['render']();
+      assert.ok(element['cooldownTimer']);
+      if (stop === 'raised') client.me.handRaised = true;
+      if (stop === 'stage') client.me.onStage = true;
+      if (stop === 'controller') client.me.role = 'controller';
+      if (stop === 'closed') Object.defineProperty(client, 'me', { value: null });
+      if (stop === 'disconnected') { element.disconnectedCallback(); await settle(); }
+      else element['render']();
+      assert.equal(element['cooldownTimer'], undefined);
+      const render = t.mock.method(element as unknown as { render(): void }, 'render'); t.mock.timers.tick(60000);
+      assert.equal(render.mock.callCount(), 0);
+    }
+  });
+
+  it('starts countdown after withdrawal and does not unlock a still-pending action at expiry', async t => {
+    t.mock.timers.enable({ apis: ['setTimeout'] });
+    const { element, client, pending } = widget();
+    client.me.handRaised = true; client.handCooldownMs = 500; element['render']();
+    assert.equal(element['cooldownTimer'], undefined);
+    click(element['hand']); client.me.handRaised = false; element['render']();
+    assert.ok(element['cooldownTimer']);
+    client.handCooldownMs = 0; t.mock.timers.tick(500);
+    assert.equal(element['cooldownTimer'], undefined); assert.equal(element['hand'].disabled, true);
+    assert.equal(element['hand'].getAttribute('aria-busy'), 'true');
+    pending.resolve(); await settle(); assert.equal(element['hand'].disabled, false);
+  });
 });
