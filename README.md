@@ -122,10 +122,12 @@ JSON frame，型別定義在 [`shared/protocol.ts`](shared/protocol.ts)。每個
 | `kicked` | `{roomId}`：你被主控踢出，伺服器隨即以 close code 4001 關閉連線 |
 | `rtc:config` | 瀏覽器用的 ICE servers（設定 `rtc.turn` 時含該參與者專屬的短期 TURN 憑證） |
 | `speaking` | `{participantIds}`：目前在混音中有聲的參與者（VAD＋釋放延遲），集合變動時才送 |
-| `quality` | `{participants: [{participantId, uplinkLossPercent?, downlinkLossPercent?, rttMs?}]}`：每 `qualityIntervalMs` 回報所有上行者的連線品質（上行掉包為該區間伺服器實際遺失比例，下行掉包取自對方 RTCP 接收報告），只送給主控與台上者 |
+| `quality` | `{participants: [{participantId, uplinkLossPercent?, downlinkLossPercent?, rttMs?}]}`：依 `qualityIntervalMs` 回報可取得統計的上行者連線品質（上行掉包為該區間伺服器實際遺失比例，下行掉包取自對方 RTCP 接收報告），只送給主控與台上者 |
 | `role:update`、`hand:raise`／`hand:withdraw`、`stage:invite`、`stage:joined`、`stage:left`、`control:transferred`、`mic:muted`／`mic:unmuted` | 事件廣播 |
 | `rtc:answer`、`rtc:ice` | 伺服器端信令 |
 | `status` | `waiting`／`live` |
+
+連線品質收集每房間同時最多一輪；完成後再等待 `qualityIntervalMs` 啟動下一輪。個別 publisher 統計失敗只略過該人的本輪資料，其他人的回報照常；全部失敗時不送空報告，但下一輪仍會重試。失敗不會被當作 0% 掉包，恢復後上行差量從上次成功樣本計算。關房或最後一位停止發布後不再排程；離台再發布的舊統計結果會被忽略。
 
 限制：frame ≤ 64KB；控制訊息 ≤ 20/s、`rtc:ice` ≤ 30/s；超過即以 close code 1008 斷線。房間不存在或代碼錯誤一律回 `unauthorized`。名稱以 HTML 轉義形式傳送。client 以 close code 1000 關閉＝主動離開（立即移出房間）；其他關閉碼或斷線＝保留席位至寬限期結束（主控一律保留 `controllerGraceMs`）。
 

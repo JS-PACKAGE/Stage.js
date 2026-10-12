@@ -60,7 +60,8 @@ interface RoomRuntime {
   readonly queue: SerialQueue;
   readonly mixer: Mixer;
   readonly sessions: Map<string, Session>;
-  readonly publishers: Set<string>;
+  /** Token changes when a participant stops and resumes publishing. */
+  readonly publishers: Map<string, symbol>;
   graceTimer: unknown;
   /** Seat-hold timers of disconnected non-controllers (`rooms.participantGraceMs`). */
   readonly graceTimers: Map<string, unknown>;
@@ -69,6 +70,7 @@ interface RoomRuntime {
   stateTimerDelay: number | undefined;
   /** Next connection-quality report; scheduled only while someone publishes. */
   qualityTimer: unknown;
+  qualityInFlight: boolean;
   /** Uplink counters at the previous report, so each report covers one interval. */
   readonly uplinkCounts: Map<string, { received: number; lost: number }>;
   lastStatus: 'waiting' | 'live';
@@ -223,12 +225,13 @@ export class StageHub {
       queue: new SerialQueue(),
       mixer,
       sessions: new Map([[controller.participantId, session]]),
-      publishers: new Set(),
+      publishers: new Map(),
       graceTimer: undefined,
       graceTimers: new Map(),
       stateTimer: undefined,
       stateTimerDelay: undefined,
       qualityTimer: undefined,
+      qualityInFlight: false,
       uplinkCounts: new Map(),
       lastStatus: room.status,
       closed: false,
@@ -449,7 +452,7 @@ export class StageHub {
       session.send({ type: 'rtc:answer', fromId: SERVER_PEER_ID, payload: answer });
       transport.subscribe(roomId, pid);
       if (sends && p.onStage && !rt.publishers.has(pid)) {
-        rt.publishers.add(pid);
+        rt.publishers.set(pid, Symbol());
         rt.mixer.addSource(pid);
         rt.mixer.setGain(pid, p.gainDb);
         this.scheduleQuality(rt);
@@ -550,10 +553,13 @@ export class StageHub {
 
   private scheduleQuality(rt: RoomRuntime): void {
     const interval = this.deps.config.rooms.qualityIntervalMs;
-    if (interval === 0 || rt.qualityTimer !== undefined) return;
+    if (rt.closed || !rt.publishers.size || interval === 0 || rt.qualityTimer !== undefined || rt.qualityInFlight) return;
     rt.qualityTimer = this.setTimer(() => {
       rt.qualityTimer = undefined;
-      void this.reportQuality(rt).catch((err) => this.deps.log.warn('quality report failed', { roomId: rt.room.roomId, error: String(err) }));
+      rt.qualityInFlight = true;
+      void this.reportQuality(rt)
+        .catch((err) => this.deps.log.warn('quality report failed', { roomId: rt.room.roomId, error: String(err) }))
+        .finally(() => { rt.qualityInFlight = false; this.scheduleQuality(rt); });
     }, interval);
   }
 
@@ -564,13 +570,19 @@ export class StageHub {
   private async reportQuality(rt: RoomRuntime): Promise<void> {
     if (rt.closed || !rt.publishers.size) return;
     const { roomId } = rt.room;
-    const ids = [...rt.publishers];
-    const stats = await Promise.all(ids.map((id) => this.deps.transport.getStats(roomId, id)));
+    const publishers = [...rt.publishers];
+    const stats = await Promise.allSettled(publishers.map(async ([id]) => this.deps.transport.getStats(roomId, id)));
     if (rt.closed) return;
     const participants: ConnectionQuality[] = [];
-    ids.forEach((participantId, i) => {
-      const s = stats[i];
-      if (!s || !rt.publishers.has(participantId)) return;
+    publishers.forEach(([participantId, generation], i) => {
+      if (rt.publishers.get(participantId) !== generation) return;
+      const result = stats[i]!;
+      if (result.status === 'rejected') {
+        this.deps.log.warn('publisher quality stats failed', { roomId, participantId, error: String(result.reason) });
+        return;
+      }
+      const s = result.value;
+      if (!s) return;
       const q: ConnectionQuality = { participantId };
       const received = s.inbound?.packetsReceived, lost = s.inbound?.packetsLost;
       if (received !== undefined && lost !== undefined) {
@@ -591,7 +603,6 @@ export class StageHub {
         if (p && (p.onStage || pid === rt.room.controllerId)) session.send(msg, encoded);
       }
     }
-    if (rt.publishers.size) this.scheduleQuality(rt);
   }
 
   private setPublisherMuted(rt: RoomRuntime, pid: string, muted: boolean): void {
