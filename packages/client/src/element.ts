@@ -39,6 +39,7 @@ export class StageElement extends HTMLElement {
   private readonly hand: HTMLButtonElement;
   private readonly mic: HTMLButtonElement;
   private readonly leaveStage: HTMLButtonElement;
+  private readonly pendingActions = new Set<HTMLButtonElement>();
   private cooldownTimer: ReturnType<typeof setInterval> | undefined;
   /** Bumped on every (re)join, so a superseded join cannot touch the widget. */
   private generation = 0;
@@ -90,14 +91,25 @@ export class StageElement extends HTMLElement {
     b.textContent = label;
     if (className) b.className = className;
     b.onclick = () => {
+      if (b.disabled || this.pendingActions.has(b)) return;
       const generation = this.generation;
+      this.pendingActions.add(b);
       b.disabled = true;
+      b.setAttribute('aria-busy', 'true');
       this.error.hidden = true;
-      void Promise.resolve(action()).catch((error: unknown) => {
-        if (generation === this.generation) this.show(error);
-      }).finally(() => {
-        if (generation === this.generation) { b.disabled = false; this.render(); }
-      });
+      // Invoke synchronously to retain the clicked client's identity, but catch synchronous
+      // failures too. A later render must not unlock the action before its promise settles.
+      void (async () => {
+        try { await action(); }
+        catch (error) { if (generation === this.generation) this.show(error); }
+        finally {
+          if (generation === this.generation) {
+            this.pendingActions.delete(b);
+            b.removeAttribute('aria-busy');
+            this.render();
+          }
+        }
+      })();
     };
     return b;
   }
@@ -134,6 +146,8 @@ export class StageElement extends HTMLElement {
   }
 
   private async leave(): Promise<void> {
+    for (const button of this.pendingActions) button.removeAttribute('aria-busy');
+    this.pendingActions.clear();
     clearInterval(this.cooldownTimer);
     this.cooldownTimer = undefined;
     const client = this.current;
@@ -172,13 +186,14 @@ export class StageElement extends HTMLElement {
     const audience = Boolean(me && !me.onStage && me.role !== 'controller');
     const cooldown = Math.ceil((client?.handCooldownMs ?? 0) / 1000);
     this.hand.hidden = !audience;
-    this.hand.disabled = !me || (!me.handRaised && cooldown > 0);
+    this.unlock.disabled = this.pendingActions.has(this.unlock);
+    this.hand.disabled = this.pendingActions.has(this.hand) || !me || (!me.handRaised && cooldown > 0);
     this.hand.textContent = me?.handRaised ? '收回舉手' : cooldown > 0 ? `舉手發言（${cooldown} 秒）` : '舉手發言';
     this.mic.hidden = this.leaveStage.hidden = !me?.onStage;
-    this.mic.disabled = Boolean(me?.forceMuted);
+    this.mic.disabled = this.pendingActions.has(this.mic) || Boolean(me?.forceMuted);
     this.mic.textContent = me?.muted ? '取消靜音' : '靜音';
     this.mic.setAttribute('aria-pressed', String(Boolean(me?.muted)));
-    this.leaveStage.disabled = false;
+    this.leaveStage.disabled = this.pendingActions.has(this.leaveStage);
   }
 }
 
