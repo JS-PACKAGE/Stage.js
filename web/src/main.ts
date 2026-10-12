@@ -89,6 +89,7 @@ let testingBusy = false;
 let micSettingsGeneration = 0;
 let selectedInput = '';
 let selectedOutput = '';
+let deviceRefreshSequence = 0;
 const testButton = button('測試麥克風', async () => {
   if (testingBusy || client.me?.onStage) return;
   const generation = micSettingsGeneration;
@@ -147,7 +148,9 @@ speakerSelect.onchange = () => {
     .finally(() => { speakerSelect.disabled = false; speakerSelect.value = selectedOutput; });
 };
 async function refreshDevices(): Promise<void> {
+  const sequence = ++deviceRefreshSequence;
   const devices = await client.listAudioDevices();
+  if (sequence !== deviceRefreshSequence) return;
   for (const [select, list, chosen] of [[micSelect, devices.inputs, selectedInput], [speakerSelect, devices.outputs, selectedOutput]] as const) {
     const defaultOption = element('option', '', '系統預設');
     defaultOption.value = '';

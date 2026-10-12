@@ -138,6 +138,10 @@ interface Events {
   quality: { participants: { participantId: string; uplinkLossPercent?: number; downlinkLossPercent?: number; rttMs?: number }[] };
 }
 interface JoinOptions { roomId: string; code?: string; name: string }
+export interface SampleAudioDevices {
+  inputs: { deviceId: string; label: string }[];
+  outputs: { deviceId: string; label: string }[];
+}
 
 export class SampleSdk {
   state: RoomStatePayload | null = null;
@@ -152,11 +156,15 @@ export class SampleSdk {
   readonly previews: Deferred<SamplePreview>[] = [];
   readonly polls: Deferred<Stats>[] = [];
   readonly raises: Deferred<void>[] = [];
+  readonly deviceLists: Deferred<SampleAudioDevices>[] = [];
+  readonly inputDevices: string[] = [];
+  readonly outputDevices: string[] = [];
   readonly events: (keyof Events)[] = [];
   readonly activePreviews = new Set<SamplePreview>();
   private readonly listeners = new Map<keyof Events, ((event: { detail: unknown }) => void)[]>();
   readonly clock: SampleClock;
-  constructor(clock: SampleClock) { this.clock = clock; }
+  private readonly deferAudioDevices: boolean;
+  constructor(clock: SampleClock, deferAudioDevices = false) { this.clock = clock; this.deferAudioDevices = deferAudioDevices; }
   get me(): ParticipantView | null { return this.state?.me ?? null; }
   get micLevel(): number { this.micLevelReads++; return this.micLevelValue; }
   get handCooldownMs(): number { return Math.max(0, this.cooldownUntil - this.clock.now); }
@@ -183,9 +191,14 @@ export class SampleSdk {
     const join = this.joins.at(-1); assert.ok(join); assert.equal(join.work.status, 'pending');
     this.snapshot(state); join.work.resolve(undefined);
   }
-  async listAudioDevices() {
+  async listAudioDevices(): Promise<SampleAudioDevices> {
+    if (this.deferAudioDevices) {
+      const work = new Deferred<SampleAudioDevices>(); this.deviceLists.push(work); return work.promise;
+    }
     return { inputs: [{ deviceId: 'mic-a', label: '測試麥克風' }], outputs: [{ deviceId: 'speaker-a', label: '測試揚聲器' }] };
   }
+  async setInputDevice(id: string): Promise<void> { this.inputDevices.push(id); }
+  async setOutputDevice(id: string): Promise<void> { this.outputDevices.push(id); }
   setPlaybackVolume(value: number): void { assert.ok(value >= 0 && value <= 1); this.playbackVolume = value; }
   setPlaybackMuted(value: boolean): void { this.playbackMuted = value; }
   startMicTest(): Promise<SamplePreview> {
@@ -216,7 +229,7 @@ export class SampleSdk {
     else this.emit('kicked', { roomId });
   }
   assertSettled(): void {
-    const work = [...this.joins.map(join => join.work), ...this.previews, ...this.polls, ...this.raises];
+    const work = [...this.joins.map(join => join.work), ...this.previews, ...this.polls, ...this.raises, ...this.deviceLists];
     assert.equal(work.filter(item => item.status === 'pending').length, 0, 'all deferred work must settle');
     assert.equal(this.activePreviews.size, 0, 'all granted previews must stop');
   }
@@ -231,8 +244,8 @@ export function roomState(me: Partial<ParticipantView> = {}): RoomStatePayload {
 }
 export async function flushSample(): Promise<void> { for (let i = 0; i < 16; i++) await Promise.resolve(); }
 
-export function sampleApp() {
-  const clock = new SampleClock(), sdk = new SampleSdk(clock);
+export function sampleApp(options: { deferAudioDevices?: boolean } = {}) {
+  const clock = new SampleClock(), sdk = new SampleSdk(clock, options.deferAudioDevices);
   const documentRoot = new SampleNode('#document'), documentElement = new SampleNode('html'), body = new SampleNode('body');
   const app = new SampleNode('div'); app.id = 'app';
   documentRoot.append(documentElement); documentElement.append(body); body.append(app);
@@ -249,11 +262,14 @@ export function sampleApp() {
   const executable = stripTypeScriptTypes(lines.slice(3).join('\n'));
   assert.doesNotMatch(executable, /^\s*import\b/m);
   const storage = new Map<string, string>();
+  const deviceChangeListeners: (() => void)[] = [];
   let constructions = 0;
   runInNewContext(`'use strict';\n${executable}`, {
     document, location: { protocol: 'https:', host: 'sample.test', search: '', pathname: '/', origin: 'https://sample.test' },
     localStorage: { getItem: (key: string) => storage.get(key) ?? null, setItem: (key: string, value: string) => storage.set(key, value) },
-    navigator: { mediaDevices: { addEventListener(type: string, _listener: () => void) { assert.equal(type, 'devicechange'); } } },
+    navigator: { mediaDevices: { addEventListener(type: string, listener: () => void) {
+      assert.equal(type, 'devicechange'); deviceChangeListeners.push(listener);
+    } } },
     window: { confirm() { throw new Error('Unexpected confirmation dialog in lifecycle test'); } },
     StageClient: function (options: { url: string }) { constructions++; assert.equal(options.url, 'wss://sample.test/ws'); return sdk; },
     decodeName: (value: string) => value, MAX_GAIN_DB, URL, URLSearchParams, Error,
@@ -264,12 +280,13 @@ export function sampleApp() {
     const matches = app.descendants().filter(predicate); assert.equal(matches.length, 1, 'expected one connected matching DOM node'); return matches[0]!;
   };
   return {
-    app, sdk, clock, find,
+    app, sdk, clock, find, deviceChangeListeners,
+    dispatchDeviceChange() { for (const listener of [...deviceChangeListeners]) listener(); },
     id: (id: string) => find(node => node.id === id),
     button: (text: string) => find(node => node.tagName === 'button' && node.textContent === text),
     async cleanup() {
       await sdk.disconnect();
-      for (const work of [...sdk.joins.map(join => join.work), ...sdk.polls]) if (work.status === 'pending') work.reject(new Error('fixture cleanup'));
+      for (const work of [...sdk.joins.map(join => join.work), ...sdk.polls, ...sdk.deviceLists]) if (work.status === 'pending') work.reject(new Error('fixture cleanup'));
       await flushSample(); clock.jobs.clear(); sdk.assertSettled();
     },
   };
