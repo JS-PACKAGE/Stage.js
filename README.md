@@ -155,6 +155,8 @@ JSON frame，型別定義在 [`shared/protocol.ts`](shared/protocol.ts)。每個
 
 連線中取消、關房與被踢會完整停止麥克風／麥克風測試並清除待回覆請求；同一個 client 可在取消後重用。Web Component 快速移除／重掛載時只接受最新一次連線的事件，音訊解鎖失敗可重試，成功後隱藏按鈕。
 
+本機收聽可用 `setPlaybackVolume(0.5)`／`setPlaybackMuted(true)` 調整，`playbackVolume`／`playbackMuted` 即時讀取；不影響麥克風或其他人，重連時保留。範例前端的「音訊設定」也提供音量與靜音收聽控制。
+
 完整 API 見 [`packages/client/README.md`](packages/client/README.md)；`web/embed.html` 是最小嵌入範例。
 
 ## 測試與驗證

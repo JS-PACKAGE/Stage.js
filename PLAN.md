@@ -324,6 +324,8 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 
 24. **慢速 WebSocket 讀取端防護**：`limits.maxSendBufferBytes` 限制每條 ws 已排隊資料加上下一則 JSON 的 UTF-8 位元組；超限立即 terminate，避免關閉握手卡在待送佇列。保留既有非主動離開的席位／媒體寬限與回座流程，其他連線不受影響；Prometheus `stage_ws_backpressure_disconnects_total` 計數。範例為 1 MiB，舊設定省略時以 `maxFrameBytes × 16` 相容。
 
+25. **本機收聽控制**：client 提供 `playbackVolume`／`playbackMuted` getters 與 `setPlaybackVolume(0–1)`／`setPlaybackMuted(boolean)`，只操作本機 audio，與麥克風／伺服器混音增益分離、不發控制訊息；音訊元件重用讓偏好保留至回座與同一 client 重用。自訂 audio 的既有音量／靜音不覆寫，非法音量同步拒絕；範例前端附繁中滑桿與獨立切換鈕。
+
 ---
 
 開始執行。
