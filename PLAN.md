@@ -326,6 +326,8 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 
 25. **本機收聽控制**：client 提供 `playbackVolume`／`playbackMuted` getters 與 `setPlaybackVolume(0–1)`／`setPlaybackMuted(boolean)`，只操作本機 audio，與麥克風／伺服器混音增益分離、不發控制訊息；音訊元件重用讓偏好保留至回座與同一 client 重用。自訂 audio 的既有音量／靜音不覆寫，非法音量同步拒絕；範例前端附繁中滑桿與獨立切換鈕。
 
+26. **media worker RPC 期限**：`rtc.mediaWorkerTimeoutMs`（預設／舊設定 30000 ms）為 SDP、ICE、統計與關閉的期限。逾時拒絕該 worker 的所有 pending，清除期限、停止舊 worker、重生並通知受影響 peer；舊 worker 回覆／候選／上行等事件以 worker 身分隔離。成功、失敗、postMessage 例外與 exit 都清掉期限及 pending，未送出的協商不占 peer；停機拒絕新工作，close 可重複且被同一期限約束，不重生。其他 worker 不受影響，主執行緒模式不套用；正常協商需預留足夠時間。
+
 ---
 
 開始執行。

@@ -111,6 +111,8 @@ export interface AppConfig {
     portRange: [number, number] | [];
     /** Worker threads hosting PeerConnections (ICE/DTLS/SRTP); 0 keeps them on the main thread. */
     mediaWorkers: number;
+    /** Worker RPC deadline; an unresponsive shard is replaced so stale operations cannot survive. */
+    mediaWorkerTimeoutMs: number;
     /** Ephemeral TURN (coturn use-auth-secret); empty `urls` disables it. */
     turn: { urls: string[]; secret: string; ttlSeconds: number };
   };
@@ -334,6 +336,7 @@ export function parseConfig(raw: unknown): AppConfig {
     serverIceServers: iceServers(t.serverIceServers, 'rtc.serverIceServers'),
     portRange,
     mediaWorkers: int(t, 'mediaWorkers', 'rtc', 0, 64),
+    mediaWorkerTimeoutMs: t.mediaWorkerTimeoutMs === undefined ? 30000 : int(t, 'mediaWorkerTimeoutMs', 'rtc', 1, 300000),
     turn,
   };
 

@@ -343,3 +343,18 @@ describe('slow reader recovery', () => {
     }
   });
 });
+
+
+describe('media worker deadline configuration', () => {
+  it('keeps legacy files usable and rejects invalid deadlines', () => {
+    const raw = parse(readFileSync(new URL('../config.example.yaml', import.meta.url), 'utf8'));
+    delete raw.rtc.mediaWorkerTimeoutMs;
+    assert.equal(parseConfig(raw).rtc.mediaWorkerTimeoutMs, 30000);
+    for (const invalid of [0, -1, 1.5, 300001, Infinity, '30000']) {
+      raw.rtc.mediaWorkerTimeoutMs = invalid;
+      assert.throws(() => parseConfig(raw), /rtc.mediaWorkerTimeoutMs/);
+    }
+    raw.rtc.mediaWorkerTimeoutMs = 1000;
+    assert.equal(parseConfig(raw).rtc.mediaWorkerTimeoutMs, 1000);
+  });
+});
