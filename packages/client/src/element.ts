@@ -25,12 +25,13 @@ button.primary { background: var(--stage-accent, #2563eb); border-color: transpa
  * Joins when it is in the document and has `room` and `name`; leaves when removed. Changing
  * `url`, `room`, `code` or `name` rejoins. `url` defaults to `/ws` on the origin the library was
  * loaded from. The underlying client is exposed as `.client` for anything the widget does not
- * offer, and every client event is re-dispatched from the element as `stage-<type>` (bubbling,
+ * offer. `playback-muted` / `.playbackMuted` controls local listening without rejoining,
+ * and every client event is re-dispatched from the element as `stage-<type>` (bubbling,
  * composed) with the same `detail`. Style through `::part(panel|status|actions)` and the
  * `--stage-*` custom properties.
  */
 export class StageElement extends HTMLElement {
-  static readonly observedAttributes = ['url', 'room', 'code', 'name'];
+  static readonly observedAttributes = ['url', 'room', 'code', 'name', 'playback-muted'];
   private current: StageClient | null = null;
   private readonly status: HTMLParagraphElement;
   /** Last failure (request rejected, mic denied…); stays until the next action or join. */
@@ -39,6 +40,7 @@ export class StageElement extends HTMLElement {
   private readonly hand: HTMLButtonElement;
   private readonly mic: HTMLButtonElement;
   private readonly leaveStage: HTMLButtonElement;
+  private readonly listen: HTMLButtonElement;
   private readonly pendingActions = new Set<HTMLButtonElement>();
   private cooldownTimer: ReturnType<typeof setInterval> | undefined;
   /** Bumped on every (re)join, so a superseded join cannot touch the widget. */
@@ -70,7 +72,9 @@ export class StageElement extends HTMLElement {
     this.hand = this.button('舉手發言', () => (this.current?.me?.handRaised ? this.current.withdrawHand() : this.current?.raiseHand()));
     this.mic = this.button('靜音', () => (this.current?.me?.muted ? this.current.unmute() : this.current?.mute()));
     this.leaveStage = this.button('離開舞台', () => this.current?.leaveStage());
-    actions.append(this.unlock, this.hand, this.mic, this.leaveStage);
+    this.listen = this.button('靜音收聽', () => { this.playbackMuted = !this.playbackMuted; });
+    this.listen.setAttribute('aria-label', '靜音收聽');
+    actions.append(this.unlock, this.listen, this.hand, this.mic, this.leaveStage);
     panel.append(this.status, this.error, actions);
     root.append(style, panel);
     this.render();
@@ -79,13 +83,19 @@ export class StageElement extends HTMLElement {
   /** The StageClient behind the widget; null while not joined. */
   get client(): StageClient | null { return this.current; }
 
+  /** Local listening preference; reflected as a boolean attribute and retained across rejoins. */
+  get playbackMuted(): boolean { return this.hasAttribute('playback-muted'); }
+  set playbackMuted(value: boolean) { this.toggleAttribute('playback-muted', Boolean(value)); }
+
   connectedCallback(): void { this.rejoin(); }
   disconnectedCallback(): void { ++this.generation; void this.leave(); }
-  attributeChangedCallback(_name: string, previous: string | null, next: string | null): void {
-    if (previous !== next && this.isConnected) this.rejoin();
+  attributeChangedCallback(name: string, previous: string | null, next: string | null): void {
+    if (previous === next) return;
+    if (name === 'playback-muted') { this.current?.setPlaybackMuted(this.playbackMuted); this.render(); return; }
+    if (this.isConnected) this.rejoin();
   }
 
-  private button(label: string, action: () => Promise<unknown> | undefined, className = ''): HTMLButtonElement {
+  private button(label: string, action: () => Promise<unknown> | void, className = ''): HTMLButtonElement {
     const b = document.createElement('button');
     b.type = 'button';
     b.textContent = label;
@@ -120,6 +130,7 @@ export class StageElement extends HTMLElement {
       const room = this.getAttribute('room')?.trim(), name = this.getAttribute('name')?.trim();
       if (generation !== this.generation || !this.isConnected || !room || !name) { this.render(); return; }
       const client = new StageClient({ url: this.wsUrl() });
+      client.setPlaybackMuted(this.playbackMuted);
       this.current = client;
       for (const type of EVENTS) {
         client.on(type, ({ detail }) => {
@@ -186,6 +197,10 @@ export class StageElement extends HTMLElement {
     const audience = Boolean(me && !me.onStage && me.role !== 'controller');
     const cooldown = Math.ceil((client?.handCooldownMs ?? 0) / 1000);
     this.hand.hidden = !audience;
+    this.listen.hidden = !me;
+    this.listen.disabled = !client || this.pendingActions.has(this.listen);
+    this.listen.textContent = this.playbackMuted ? '恢復收聽' : '靜音收聽';
+    this.listen.setAttribute('aria-pressed', String(this.playbackMuted));
     this.unlock.disabled = this.pendingActions.has(this.unlock);
     this.hand.disabled = this.pendingActions.has(this.hand) || !me || (!me.handRaised && cooldown > 0);
     this.hand.textContent = me?.handRaised ? '收回舉手' : cooldown > 0 ? `舉手發言（${cooldown} 秒）` : '舉手發言';

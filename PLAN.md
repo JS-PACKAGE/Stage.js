@@ -363,3 +363,5 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 41. **同一 peer 下台取消擷取等待（2026-10-12）：** 重現未回覆的 getUserMedia 阻塞同一 peer 下台後 recvonly 協商。房間擷取新增單一 permission token，連到 peer 代際，並在下台中止；完成／失敗／取消清除連結 listener。captureRevision 防止授權成功與安裝間的快速下台／再上台競態採用舊串流，正常權限拒絕仍走 micerror，獨立 preview 不受影響。同 peer 工作仍序列化；不取消已進瀏覽器的 replaceTrack。增加 7 個 fake-media 測試，包含 listener 清理、快速往返、裝置切換、preview 隔離與 acquisition→installation 競態，以及拒絕先排入 microtask 後才下台／再上台的舊錯誤。
 
 42. **靜態掛載 canonical containment（2026-10-12）：** synthetic 測試重現 lexical path 檢查仍會透過來源檔／父目錄 symlink 送出 mount 之外內容。每請求解析實際 root/source 路徑並驗證目錄邊界，選中的 sidecar 亦須在 canonical root 內；讀取解析後的檔案路徑。保留 mount 內 symlink、部署 release-root symlink、啟動後建立輸出目錄與 root 切換。測試含相似前綴 sibling、外部 directory→內部來源回鏈但外部 sidecar、dangling/cycle、GET/HEAD。增加 metadata I/O，無加速宣稱；不宣稱防禦惡意本機 writer 在檢查與開檔間替換檔案的 TOCTOU。
+
+43. **嵌入元件本機收聽靜音（2026-10-12）：** `<stage-client>` 增加「靜音收聽／恢復收聽」原生按鈕（aria-pressed）與 playback-muted 布林 attribute／playbackMuted property，清楚區別台上麥克風靜音。只改本機 audio，不傳控制面訊息、不重新進房；偏好在新 client 開始 connect 前套用，保留於 rejoin／重掛載／信令 reconnect，未進房隱藏操作。增加 4 個 DOM fake 測試（含實際元件 lifecycle callbacks，SDK connect/join 以 stub 取代）；不宣稱瀏覽器鍵盤／版面／實際音訊 QA。

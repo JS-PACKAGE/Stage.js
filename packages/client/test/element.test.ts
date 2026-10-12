@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { after, describe, it } from 'node:test';
-import type { StageClient } from '../src/index.ts';
+import { StageClient } from '../src/index.ts';
 
 /** Minimal DOM surface for widget state tests; this does not simulate a browser layout or input system. */
 class Node extends EventTarget {
@@ -16,13 +16,20 @@ class Node extends EventTarget {
   onclick?: () => void;
   append(...nodes: Node[]): void { this.children.push(...nodes); }
   attachShadow(): Node { const root = new Node(); this.children.push(root); return root; }
-  setAttribute(name: string, value: string): void { this.attributes.set(name, value); }
+  setAttribute(name: string, value: string): void { const previous = this.getAttribute(name); this.attributes.set(name, value); this.changed(name, previous, value); }
   getAttribute(name: string): string | null { return this.attributes.get(name) ?? null; }
-  removeAttribute(name: string): void { this.attributes.delete(name); }
+  removeAttribute(name: string): void { const previous = this.getAttribute(name); this.attributes.delete(name); this.changed(name, previous, null); }
+  hasAttribute(name: string): boolean { return this.attributes.has(name); }
+  toggleAttribute(name: string, force: boolean): boolean { if (force) this.setAttribute(name, ''); else this.removeAttribute(name); return force; }
+  private changed(name: string, previous: string | null, next: string | null): void {
+    const element = this as unknown as { attributeChangedCallback?: (name: string, previous: string | null, next: string | null) => void };
+    const type = this.constructor as unknown as { observedAttributes?: string[] };
+    if (previous !== next && type.observedAttributes?.includes(name)) element.attributeChangedCallback?.(name, previous, next);
+  }
 }
 const originals = new Map(['HTMLElement', 'document'].map(name => [name, Object.getOwnPropertyDescriptor(globalThis, name)]));
 Object.defineProperty(globalThis, 'HTMLElement', { configurable: true, value: Node });
-Object.defineProperty(globalThis, 'document', { configurable: true, value: { createElement: () => new Node() } });
+Object.defineProperty(globalThis, 'document', { configurable: true, value: { createElement: () => new Node(), body: { append() {} } } });
 const { StageElement } = await import('../src/element.ts');
 after(() => { for (const [name, descriptor] of originals) { if (descriptor) Object.defineProperty(globalThis, name, descriptor); else Reflect.deleteProperty(globalThis, name); } });
 
@@ -41,7 +48,7 @@ function widget(onStage = false) {
     me: { onStage, muted: false, forceMuted: false, handRaised: false, role: 'audience' },
     state: { name: 'Room' }, status: 'live', handCooldownMs: 0,
     raiseHand: action, withdrawHand: action, mute: action, unmute: action, leaveStage: action,
-    disconnect: async () => {},
+    disconnect: async () => {}, playbackMuted: false, setPlaybackMuted(muted: boolean) { this.playbackMuted = muted; },
   };
   element['current'] = client as unknown as StageClient;
   element['render']();
@@ -49,7 +56,7 @@ function widget(onStage = false) {
 }
 function click(button: HTMLButtonElement): void { button.onclick?.call(button, {} as PointerEvent); }
 
-describe('widget pending actions', () => {
+describe('widget actions and local playback', () => {
   it('keeps hand, mic and leave-stage actions disabled across renders until their request settles', async () => {
     for (const key of ['hand', 'mic', 'leaveStage'] as const) {
       const { element, pending, calls } = widget(key !== 'hand');
@@ -140,6 +147,80 @@ describe('widget pending actions', () => {
     assert.equal(calls(), 1);
     pending.resolve(); await settle();
     assert.equal(element['pendingActions'].size, 0);
+  });
+
+
+  it('toggles local listening without microphone or control requests and reflects its boolean attribute', async () => {
+    const { element, client, calls } = widget(true);
+    const before = { ...client.me };
+    click(element['listen']); await settle();
+    assert.equal(element.playbackMuted, true);
+    assert.equal(element.hasAttribute('playback-muted'), true);
+    assert.equal(client.playbackMuted, true);
+    assert.equal(element['listen'].textContent, '恢復收聽');
+    assert.equal(element['listen'].getAttribute('aria-pressed'), 'true');
+    assert.equal(element['listen'].getAttribute('aria-label'), '靜音收聽');
+    assert.equal(calls(), 0);
+    assert.deepEqual(client.me, before);
+    click(element['listen']); await settle();
+    assert.equal(element.playbackMuted, false);
+    assert.equal(client.playbackMuted, false);
+    assert.equal(element['listen'].getAttribute('aria-pressed'), 'false');
+    assert.equal(element['listen'].getAttribute('aria-label'), '靜音收聽');
+  });
+
+  it('applies attribute/property changes without rejoining or changing the current client', () => {
+    const { element, client } = widget();
+    const current = element.client, generation = element['generation'];
+    element.setAttribute('playback-muted', 'false'); // HTML boolean attributes are true when present.
+    assert.equal(element.playbackMuted, true);
+    assert.equal(client.playbackMuted, true);
+    element.playbackMuted = false;
+    assert.equal(element.hasAttribute('playback-muted'), false);
+    assert.equal(client.playbackMuted, false);
+    assert.equal(element.client, current);
+    assert.equal(element['generation'], generation);
+  });
+
+  it('retains the listening preference across actual rejoin and disconnect callbacks', async t => {
+    const initialMutes: boolean[] = [];
+    t.mock.method(StageClient.prototype, 'connect', async function (this: StageClient) { initialMutes.push(this.playbackMuted); });
+    t.mock.method(StageClient.prototype, 'join', async () => {});
+    t.mock.method(StageClient.prototype, 'disconnect', async () => {});
+    const element = new StageElement();
+    try {
+      element.playbackMuted = true;
+      element.setAttribute('room', 'one'); element.setAttribute('name', 'Listener');
+      await settle();
+      const first = element.client;
+      assert.ok(first);
+      assert.equal(first.playbackMuted, true);
+      element.setAttribute('room', 'two'); await settle();
+      assert.notEqual(element.client, first);
+      assert.equal(element.client?.playbackMuted, true);
+      element.disconnectedCallback(); await settle();
+      assert.equal(element.client, null);
+      assert.equal(element.playbackMuted, true);
+      element.connectedCallback(); await settle();
+      const reconnected = element.client as StageClient | null;
+      assert.equal(reconnected?.playbackMuted, true);
+      assert.deepEqual(initialMutes, [true, true, true], 'preference is applied before each connection starts');
+      assert.equal(element['listen'].hidden, true, 'no joined state yet');
+    } finally { element.disconnectedCallback(); await settle(); }
+  });
+
+
+  it('allows listening mute during signaling reconnect and hides it after leaving', async () => {
+    const { element, client, calls } = widget();
+    client.status = 'reconnecting'; element['render']();
+    assert.equal(element['listen'].disabled, false);
+    click(element['listen']); await settle();
+    assert.equal(client.playbackMuted, true);
+    assert.equal(calls(), 0);
+    element.disconnectedCallback(); await settle();
+    assert.equal(element['listen'].hidden, true);
+    assert.equal(element['listen'].disabled, true);
+    assert.equal(element.playbackMuted, true);
   });
 
 });
