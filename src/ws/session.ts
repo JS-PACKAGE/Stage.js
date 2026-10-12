@@ -35,12 +35,13 @@ export class WsSession implements Session {
     }
     this.ws.send(data);
   }
+  stopInput(): void { this.onClosing(); }
   terminate(): void {
-    this.onClosing();
+    this.stopInput();
     this.ws.terminate();
   }
   close(code: number, reason: string): void {
-    this.onClosing();
+    this.stopInput();
     this.ws.close(code, reason);
   }
 }

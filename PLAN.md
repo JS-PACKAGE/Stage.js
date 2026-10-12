@@ -336,6 +336,8 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 
 30. **輸入工作上限**：每條 ws 以可清空的明確佇列取代逐訊息 promise closure，等待工作受 maxPendingMessages／maxPendingBytes 雙上限約束，單一執行中工作另受 maxFrameBytes 限制。超限立即 terminate 並清除等待 payload，所有關閉均停止接收／執行新工作，僅等待執行中工作完成後 detach；正常 FIFO 不變，其他連線不受影響。觀測 inbound queue disconnect counter，舊設定採有界預設。
 
+31. **停機准入與 readiness**：server.close 開始時同步標記 draining、停止所有 session 輸入工作；新 upgrade 回 503，不再接受排空期間新增連線／控制操作。新增 GET／HEAD /readyz（正常 200、排空 503、no-store），/healthz 繼續表示程序存活；不是 WebRTC 健康探針。close 共用同一 promise，房間通知／關閉握手維持原順序，避免重複停機。
+
 ---
 
 開始執行。

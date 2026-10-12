@@ -4,7 +4,6 @@ import { createServer as createHttpsServer, type Server as HttpsServer } from 'n
 import type { AddressInfo } from 'node:net';
 import { basename, dirname } from 'node:path';
 import { timingSafeEqual } from 'node:crypto';
-import { once } from 'node:events';
 import { WebSocketServer, type WebSocket } from 'ws';
 import type { AppConfig } from '../config.ts';
 import { createStaticHandler } from '../http/static.ts';
@@ -49,12 +48,22 @@ const TLS_RELOAD_DEBOUNCE_MS = 2000;
 export function createStageServer(deps: StageServerDeps): StageServer {
   const { config, hub, log } = deps;
   const now = deps.now ?? Date.now;
+  let stopping = false;
+  let closing: Promise<void> | undefined;
   let backpressureDisconnects = 0;
   let inboundQueueDisconnects = 0;
   let metricsInFlight: Promise<string> | undefined;
   const serveStatic = createStaticHandler(config.server.static, deps.baseDir);
 
   const onRequest = (req: IncomingMessage, res: ServerResponse) => {
+    if (req.url === '/readyz') {
+      res.setHeader('Content-Type', 'text/plain');
+      res.setHeader('Cache-Control', 'no-store');
+      if (req.method !== 'GET' && req.method !== 'HEAD') {
+        res.writeHead(405, { Allow: 'GET, HEAD' }).end();
+      } else res.writeHead(stopping ? 503 : 200).end(req.method === 'HEAD' ? undefined : stopping ? 'draining' : 'ready');
+      return;
+    }
     if (req.url === '/healthz') {
       res.writeHead(200, { 'Content-Type': 'text/plain' }).end('ok');
       return;
@@ -146,6 +155,10 @@ export function createStageServer(deps: StageServerDeps): StageServer {
   };
 
   server.on('upgrade', (req, socket, head) => {
+    if (stopping) {
+      socket.end('HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\nContent-Length: 0\r\nRetry-After: 1\r\n\r\n', () => socket.destroy());
+      return;
+    }
     const path = new URL(req.url ?? '/', 'http://x').pathname;
     const ip = clientAddress(req);
     const perIpCap = config.limits.maxConnectionsPerIp;
@@ -164,7 +177,7 @@ export function createStageServer(deps: StageServerDeps): StageServer {
       log.warn('ws outbound buffer exceeded, disconnecting', { session: session.id, bufferedBytes, messageBytes, limitBytes: config.limits.maxSendBufferBytes });
     }, () => stopInput());
     const incoming = new MessageQueue<ClientMessage>(config.limits.maxPendingMessages, config.limits.maxPendingBytes, (message) => {
-      if (ws.readyState !== ws.OPEN) { stopInput(); return Promise.resolve(); }
+      if (stopping || ws.readyState !== ws.OPEN) { stopInput(); return Promise.resolve(); }
       return hub.handle(session, message);
     }, (error) => {
       log.error('ws message handler failed', { session: session.id, error: String(error) });
@@ -187,7 +200,7 @@ export function createStageServer(deps: StageServerDeps): StageServer {
       session.alive = true;
     });
     ws.on('message', (data, isBinary) => {
-      if (ws.readyState !== ws.OPEN) return;
+      if (stopping || ws.readyState !== ws.OPEN) return;
       let msg;
       let messageBytes = 0;
       try {
@@ -240,6 +253,7 @@ export function createStageServer(deps: StageServerDeps): StageServer {
 
   return {
     listen: () => {
+      if (stopping) return Promise.reject(new Error('server is closing'));
       const { promise, resolve: done, reject } = Promise.withResolvers<AddressInfo>();
       server.once('error', reject);
       server.listen(config.server.port, config.server.host, () => {
@@ -248,23 +262,31 @@ export function createStageServer(deps: StageServerDeps): StageServer {
       });
       return promise;
     },
-    close: async () => {
-      clearInterval(heartbeat);
-      clearTimeout(reloadTimer);
-      for (const w of watchers) w.close();
-      await hub.shutdown();
-      // A graceful close flushes the `room:closed` frames queued above; terminate() could drop them.
-      const drained = Promise.all([...sessions].map((s) => once(s.ws, 'close')));
-      for (const s of sessions) s.close(CLOSE_GOING_AWAY, 'server shutdown');
-      const deadline = setTimeout(() => { for (const s of sessions) s.terminate(); }, SHUTDOWN_DRAIN_MS);
-      await drained;
-      clearTimeout(deadline);
-      const wssClosed = Promise.withResolvers<void>();
-      wss.close(() => wssClosed.resolve());
-      await wssClosed.promise;
-      const serverClosed = Promise.withResolvers<void>();
-      server.close(() => serverClosed.resolve());
-      await serverClosed.promise;
+    close: () => {
+      if (closing) return closing;
+      stopping = true;
+      for (const session of sessions) session.stopInput();
+      closing = Promise.resolve().then(async () => {
+        clearInterval(heartbeat);
+        clearTimeout(reloadTimer);
+        for (const w of watchers) w.close();
+        try { await hub.shutdown(); }
+        finally {
+          // A graceful close flushes the `room:closed` frames queued above; terminate() could drop them.
+          const drained = Promise.all([...sessions].map((s) => new Promise<void>(resolve => s.ws.once('close', () => resolve()))));
+          for (const s of sessions) s.close(CLOSE_GOING_AWAY, 'server shutdown');
+          const deadline = setTimeout(() => { for (const s of sessions) s.terminate(); }, SHUTDOWN_DRAIN_MS);
+          await drained;
+          clearTimeout(deadline);
+          const wssClosed = Promise.withResolvers<void>();
+          wss.close(() => wssClosed.resolve());
+          await wssClosed.promise;
+          const serverClosed = Promise.withResolvers<void>();
+          server.close(() => serverClosed.resolve());
+          await serverClosed.promise;
+        }
+      });
+      return closing;
     },
   };
 }
