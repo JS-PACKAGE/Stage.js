@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { after, before, describe, it } from 'node:test';
-import { mkdtemp, mkdir, readFile, rm, symlink, utimes, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, rename, symlink, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer, request, type IncomingHttpHeaders } from 'node:http';
@@ -51,7 +51,18 @@ describe('precompressed static delivery', () => {
     await writeFile(join(pub, 'linked.js'), source);
     await writeFile(join(root, 'secret.br'), br);
     await symlink(join(root, 'secret.br'), join(pub, 'linked.js.br'));
-    const serve = createStaticHandler([{ mount: '/', dir: pub, cors: true }], root);
+    await writeFile(join(root, 'outside.js'), 'synthetic outside-mount fixture');
+    await symlink(join(root, 'outside.js'), join(pub, 'outside-link.js'));
+    await mkdir(join(root, 'public-other'));
+    await writeFile(join(root, 'public-other', 'other.js'), 'synthetic sibling fixture');
+    await symlink(join(root, 'public-other'), join(pub, 'outside-dir'));
+    await symlink(join(pub, 'asset.js'), join(root, 'public-other', 'back.js'));
+    await writeFile(join(root, 'public-other', 'back.js.br'), 'synthetic external sidecar');
+    await symlink(join(pub, 'asset.js'), join(pub, 'inside-link.js'));
+    await symlink(pub, join(root, 'mounted-link'));
+    await symlink(join(pub, 'cycle.js'), join(pub, 'cycle.js'));
+    await symlink(join(root, 'missing-target.js'), join(pub, 'dangling.js'));
+    const serve = createStaticHandler([{ mount: '/late/', dir: join(root, 'late-build'), cors: false }, { mount: '/linked-root/', dir: join(root, 'mounted-link'), cors: false }, { mount: '/', dir: pub, cors: true }], root);
     server = createServer((req, res) => { void serve(req, res).then(found => { if (!found) res.writeHead(404).end(); }).catch(() => res.writeHead(500).end()); });
     await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
     port = (server.address() as AddressInfo).port;
@@ -127,6 +138,38 @@ describe('precompressed static delivery', () => {
     assert.equal(head.headers['content-length'], String(gz.length));
     assert.equal(head.headers['content-type'], 'text/javascript; charset=utf-8');
     assert.equal(head.body.length, 0);
+  });
+  it('rejects source and directory symlinks escaping the canonical mount while allowing internal and configured-root links', async () => {
+    for (const path of ['/outside-link.js', '/outside-dir/other.js', '/cycle.js', '/dangling.js']) {
+      for (const method of ['GET', 'HEAD']) {
+        const response = await get(path, { 'accept-encoding': 'br, gzip' }, method);
+        assert.equal(response.status, 404, `${method} ${path}`);
+        assert.equal(response.body.length, 0);
+      }
+    }
+    assert.deepEqual((await get('/inside-link.js')).body, source);
+    const back = await get('/outside-dir/back.js', { 'accept-encoding': 'br' });
+    assert.equal(back.headers['content-encoding'], undefined, 'a linked-back source must not authorize its outside sidecar');
+    assert.deepEqual(back.body, source);
+    assert.deepEqual((await get('/linked-root/asset.js')).body, source);
+  });
+  it('supports a mount built after startup and symlinked release-root replacement without stale canonical caching', async () => {
+    assert.equal((await get('/late/ready.js')).status, 404);
+    await mkdir(join(root, 'late-build'));
+    await writeFile(join(root, 'late-build', 'ready.js'), 'late build');
+    assert.equal((await get('/late/ready.js')).body.toString(), 'late build');
+    const release = join(root, 'release-two');
+    await mkdir(release);
+    await writeFile(join(release, 'asset.js'), 'new release');
+    await symlink(release, join(root, 'new-link'));
+    await rename(join(root, 'new-link'), join(root, 'mounted-link'));
+    try {
+      assert.equal((await get('/linked-root/asset.js')).body.toString(), 'new release');
+      assert.deepEqual((await get('/asset.js')).body, source, 'other mounts stay independent');
+    } finally {
+      await symlink(join(root, 'public'), join(root, 'restored-link'));
+      await rename(join(root, 'restored-link'), join(root, 'mounted-link'));
+    }
   });
   it('retains path-traversal protection and never recompresses encoded URLs', async () => {
     assert.equal((await get('/..%2fsecret.br', { 'accept-encoding': 'br' })).status, 404);
