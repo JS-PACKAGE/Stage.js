@@ -11,6 +11,8 @@ import { createStaticHandler } from '../http/static.ts';
 import type { Logger } from '../log.ts';
 import { renderPrometheus } from '../metrics.ts';
 import { WsSession } from './session.ts';
+import { MessageQueue } from './messageQueue.ts';
+import type { ClientMessage } from '../../shared/protocol.ts';
 import { ERROR_MESSAGES } from '../model/errors.ts';
 import type { StageHub } from './hub.ts';
 import { ConnectionRateLimiter } from './rateLimit.ts';
@@ -48,6 +50,7 @@ export function createStageServer(deps: StageServerDeps): StageServer {
   const { config, hub, log } = deps;
   const now = deps.now ?? Date.now;
   let backpressureDisconnects = 0;
+  let inboundQueueDisconnects = 0;
   let metricsInFlight: Promise<string> | undefined;
   const serveStatic = createStaticHandler(config.server.static, deps.baseDir);
 
@@ -68,7 +71,10 @@ export function createStageServer(deps: StageServerDeps): StageServer {
       const collect = deps.metrics;
       metricsInFlight ??= Promise.resolve().then(() => collect.call(deps)).finally(() => { metricsInFlight = undefined; });
       metricsInFlight.then(
-        (text) => res.writeHead(200, { 'Content-Type': 'text/plain; version=0.0.4', 'Cache-Control': 'no-store' }).end(text + renderPrometheus([{ name: 'stage_ws_backpressure_disconnects_total', help: 'WebSocket connections terminated for exceeding the outbound buffer limit.', type: 'counter', value: backpressureDisconnects }])),
+        (text) => res.writeHead(200, { 'Content-Type': 'text/plain; version=0.0.4', 'Cache-Control': 'no-store' }).end(text + renderPrometheus([
+          { name: 'stage_ws_backpressure_disconnects_total', help: 'WebSocket connections terminated for exceeding the outbound buffer limit.', type: 'counter', value: backpressureDisconnects },
+          { name: 'stage_ws_inbound_queue_disconnects_total', help: 'WebSocket connections terminated for exceeding the waiting input backlog.', type: 'counter', value: inboundQueueDisconnects },
+        ])),
         (err) => { log.error('metrics error', { error: String(err) }); res.writeHead(500).end(); },
       );
       return;
@@ -152,10 +158,19 @@ export function createStageServer(deps: StageServerDeps): StageServer {
   });
 
   wss.on('connection', (ws: WebSocket, req: IncomingMessage) => {
+    let stopInput = () => {};
     const session = new WsSession(ws, config.limits.maxSendBufferBytes, (bufferedBytes, messageBytes) => {
       backpressureDisconnects++;
       log.warn('ws outbound buffer exceeded, disconnecting', { session: session.id, bufferedBytes, messageBytes, limitBytes: config.limits.maxSendBufferBytes });
+    }, () => stopInput());
+    const incoming = new MessageQueue<ClientMessage>(config.limits.maxPendingMessages, config.limits.maxPendingBytes, (message) => {
+      if (ws.readyState !== ws.OPEN) { stopInput(); return Promise.resolve(); }
+      return hub.handle(session, message);
+    }, (error) => {
+      log.error('ws message handler failed', { session: session.id, error: String(error) });
+      session.terminate();
     });
+    stopInput = () => { void incoming.stop(); };
     const limiter = new ConnectionRateLimiter(config.limits, now());
     const ip = clientAddress(req);
     sessions.add(session);
@@ -172,10 +187,14 @@ export function createStageServer(deps: StageServerDeps): StageServer {
       session.alive = true;
     });
     ws.on('message', (data, isBinary) => {
+      if (ws.readyState !== ws.OPEN) return;
       let msg;
+      let messageBytes = 0;
       try {
         if (isBinary) throw new ValidationError('bad_request', 'binary frame', undefined);
-        msg = parseClientMessage(data.toString('utf8'), config.limits);
+        const text = data.toString('utf8');
+        messageBytes = Buffer.byteLength(text);
+        msg = parseClientMessage(text, config.limits);
       } catch (err) {
         if (!limiter.allow('ping', now())) return violate(session, 'invalid');
         const e = err instanceof ValidationError ? err : new ValidationError('bad_request', 'parse', undefined);
@@ -183,8 +202,12 @@ export function createStageServer(deps: StageServerDeps): StageServer {
         return;
       }
       if (!limiter.allow(msg.type, now())) return violate(session, msg.type);
-      const m = msg;
-      session.chain = session.chain.then(() => hub.handle(session, m));
+      if (!incoming.enqueue(msg, messageBytes)) {
+        inboundQueueDisconnects++;
+        log.warn('ws inbound backlog exceeded, disconnecting', { session: session.id, pendingMessages: incoming.pendingMessages, pendingBytes: incoming.pendingBytes, messageBytes });
+        void incoming.stop();
+        session.terminate();
+      }
     });
     ws.on('close', (code) => {
       clearTimeout(joinDeadline);
@@ -193,7 +216,7 @@ export function createStageServer(deps: StageServerDeps): StageServer {
       if (remaining > 0) perIp.set(ip, remaining); else perIp.delete(ip);
       log.debug('connection closed', { session: session.id, code });
       // 1000 from the client = it chose to leave; anything else (1001 page hide, 1006 drop…) holds the seat.
-      session.chain = session.chain.then(() => hub.detach(session, code === CLOSE_NORMAL));
+      void incoming.stop().then(() => hub.detach(session, code === CLOSE_NORMAL));
     });
     ws.on('error', (err) => log.debug('ws error', { session: session.id, error: String(err) }));
   });
@@ -206,7 +229,7 @@ export function createStageServer(deps: StageServerDeps): StageServer {
   const heartbeat = setInterval(() => {
     for (const s of sessions) {
       if (!s.alive) {
-        s.ws.terminate();
+        s.terminate();
         continue;
       }
       s.alive = false;
@@ -233,7 +256,7 @@ export function createStageServer(deps: StageServerDeps): StageServer {
       // A graceful close flushes the `room:closed` frames queued above; terminate() could drop them.
       const drained = Promise.all([...sessions].map((s) => once(s.ws, 'close')));
       for (const s of sessions) s.close(CLOSE_GOING_AWAY, 'server shutdown');
-      const deadline = setTimeout(() => { for (const s of sessions) s.ws.terminate(); }, SHUTDOWN_DRAIN_MS);
+      const deadline = setTimeout(() => { for (const s of sessions) s.terminate(); }, SHUTDOWN_DRAIN_MS);
       await drained;
       clearTimeout(deadline);
       const wssClosed = Promise.withResolvers<void>();

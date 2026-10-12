@@ -334,6 +334,8 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 
 29. **監控收集去重**：每個 HTTP server 僅共用同時進行的 metrics promise，授權檢查仍逐請求先執行，成功／拒絕後立即清除。不跨伺服器共用、不設 TTL，新的 scrape 重新收集；同步 throw 也轉成既有 generic 500。重疊請求不再各自掃描房間與發出 worker counters RPC。
 
+30. **輸入工作上限**：每條 ws 以可清空的明確佇列取代逐訊息 promise closure，等待工作受 maxPendingMessages／maxPendingBytes 雙上限約束，單一執行中工作另受 maxFrameBytes 限制。超限立即 terminate 並清除等待 payload，所有關閉均停止接收／執行新工作，僅等待執行中工作完成後 detach；正常 FIFO 不變，其他連線不受影響。觀測 inbound queue disconnect counter，舊設定採有界預設。
+
 ---
 
 開始執行。

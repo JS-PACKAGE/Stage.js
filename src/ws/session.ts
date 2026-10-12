@@ -8,15 +8,15 @@ export class WsSession implements Session {
   readonly id = randomBytes(6).toString('base64url');
   readonly ws: WebSocket;
   alive = true;
-  /** Per-connection ordering: a message is handled only after the previous one settled. */
-  chain: Promise<void> = Promise.resolve();
   private readonly maxSendBufferBytes: number;
   private readonly onBackpressure: (bufferedBytes: number, messageBytes: number) => void;
   private overloaded = false;
-  constructor(ws: WebSocket, maxSendBufferBytes: number, onBackpressure: (bufferedBytes: number, messageBytes: number) => void) {
+  private readonly onClosing: () => void;
+  constructor(ws: WebSocket, maxSendBufferBytes: number, onBackpressure: (bufferedBytes: number, messageBytes: number) => void, onClosing: () => void = () => {}) {
     this.ws = ws;
     this.maxSendBufferBytes = maxSendBufferBytes;
     this.onBackpressure = onBackpressure;
+    this.onClosing = onClosing;
   }
   send(msg: ServerMessage, encoded?: string): void {
     if (this.overloaded || this.ws.readyState !== this.ws.OPEN) return;
@@ -29,13 +29,18 @@ export class WsSession implements Session {
       this.overloaded = true;
       // A close frame would wait behind the stalled queue. Terminate instead: abnormal closure
       // preserves the participant's seat/media for the normal reconnect grace period.
-      this.ws.terminate();
+      this.terminate();
       this.onBackpressure(bufferedBytes, messageBytes);
       return;
     }
     this.ws.send(data);
   }
+  terminate(): void {
+    this.onClosing();
+    this.ws.terminate();
+  }
   close(code: number, reason: string): void {
+    this.onClosing();
     this.ws.close(code, reason);
   }
 }

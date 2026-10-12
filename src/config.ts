@@ -29,6 +29,9 @@ export interface AppConfig {
     maxFrameBytes: number;
     /** Maximum pending outbound bytes, including the next message; slow readers are disconnected. */
     maxSendBufferBytes: number;
+    /** Waiting inbound work, excluding the single active operation. */
+    maxPendingMessages: number;
+    maxPendingBytes: number;
     controlPerSecond: number;
     handRaiseIntervalMs: number;
     icePerSecond: number;
@@ -219,6 +222,10 @@ export function parseConfig(raw: unknown): AppConfig {
     maxSendBufferBytes: l.maxSendBufferBytes === undefined
       ? Math.min(Number.MAX_SAFE_INTEGER, int(l, 'maxFrameBytes', 'limits', 1024) * 16)
       : int(l, 'maxSendBufferBytes', 'limits', 1024),
+    maxPendingMessages: l.maxPendingMessages === undefined ? 128 : int(l, 'maxPendingMessages', 'limits', 1),
+    maxPendingBytes: l.maxPendingBytes === undefined
+      ? Math.min(Number.MAX_SAFE_INTEGER, int(l, 'maxFrameBytes', 'limits', 1024) * 16)
+      : int(l, 'maxPendingBytes', 'limits', 1024),
     controlPerSecond: int(l, 'controlPerSecond', 'limits', 1),
     handRaiseIntervalMs: int(l, 'handRaiseIntervalMs', 'limits', 0),
     icePerSecond: int(l, 'icePerSecond', 'limits', 1),
