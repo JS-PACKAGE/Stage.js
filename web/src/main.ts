@@ -13,6 +13,9 @@ let micNotice = '';
 let invitation = '';
 let createdRoom: { roomId: string; code?: string } | null = null;
 let cooldownButton: HTMLButtonElement | null = null;
+let roomActionIdentity = '';
+let roomActionGeneration = 0;
+const pendingRoomActions = new Map<string, symbol>();
 /** Latest server report per publisher; loss at or above this is flagged in the stage list. */
 const POOR_LOSS_PERCENT = 5;
 let quality = new Map<string, ConnectionQuality>();
@@ -177,6 +180,41 @@ async function run(action: () => Promise<unknown>, target?: HTMLButtonElement): 
   catch (error) { showError(error instanceof Error ? error.message : '操作失敗，請稍後再試。'); }
   finally { if (target?.isConnected) target.disabled = false; updateCooldown(); syncMeter(); }
 }
+/** Personal room controls retain their pending state when snapshots replace their DOM nodes. */
+function resetRoomActions(identity: string): void {
+  if (roomActionIdentity === identity) return;
+  roomActionIdentity = identity; roomActionGeneration++; pendingRoomActions.clear();
+}
+function roomButton(key: string, label: string, action: () => Promise<unknown>, className = ''): HTMLButtonElement {
+  const node = element('button', className, label);
+  node.type = 'button'; node.dataset.roomAction = key;
+  const generation = roomActionGeneration;
+  node.onclick = () => {
+    if (node.disabled || generation !== roomActionGeneration || pendingRoomActions.has(key)) return;
+    const token = Symbol(key); pendingRoomActions.set(key, token);
+    updateCooldown(); errorBox.hidden = true;
+    void (async () => {
+      try { await action(); }
+      catch (error) {
+        if (generation === roomActionGeneration) showError(error instanceof Error ? error.message : '操作失敗，請稍後再試。');
+      } finally {
+        if (generation === roomActionGeneration && pendingRoomActions.get(key) === token) {
+          pendingRoomActions.delete(key); updateCooldown(); syncMeter();
+        }
+      }
+    })();
+  };
+  return node;
+}
+function syncRoomActions(): void {
+  for (const node of content.querySelectorAll<HTMLButtonElement>('[data-room-action]')) {
+    const key = node.dataset.roomAction!;
+    const pending = pendingRoomActions.has(key);
+    node.setAttribute('aria-busy', String(pending));
+    node.disabled = pending || client.status === 'reconnecting' || node.dataset.policyDisabled === 'true'
+      || (key === 'hand' && !client.me?.handRaised && client.handCooldownMs > 0);
+  }
+}
 function showError(message: string): void { errorBox.textContent = message; errorBox.hidden = false; }
 function field(form: HTMLFormElement, label: string, name: string, value = '', required = true, maxLength = 32): HTMLInputElement {
   const wrapper = element('label', 'field', label);
@@ -191,6 +229,7 @@ function field(form: HTMLFormElement, label: string, name: string, value = '', r
   return input;
 }
 function landing(): void {
+  resetRoomActions('');
   cooldownButton = null;
   brand.textContent = 'Stage.js 音訊舞台';
   const intro = element('section', 'intro');
@@ -253,6 +292,7 @@ function renderNotices(): void {
   if (invitation) notices.append(element('p', 'banner', invitation));
 }
 function renderRoom(state: RoomStatePayload): void {
+  resetRoomActions(JSON.stringify([state.roomId, state.me.participantId]));
   brand.textContent = decodeName(state.name);
   status.textContent = statusLabels[client.status];
   cooldownButton = null;
@@ -284,18 +324,18 @@ function renderRoom(state: RoomStatePayload): void {
   controls.append(element('h2', '', `你好，${decodeName(state.me.name)}`), element('p', '', `${roleLabels[state.me.role]}${state.me.forceMuted ? ' · 主控已鎖定靜音' : ''}`), connectionLine);
   const actions = element('div', 'actions');
   if (state.me.onStage) {
-    const mute = button(state.me.muted ? '取消靜音' : '靜音', () => state.me.muted ? client.unmute() : client.mute());
-    mute.disabled = state.me.forceMuted;
-    actions.append(mute, button('離開舞台', () => client.leaveStage()));
+    const mute = roomButton('mute', state.me.muted ? '取消靜音' : '靜音', () => state.me.muted ? client.unmute() : client.mute());
+    mute.dataset.policyDisabled = String(state.me.forceMuted);
+    actions.append(mute, roomButton('stage', '離開舞台', () => client.leaveStage()));
   } else if (controller) {
     // An off-stage controller keeps control and returns by self-approval; raising a hand is audience-only.
-    const returnButton = button('返回舞台', () => client.returnToStage(), 'primary');
+    const returnButton = roomButton('stage', '返回舞台', () => client.returnToStage(), 'primary');
     returnButton.dataset.returnStage = 'true';
     actions.append(returnButton);
   } else if (state.me.handRaised) {
-    actions.append(button('收回舉手', () => client.withdrawHand()));
+    actions.append(roomButton('hand', '收回舉手', () => client.withdrawHand()));
   } else {
-    cooldownButton = button('舉手發言', () => client.raiseHand(), 'primary');
+    cooldownButton = roomButton('hand', '舉手發言', () => client.raiseHand(), 'primary');
     actions.append(cooldownButton);
   }
   actions.append(button('離開房間', async () => {
@@ -392,6 +432,7 @@ function updateCooldown(): void {
   }
   const returnButton = content.querySelector<HTMLButtonElement>('[data-return-stage]');
   if (returnButton) returnButton.disabled = client.status === 'reconnecting';
+  syncRoomActions();
 }
 client.on('state', ({ detail }) => renderRoom(detail));
 client.on('status', ({ detail }) => {
