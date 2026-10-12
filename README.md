@@ -194,3 +194,9 @@ npm audit
 ### 結構化日誌遮蔽
 
 logger 會遞迴遮蔽物件／陣列中的 `code`、`resumeToken`、`token`、`credential`、`password`、`username`、`secret`、`sdp`、`payload` 欄位（不分大小寫），不修改原物件。循環、深度 8 或超過 1000 個欄位／元素的結構使用標記截斷；getter、toJSON 與 Proxy 不執行。深度／欄位上限限制遞迴複製與輸出結構，不限制 Object.keys 列舉成本或任意字串的位元組數，呼叫端仍應使用精簡欄位。Error 的資料型 name／message／stack／cause 保留並遞迴處理，accessor 型 stack 以標記表示；Date 與 bigint 安全轉成字串。這只是欄位名稱防護，不會辨識任意訊息／字串裡的秘密，呼叫端仍不得把憑證或原始 SDP 混進 log message。
+
+### 本機控制面容量煙霧測試
+
+`node scripts/bench-control-plane.ts` 只在 `127.0.0.1` 啟動臨時伺服器，依範本的 300 位觀眾上限，以每批 50 條真實 WebSocket 驗證進房、Mock SDP、滿房拒絕、10 位斷線回座與全體關機通知。30 秒硬期限避免卡住；完成即關閉連線與伺服器。輸出 ACK 延遲分位數、CPU、取樣 RSS 高點、事件迴圈延遲與訊息量，並檢查可用的輸入／輸出超限計數器為零（舊版無該指標時輸出 `null`）。
+
+這不是音訊容量驗收：媒體使用 `MockMediaTransport`，混音器不啟動，負載產生器與伺服器共用 Node 程序，所以資源／延遲包含兩者，也不代表跨網路或實際 WebRTC 表現。presence 合併視窗會讓不同次執行的快照數不同；請使用相同環境、多次比較，不把單次小幅差異當成加速證據。完整媒體測試仍使用 `scripts/load-test.ts`。
