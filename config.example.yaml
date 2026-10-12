@@ -26,6 +26,8 @@ server:
     token: ""
   # 反向代理之後設 true：每 IP 連線上限改以 X-Forwarded-For 第一個位址計算。直接對外時務必保持 false（標頭可偽造）。
   trustProxy: false
+  # HTTP listener 停止接收後，最多等待未完成回應多久；0 立即切斷，範圍 0–60000ms。舊設定省略時為 1000ms。
+  httpShutdownDrainMs: 1000
 
 limits:
   maxRooms: 100                # 可調整

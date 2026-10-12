@@ -284,7 +284,10 @@ export function createStageServer(deps: StageServerDeps): StageServer {
           await wssClosed.promise;
           const serverClosed = Promise.withResolvers<void>();
           server.close(() => serverClosed.resolve());
-          await serverClosed.promise;
+          // A paused download or unresolved metrics response must not retain the HTTP listener forever.
+          const httpDeadline = setTimeout(() => server.closeAllConnections(), config.server.httpShutdownDrainMs);
+          try { await serverClosed.promise; }
+          finally { clearTimeout(httpDeadline); }
         }
       });
       return closing;

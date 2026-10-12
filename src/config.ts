@@ -20,6 +20,8 @@ export interface AppConfig {
     metrics: { enabled: boolean; token: string };
     /** Behind a reverse proxy: take the client address from `X-Forwarded-For` for per-IP limits. */
     trustProxy: boolean;
+    /** Grace for unfinished HTTP responses after listener shutdown begins (0 = cut off immediately). */
+    httpShutdownDrainMs: number;
   };
   limits: {
     maxRooms: number;
@@ -198,6 +200,7 @@ export function parseConfig(raw: unknown): AppConfig {
     }),
     metrics: { enabled: bool(mt, 'enabled', 'server.metrics'), token: str(mt, 'token', 'server.metrics') },
     trustProxy: bool(s, 'trustProxy', 'server'),
+    httpShutdownDrainMs: s.httpShutdownDrainMs === undefined ? 1000 : int(s, 'httpShutdownDrainMs', 'server', 0, 60000),
   };
   if (server.metrics.enabled && server.metrics.token === '' && LOOPBACK[server.host] !== true) {
     throw new ConfigError('server.metrics.token: required when metrics are enabled on a non-loopback host');
