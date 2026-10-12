@@ -525,8 +525,11 @@ export class StageHub {
     }
     this.deps.log.info('controller auto-transfer', { roomId: room.roomId, fromId: pid, toId: successor.participantId });
     this.dropMedia(rt, pid);
-    const events = room.transfer(pid, successor.participantId, 'auto');
-    this.apply(rt, [...events, ...room.remove(pid)]);
+    // The expired controller is removed immediately, so unlike a manual transfer it needs no extra speaker seat.
+    const events = p.onStage && !successor.onStage && room.speakerCount >= room.limits.maxSpeakers
+      ? room.leaveStage(pid) : [];
+    events.push(...room.transfer(pid, successor.participantId, 'auto'), ...room.remove(pid));
+    this.apply(rt, events);
   }
 
   // ─────────────────────────────── effects ───────────────────────────────

@@ -93,6 +93,10 @@ Windows 用 `.\stage.ps1 <command>`，指令相同；Windows 無法對背景 nod
 
 `allowInsecure: false`、`host: 0.0.0.0`、填 `tls`；開放 `rtc.portRange` 的 UDP；設定 `rtc.turn`（coturn 需 `use-auth-secret` 與相同的 `static-auth-secret`）。憑證檔更新（含 ACME 工具的改名／symlink 替換）後約 2 秒自動重載，不需重啟；新憑證載入失敗時沿用舊憑證並記 error。
 
+### 主控斷線接任
+
+主控斷線寬限到期時，仍優先移交給最早上台且已連線的發言者，否則給最早加入且已連線的觀眾。即使所有發言席都由寬限中的斷線者占用，觀眾也能接任主控；到期舊主控會移除，不需額外占用發言席。其他斷線者仍保留原席位、媒體與各自寬限，接任觀眾不會自動開啟麥克風。手動移交的滿台限制維持不變；沒有可接任的已連線者時關房。
+
 ### 媒體 worker 看門狗
 
 RPC（SDP、ICE、統計、關閉）超過 `rtc.mediaWorkerTimeoutMs` 即拒絕該 worker 全部待回覆請求、停止並重建 worker，通知其音訊連線已失效；其他 worker 不受影響。替換後忽略舊 worker 的延遲回覆／事件，避免舊協商污染新連線。這會讓該 worker 的使用者暫時中斷音訊並依既有流程重建，請將期限設得足以涵蓋正常 ICE／STUN 協商；過小會反覆重生。停機沿用同一期限，但不重生 worker。
