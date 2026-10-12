@@ -15,6 +15,12 @@ const MOCKED_CALLS = new Set([
   'kill -TERM "$pid"',
   'while kill -0 "$pid" 2>/dev/null; do',
   'kill -KILL "$pid" 2>/dev/null || true',
+  'command -v node >/dev/null 2>&1 || die "找不到 node（需要 Node.js 24 以上）"',
+  'major=$(node -p \'process.versions.node.split(".")[0]\')',
+  '[ "$major" -ge 24 ] || die "Node.js 版本為 $(node --version)，需要 24 以上"',
+  'nohup node "$ENTRY" >>"$LOG_FILE" 2>&1 &',
+  // This dispatch is unreachable through the fixture's command options.
+  'run) check_node; ensure_config; exec node "$ENTRY" ;;',
 ]);
 
 // Reject command/builtin/path-qualified calls before sourcing: they could bypass
@@ -22,16 +28,17 @@ const MOCKED_CALLS = new Set([
 function assertMockableScript(): void {
   for (const line of SCRIPT.split('\n')) {
     const code = line.trim();
-    if (!code.startsWith('#') && /\b(?:kill|sleep)\b/.test(code)) {
+    if (!code.startsWith('#') && /\b(?:kill|sleep|node|nohup)\b/.test(code)) {
       assert.ok(MOCKED_CALLS.has(code), `Unreviewed process operation: ${code}`);
     }
   }
 }
 
 const HARNESS = String.raw`
+# Malformed operands stay inside this mock and are never forwarded to real kill.
 kill() {
   printf 'kill %s\n' "$*" >> "$TRACE"
-  [ "$#" -eq 2 ] && [ "$2" = "$FAKE_PID" ] || exit 91
+  [ "$#" -eq 2 ] && [ "$2" = "$EXPECTED_PID" ] || exit 91
   case "$1" in
     -TERM|-KILL) return 0 ;;
     -0)
@@ -46,20 +53,39 @@ sleep() {
   printf 'sleep %s\n' "$*" >> "$TRACE"
   [ "$#" -eq 1 ] && [ "$1" = 1 ] || exit 93
 }
-# Invalid restart must not reach start. Never launch a Node server on regression.
+# Simulate read errors independently of the runner's filesystem permissions.
+od() {
+  if [ "$PID_READ_FAIL" = 1 ]; then
+    printf ' 49 10\n' # Partial output must be discarded on read failure.
+    return 96
+  fi
+  command od "$@"
+}
+# Invalid start/restart must not reach Node. Never launch a server on regression.
 node() { printf 'node %s\n' "$*" >> "$TRACE"; return 94; }
 nohup() { printf 'nohup %s\n' "$*" >> "$TRACE"; return 95; }
-. "$0"
+if [ "$HARNESS_COMMAND" = running_pid ]; then
+  set -- help
+  . "$0" >/dev/null
+  running_pid
+else
+  . "$0"
+fi
 `;
 
 type Options = {
-  command?: 'stop' | 'restart' | 'status' | 'help';
+  command?: 'start' | 'stop' | 'restart' | 'status' | 'help' | 'running_pid';
   timeout?: string;
   aliveChecks?: number;
   pidFile?: boolean;
+  pidContent?: string;
+  pidReadFail?: boolean;
 };
 
-function runScript({ command = 'stop', timeout, aliveChecks = 32, pidFile = true }: Options = {}) {
+function runScript({
+  command = 'stop', timeout, aliveChecks = 32, pidFile = true,
+  pidContent = `${FAKE_PID}\n`, pidReadFail = false,
+}: Options = {}) {
   assertMockableScript();
   const root = mkdtempSync(join(tmpdir(), 'stage-script-test-'));
   try {
@@ -69,11 +95,14 @@ function runScript({ command = 'stop', timeout, aliveChecks = 32, pidFile = true
     const count = join(root, 'count');
     writeFileSync(script, SCRIPT);
     mkdirSync(join(root, '.run'));
-    if (pidFile) writeFileSync(pid, `${FAKE_PID}\n`);
+    if (pidFile) writeFileSync(pid, pidContent);
     writeFileSync(trace, '');
     writeFileSync(count, '0\n');
     const env: NodeJS.ProcessEnv = {
-      ...process.env, TRACE: trace, COUNT: count, FAKE_PID, ALIVE_CHECKS: String(aliveChecks),
+      ...process.env, TRACE: trace, COUNT: count, ALIVE_CHECKS: String(aliveChecks),
+      // Model the old shell capture for safe baseline probes; environment values cannot contain NUL.
+      EXPECTED_PID: pidContent.replace(/\0/g, '').replace(/\n+$/, ''),
+      PID_READ_FAIL: pidReadFail ? '1' : '0', HARNESS_COMMAND: command,
     };
     delete env.STAGE_STOP_TIMEOUT;
     if (timeout !== undefined) env.STAGE_STOP_TIMEOUT = timeout;
@@ -213,4 +242,104 @@ describe('stage.sh stop timeout', { skip }, () => {
     assert.match(result.stdout, /STAGE_STOP_TIMEOUT/);
     assert.equal(result.stderr, '');
   });
+});
+
+describe('stage.sh PID-file validation', { skip }, () => {
+  const commands = ['start', 'status', 'stop', 'restart'] as const;
+  const invalid = [
+    '', '\n', '\n\n', '\0', '1\0\n', '\0' + '1\n', '1\0' + '2\n', '1\n\0', '\n1\n', '1\t', '\u00011\n', ' ', '\t\n', '0', '0000', '-1', '-0', '+1',
+    'abc', '1.5', '1e2', '0x10', ' 1', '1 ', '1 2', '1\n2\n', '1\r\n',
+    '１２', '2; exit 0', '2147483648', '0002147483648', '999999999999999999999999',
+  ];
+
+  for (const command of commands) {
+    for (const pidContent of invalid) {
+      it(`${command} preserves and rejects PID ${JSON.stringify(pidContent)} before process operations`, () => {
+        const result = runScript({ command, pidContent, timeout: '0' });
+        assert.deepEqual(result.trace, [], 'invalid PID must not probe, signal, sleep, or reach Node');
+        assert.equal(result.status, 1);
+        assert.equal(result.stdout, '');
+        assert.equal(result.pid, pidContent);
+        assert.match(result.stderr, /^stage: [^\r\n]+\n$/);
+        assert.match(result.stderr, /PID|pid/);
+        assert.doesNotMatch(result.stderr, /Illegal number|integer expression|out of range/i);
+      });
+    }
+
+    it(`${command} preserves a PID file when reading it fails`, () => {
+      const result = runScript({ command, pidReadFail: true, timeout: '0' });
+      assert.deepEqual(result.trace, []);
+      assert.equal(result.status, 1);
+      assert.equal(result.stdout, '');
+      assert.equal(result.pid, `${FAKE_PID}\n`);
+      assert.match(result.stderr, /^stage: [^\r\n]+\n$/);
+      assert.match(result.stderr, /PID|pid/);
+    });
+  }
+
+  for (const pidContent of [
+    '1', `${FAKE_PID}\n`, '0001\n', '0008\n', '0002147483647\n',
+    `${'0'.repeat(64)}8\n`, `${FAKE_PID}\n\n`,
+  ]) {
+    const parsed = pidContent.replace(/\n+$/, '');
+    for (const aliveChecks of [0, 1]) {
+      it(`status accepts ${JSON.stringify(pidContent)} when ${aliveChecks ? 'live' : 'stale'}`, () => {
+        const result = runScript({ command: 'status', pidContent, aliveChecks, timeout: 'abc' });
+        assert.equal(result.status, aliveChecks ? 0 : 3);
+        assert.deepEqual(result.trace, [`kill -0 ${parsed}`]);
+        assert.equal(result.stdout, aliveChecks ? `執行中（pid ${parsed}）\n` : '未在執行\n');
+        assert.equal(result.stderr, '');
+        assert.equal(result.pid, aliveChecks ? pidContent : undefined);
+      });
+    }
+  }
+
+  it('start reports a valid live PID before checking Node or starting another server', () => {
+    const result = runScript({ command: 'start' });
+    assert.equal(result.status, 1);
+    assert.deepEqual(result.trace, [`kill -0 ${FAKE_PID}`]);
+    assert.equal(result.stdout, '');
+    assert.match(result.stderr, /已在執行中/);
+    assert.equal(result.pid, `${FAKE_PID}\n`);
+  });
+
+  it('stop uses a valid leading-zero PID only through the mocked signal handler', () => {
+    const result = runScript({ pidContent: '0008\n', aliveChecks: 1, timeout: '0' });
+    assert.equal(result.status, 0);
+    assert.deepEqual(result.trace, ['kill -0 0008', 'kill -TERM 0008', 'kill -0 0008']);
+    assert.equal(result.stdout, '已停止（pid 0008）\n');
+    assert.equal(result.stderr, '');
+    assert.equal(result.pid, undefined);
+  });
+
+  for (const command of ['start', 'restart'] as const) {
+    it(`${command} removes a valid stale PID before reaching the blocked Node check`, () => {
+      const result = runScript({ command, aliveChecks: 0 });
+      assert.equal(result.status, 94);
+      assert.deepEqual(result.trace, [
+        `kill -0 ${FAKE_PID}`, 'node -p process.versions.node.split(".")[0]',
+      ]);
+      assert.equal(result.stdout, command === 'restart' ? '未在執行\n' : '');
+      assert.equal(result.stderr, '');
+      assert.equal(result.pid, undefined);
+    });
+  }
+
+  for (const options of [
+    { pidContent: '', status: 2 },
+    { pidContent: '0\n', status: 2 },
+    { pidReadFail: true, status: 2 },
+    { pidFile: false, status: 1 },
+    { aliveChecks: 0, status: 1 },
+  ]) {
+    it(`running_pid distinguishes invalid/read failure from absent/stale: ${JSON.stringify(options)}`, () => {
+      const result = runScript({ command: 'running_pid', ...options });
+      assert.equal(result.status, options.status);
+      assert.equal(result.stdout, '');
+      assert.deepEqual(result.trace, options.aliveChecks === 0 ? [`kill -0 ${FAKE_PID}`] : []);
+      assert.equal(result.pid, options.status === 2 ? options.pidContent ?? `${FAKE_PID}\n` : undefined);
+      if (options.status === 2) assert.match(result.stderr, /^stage: [^\r\n]+\n$/);
+      else assert.equal(result.stderr, '');
+    });
+  }
 });

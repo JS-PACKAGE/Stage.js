@@ -29,10 +29,37 @@ ensure_config() {
   fi
 }
 
+valid_pid() {
+  case "$1" in ''|*[!0123456789]*) return 1 ;; esac
+  { [ "$1" -ge 1 ] && [ "$1" -le 2147483647 ]; } 2>/dev/null
+}
+
+# 0 = live, 1 = absent/stale, 2 = invalid/unreadable (never probe or delete it).
 running_pid() {
   [ -f "$PID_FILE" ] || return 1
-  pid=$(cat "$PID_FILE")
-  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+  # Inspect bytes before shell substitution can silently discard embedded NULs.
+  pid_bytes=$(LC_ALL=C od -An -v -tu1 "$PID_FILE" 2>/dev/null) || {
+    printf 'stage: 無法讀取 PID 檔：%s\n' "$PID_FILE" >&2
+    return 2
+  }
+  pid=
+  pid_ended=0
+  pid_invalid=0
+  for byte in $pid_bytes; do
+    case "$byte" in
+      4[89]|5[01234567])
+        [ "$pid_ended" -eq 0 ] || { pid_invalid=1; break; }
+        pid="$pid$((byte - 48))"
+        ;;
+      10) pid_ended=1 ;;
+      *) pid_invalid=1; break ;;
+    esac
+  done
+  if [ "$pid_invalid" -ne 0 ] || ! valid_pid "$pid"; then
+    printf 'stage: PID 檔必須包含 1 到 2147483647 的十進位整數：%s\n' "$PID_FILE" >&2
+    return 2
+  fi
+  if kill -0 "$pid" 2>/dev/null; then
     printf '%s\n' "$pid"
     return 0
   fi
@@ -45,8 +72,13 @@ cmd_install() { check_node; npm ci; }
 cmd_build() { check_node; npm run build; }
 
 cmd_start() {
+  if pid=$(running_pid); then
+    die "已在執行中（pid ${pid}）"
+  else
+    result=$?
+    [ "$result" -eq 1 ] || return 1
+  fi
   check_node
-  if pid=$(running_pid); then die "已在執行中（pid ${pid}）"; fi
   [ -f "$ENTRY" ] || die "找不到 ${ENTRY}，請先執行 build"
   ensure_config
   mkdir -p "$RUN_DIR"
@@ -74,7 +106,14 @@ validate_stop_timeout() {
 
 cmd_stop() {
   validate_stop_timeout
-  if ! pid=$(running_pid); then printf '未在執行\n'; return 0; fi
+  if pid=$(running_pid); then
+    :
+  else
+    result=$?
+    [ "$result" -eq 1 ] || return 1
+    printf '未在執行\n'
+    return 0
+  fi
   # SIGTERM 讓伺服器通知所有房間並關閉連線
   kill -TERM "$pid"
   waited=0
@@ -95,6 +134,8 @@ cmd_status() {
   if pid=$(running_pid); then
     printf '執行中（pid %s）\n' "$pid"
   else
+    result=$?
+    [ "$result" -eq 1 ] || return 1
     printf '未在執行\n'
     return 3
   fi
