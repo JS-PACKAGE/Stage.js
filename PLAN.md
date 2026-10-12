@@ -328,6 +328,8 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 
 26. **media worker RPC 期限**：`rtc.mediaWorkerTimeoutMs`（預設／舊設定 30000 ms）為 SDP、ICE、統計與關閉的期限。逾時拒絕該 worker 的所有 pending，清除期限、停止舊 worker、重生並通知受影響 peer；舊 worker 回覆／候選／上行等事件以 worker 身分隔離。成功、失敗、postMessage 例外與 exit 都清掉期限及 pending，未送出的協商不占 peer；停機拒絕新工作，close 可重複且被同一期限約束，不重生。其他 worker 不受影響，主執行緒模式不套用；正常協商需預留足夠時間。
 
+27. **靜態資源預壓縮**：根建置以 Node 內建 zlib 產生較小的 Brotli／gzip sidecar（原子替換、不追 symlink、不重複壓縮）；HTTP 依 Accept-Encoding 權重、wildcard、identity 與 q=0 協商，版本獨立 ETag、Vary、HEAD／304 及原 MIME／CORS 一致。舊於原檔或 symlink 的 sidecar 不使用；沒有可接受版本時回 406，其餘退回原檔，不在請求期間壓縮。mtime 比較用 stat 原始精度，避免 Date 的毫秒四捨五入誤判新副本。開發模式不變，部署原檔與 sidecar 一起更新。
+
 ---
 
 開始執行。
