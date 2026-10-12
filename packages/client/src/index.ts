@@ -481,6 +481,7 @@ export class StageClient extends EventTarget {
     this.reconnectTimer = undefined;
     this.session = null;
     this.snapshot = null;
+    this.lastHandAt = -Infinity;
     this.speakingIds = new Set();
     this.stopKeepalive();
     this.socket?.close(1000);
@@ -551,6 +552,7 @@ export class StageClient extends EventTarget {
       case 'room:state': {
         const { type: _, ...state } = message;
         const previousId = this.snapshot?.me.participantId;
+        if (previousId !== state.me.participantId) this.lastHandAt = -Infinity;
         this.snapshot = state;
         if (!state.me.onStage) this.micFailed = false;
         if (this.session) this.session.resumeToken = state.resumeToken;

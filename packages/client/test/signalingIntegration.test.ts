@@ -84,6 +84,7 @@ it('runs SDK room actions, same-peer resume, kick and shutdown over real WebSock
     assert.equal(guest.me!.role, 'audience'); assert.equal(guest.state!.code, undefined);
     assert.equal(host.state!.code, room.code);
     await guest.raiseHand();
+    const raisedAt = guest['lastHandAt'];
     await until(() => host.state!.hands.some(person => person.participantId === id), 'controller sees raised hand');
     await host.approve(id);
     await until(() => guest.me!.onStage && guest['mic'] !== null, 'approved guest capture');
@@ -106,10 +107,17 @@ it('runs SDK room actions, same-peer resume, kick and shutdown over real WebSock
     assert.equal(guest.me!.participantId, id); assert.equal(guest['pc'], pc);
     assert.equal((await request('inspect')).peers.find(peer => peer.participantId === id)!.identity, peer.identity);
     assert.equal(guest.playbackVolume, 0.25); assert.equal(guest.playbackMuted, true);
+    assert.equal(guest['lastHandAt'], raisedAt, 'same-seat automatic resume retains local cooldown origin');
+    const departingSocketClosed = once(Socket.instances.at(-1)!, 'close', { signal: AbortSignal.timeout(5000) });
+    await guest.disconnect(); await departingSocketClosed;
+    await guest.join({ ...room, name: 'Guest reused' });
+    const freshId = guest.me!.participantId; assert.notEqual(freshId, id);
+    assert.equal(guest.handCooldownMs, 0);
+    await guest.raiseHand(); assert.equal(guest.me!.handRaised, true);
     const socketCount = Socket.instances.length;
     const kickedSocketClosed = once(Socket.instances.at(-1)!, 'close', { signal: AbortSignal.timeout(5000) });
     const kicked = event(guest, 'kicked');
-    await Promise.all([host.kick(id), kicked, kickedSocketClosed]);
+    await Promise.all([host.kick(freshId), kicked, kickedSocketClosed]);
     assert.equal(guest.status, 'disconnected'); assert.equal(guest.state, null); assert.equal(guest['session'], null); assert.equal(guest['reconnectTimer'], undefined);
     assert.equal(guest['pc'], null); assert.equal(guest['mic'], null);
     const hostSocketClosed = once(Socket.instances[0]!, 'close', { signal: AbortSignal.timeout(5000) });

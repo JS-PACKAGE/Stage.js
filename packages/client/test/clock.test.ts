@@ -1,5 +1,6 @@
 import assert from 'node:assert/strict';
 import { afterEach, beforeEach, describe, it } from 'node:test';
+import type { RoomStatePayload } from '../../../shared/protocol.ts';
 import { StageClient } from '../src/index.ts';
 
 class Socket {
@@ -76,4 +77,29 @@ describe('monotonic client intervals', () => {
     t.mock.timers.tick(30000);
     assert.equal(Socket.instances[0]!.readyState, 3);
   });
+  it('clears the old room cooldown on disconnect and lets the reused client raise immediately', async t => {
+    await client.connect(); const first = client.raiseHand(); t.mock.timers.tick(0); await first;
+    assert.equal(client.handCooldownMs, 10000);
+    await client.disconnect(); assert.equal(client.handCooldownMs, 0);
+    await client.connect(); const second = client.raiseHand(); t.mock.timers.tick(0); await second;
+    assert.equal(JSON.parse(Socket.instances[1]!.sent[0]!).type, 'hand:raise');
+  });
+
+  it('preserves cooldown for same-identity snapshots and resets it only for a new participant', async t => {
+    client['createMedia'] = () => {}; client['syncMedia'] = () => {};
+    const state = (participantId: string): RoomStatePayload => ({
+      roomId: 'room', name: 'Room', controllerId: 'host', speakers: [], hands: [], audienceCount: 1,
+      codeRequired: false, limits: { maxSpeakers: 8, maxAudience: 300 }, status: 'live',
+      me: { participantId, name: 'Guest', role: 'audience', onStage: false, handRaised: false,
+        muted: false, forceMuted: false, gainDb: 0, connected: true, joinedAt: 0 },
+    });
+    await client.connect(); await client['receive']({ type: 'room:state', ...state('old') });
+    const raised = client.raiseHand(); t.mock.timers.tick(0); await raised;
+    monotonic += 1000;
+    await client['receive']({ type: 'room:state', ...state('old') });
+    assert.equal(client.handCooldownMs, 9000, 'ordinary or resumed snapshots must not reset the cooldown');
+    await client['receive']({ type: 'room:state', ...state('new') });
+    assert.equal(client.handCooldownMs, 0);
+  });
+
 });
