@@ -8,7 +8,7 @@ export function decodeName(value: string): string {
 }
 
 export class StageError extends Error {
-  readonly code: ErrorCode | 'timeout' | 'disconnected' | 'media_error';
+  readonly code: ErrorCode | 'timeout' | 'disconnected' | 'media_error' | 'queue_full';
   constructor(code: StageError['code'], message: string) {
     super(message);
     this.name = 'StageError';
@@ -19,6 +19,8 @@ export interface StageClientOptions {
   url: string;
   /** Connection hello, request acknowledgement and SDP answer deadline; default 15000 ms. */
   requestTimeoutMs?: number;
+  /** Optional cap on queued/unacknowledged caller controls; RTC and automatic resume are excluded. */
+  maxPendingControlRequests?: number;
   reconnect?: { initialDelayMs: number; maxDelayMs: number };
   audioElement?: HTMLAudioElement;
   micConstraints?: MediaTrackConstraints;
@@ -133,7 +135,7 @@ interface StatsCounters { timestamp: number; bytes?: number; received?: number; 
 const finite = (value: unknown): number | undefined => typeof value === 'number' && Number.isFinite(value) ? value : undefined;
 const nonnegative = (value: unknown): number | undefined => { const n = finite(value); return n !== undefined && n >= 0 ? n : undefined; };
 
-interface Pending { resolve: () => void; reject: (error: StageError) => void; timer: ReturnType<typeof setTimeout>; sendTimer?: ReturnType<typeof setTimeout> }
+interface Pending { control: boolean; resolve: () => void; reject: (error: StageError) => void; timer: ReturnType<typeof setTimeout>; sendTimer?: ReturnType<typeof setTimeout> }
 type JoinOptions = { roomId: string; code?: string; name: string; resumeToken?: string };
 const DEFAULT_REQUEST_TIMEOUT = 15000;
 /** Until the server's `hello` says otherwise: the config.example.yaml defaults. */
@@ -154,6 +156,8 @@ export class StageClient extends EventTarget {
   private readonly requestTimeoutMs: number;
   private connecting: Promise<void> | null = null;
   private pending = new Map<string, Pending>();
+  private pendingControlRequests = 0;
+  private readonly maxPendingControlRequests: number;
   private snapshot: RoomStatePayload | null = null;
   private currentStatus: ClientStatus = 'disconnected';
   private session: JoinOptions | null = null;
@@ -202,6 +206,9 @@ export class StageClient extends EventTarget {
     super();
     const timeout = options.requestTimeoutMs === undefined ? DEFAULT_REQUEST_TIMEOUT : options.requestTimeoutMs;
     if (!Number.isInteger(timeout) || timeout < 1 || timeout > 300000) throw new RangeError('請求逾時必須是 1 到 300000 之間的整數毫秒。');
+    const capacity = options.maxPendingControlRequests;
+    if (capacity !== undefined && (!Number.isSafeInteger(capacity) || capacity < 1)) throw new RangeError('待回覆控制請求上限必須是正安全整數。');
+    this.maxPendingControlRequests = capacity ?? Infinity;
     this.requestTimeoutMs = timeout;
     this.options = options;
     this.ownsAudio = !options.audioElement;
@@ -443,9 +450,13 @@ export class StageClient extends EventTarget {
     this.keepaliveTimer = undefined;
   }
   async createRoom(options: { name: string; roomName?: string; codeRequired?: boolean; token?: string }): Promise<{ roomId: string; code?: string }> {
+    const admissionError = this.controlCapacityError();
+    if (admissionError) throw admissionError;
     const revision = this.sessionRevision;
     await this.connect();
     if (revision !== this.sessionRevision) throw new StageError('disconnected', '連線已中斷。');
+    const capacityError = this.controlCapacityError();
+    if (capacityError) throw capacityError;
     this.created = null;
     await this.request('room:create', options);
     if (revision !== this.sessionRevision) throw new StageError('disconnected', '連線已中斷。');
@@ -455,6 +466,8 @@ export class StageClient extends EventTarget {
     return result;
   }
   async join(options: { roomId: string; code?: string; name: string }): Promise<void> {
+    const admissionError = this.controlCapacityError();
+    if (admissionError) throw admissionError;
     const revision = this.sessionRevision;
     await this.connect();
     if (revision !== this.sessionRevision) throw new StageError('disconnected', '連線已中斷。');
@@ -470,6 +483,8 @@ export class StageClient extends EventTarget {
   }
   raiseHand(): Promise<void> {
     if (this.handCooldownMs > 0) return Promise.reject(new StageError('rate_limited', `每次舉手需間隔 ${Math.ceil(this.limits.handRaiseIntervalMs / 1000)} 秒。`));
+    const capacityError = this.controlCapacityError();
+    if (capacityError) return Promise.reject(capacityError);
     this.lastHandAt = performance.now();
     return this.request('hand:raise', {});
   }
@@ -522,9 +537,16 @@ export class StageClient extends EventTarget {
   }
   async unlockAudio(): Promise<void> { await this.audio.play(); }
 
-  private request<K extends Exclude<ClientMessageType, 'ping'>>(type: K, payload: Omit<ClientMessageMap[K], 'requestId'>, onSend?: () => void): Promise<void> {
+  private controlCapacityError(): StageError | undefined {
+    if (this.pendingControlRequests >= this.maxPendingControlRequests) return new StageError('queue_full', '待回覆控制請求已滿，請等待完成後再試。');
+    return undefined;
+  }
+  private request<K extends Exclude<ClientMessageType, 'ping'>>(type: K, payload: Omit<ClientMessageMap[K], 'requestId'>, onSend?: () => void, internal = false): Promise<void> {
     const ws = this.socket;
     if (!ws || ws.readyState !== WebSocket.OPEN) return Promise.reject(new StageError('disconnected', '尚未連線至舞台。'));
+    const control = !internal && type !== 'rtc:offer' && type !== 'rtc:ice';
+    const capacityError = control ? this.controlCapacityError() : undefined;
+    if (capacityError) return Promise.reject(capacityError);
     const requestId = crypto.randomUUID();
     const now = performance.now();
     const ice = type === 'rtc:ice';
@@ -538,8 +560,9 @@ export class StageClient extends EventTarget {
       const timer = setTimeout(() => {
         this.finish(requestId, new StageError('timeout', '請求逾時，請重試。'));
       }, this.requestTimeoutMs + sendAt - now);
-      const pending: Pending = { resolve, reject, timer };
+      const pending: Pending = { control, resolve, reject, timer };
       this.pending.set(requestId, pending);
+      if (control) this.pendingControlRequests++;
       pending.sendTimer = setTimeout(() => {
         delete pending.sendTimer;
         if (!this.pending.has(requestId)) return;
@@ -558,6 +581,7 @@ export class StageClient extends EventTarget {
     clearTimeout(pending.timer);
     clearTimeout(pending.sendTimer);
     this.pending.delete(id);
+    if (pending.control) this.pendingControlRequests--;
     if (error) pending.reject(error); else pending.resolve();
   }
   private rejectPending(): void {
@@ -651,7 +675,8 @@ export class StageClient extends EventTarget {
           attemptedSocket = this.socket;
           await connecting;
           if (!current()) return;
-          await this.request('join', { ...session, resumeToken: this.snapshot?.resumeToken });
+          // Recovery must not compete with the caller-controlled backlog.
+          await this.request('join', { ...session, resumeToken: this.snapshot?.resumeToken }, undefined, true);
         } catch (error) {
           if (!current()) return;
           this.report(error);

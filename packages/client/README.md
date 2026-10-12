@@ -34,6 +34,14 @@
 
 這是 client 等待期限，不會取消已送達伺服器的操作，也不會延長伺服器 `rtc.mediaWorkerTimeoutMs`。keepalive 的靜默判定、ICE restart 與重連退避不受此選項影響；較短期限可能使慢速但仍正常的操作被判為逾時。
 
+### 可選的控制請求上限
+
+`new StageClient({ url, maxPendingControlRequests: 128 })` 可限制呼叫端同時等待送出或 ACK 的控制請求數；省略時維持不設上限。值須為正安全整數，無效值在建構時拋 `RangeError`，尚未修改／建立 audio。
+
+上限包含公開 `join`／`createRoom`、舉手／收回、上下台、麥克風靜音、增益、移交、踢人、換碼與關房操作。已送出但未 ACK 的請求仍占名額；收到 ACK／錯誤、逾時、送出失敗或斷線即釋放。超限的新呼叫立即以本機 `StageError` 的 `code: 'queue_full'` 拒絕，不送到伺服器、不額外派發 error event、不保留 pacing 時段／timer；舉手不開始冷卻，開房不清除先前待完成的結果。請等待既有 promise 完成後重試，避免持續產生已過時的操作。
+
+hello、內部 SDP／ICE 信令及自動回座不占用此上限，仍遵守原本的 pacing 與 offer／ICE 順序，因此 `maxPendingControlRequests: 1` 不會因未 ACK 的 join 阻擋初始媒體協商。`disconnect()`、本機音訊／裝置設定也不占名額。這只限制 SDK 已接納的呼叫端控制請求數，不是總記憶體／payload 位元組／瀏覽器待送緩衝上限，也不限制 hello 前等待共用 connect 的呼叫者數；不改變伺服器限流或包含 pacing 的等待期限，不取消已送達的操作。自動回座與信令仍可能等待已接納請求的 pacing 時段，並非優先插隊。
+
 ## 事件與狀態
 
 `state`、`me`、`status`、`speaking`（目前說話中的 participantId 集合）為即時 getters。`on(type, listener)` 回傳取消訂閱函式；事件也可透過 EventTarget 的 `addEventListener` 使用。事件：`state`、`status`、`created`、`closed`（`{roomId, reason?}`；`reason: 'shutdown'` 表示伺服器停止或重啟，而非主控關房）、`kicked`（被主控踢出；已斷線且不會自動重連）、`hand`、`invite`、`stagejoined`、`stageleft`、`transferred`、`mic`、`role`、`speaking`（說話中集合變動）、`quality`（主控與台上者每隔數秒收到所有上行者的 `{participantId, uplinkLossPercent?, downlinkLossPercent?, rttMs?}`）、`error`、`micerror`、`micready`、`audioblocked`。狀態為 waiting/live/reconnecting/disconnected。名稱先用 `decodeName()` 還原伺服器的五種 HTML entities，再以 `textContent` 顯示，勿使用 innerHTML。
@@ -44,7 +52,7 @@
 
 ## 連線生命週期
 
-- 可傳入 `audioElement`、`micConstraints`、`requestTimeoutMs`、`reconnect: {initialDelayMs,maxDelayMs}`。預設隱藏 audio 與 500–15000ms 指數重連；所有人自動帶上 resume token 恢復席位（伺服器 `rooms.participantGraceMs`／`controllerGraceMs` 內有效）。
+- 可傳入 `audioElement`、`micConstraints`、`requestTimeoutMs`、`maxPendingControlRequests`、`reconnect: {initialDelayMs,maxDelayMs}`。預設隱藏 audio 與 500–15000ms 指數重連；所有人自動帶上 resume token 恢復席位（伺服器 `rooms.participantGraceMs`／`controllerGraceMs` 內有效）。
 
 - 斷線韌性：ws 中斷時**不拆** PeerConnection——伺服器在寬限期內保留席位與媒體，音訊持續，重連回座後沿用同一條連線；協商中的 answer 遺失時立即解除等待，回座後直接替換尚未完成的 offer，保留其 MID，不以 rollback 產生額外 transceiver。只有身分改變（寬限逾時、被踢、關房、主動 `disconnect()`）才重建。`disconnect()` 以 close code 1000 告知伺服器「主動離開」，立即讓出席位；`pagehide` 以 4002 關閉、保留席位供返回頁面時回座。client 每 15 秒送 `ping`，35 秒沒收到任何訊息即視為斷線並重連（半開 TCP 不會卡住）。WebRTC 進入 `disconnected` 3 秒即 ICE restart，`failed` 則兩端重建。節流與舉手冷卻依伺服器 `hello.limits`（`rateLimits` getter）；請求排程、舉手冷卻與 keepalive 使用單調經過時間，不受系統時鐘向前／向後校正影響。
 
