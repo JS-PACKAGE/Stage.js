@@ -13,6 +13,7 @@ let micNotice = '';
 let invitation = '';
 let createdRoom: { roomId: string; code?: string } | null = null;
 let cooldownButton: HTMLButtonElement | null = null;
+let cooldownTimer: ReturnType<typeof setTimeout> | undefined;
 let roomActionIdentity = '';
 let roomActionGeneration = 0;
 const pendingRoomActions = new Map<string, symbol>();
@@ -194,7 +195,12 @@ function roomButton(key: string, label: string, action: () => Promise<unknown>, 
     const token = Symbol(key); pendingRoomActions.set(key, token);
     updateCooldown(); errorBox.hidden = true;
     void (async () => {
-      try { await action(); }
+      try {
+        const result = action();
+        // raiseHand starts its local cooldown synchronously, before the ACK arrives.
+        if (generation === roomActionGeneration) updateCooldown();
+        await result;
+      }
       catch (error) {
         if (generation === roomActionGeneration) showError(error instanceof Error ? error.message : '操作失敗，請稍後再試。');
       } finally {
@@ -230,7 +236,7 @@ function field(form: HTMLFormElement, label: string, name: string, value = '', r
 }
 function landing(): void {
   resetRoomActions('');
-  cooldownButton = null;
+  cooldownButton = null; scheduleCooldown(0);
   brand.textContent = 'Stage.js 音訊舞台';
   const intro = element('section', 'intro');
   intro.append(element('h2', '', '一起聊，所有人都能聽見。'), element('p', '', '建立音訊舞台，邀請朋友發言；觀眾可舉手，經主控核准後上台。'));
@@ -425,7 +431,8 @@ function applyQuality(row: HTMLElement): void {
   badge.title = `上行掉包 ${q.uplinkLossPercent ?? '—'}%、下行掉包 ${q.downlinkLossPercent ?? '—'}%${q.rttMs !== undefined ? `、RTT ${q.rttMs} ms` : ''}`;
 }
 function updateCooldown(): void {
-  const remaining = Math.ceil(client.handCooldownMs / 1000);
+  const remainingMs = client.handCooldownMs;
+  const remaining = Math.ceil(remainingMs / 1000);
   if (cooldownButton?.isConnected) {
     cooldownButton.disabled = remaining > 0 || client.status === 'reconnecting';
     cooldownButton.textContent = remaining > 0 ? `舉手發言（${remaining} 秒）` : '舉手發言';
@@ -433,6 +440,18 @@ function updateCooldown(): void {
   const returnButton = content.querySelector<HTMLButtonElement>('[data-return-stage]');
   if (returnButton) returnButton.disabled = client.status === 'reconnecting';
   syncRoomActions();
+  scheduleCooldown(cooldownButton?.isConnected ? remainingMs : 0);
+}
+/** Only a visible countdown needs clock-driven updates; state/status/action changes update directly. */
+function scheduleCooldown(remaining: number): void {
+  if (remaining <= 0) {
+    clearTimeout(cooldownTimer); cooldownTimer = undefined;
+  } else if (cooldownTimer === undefined) {
+    const delay = Math.max(1, Math.ceil(remaining - (Math.ceil(remaining / 1000) - 1) * 1000));
+    cooldownTimer = setTimeout(() => {
+      cooldownTimer = undefined; updateCooldown();
+    }, delay);
+  }
 }
 client.on('state', ({ detail }) => renderRoom(detail));
 client.on('status', ({ detail }) => {
@@ -479,11 +498,11 @@ function refreshConnectionLine(): void {
     connectionLine.classList.toggle('error', Math.max(inbound?.lossPercent ?? 0, outbound?.lossPercent ?? 0) >= POOR_LOSS_PERCENT);
   }, () => {});
 }
-/** Stats and the hand cooldown matter only inside a room; nothing polls on the landing page. */
+/** Connection stats matter only inside a room; the separate cooldown timeout runs only while visible. */
 let roomTimers: ReturnType<typeof setInterval>[] = [];
 function syncRoomTimers(): void {
   const inRoom = client.state !== null;
-  if (inRoom && !roomTimers.length) roomTimers = [setInterval(refreshConnectionLine, 2000), setInterval(updateCooldown, 250)];
+  if (inRoom && !roomTimers.length) roomTimers = [setInterval(refreshConnectionLine, 2000)];
   else if (!inRoom && roomTimers.length) { roomTimers.forEach(clearInterval); roomTimers = []; connectionLine.textContent = ''; }
 }
 client.on('state', syncRoomTimers);

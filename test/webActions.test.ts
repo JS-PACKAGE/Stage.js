@@ -7,6 +7,7 @@ import { it } from 'node:test';
 const source = readFileSync(new URL('../web/src/main.ts', import.meta.url), 'utf8');
 // Exercise the production handlers with DOM/SDK doubles, not a duplicate pending-state model.
 const actions = source.slice(source.indexOf('function resetRoomActions('), source.indexOf('function showError('));
+const landing = source.slice(source.indexOf('function landing()'), source.indexOf('function renderNotices()'));
 const render = source.slice(source.indexOf('function renderRoom('), source.indexOf('function panelList('));
 const cooldown = source.slice(source.indexOf('function updateCooldown('), source.indexOf("client.on('state', ({ detail })"));
 interface Button {
@@ -23,11 +24,19 @@ interface Harness {
   reset(identity: string): void;
   tick(): void;
   render(state: unknown): void;
+  landing(): void;
+  delays(): number[];
+  callbacks(): number;
+  advance(ms: number): void;
 }
 function setup(): Harness {
   return runInNewContext(stripTypeScriptTypes(`
-    let roomActionIdentity = '', roomActionGeneration = 0, cooldownButton = null;
+    let roomActionIdentity = '', roomActionGeneration = 0, cooldownButton = null, cooldownTimer;
     const pendingRoomActions = new Map(), nodes = [], errors = [];
+    let nextTimer = 0, clock = 0, callbacks = 0;
+    const timers = new Map();
+    const setTimeout = (fn, delay) => { const id = ++nextTimer; timers.set(id, { fn, at: clock + delay }); return id; };
+    const clearTimeout = id => timers.delete(id);
     const client = { status: 'waiting', handCooldownMs: 0, me: { handRaised: false } };
     const content = { querySelectorAll: () => nodes, querySelector: () => nodes.find(node => node.dataset.returnStage),
       replaceChildren(...children) {
@@ -39,7 +48,8 @@ function setup(): Harness {
     const statusLabels = {}, roleLabels = {}, createdRoom = null;
     const location = { pathname: '/', origin: 'https://example.test' };
     const decodeName = value => value;
-    const button = () => element(), panelList = () => element();
+    const button = () => element(), panelList = () => element(), field = () => element();
+    const params = { get: () => null }, document = { createTextNode: () => element() };
     function renderNotices() {}
     const errorBox = { hidden: true };
     function element() { return { isConnected: true, disabled: false, dataset: {}, attrs: {}, children: [], append(...children) { this.children.push(...children); }, setAttribute(k, v) { this.attrs[k] = v; } }; }
@@ -48,7 +58,15 @@ function setup(): Harness {
     ${actions}
     ${cooldown}
     ${render}
-    ({ client, errors, nodes, reset: resetRoomActions, tick: updateCooldown, render(state) { client.me = state.me; renderRoom(state); },
+    ${landing}
+    ({ client, errors, nodes, landing,
+      delays: () => [...timers.values()].map(timer => timer.at - clock), callbacks: () => callbacks,
+      advance(ms) {
+        clock += ms; client.handCooldownMs = Math.max(0, client.handCooldownMs - ms);
+        for (const [id, timer] of [...timers]) if (timer.at <= clock && timers.has(id)) {
+          timers.delete(id); callbacks++; timer.fn();
+        }
+      }, reset: resetRoomActions, tick: updateCooldown, render(state) { client.me = state.me; renderRoom(state); },
       button(key, action) { const node = roomButton(key, key, action); nodes.push(node); updateCooldown(); return node; } });
   `), { Symbol, Map, Error, Math, Promise, URL }) as Harness;
 }
@@ -138,4 +156,61 @@ it('actual audience renderer keeps the cooldown button pending across its timer 
   const node = h.nodes.find(node => node.dataset.roomAction === 'hand')!;
   node.onclick(); h.tick(); node.onclick(); assert.equal(calls, 1); assert.equal(node.disabled, true);
   work.resolve(); await flush(); assert.equal(node.disabled, false);
+});
+
+function audienceState(handRaised = false, onStage = false) {
+  return { roomId: 'room', name: 'Room', controllerId: 'host', codeRequired: false,
+    me: { participantId: 'p', name: 'Guest', role: 'audience', onStage, handRaised },
+    speakers: [], hands: [], audienceCount: 1, limits: { maxSpeakers: 8, maxAudience: 300 } };
+}
+
+it('schedules only displayed countdown boundaries without postponing an existing wake', () => {
+  const h = setup(); h.client.handCooldownMs = 1500.75; h.render(audienceState());
+  assert.deepEqual([...h.delays()], [501]);
+  h.advance(100); h.render(audienceState()); h.tick(); assert.deepEqual([...h.delays()], [401]);
+  h.advance(401); assert.deepEqual([...h.delays()], [1000]);
+  h.advance(1000); assert.deepEqual([...h.delays()], []); assert.equal(h.callbacks(), 2);
+  assert.equal(h.nodes[0]!.disabled, false);
+});
+
+it('a late countdown callback recomputes current state without replaying missed ticks', () => {
+  const h = setup(); h.client.handCooldownMs = 5500; h.render(audienceState());
+  h.advance(6000); assert.equal(h.callbacks(), 1); assert.deepEqual([...h.delays()], []);
+  assert.equal(h.nodes[0]!.disabled, false);
+});
+
+it('cancels countdowns on raised hand or stage changes and keeps pending expiry disabled', async () => {
+  const h = setup(); h.client.handCooldownMs = 1500; h.render(audienceState());
+  h.render(audienceState(true)); assert.deepEqual([...h.delays()], []);
+  h.render(audienceState()); assert.equal(h.delays().length, 1);
+  h.render(audienceState(false, true)); assert.deepEqual([...h.delays()], []);
+  h.client.handCooldownMs = 0; const work = Promise.withResolvers<void>();
+  Object.assign(h.client, { raiseHand: () => { h.client.handCooldownMs = 1500; return work.promise; } });
+  h.render(audienceState()); h.nodes[0]!.onclick();
+  assert.deepEqual([...h.delays()], [500], 'local cooldown schedules before the ACK'); h.advance(1500);
+  assert.equal(h.nodes[0]!.disabled, true); assert.equal(h.delays().length, 0);
+  work.resolve(); await flush(); assert.equal(h.nodes[0]!.disabled, false);
+});
+
+it('production room scheduler keeps stats cadence with zero idle cooldown polling', () => {
+  const scheduling = source.slice(source.indexOf('function syncRoomTimers()'), source.indexOf("client.on('state', syncRoomTimers)"));
+  const jobs: { fn: () => void; ms: number }[] = []; let stats = 0, cooldownCalls = 0;
+  runInNewContext(stripTypeScriptTypes(`let roomTimers = []; ${scheduling}; syncRoomTimers();`), {
+    client: { state: {} }, connectionLine: {}, clearInterval() {},
+    setInterval(fn: () => void, ms: number) { jobs.push({ fn, ms }); return jobs.length; },
+    refreshConnectionLine() { stats++; }, updateCooldown() { cooldownCalls++; },
+  });
+  for (const job of jobs) for (let elapsed = job.ms; elapsed <= 60000; elapsed += job.ms) job.fn();
+  assert.equal(stats, 30); assert.equal(cooldownCalls, 0);
+  const h = setup(); h.render(audienceState()); h.advance(60000);
+  assert.equal(h.callbacks(), 0); assert.equal(h.delays().length, 0);
+});
+
+it('landing cancels the old countdown and rejoin/controller transitions own only current timers', () => {
+  const h = setup(); h.client.handCooldownMs = 1500; h.render(audienceState());
+  assert.equal(h.delays().length, 1); h.landing(); assert.equal(h.delays().length, 0);
+  h.advance(500); assert.equal(h.callbacks(), 0); h.render(audienceState()); assert.equal(h.delays().length, 1);
+  const state = audienceState(); h.render({ ...state, me: { ...state.me, role: 'controller' } });
+  assert.equal(h.delays().length, 0); h.client.status = 'disconnected'; h.landing();
+  h.advance(60000); assert.equal(h.callbacks(), 0);
 });
