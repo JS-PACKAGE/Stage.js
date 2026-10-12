@@ -41,7 +41,8 @@ async function until(predicate: () => boolean, label: string): Promise<void> {
   while (!predicate()) { if (performance.now() >= deadline) throw new Error(`timed out: ${label}`); await sleep(5); }
 }
 
-for (const maxPendingControlRequests of [undefined, 1]) it(`runs SDK room actions, same-peer resume, kick and shutdown over real WebSockets with ${maxPendingControlRequests ?? 'unlimited'} caller capacity`, async () => {
+const scenarios: { capacity?: number; reentrant?: 'created' | 'state' }[] = [{}, { capacity: 1 }, { reentrant: 'created' }, { reentrant: 'state' }];
+for (const { capacity: maxPendingControlRequests, reentrant } of scenarios) it(`runs SDK room actions, same-peer resume, kick and shutdown over real WebSockets with ${maxPendingControlRequests ?? 'unlimited'} caller capacity${reentrant ? ` and ${reentrant} create reentry` : ''}`, async () => {
   const child = fork(new URL('../../../test/fixtures/sdkServer.ts', import.meta.url), maxPendingControlRequests === 1 ? ['--hold-first-join-ack'] : [], { stdio: ['ignore', 'ignore', 'pipe', 'ipc'] });
   const exit = once(child, 'exit');
   let stderr = ''; child.stderr?.on('data', data => { stderr += String(data); });
@@ -78,7 +79,26 @@ for (const maxPendingControlRequests of [undefined, 1]) it(`runs SDK room action
       client.on('error', event => errors.push(event.detail)); clients.push(client); return client;
     }
     const host = make(), guest = make();
+    let overlappingCreate: Promise<unknown> | undefined;
+    if (reentrant) {
+      const off = host.on(reentrant, () => {
+        off(); overlappingCreate = host.createRoom({ name: 'Overlapping host' });
+        overlappingCreate.catch(() => {});
+      });
+    }
     const room = await host.createRoom({ name: 'Host', roomName: 'SDK integration', codeRequired: true });
+    if (reentrant) {
+      assert.ok(overlappingCreate);
+      await assert.rejects(overlappingCreate, error => error instanceof StageError && error.code === 'already_joined');
+      assert.equal(host['session']!.roomId, room.roomId);
+      await until(() => host['pc']?.remoteDescription != null && !host['negotiating'], 'host initial negotiation');
+      const hostId = host.me!.participantId, hostPeer = host['pc'];
+      const serverPeer = (await request('inspect')).peers.find(peer => peer.participantId === hostId); assert.ok(serverPeer);
+      const lost = host['socket'] as unknown as Socket; lost.terminate();
+      await until(() => host['socket'] !== null && host['socket'] !== (lost as unknown) && host.status === 'live', 'created host resumes after socket loss');
+      assert.equal(host.me!.participantId, hostId); assert.equal(host['pc'], hostPeer);
+      assert.equal((await request('inspect')).peers.find(peer => peer.participantId === hostId)!.identity, serverPeer.identity);
+    }
     const joining = guest.join({ ...room, name: 'Guest' });
     // The branch below awaits other work before joining, so observe early failures immediately.
     joining.catch(() => {});
@@ -118,7 +138,7 @@ for (const maxPendingControlRequests of [undefined, 1]) it(`runs SDK room action
     await until(() => guest['pc']?.remoteDescription != null && !guest['negotiating'], 'initial negotiation completes');
     const before = await request('inspect');
     const peer = before.peers.find(peer => peer.participantId === id); assert.ok(peer);
-    const pc = guest['pc']; const oldSocket = Socket.instances.at(-1)!;
+    const pc = guest['pc']; const oldSocket = guest['socket'] as unknown as Socket;
     const statuses: string[] = []; guest.on('status', event => statuses.push(event.detail));
     oldSocket.terminate();
     await until(() => statuses.includes('reconnecting') && Socket.instances.at(-1) !== oldSocket && guest.status === 'live', 'automatic same-seat resume');
@@ -138,7 +158,7 @@ for (const maxPendingControlRequests of [undefined, 1]) it(`runs SDK room action
     await Promise.all([host.kick(freshId), kicked, kickedSocketClosed]);
     assert.equal(guest.status, 'disconnected'); assert.equal(guest.state, null); assert.equal(guest['session'], null); assert.equal(guest['reconnectTimer'], undefined);
     assert.equal(guest['pc'], null); assert.equal(guest['mic'], null);
-    const hostSocketClosed = once(Socket.instances[0]!, 'close', { signal: AbortSignal.timeout(5000) });
+    const hostSocketClosed = once(host['socket'] as unknown as Socket, 'close', { signal: AbortSignal.timeout(5000) });
     const closed = event(host, 'closed');
     const [, detail] = await Promise.all([request('shutdown'), closed, hostSocketClosed]);
     assert.equal(detail.reason, 'shutdown');
@@ -148,7 +168,7 @@ for (const maxPendingControlRequests of [undefined, 1]) it(`runs SDK room action
     // Observe actual socket close before checking beyond the configured 1 ms reconnect delay.
     await sleep(25);
     assert.equal(Socket.instances.length, socketCount);
-    assert.deepEqual(errors.map(error => error.code), ['forbidden']);
+    assert.deepEqual(errors.map(error => error.code), reentrant ? ['already_joined', 'forbidden'] : ['forbidden']);
   } finally {
     for (const client of clients) await client.disconnect();
     for (const socket of Socket.instances.splice(0)) socket.terminate();

@@ -457,10 +457,11 @@ export class StageClient extends EventTarget {
     if (revision !== this.sessionRevision) throw new StageError('disconnected', '連線已中斷。');
     const capacityError = this.controlCapacityError();
     if (capacityError) throw capacityError;
-    this.created = null;
+    // An overlapping create must not erase a result already delivered to another caller.
+    const previousCreated = this.created;
     await this.request('room:create', options);
     if (revision !== this.sessionRevision) throw new StageError('disconnected', '連線已中斷。');
-    if (!this.created) throw new StageError('internal', '伺服器未回傳房間資訊。');
+    if (!this.created || this.created === previousCreated) throw new StageError('internal', '伺服器未回傳房間資訊。');
     const result = this.created as ServerMessageMap['room:created'];
     this.installSession({ roomId: result.roomId, code: result.code, name: options.name });
     return result;

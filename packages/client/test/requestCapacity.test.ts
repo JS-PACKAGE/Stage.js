@@ -301,7 +301,7 @@ describe('client request capacity', () => {
     assert.equal(client['session']!.roomId, 'room');
   });
 
-  it('rejects the second simultaneous create after hello before clearing the admitted result', async t => {
+  it('rejects the second simultaneous create after hello without mutating creation results', async t => {
     const client = make({ maxPendingControlRequests: 1 });
     let created = client['created'];
     const writes: unknown[] = [];
@@ -316,7 +316,7 @@ describe('client request capacity', () => {
     const socket = Socket.instances[0]!;
     hello(socket); await flush();
     assertError(await second, 'queue_full');
-    assert.deepEqual(writes, [null], 'only the admitted caller may reset its room-creation result');
+    assert.deepEqual(writes, [], 'neither caller may erase a room-creation result while awaiting its own ACK');
     assert.equal(client['pendingControlRequests'], 1);
     assert.equal(client['session'], null);
     tick(t, 0);
