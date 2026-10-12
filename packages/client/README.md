@@ -76,3 +76,14 @@
 請求 ACK 期限保留原本的 pacing 等待額度；SDP answer 期限從 offer 實際送出時起算，不會因尚在排程佇列而提早逾時。已替換 peer 的未送出 offer 不再送出，其期限也不影響新 peer。成功、失敗、斷線會清理相關計時器。
 
 這是 client 等待期限，不會取消已送達伺服器的操作，也不會延長伺服器 `rtc.mediaWorkerTimeoutMs`。keepalive 的靜默判定、ICE restart 與重連退避不受此選項影響；較短期限可能使慢速但仍正常的操作被判為逾時。
+
+## 取消麥克風預覽
+
+`startMicTest({ signal?: AbortSignal })` 可將預覽綁定至 `AbortController`，原本的 `startMicTest()` 不變。
+
+- 已取消的 signal 不呼叫 getUserMedia、不提出麥克風權限要求。
+- 等待權限時取消，promise 立即以 signal.reason 拒絕（預設為 AbortError）；瀏覽器原生權限提示無法由此 API 自動關閉，但之後取得的串流會立即停止，不建立 meter 或發出 micready。
+- 預覽已啟動後取消，只停止該預覽的音軌／AudioContext，不影響房間正在使用的麥克風，也不影響使用其他 signal 的預覽。
+- `MicTest.stop()` 可重複呼叫；手動停止或取消都移除 abort listener。正常權限失敗仍保留原錯誤，disconnect 的既有清理行為不變。
+
+例如建立 `const controller = new AbortController()`，呼叫 `client.startMicTest({ signal: controller.signal })`，在取消按鈕或視圖卸載時呼叫 `controller.abort()`，並在呼叫端處理取消拒絕。這不會取消已經送到伺服器的房間操作。

@@ -47,6 +47,33 @@ export interface AudioStats {
 export interface StageStats { inbound: AudioStats | null; outbound: AudioStats | null }
 export interface AudioDevices { inputs: MediaDeviceInfo[]; outputs: MediaDeviceInfo[] }
 export interface MicTest { level(): number; stop(): void }
+export interface MicTestOptions { signal?: AbortSignal }
+
+
+function abortReason(signal: AbortSignal): unknown {
+  return signal.reason === undefined ? new DOMException('麥克風測試已取消。', 'AbortError') : signal.reason;
+}
+/** getUserMedia cannot dismiss an existing permission prompt; dispose any late stream instead. */
+function abortableMicStream(request: Promise<MediaStream>, signal: AbortSignal): Promise<MediaStream> {
+  return new Promise((resolve, reject) => {
+    let cancelled = false;
+    const abort = () => {
+      cancelled = true;
+      signal.removeEventListener('abort', abort);
+      reject(abortReason(signal));
+    };
+    signal.addEventListener('abort', abort, { once: true });
+    void request.then(stream => {
+      signal.removeEventListener('abort', abort);
+      if (cancelled) stream.getTracks().forEach(track => track.stop());
+      else resolve(stream);
+    }, error => {
+      signal.removeEventListener('abort', abort);
+      if (!cancelled) reject(error);
+    });
+    if (signal.aborted) abort();
+  });
+}
 
 function createMicMeter(stream: MediaStream): MicTest {
   const context = new AudioContext();
@@ -242,24 +269,36 @@ export class StageClient extends EventTarget {
     this.mediaTask = task.catch(() => {});
     return task;
   }
-  async startMicTest(): Promise<MicTest> {
+  async startMicTest(options: MicTestOptions = {}): Promise<MicTest> {
+    const signal = options.signal;
+    if (signal?.aborted) throw abortReason(signal);
     const revision = this.testRevision;
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: this.audioConstraints(this.inputDeviceId) });
+    const request = navigator.mediaDevices.getUserMedia({ audio: this.audioConstraints(this.inputDeviceId) });
+    const stream = await (signal ? abortableMicStream(request, signal) : request);
     let meter: MicTest;
     try {
+      if (signal?.aborted) throw abortReason(signal);
       if (revision !== this.testRevision) throw new StageError('disconnected', '麥克風測試已取消。');
       meter = createMicMeter(stream);
     } catch (error) { stream.getTracks().forEach((track) => track.stop()); throw error; }
+    let stopped = false;
     const test: MicTest = {
       level: meter.level,
       stop: () => {
+        if (stopped) return;
+        stopped = true;
+        signal?.removeEventListener('abort', stopOnAbort);
         meter.stop();
         stream.getTracks().forEach((track) => track.stop());
         this.micTests.delete(test);
       },
     };
+    const stopOnAbort = () => test.stop();
     this.micTests.add(test);
+    signal?.addEventListener('abort', stopOnAbort, { once: true });
+    if (signal?.aborted) { test.stop(); throw abortReason(signal); }
     this.emit('micready', undefined);
+    if (signal?.aborted) { test.stop(); throw abortReason(signal); }
     return test;
   }
   private audioConstraints(deviceId: string): MediaTrackConstraints {

@@ -346,6 +346,8 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 
 35. **遞迴日誌遮蔽**：敏感欄位名稱防護延伸到巢狀物件與陣列，透過 own descriptor 複製不修改來源；不呼叫 getter／toJSON／Proxy traps，循環、深度與遞迴複製／輸出欄位數有界（不是 Object.keys 列舉或字串位元組的固定成本保證）。Error 資料欄位／cause、Date、bigint 保留可用診斷，accessor 明確標記。這不是任意字串秘密偵測，原本不得傳入憑證／原始 SDP 的規則不變。
 
+36. **可取消麥克風預覽**：startMicTest 可選 AbortSignal；預先取消不要求權限，等待中取消立即拒絕且停止遲到串流，啟動後取消只停止該 preview。原生 permission prompt 不能自動關閉；signal reason 保留，正常失敗保留原錯誤，stop 冪等並清除 listener，不觸及房間 microphone 或其他 preview。
+
 ---
 
 開始執行。
