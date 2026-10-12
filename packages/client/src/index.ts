@@ -510,13 +510,15 @@ export class StageClient extends EventTarget {
     this.lastHandAt = -Infinity;
     this.speakingIds = new Set();
     this.stopKeepalive();
-    this.socket?.close(1000);
+    const socket = this.socket;
     this.socket = null;
     this.rejectPending();
     this.destroyMedia();
-    this.setStatus('disconnected');
     if (this.ownsAudio) this.audio.remove();
     window.removeEventListener('pagehide', this.onPageHide);
+    // Retire all old resources before close/status callbacks can reconnect this client.
+    try { socket?.close(1000); } catch { /* local cleanup must not depend on the transport */ }
+    this.setStatus('disconnected');
   }
   async unlockAudio(): Promise<void> { await this.audio.play(); }
 

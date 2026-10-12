@@ -131,3 +131,58 @@ it('never removes a caller-owned audio element after failed or closed connection
   Socket.instances[0]!.close(); assert.equal(audio.isConnected, true);
   await client.disconnect(); assert.equal(audio.isConnected, true);
 });
+
+for (const custom of [false, true]) {
+  it(`preserves ${custom ? 'custom-audio' : 'owned-audio'} replacement resources started by disconnected status`, async t => {
+    const { make, listeners, owned, target } = setup(t), client = make(custom);
+    const first = client.connect(); const old = Socket.instances[0]!; old.hello(); await first;
+    old.deliver({ type: 'status', state: 'waiting' });
+    // Native close events arrive later; do not let a synchronous fake hide the trailing cleanup.
+    old.deferClose = true;
+    let replacement: Promise<void> | undefined;
+    const off = client.on('status', event => {
+      if (event.detail === 'disconnected') { off(); replacement = client.connect(); }
+    });
+    await client.disconnect();
+    assert.ok(replacement); const next = Socket.instances[1]!;
+    assert.equal(listeners(), 1, 'old disconnect must not remove the replacement pagehide listener');
+    if (!custom) assert.equal(owned[0]!.isConnected, true, 'replacement reattaches the same owned audio');
+    old.onclose?.(); await flush();
+    assert.equal(listeners(), 1); next.hello(); await replacement;
+    assert.equal(client['socket'], next); assert.equal(listeners(), 1);
+    if (!custom) assert.equal(owned[0]!.isConnected, true);
+    target.dispatchEvent(new Event('pagehide'));
+    assert.equal(next.readyState, 3); assert.equal(listeners(), 0);
+  });
+}
+
+for (const closing of ['synchronous', 'asynchronous', 'throwing'] as const) {
+  it(`can rejoin from disconnected status when the old close is ${closing}`, async t => {
+    const { make, listeners, owned } = setup(t), client = make(false);
+    const initial = client.join({ roomId: 'old-room', name: 'guest' });
+    const old = Socket.instances[0]!; old.hello(); await flush(); t.mock.timers.tick(0); await initial;
+    old.deliver({ type: 'status', state: 'waiting' });
+    if (closing === 'asynchronous') old.close = () => {
+      old.readyState = 2;
+      queueMicrotask(() => { old.readyState = 3; old.onclose?.(); });
+    };
+    if (closing === 'throwing') old.close = () => { throw new Error('transport close failed'); };
+    let rejoin: Promise<void> | undefined;
+    const off = client.on('status', event => {
+      if (event.detail !== 'disconnected') return;
+      off(); assert.equal(client['session'], null); assert.equal(listeners(), 0);
+      assert.equal(owned[0]!.isConnected, false);
+      rejoin = client.join({ roomId: 'new-room', name: 'guest' });
+    });
+    await client.disconnect(); assert.ok(rejoin);
+    const replacement = Socket.instances[1]!;
+    assert.equal(client['socket'], replacement); assert.equal(listeners(), 1);
+    assert.equal(owned[0]!.isConnected, true);
+    replacement.hello(); await flush(); t.mock.timers.tick(0); await rejoin;
+    assert.equal(client['session']!.roomId, 'new-room');
+    assert.equal(client['socket'], replacement); assert.equal(listeners(), 1);
+    assert.equal(owned[0]!.isConnected, true); assert.equal(client['reconnectTimer'], undefined);
+    await client.disconnect(); assert.equal(client['session'], null);
+    assert.equal(listeners(), 0); assert.equal(owned[0]!.isConnected, false);
+  });
+}
