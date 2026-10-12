@@ -344,6 +344,8 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 
 34. **client 可調期限**：StageClientOptions.requestTimeoutMs 可設定 hello／ACK／SDP answer 期限（1–300000 整數毫秒，省略維持 15000），建構時先驗證。ACK 仍預留 pacing 排程時間，answer 期限改從 offer 實際送出開始，並綁定 peer／answer waiter 身分，過期 peer 不得送出排隊 offer 或改動新期限。不改 keepalive／重連／server watchdog，也不宣稱取消已送出的伺服器操作。
 
+35. **遞迴日誌遮蔽**：敏感欄位名稱防護延伸到巢狀物件與陣列，透過 own descriptor 複製不修改來源；不呼叫 getter／toJSON／Proxy traps，循環、深度與遞迴複製／輸出欄位數有界（不是 Object.keys 列舉或字串位元組的固定成本保證）。Error 資料欄位／cause、Date、bigint 保留可用診斷，accessor 明確標記。這不是任意字串秘密偵測，原本不得傳入憑證／原始 SDP 的規則不變。
+
 ---
 
 開始執行。

@@ -190,3 +190,7 @@ npm audit
 `limits.maxPendingMessages`（預設 128）與 `limits.maxPendingBytes`（範例 1 MiB；舊設定為 `maxFrameBytes × 16`）限制每條 WebSocket 等待處理的工作，以訊息數與 JSON UTF-8 位元組分別計算。正在執行的一筆不計入等待上限，仍受單幀上限限制。超過任一上限立即終止該連線並清除等待工作，沿用非主動離開的席位寬限；正在執行的工作結束後才 detach。一般斷線也丟棄尚未開始的工作，不會離開後繼續執行；已開始的工作不強制取消。Prometheus `stage_ws_inbound_queue_disconnects_total` 記錄超限次數。正常順序與每秒頻率限制不變。`node scripts/bench-ws-inbound.ts` 比較 gated 工作下舊 promise chain 與有界佇列的待處理筆數／payload 位元組及斷線後執行數；這不是 RSS 或延遲 benchmark。
 
 伺服器限流以單調經過時間計算，不以牆鐘時間計算，避免系統校時讓正常連線誤觸限流或提早補滿配額；房間時間戳與日誌仍保留正常 UTC／epoch 語意。
+
+### 結構化日誌遮蔽
+
+logger 會遞迴遮蔽物件／陣列中的 `code`、`resumeToken`、`token`、`credential`、`password`、`username`、`secret`、`sdp`、`payload` 欄位（不分大小寫），不修改原物件。循環、深度 8 或超過 1000 個欄位／元素的結構使用標記截斷；getter、toJSON 與 Proxy 不執行。深度／欄位上限限制遞迴複製與輸出結構，不限制 Object.keys 列舉成本或任意字串的位元組數，呼叫端仍應使用精簡欄位。Error 的資料型 name／message／stack／cause 保留並遞迴處理，accessor 型 stack 以標記表示；Date 與 bigint 安全轉成字串。這只是欄位名稱防護，不會辨識任意訊息／字串裡的秘密，呼叫端仍不得把憑證或原始 SDP 混進 log message。
