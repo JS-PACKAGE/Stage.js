@@ -210,6 +210,7 @@ JSON frame，型別定義在 [`shared/protocol.ts`](shared/protocol.ts)。每個
 ```bash
 npm run typecheck                # 伺服器＋client＋web
 npm test                         # 控制面流程 1–4、不變量、斷線寬限與回座、信令與政策競態、ws 邊界（驗證、限流、尺寸、轉義、靜態檔、准入）、混音器與時鐘、下行分級／共用編碼／靜音 DTX、worker 重生
+node --test --test-timeout=20000 test/roomSequences.test.ts # 固定 seed 的房間模型轉換與快照／拒絕原子性檢查
 node scripts/werift-loopback.ts 0 # 真 werift 端到端（主執行緒，含觀眾→發言者重協商、client 端 ICE restart）
 node scripts/werift-loopback.ts 2 # 同一流程驗證 media worker 模式
 node scripts/bench-ws-backpressure.ts unbounded # 慢速讀取端基準（無上限，僅限本機壓測）
@@ -220,6 +221,8 @@ node scripts/bench-mixer.ts      # 混音壓測：3／8 發言者 × 300 訂閱�
 node scripts/load-test.ts        # 全端壓測：3 發言者＋298 werift 觀眾（--speakers/--audience/--seconds/--procs/--url）
 npm audit
 ```
+
+`test/roomSequences.test.ts` 使用 12 個固定 seed、每個 500 步，混合 17 種模型操作與時鐘前進／回撥／同值。獨立的成功操作 ledger 檢查入場／上台／舉手順序、每位接收者的快照與私人欄位；拒絕操作必須保持完整原狀，固定邊界案例另驗證權限與容量。失敗訊息包含 seed 與 action trace，參與者最多 20 人；這是有界狀態模型覆蓋，不是所有序列的證明或網路／媒體壓測。
 
 完整範例的 `test/webLifecycle.test.ts` 會執行整份 `web/src/main.ts`（只替換 SDK／CSS imports），透過實際註冊的表單、按鈕與 SDK event handlers 驗證離房／重入、預覽取消與晚到完成、統計／冷卻排程、preview→stage meter 切換及關房／kick 通知。fixture 使用可斷開／重掛 DOM、依 SDK 順序派發的 stub events 與有 callback 上限的虛擬時鐘；沒有真實網路、麥克風或新依賴。這補足函式片段測試的初始化／事件串接覆蓋，不替代瀏覽器版面、原生輸入／accessibility、權限提示、CSS 或真實 SDK／WebRTC 整合驗證。
 
