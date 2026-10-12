@@ -22,6 +22,7 @@ const POOR_LOSS_PERCENT = 5;
 let quality = new Map<string, ConnectionQuality>();
 /** Own connection, refreshed from `getStats()`; kept across re-renders of the room view. */
 const connectionLine = element('p', 'muted connection');
+let connectionPollSequence = 0;
 const header = element('header', 'topbar');
 const brand = element('h1', '', 'Stage.js 音訊舞台');
 const status = element('span', 'badge', statusLabels.disconnected);
@@ -489,7 +490,11 @@ client.on('quality', ({ detail }) => {
   for (const row of content.querySelectorAll<HTMLElement>('.person[data-participant-id]')) applyQuality(row);
 });
 function refreshConnectionLine(): void {
+  if (!client.state) return;
+  const generation = roomActionGeneration, sequence = ++connectionPollSequence;
   void client.getStats().then(({ inbound, outbound }) => {
+    // SDK polls can settle out of order; an obsolete empty result must not erase a newer display.
+    if (generation !== roomActionGeneration || sequence !== connectionPollSequence) return;
     const parts: string[] = [];
     if (inbound?.lossPercent !== undefined) parts.push(`收聽掉包 ${inbound.lossPercent.toFixed(1)}%`);
     if (outbound?.lossPercent !== undefined) parts.push(`發言掉包 ${outbound.lossPercent.toFixed(1)}%`);
