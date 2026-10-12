@@ -108,3 +108,5 @@
 舉手冷卻屬於目前參與者：明確 disconnect（包含被踢／關房）或收到不同 participantId 的新身分時清除，同一個 StageClient 可立即在新房間舉手；同席位的自動恢復與一般 state 更新保留原本冷卻。伺服器的速率限制仍會獨立檢查請求。
 
 `status`／`state` 的監聽器可同步呼叫 `disconnect()`（例如移除嵌入元件）；舊 room:state handler 會停止，不在斷線後繼續建立 PeerConnection／取得麥克風，也不在 status 監聽器取消後發出舊 state。若處理期間已有更新快照，舊 handler 不會取代較新的媒體連線。
+
+自動重連的排程與錯誤處理綁定原本 session：若 `status: reconnecting` 或 `error` 監聽器同步斷線並切換房間，舊 timer／遲到的 hello 失敗／resume 拒絕不會再次加入或關閉新房間，也不向新 session 回報過期錯誤。直接 join／createRoom 成功安裝新 session 時也會取消舊重連 timer，新 session 之後斷線仍可正常重連。仍屬於目前 session 的暫時失敗照常退避重試；unauthorized／not_found／room_full 仍停止該 session。

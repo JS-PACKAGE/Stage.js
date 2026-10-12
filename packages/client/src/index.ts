@@ -432,7 +432,7 @@ export class StageClient extends EventTarget {
     if (revision !== this.sessionRevision) throw new StageError('disconnected', '連線已中斷。');
     if (!this.created) throw new StageError('internal', '伺服器未回傳房間資訊。');
     const result = this.created as ServerMessageMap['room:created'];
-    this.session = { roomId: result.roomId, code: result.code, name: options.name };
+    this.installSession({ roomId: result.roomId, code: result.code, name: options.name });
     return result;
   }
   async join(options: { roomId: string; code?: string; name: string }): Promise<void> {
@@ -441,7 +441,13 @@ export class StageClient extends EventTarget {
     if (revision !== this.sessionRevision) throw new StageError('disconnected', '連線已中斷。');
     await this.request('join', options);
     if (revision !== this.sessionRevision) throw new StageError('disconnected', '連線已中斷。');
-    this.session = { ...options };
+    this.installSession({ ...options });
+  }
+  private installSession(session: JoinOptions): void {
+    // An explicit successful join/create may replace a dropped session before its retry fires.
+    clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = undefined;
+    this.session = session;
   }
   raiseHand(): Promise<void> {
     if (this.handCooldownMs > 0) return Promise.reject(new StageError('rate_limited', `每次舉手需間隔 ${Math.ceil(this.limits.handRaiseIntervalMs / 1000)} 秒。`));
@@ -606,20 +612,26 @@ export class StageClient extends EventTarget {
     }
   }
   private scheduleReconnect(): void {
+    const session = this.session, revision = this.sessionRevision;
+    if (!session || this.intentional || this.reconnectTimer !== undefined) return;
+    const current = () => !this.intentional && this.session === session && this.sessionRevision === revision;
     this.setStatus('reconnecting');
+    if (!current()) return;
     const config = this.options.reconnect ?? { initialDelayMs: 500, maxDelayMs: 15000 };
     const delay = Math.min(config.maxDelayMs, config.initialDelayMs * 2 ** Math.min(this.reconnectAttempt++, 20));
-    this.reconnectTimer = setTimeout(() => {
+    const timer = setTimeout(() => {
+      if (this.reconnectTimer !== timer) return;
       this.reconnectTimer = undefined;
-      const session = this.session;
-      if (!session || this.intentional) return;
+      if (!current()) return;
       void (async () => {
         try {
           await this.connect();
-          if (this.intentional || this.session !== session) return;
+          if (!current()) return;
           await this.request('join', { ...session, resumeToken: this.snapshot?.resumeToken });
         } catch (error) {
+          if (!current()) return;
           this.report(error);
+          if (!current()) return;
           if (error instanceof StageError && ['unauthorized', 'not_found', 'room_full'].includes(error.code)) {
             await this.disconnect();
           } else if (!this.reconnectTimer && !this.intentional && this.session) {
@@ -629,6 +641,7 @@ export class StageClient extends EventTarget {
         }
       })();
     }, delay);
+    this.reconnectTimer = timer;
   }
   private createMedia(): void {
     this.destroyMedia();
