@@ -20,6 +20,9 @@ const pendingRoomActions = new Map<string, symbol>();
 /** Latest server report per publisher; loss at or above this is flagged in the stage list. */
 const POOR_LOSS_PERCENT = 5;
 let quality = new Map<string, ConnectionQuality>();
+/** Current rendered rows only; one participant can appear in both audience and hand lists. */
+const personRows = new Map<string, HTMLElement[]>();
+let speakingIds = new Set<string>();
 /** Own connection, refreshed from `getStats()`; kept across re-renders of the room view. */
 const connectionLine = element('p', 'muted connection');
 let connectionPollSequence = 0;
@@ -265,6 +268,7 @@ function field(form: HTMLFormElement, label: string, name: string, value = '', r
   return input;
 }
 function landing(): void {
+  personRows.clear(); speakingIds.clear();
   resetMicSettings();
   resetRoomActions('');
   cooldownButton = null; scheduleCooldown(0);
@@ -329,6 +333,7 @@ function renderNotices(): void {
   if (invitation) notices.append(element('p', 'banner', invitation));
 }
 function renderRoom(state: RoomStatePayload): void {
+  personRows.clear(); speakingIds = new Set(client.speaking);
   resetRoomActions(JSON.stringify([state.roomId, state.me.participantId]));
   const generation = roomActionGeneration;
   brand.textContent = decodeName(state.name);
@@ -417,6 +422,8 @@ function panelList(title: string, people: ParticipantView[], controller: boolean
 function personRow(person: ParticipantView, controller: boolean, kind: 'speaker' | 'hand' | 'audience'): HTMLLIElement {
   const row = element('li', 'person');
   row.dataset.participantId = person.participantId;
+  const rows = personRows.get(person.participantId);
+  if (rows) rows.push(row); else personRows.set(person.participantId, [row]);
   row.classList.toggle('speaking', client.speaking.has(person.participantId));
   const identity = element('div', 'identity');
   identity.append(element('strong', '', decodeName(person.name)), element('span', 'badge', roleLabels[person.role]));
@@ -513,7 +520,13 @@ client.on('error', ({ detail }) => showError(detail.message));
 // Toggle in place: a full re-render every few hundred ms would reset focus and scroll.
 client.on('speaking', ({ detail }) => {
   const ids = new Set(detail.participantIds);
-  for (const row of content.querySelectorAll<HTMLElement>('.person[data-participant-id]')) row.classList.toggle('speaking', ids.has(row.dataset.participantId!));
+  for (const id of speakingIds) {
+    if (!ids.has(id)) for (const row of personRows.get(id) ?? []) row.classList.toggle('speaking', false);
+  }
+  for (const id of ids) {
+    if (!speakingIds.has(id)) for (const row of personRows.get(id) ?? []) row.classList.toggle('speaking', true);
+  }
+  speakingIds = ids;
 });
 client.on('quality', ({ detail }) => {
   quality = new Map(detail.participants.map((q) => [q.participantId, q]));

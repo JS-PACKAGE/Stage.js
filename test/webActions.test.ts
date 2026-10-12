@@ -36,6 +36,7 @@ function setup(): Harness {
   return runInNewContext(stripTypeScriptTypes(`
     let roomActionIdentity = '', roomActionGeneration = 0, cooldownButton = null, cooldownTimer, invitation = '';
     const pendingRoomActions = new Map(), nodes = [], errors = [];
+    const personRows = new Map(); let speakingIds = new Set();
     let nextTimer = 0, clock = 0, callbacks = 0;
     const timers = new Map();
     const setTimeout = (fn, delay) => { const id = ++nextTimer; timers.set(id, { fn, at: clock + delay }); return id; };
