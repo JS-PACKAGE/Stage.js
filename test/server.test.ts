@@ -358,3 +358,19 @@ describe('media worker deadline configuration', () => {
     assert.equal(parseConfig(raw).rtc.mediaWorkerTimeoutMs, 1000);
   });
 });
+
+describe('HTTP shutdown drain configuration', () => {
+  it('defaults legacy files and validates an explicit network drain deadline', () => {
+    const raw = parse(readFileSync(new URL('../config.example.yaml', import.meta.url), 'utf8'));
+    delete raw.server.httpShutdownDrainMs;
+    assert.equal(parseConfig(raw).server.httpShutdownDrainMs, 1000);
+    for (const invalid of [-1, 1.5, 60001, Infinity, '1000', null]) {
+      raw.server.httpShutdownDrainMs = invalid;
+      assert.throws(() => parseConfig(raw), /server.httpShutdownDrainMs/);
+    }
+    for (const valid of [0, 1000, 60000]) {
+      raw.server.httpShutdownDrainMs = valid;
+      assert.equal(parseConfig(raw).server.httpShutdownDrainMs, valid);
+    }
+  });
+});

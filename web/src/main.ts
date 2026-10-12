@@ -13,11 +13,16 @@ let micNotice = '';
 let invitation = '';
 let createdRoom: { roomId: string; code?: string } | null = null;
 let cooldownButton: HTMLButtonElement | null = null;
+let cooldownTimer: ReturnType<typeof setTimeout> | undefined;
+let roomActionIdentity = '';
+let roomActionGeneration = 0;
+const pendingRoomActions = new Map<string, symbol>();
 /** Latest server report per publisher; loss at or above this is flagged in the stage list. */
 const POOR_LOSS_PERCENT = 5;
 let quality = new Map<string, ConnectionQuality>();
 /** Own connection, refreshed from `getStats()`; kept across re-renders of the room view. */
 const connectionLine = element('p', 'muted connection');
+let connectionPollSequence = 0;
 const header = element('header', 'topbar');
 const brand = element('h1', '', 'Stage.js 音訊舞台');
 const status = element('span', 'badge', statusLabels.disconnected);
@@ -81,17 +86,26 @@ playbackMute.setAttribute('aria-pressed', String(client.playbackMuted));
 settings.append(playbackLabel, playbackMute, element('p', 'muted', '僅調整你聽到的聲音，不影響麥克風或其他人。'));
 let micTest: MicTest | null = null;
 let testingBusy = false;
+let micSettingsGeneration = 0;
 let selectedInput = '';
 let selectedOutput = '';
+let deviceRefreshSequence = 0;
 const testButton = button('測試麥克風', async () => {
+  if (testingBusy || client.me?.onStage) return;
+  const generation = micSettingsGeneration;
   testingBusy = true;
-  micSelect.disabled = true;
+  micSelect.disabled = true; syncMeter();
   try {
     if (micTest) { micTest.stop(); micTest = null; }
-    else micTest = await client.startMicTest();
+    else {
+      const preview = await client.startMicTest();
+      if (generation !== micSettingsGeneration) { preview.stop(); return; }
+      micTest = preview;
+    }
     testButton.textContent = micTest ? '停止測試' : '測試麥克風';
     testButton.setAttribute('aria-pressed', String(Boolean(micTest)));
-  } finally { testingBusy = false; micSelect.disabled = false; syncMeter(); }
+  } catch (error) { if (generation === micSettingsGeneration) throw error; }
+  finally { if (generation === micSettingsGeneration) { testingBusy = false; micSelect.disabled = false; syncMeter(); } }
 });
 testButton.id = 'mic-test';
 testButton.setAttribute('aria-pressed', 'false');
@@ -103,19 +117,29 @@ levelLabel.append(level);
 settings.append(testButton, levelLabel);
 app.append(settings);
 micSelect.onchange = () => {
+  if (testingBusy) return;
+  const generation = micSettingsGeneration;
   const deviceId = micSelect.value;
   micSelect.disabled = true;
-  testingBusy = true;
+  testingBusy = true; syncMeter();
   void run(async () => {
-    await client.setInputDevice(deviceId);
-    selectedInput = deviceId;
-    if (micTest) {
-      micTest.stop(); micTest = null;
-      testButton.textContent = '測試麥克風'; testButton.setAttribute('aria-pressed', 'false');
-      micTest = await client.startMicTest();
-      testButton.textContent = '停止測試'; testButton.setAttribute('aria-pressed', 'true');
-    }
-  }).finally(() => { testingBusy = false; micSelect.disabled = false; micSelect.value = selectedInput; syncMeter(); });
+    try {
+      await client.setInputDevice(deviceId);
+      if (generation !== micSettingsGeneration) return;
+      selectedInput = deviceId;
+      if (micTest) {
+        micTest.stop(); micTest = null;
+        testButton.textContent = '測試麥克風'; testButton.setAttribute('aria-pressed', 'false');
+        const preview = await client.startMicTest();
+        if (generation !== micSettingsGeneration) { preview.stop(); return; }
+        micTest = preview;
+        testButton.textContent = '停止測試'; testButton.setAttribute('aria-pressed', 'true');
+      }
+    } catch (error) { if (generation === micSettingsGeneration) throw error; }
+  }).finally(() => {
+    if (generation !== micSettingsGeneration) return;
+    testingBusy = false; micSelect.disabled = false; micSelect.value = selectedInput; syncMeter();
+  });
 };
 speakerSelect.onchange = () => {
   const deviceId = speakerSelect.value;
@@ -124,7 +148,9 @@ speakerSelect.onchange = () => {
     .finally(() => { speakerSelect.disabled = false; speakerSelect.value = selectedOutput; });
 };
 async function refreshDevices(): Promise<void> {
+  const sequence = ++deviceRefreshSequence;
   const devices = await client.listAudioDevices();
+  if (sequence !== deviceRefreshSequence) return;
   for (const [select, list, chosen] of [[micSelect, devices.inputs, selectedInput], [speakerSelect, devices.outputs, selectedOutput]] as const) {
     const defaultOption = element('option', '', '系統預設');
     defaultOption.value = '';
@@ -142,6 +168,14 @@ navigator.mediaDevices?.addEventListener('devicechange', () => { void refreshDev
 void refreshDevices().catch(() => {});
 /** The level meter polls only while there is something to meter: a mic test or an on-stage mic. */
 let meterTimer: ReturnType<typeof setInterval> | undefined;
+/** Leave/rejoin releases the UI immediately; late previews still dispose only their own stream. */
+function resetMicSettings(): void {
+  micSettingsGeneration++;
+  micTest?.stop(); micTest = null; testingBusy = false;
+  micSelect.disabled = false; micSelect.value = selectedInput;
+  testButton.textContent = '測試麥克風'; testButton.setAttribute('aria-pressed', 'false');
+  syncMeter();
+}
 function syncMeter(): void {
   if (client.me?.onStage && micTest) {
     micTest.stop(); micTest = null;
@@ -177,6 +211,46 @@ async function run(action: () => Promise<unknown>, target?: HTMLButtonElement): 
   catch (error) { showError(error instanceof Error ? error.message : '操作失敗，請稍後再試。'); }
   finally { if (target?.isConnected) target.disabled = false; updateCooldown(); syncMeter(); }
 }
+/** Room controls retain their pending state when snapshots replace their DOM nodes. */
+function resetRoomActions(identity: string): void {
+  if (roomActionIdentity === identity) return;
+  roomActionIdentity = identity; roomActionGeneration++; pendingRoomActions.clear();
+}
+function roomButton(key: string, label: string, action: () => Promise<unknown>, className = ''): HTMLButtonElement {
+  const node = element('button', className, label);
+  node.type = 'button'; node.dataset.roomAction = key;
+  const generation = roomActionGeneration;
+  node.onclick = () => {
+    if (node.disabled || generation !== roomActionGeneration || pendingRoomActions.has(key)) return;
+    const token = Symbol(key); pendingRoomActions.set(key, token);
+    updateCooldown(); errorBox.hidden = true;
+    void (async () => {
+      try {
+        const result = action();
+        // raiseHand starts its local cooldown synchronously, before the ACK arrives.
+        if (generation === roomActionGeneration) updateCooldown();
+        await result;
+      }
+      catch (error) {
+        if (generation === roomActionGeneration) showError(error instanceof Error ? error.message : '操作失敗，請稍後再試。');
+      } finally {
+        if (generation === roomActionGeneration && pendingRoomActions.get(key) === token) {
+          pendingRoomActions.delete(key); updateCooldown(); syncMeter();
+        }
+      }
+    })();
+  };
+  return node;
+}
+function syncRoomActions(): void {
+  for (const node of content.querySelectorAll<HTMLButtonElement>('[data-room-action]')) {
+    const key = node.dataset.roomAction!;
+    const pending = pendingRoomActions.has(key);
+    node.setAttribute('aria-busy', String(pending));
+    node.disabled = pending || client.status === 'reconnecting' || node.dataset.policyDisabled === 'true'
+      || (key === 'hand' && !client.me?.handRaised && client.handCooldownMs > 0);
+  }
+}
 function showError(message: string): void { errorBox.textContent = message; errorBox.hidden = false; }
 function field(form: HTMLFormElement, label: string, name: string, value = '', required = true, maxLength = 32): HTMLInputElement {
   const wrapper = element('label', 'field', label);
@@ -191,7 +265,9 @@ function field(form: HTMLFormElement, label: string, name: string, value = '', r
   return input;
 }
 function landing(): void {
-  cooldownButton = null;
+  resetMicSettings();
+  resetRoomActions('');
+  cooldownButton = null; scheduleCooldown(0);
   brand.textContent = 'Stage.js 音訊舞台';
   const intro = element('section', 'intro');
   intro.append(element('h2', '', '一起聊，所有人都能聽見。'), element('p', '', '建立音訊舞台，邀請朋友發言；觀眾可舉手，經主控核准後上台。'));
@@ -253,6 +329,8 @@ function renderNotices(): void {
   if (invitation) notices.append(element('p', 'banner', invitation));
 }
 function renderRoom(state: RoomStatePayload): void {
+  resetRoomActions(JSON.stringify([state.roomId, state.me.participantId]));
+  const generation = roomActionGeneration;
   brand.textContent = decodeName(state.name);
   status.textContent = statusLabels[client.status];
   cooldownButton = null;
@@ -274,9 +352,10 @@ function renderRoom(state: RoomStatePayload): void {
       renderNotices();
     });
     summary.append(inviteLink, copy);
-    if (state.codeRequired) summary.append(button('更換房間代碼', async () => {
+    if (state.codeRequired) summary.append(roomButton('rotate-code', '更換房間代碼', async () => {
       if (!window.confirm('更換後舊代碼與舊邀請連結立即失效，已在房內的人不受影響。確定更換？')) return;
       await client.rotateCode();
+      if (generation !== roomActionGeneration) return;
       invitation = '已更換房間代碼，請重新分享邀請連結。'; renderNotices();
     }));
   }
@@ -284,18 +363,18 @@ function renderRoom(state: RoomStatePayload): void {
   controls.append(element('h2', '', `你好，${decodeName(state.me.name)}`), element('p', '', `${roleLabels[state.me.role]}${state.me.forceMuted ? ' · 主控已鎖定靜音' : ''}`), connectionLine);
   const actions = element('div', 'actions');
   if (state.me.onStage) {
-    const mute = button(state.me.muted ? '取消靜音' : '靜音', () => state.me.muted ? client.unmute() : client.mute());
-    mute.disabled = state.me.forceMuted;
-    actions.append(mute, button('離開舞台', () => client.leaveStage()));
+    const mute = roomButton('mute', state.me.muted ? '取消靜音' : '靜音', () => state.me.muted ? client.unmute() : client.mute());
+    mute.dataset.policyDisabled = String(state.me.forceMuted);
+    actions.append(mute, roomButton('stage', '離開舞台', () => client.leaveStage()));
   } else if (controller) {
     // An off-stage controller keeps control and returns by self-approval; raising a hand is audience-only.
-    const returnButton = button('返回舞台', () => client.returnToStage(), 'primary');
+    const returnButton = roomButton('stage', '返回舞台', () => client.returnToStage(), 'primary');
     returnButton.dataset.returnStage = 'true';
     actions.append(returnButton);
   } else if (state.me.handRaised) {
-    actions.append(button('收回舉手', () => client.withdrawHand()));
+    actions.append(roomButton('hand', '收回舉手', () => client.withdrawHand()));
   } else {
-    cooldownButton = button('舉手發言', () => client.raiseHand(), 'primary');
+    cooldownButton = roomButton('hand', '舉手發言', () => client.raiseHand(), 'primary');
     actions.append(cooldownButton);
   }
   actions.append(button('離開房間', async () => {
@@ -303,7 +382,7 @@ function renderRoom(state: RoomStatePayload): void {
     testButton.textContent = '測試麥克風'; testButton.setAttribute('aria-pressed', 'false');
     await client.disconnect(); createdRoom = null; micNotice = invitation = ''; landing();
   }));
-  if (controller) actions.append(button('關閉房間', async () => {
+  if (controller) actions.append(roomButton('close', '關閉房間', async () => {
     if (window.confirm('確定關閉房間並讓所有人離場？')) await client.closeRoom();
   }, 'danger'));
   controls.append(actions);
@@ -351,11 +430,11 @@ function personRow(person: ParticipantView, controller: boolean, kind: 'speaker'
   if (controller && person.participantId !== client.me?.participantId) {
     const id = person.participantId;
     const actions = element('div', 'actions');
-    if (kind === 'hand') actions.append(button('核准上台', () => client.approve(id), 'primary'), button('婉拒', () => client.reject(id)));
-    if (kind === 'speaker') actions.append(gainSlider(person), button(person.forceMuted ? '解除強制靜音' : '強制靜音', () => person.forceMuted ? client.forceUnmute(id) : client.forceMute(id)), button('移出舞台', () => client.removeFromStage(id)));
-    actions.append(button('移交控制權', async () => {
+    if (kind === 'hand') actions.append(roomButton(`stage:${id}`, '核准上台', () => client.approve(id), 'primary'), roomButton(`stage:${id}`, '婉拒', () => client.reject(id)));
+    if (kind === 'speaker') actions.append(gainSlider(person), roomButton(`force-mute:${id}`, person.forceMuted ? '解除強制靜音' : '強制靜音', () => person.forceMuted ? client.forceUnmute(id) : client.forceMute(id)), roomButton(`stage:${id}`, '移出舞台', () => client.removeFromStage(id)));
+    actions.append(roomButton('transfer', '移交控制權', async () => {
       if (window.confirm(`確定將控制權移交給 ${decodeName(person.name)}？`)) await client.transferControl(id);
-    }), button('踢出房間', async () => {
+    }), roomButton(`kick:${id}`, '踢出房間', async () => {
       if (window.confirm(`確定將 ${decodeName(person.name)} 踢出房間？若要防止對方再進來，請接著更換房間代碼。`)) await client.kick(id);
     }, 'danger'));
     row.append(actions);
@@ -385,13 +464,27 @@ function applyQuality(row: HTMLElement): void {
   badge.title = `上行掉包 ${q.uplinkLossPercent ?? '—'}%、下行掉包 ${q.downlinkLossPercent ?? '—'}%${q.rttMs !== undefined ? `、RTT ${q.rttMs} ms` : ''}`;
 }
 function updateCooldown(): void {
-  const remaining = Math.ceil(client.handCooldownMs / 1000);
+  const remainingMs = client.handCooldownMs;
+  const remaining = Math.ceil(remainingMs / 1000);
   if (cooldownButton?.isConnected) {
     cooldownButton.disabled = remaining > 0 || client.status === 'reconnecting';
     cooldownButton.textContent = remaining > 0 ? `舉手發言（${remaining} 秒）` : '舉手發言';
   }
   const returnButton = content.querySelector<HTMLButtonElement>('[data-return-stage]');
   if (returnButton) returnButton.disabled = client.status === 'reconnecting';
+  syncRoomActions();
+  scheduleCooldown(cooldownButton?.isConnected ? remainingMs : 0);
+}
+/** Only a visible countdown needs clock-driven updates; state/status/action changes update directly. */
+function scheduleCooldown(remaining: number): void {
+  if (remaining <= 0) {
+    clearTimeout(cooldownTimer); cooldownTimer = undefined;
+  } else if (cooldownTimer === undefined) {
+    const delay = Math.max(1, Math.ceil(remaining - (Math.ceil(remaining / 1000) - 1) * 1000));
+    cooldownTimer = setTimeout(() => {
+      cooldownTimer = undefined; updateCooldown();
+    }, delay);
+  }
 }
 client.on('state', ({ detail }) => renderRoom(detail));
 client.on('status', ({ detail }) => {
@@ -427,7 +520,11 @@ client.on('quality', ({ detail }) => {
   for (const row of content.querySelectorAll<HTMLElement>('.person[data-participant-id]')) applyQuality(row);
 });
 function refreshConnectionLine(): void {
+  if (!client.state) return;
+  const generation = roomActionGeneration, sequence = ++connectionPollSequence;
   void client.getStats().then(({ inbound, outbound }) => {
+    // SDK polls can settle out of order; an obsolete empty result must not erase a newer display.
+    if (generation !== roomActionGeneration || sequence !== connectionPollSequence) return;
     const parts: string[] = [];
     if (inbound?.lossPercent !== undefined) parts.push(`收聽掉包 ${inbound.lossPercent.toFixed(1)}%`);
     if (outbound?.lossPercent !== undefined) parts.push(`發言掉包 ${outbound.lossPercent.toFixed(1)}%`);
@@ -438,11 +535,11 @@ function refreshConnectionLine(): void {
     connectionLine.classList.toggle('error', Math.max(inbound?.lossPercent ?? 0, outbound?.lossPercent ?? 0) >= POOR_LOSS_PERCENT);
   }, () => {});
 }
-/** Stats and the hand cooldown matter only inside a room; nothing polls on the landing page. */
+/** Connection stats matter only inside a room; the separate cooldown timeout runs only while visible. */
 let roomTimers: ReturnType<typeof setInterval>[] = [];
 function syncRoomTimers(): void {
   const inRoom = client.state !== null;
-  if (inRoom && !roomTimers.length) roomTimers = [setInterval(refreshConnectionLine, 2000), setInterval(updateCooldown, 250)];
+  if (inRoom && !roomTimers.length) roomTimers = [setInterval(refreshConnectionLine, 2000)];
   else if (!inRoom && roomTimers.length) { roomTimers.forEach(clearInterval); roomTimers = []; connectionLine.textContent = ''; }
 }
 client.on('state', syncRoomTimers);

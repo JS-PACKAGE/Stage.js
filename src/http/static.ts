@@ -1,5 +1,5 @@
 import { createReadStream } from 'node:fs';
-import { lstat, stat } from 'node:fs/promises';
+import { lstat, realpath, stat } from 'node:fs/promises';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { extname, resolve, sep } from 'node:path';
 import { pipeline } from 'node:stream';
@@ -20,6 +20,10 @@ const CONTENT_TYPES: Record<string, string> = {
   '.woff2': 'font/woff2',
   '.ts': 'text/plain; charset=utf-8',
 };
+
+function within(root: string, file: string): boolean {
+  return file === root || file.startsWith(root.endsWith(sep) ? root : root + sep);
+}
 
 /**
  * Serve built assets (web/dist, packages/client/dist). Only GET/HEAD, only
@@ -46,10 +50,15 @@ export function createStaticHandler(mounts: StaticMount[], baseDir: string) {
     let rel = pathname.slice(mount.mount.length);
     if (rel === '' || rel.endsWith('/')) rel += 'index.html';
     const file = resolve(mount.root, rel);
-    if (file !== mount.root && !file.startsWith(mount.root + sep)) return false;
+    if (!within(mount.root, file)) return false;
+    let canonicalRoot: string, canonicalFile: string;
     let size: number, mtime: Date, modifiedMs: number;
     try {
-      const st = await stat(file);
+      [canonicalRoot, canonicalFile] = await Promise.all([realpath(mount.root), realpath(file)]);
+      // Lexical containment alone follows asset/directory symlinks outside the public tree.
+      // Resolve per request so release-root symlink swaps and later builds still work.
+      if (!within(canonicalRoot, canonicalFile)) return false;
+      const st = await stat(canonicalFile);
       if (!st.isFile()) return false;
       size = st.size;
       mtime = st.mtime;
@@ -58,7 +67,7 @@ export function createStaticHandler(mounts: StaticMount[], baseDir: string) {
       return false;
     }
     const encodings = acceptedAssetEncodings(req.headers['accept-encoding']);
-    let selected = file;
+    let selected = canonicalFile;
     let encoding: string | undefined;
     for (const candidate of encodings) {
       if (candidate === 'identity') { encoding = 'identity'; break; }
@@ -68,7 +77,9 @@ export function createStaticHandler(mounts: StaticMount[], baseDir: string) {
         const compressed = await lstat(sidecar);
         // Old sidecars from a partial rebuild must not hide a newer source; don't follow symlinks.
         if (!compressed.isFile() || compressed.mtimeMs < modifiedMs || compressed.size >= size) continue;
-        selected = sidecar; encoding = candidate; size = compressed.size; mtime = compressed.mtime; modifiedMs = compressed.mtimeMs;
+        const canonicalSidecar = await realpath(sidecar);
+        if (!within(canonicalRoot, canonicalSidecar)) continue;
+        selected = canonicalSidecar; encoding = candidate; size = compressed.size; mtime = compressed.mtime; modifiedMs = compressed.mtimeMs;
         break;
       } catch { /* No usable precompressed representation; try the next accepted encoding. */ }
     }

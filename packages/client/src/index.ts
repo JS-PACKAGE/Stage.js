@@ -8,7 +8,7 @@ export function decodeName(value: string): string {
 }
 
 export class StageError extends Error {
-  readonly code: ErrorCode | 'timeout' | 'disconnected' | 'media_error';
+  readonly code: ErrorCode | 'timeout' | 'disconnected' | 'media_error' | 'queue_full';
   constructor(code: StageError['code'], message: string) {
     super(message);
     this.name = 'StageError';
@@ -17,6 +17,10 @@ export class StageError extends Error {
 }
 export interface StageClientOptions {
   url: string;
+  /** Connection hello, request acknowledgement and SDP answer deadline; default 15000 ms. */
+  requestTimeoutMs?: number;
+  /** Optional cap on queued/unacknowledged caller controls; RTC and automatic resume are excluded. */
+  maxPendingControlRequests?: number;
   reconnect?: { initialDelayMs: number; maxDelayMs: number };
   audioElement?: HTMLAudioElement;
   micConstraints?: MediaTrackConstraints;
@@ -45,6 +49,33 @@ export interface AudioStats {
 export interface StageStats { inbound: AudioStats | null; outbound: AudioStats | null }
 export interface AudioDevices { inputs: MediaDeviceInfo[]; outputs: MediaDeviceInfo[] }
 export interface MicTest { level(): number; stop(): void }
+export interface MicTestOptions { signal?: AbortSignal }
+
+
+function abortReason(signal: AbortSignal): unknown {
+  return signal.reason === undefined ? new DOMException('麥克風測試已取消。', 'AbortError') : signal.reason;
+}
+/** getUserMedia cannot dismiss an existing permission prompt; dispose any late stream instead. */
+function abortableMicStream(request: Promise<MediaStream>, signal: AbortSignal): Promise<MediaStream> {
+  return new Promise((resolve, reject) => {
+    let cancelled = false;
+    const abort = () => {
+      cancelled = true;
+      signal.removeEventListener('abort', abort);
+      reject(abortReason(signal));
+    };
+    signal.addEventListener('abort', abort, { once: true });
+    void request.then(stream => {
+      signal.removeEventListener('abort', abort);
+      if (cancelled) stream.getTracks().forEach(track => track.stop());
+      else resolve(stream);
+    }, error => {
+      signal.removeEventListener('abort', abort);
+      if (!cancelled) reject(error);
+    });
+    if (signal.aborted) abort();
+  });
+}
 
 function createMicMeter(stream: MediaStream): MicTest {
   const context = new AudioContext();
@@ -100,9 +131,13 @@ export interface StageEventMap {
   /** Connection quality of everyone publishing (controller and on-stage participants only). */
   quality: ServerMessageMap['quality'];
 }
-interface Pending { resolve: () => void; reject: (error: StageError) => void; timer: ReturnType<typeof setTimeout> }
+interface StatsCounters { timestamp: number; bytes?: number; received?: number; lost?: number; bufferDelay?: number; emitted?: number }
+const finite = (value: unknown): number | undefined => typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+const nonnegative = (value: unknown): number | undefined => { const n = finite(value); return n !== undefined && n >= 0 ? n : undefined; };
+
+interface Pending { control: boolean; resolve: () => void; reject: (error: StageError) => void; timer: ReturnType<typeof setTimeout>; sendTimer?: ReturnType<typeof setTimeout> }
 type JoinOptions = { roomId: string; code?: string; name: string; resumeToken?: string };
-const REQUEST_TIMEOUT = 15000;
+const DEFAULT_REQUEST_TIMEOUT = 15000;
 /** Until the server's `hello` says otherwise: the config.example.yaml defaults. */
 const DEFAULT_LIMITS: RateLimits = { controlPerSecond: 20, icePerSecond: 30, handRaiseIntervalMs: 10000 };
 const KEEPALIVE_INTERVAL_MS = 15000;
@@ -118,8 +153,11 @@ export class StageClient extends EventTarget {
   private readonly audio: HTMLAudioElement;
   private readonly ownsAudio: boolean;
   private socket: WebSocket | null = null;
+  private readonly requestTimeoutMs: number;
   private connecting: Promise<void> | null = null;
   private pending = new Map<string, Pending>();
+  private pendingControlRequests = 0;
+  private readonly maxPendingControlRequests: number;
   private snapshot: RoomStatePayload | null = null;
   private currentStatus: ClientStatus = 'disconnected';
   private session: JoinOptions | null = null;
@@ -129,16 +167,22 @@ export class StageClient extends EventTarget {
   private reconnectTimer: ReturnType<typeof setTimeout> | undefined;
   private reconnectAttempt = 0;
   private pc: RTCPeerConnection | null = null;
+  private pcParticipantId: string | null = null;
   private transceiver: RTCRtpTransceiver | null = null;
   private mic: MediaStream | null = null;
   private micFailed = false;
   private inputDeviceId = '';
   private micMeter: MicTest | null = null;
   private micTests = new Set<MicTest>();
+  private readonly micTestRequests = new Set<AbortController>();
   private testRevision = 0;
   private remoteIce: (IceCandidatePayload | null)[] = [];
   private mediaRevision = 0;
   private mediaTask: Promise<void> = Promise.resolve();
+  /** Permission waits and queued device changes belong to one PeerConnection generation. */
+  private mediaAbort = new AbortController();
+  private micRequest: AbortController | undefined;
+  private captureRevision = 0;
   private negotiationDirty = false;
   private negotiating = false;
   private answerWait: { resolve: () => void; reject: (error: Error) => void } | null = null;
@@ -149,7 +193,9 @@ export class StageClient extends EventTarget {
   private nextIceAt = 0;
   /** Latest scheduled send of any kind: the server processes frames in arrival order, so ICE must never overtake its offer. */
   private lastSendAt = 0;
-  private previousStats = new Map<string, { bytes: number; timestamp: number; received: number; lost: number; bufferDelay: number; emitted: number }>();
+  private previousStats = new Map<string, StatsCounters>();
+  private statsSequence = 0;
+  private completedStatsSequence = 0;
   private speakingIds: ReadonlySet<string> = new Set();
   private keepaliveTimer: ReturnType<typeof setInterval> | undefined;
   private lastHeardAt = 0;
@@ -158,6 +204,12 @@ export class StageClient extends EventTarget {
 
   constructor(options: StageClientOptions) {
     super();
+    const timeout = options.requestTimeoutMs === undefined ? DEFAULT_REQUEST_TIMEOUT : options.requestTimeoutMs;
+    if (!Number.isInteger(timeout) || timeout < 1 || timeout > 300000) throw new RangeError('請求逾時必須是 1 到 300000 之間的整數毫秒。');
+    const capacity = options.maxPendingControlRequests;
+    if (capacity !== undefined && (!Number.isSafeInteger(capacity) || capacity < 1)) throw new RangeError('待回覆控制請求上限必須是正安全整數。');
+    this.maxPendingControlRequests = capacity ?? Infinity;
+    this.requestTimeoutMs = timeout;
     this.options = options;
     this.ownsAudio = !options.audioElement;
     this.audio = options.audioElement ?? document.createElement('audio');
@@ -177,7 +229,7 @@ export class StageClient extends EventTarget {
   get me(): ParticipantView | null { return this.snapshot?.me ?? null; }
   /** Participants currently audible in the mix (server voice activity). */
   get speaking(): ReadonlySet<string> { return this.speakingIds; }
-  get handCooldownMs(): number { return Math.max(0, this.limits.handRaiseIntervalMs - (Date.now() - this.lastHandAt)); }
+  get handCooldownMs(): number { return Math.max(0, this.limits.handRaiseIntervalMs - (performance.now() - this.lastHandAt)); }
   /** Limits the connected server enforces per connection (from `hello`; defaults before connecting). */
   get rateLimits(): RateLimits { return this.limits; }
   /** Local listening level (0–1); independent of microphone mute and room-wide gain. */
@@ -202,20 +254,24 @@ export class StageClient extends EventTarget {
     catch (error) { throw new StageError('media_error', error instanceof Error ? error.message : '無法切換揚聲器。'); }
   }
   setInputDevice(deviceId: string): Promise<void> {
+    const generation = this.mediaAbort;
     const task = this.mediaTask.catch(() => {}).then(async () => {
+      if (generation !== this.mediaAbort) throw new StageError('disconnected', '音訊連線已中斷。');
       const pc = this.pc;
       const transceiver = this.transceiver;
       if (!this.mic || !pc || !transceiver || !this.me?.onStage) { this.inputDeviceId = deviceId; return; }
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: this.audioConstraints(deviceId) });
+      const captureRevision = this.captureRevision;
+      const stream = await this.acquireMic(deviceId, generation);
       let meter: MicTest | null = null;
       try {
+        if (captureRevision !== this.captureRevision) throw new StageError('disconnected', '麥克風要求已取消。');
         if (pc !== this.pc || !this.me?.onStage) return;
         const track = stream.getAudioTracks()[0];
         if (!track) throw new StageError('media_error', '所選裝置沒有音訊軌道。');
         track.enabled = !this.me.muted;
         meter = createMicMeter(stream);
         await transceiver.sender.replaceTrack(track);
-        if (pc !== this.pc || !this.me?.onStage) return;
+        if (pc !== this.pc || !this.me?.onStage || captureRevision !== this.captureRevision) return;
         track.enabled = !this.me.muted;
         this.micMeter?.stop();
         this.mic?.getTracks().forEach((oldTrack) => oldTrack.stop());
@@ -230,25 +286,65 @@ export class StageClient extends EventTarget {
     this.mediaTask = task.catch(() => {});
     return task;
   }
-  async startMicTest(): Promise<MicTest> {
+  async startMicTest(options: MicTestOptions = {}): Promise<MicTest> {
+    const signal = options.signal;
+    if (signal?.aborted) throw abortReason(signal);
     const revision = this.testRevision;
-    const stream = await navigator.mediaDevices.getUserMedia({ audio: this.audioConstraints(this.inputDeviceId) });
+    const request = new AbortController();
+    const abort = () => request.abort(abortReason(signal!));
+    signal?.addEventListener('abort', abort, { once: true });
+    this.micTestRequests.add(request);
+    let stream: MediaStream;
+    try {
+      stream = await abortableMicStream(navigator.mediaDevices.getUserMedia({ audio: this.audioConstraints(this.inputDeviceId) }), request.signal);
+    } finally {
+      signal?.removeEventListener('abort', abort);
+      this.micTestRequests.delete(request);
+    }
+    const checkCancelled = () => {
+      if (signal?.aborted) throw abortReason(signal);
+      if (revision !== this.testRevision) throw new StageError('disconnected', '麥克風測試已取消。');
+    };
     let meter: MicTest;
     try {
-      if (revision !== this.testRevision) throw new StageError('disconnected', '麥克風測試已取消。');
+      checkCancelled();
       meter = createMicMeter(stream);
     } catch (error) { stream.getTracks().forEach((track) => track.stop()); throw error; }
+    let stopped = false;
     const test: MicTest = {
       level: meter.level,
       stop: () => {
+        if (stopped) return;
+        stopped = true;
+        signal?.removeEventListener('abort', stopOnAbort);
         meter.stop();
         stream.getTracks().forEach((track) => track.stop());
         this.micTests.delete(test);
       },
     };
+    const stopOnAbort = () => test.stop();
     this.micTests.add(test);
-    this.emit('micready', undefined);
-    return test;
+    signal?.addEventListener('abort', stopOnAbort, { once: true });
+    try {
+      checkCancelled();
+      this.emit('micready', undefined);
+      checkCancelled();
+      return test;
+    } catch (error) { test.stop(); throw error; }
+  }
+  /** One serialized room-microphone permission wait; preview tests have independent ownership. */
+  private async acquireMic(deviceId: string, generation: AbortController): Promise<MediaStream> {
+    if (generation.signal.aborted) throw abortReason(generation.signal);
+    const request = new AbortController();
+    const abort = () => request.abort(abortReason(generation.signal));
+    generation.signal.addEventListener('abort', abort, { once: true });
+    this.micRequest = request;
+    try {
+      return await abortableMicStream(navigator.mediaDevices.getUserMedia({ audio: this.audioConstraints(deviceId) }), request.signal);
+    } finally {
+      generation.signal.removeEventListener('abort', abort);
+      if (this.micRequest === request) this.micRequest = undefined;
+    }
   }
   private audioConstraints(deviceId: string): MediaTrackConstraints {
     return { channelCount: 1, sampleRate: 48000, echoCancellation: true, noiseSuppression: true, autoGainControl: true, ...this.options.micConstraints, ...(deviceId ? { deviceId: { exact: deviceId } } : {}) };
@@ -274,10 +370,13 @@ export class StageClient extends EventTarget {
       const ws = new WebSocket(this.options.url);
       this.socket = ws;
       let ready = false;
-      const timer = setTimeout(() => { reject(new StageError('timeout', '連線逾時，請稍後再試。')); ws.close(); }, REQUEST_TIMEOUT);
+      const timer = setTimeout(() => {
+        reject(new StageError('timeout', '連線逾時，請稍後再試。'));
+        this.abandonSocket(ws);
+      }, this.requestTimeoutMs);
       ws.onmessage = (event) => {
         if (this.socket !== ws) return;
-        this.lastHeardAt = Date.now();
+        this.lastHeardAt = performance.now();
         try {
           const message = JSON.parse(String(event.data)) as ServerMessage;
           if (message.type === 'hello') { this.limits = message.limits; ready = true; clearTimeout(timer); this.startKeepalive(ws); resolve(); }
@@ -292,7 +391,15 @@ export class StageClient extends EventTarget {
       };
     });
     this.connecting = promise;
-    void promise.finally(() => { if (this.connecting === promise) this.connecting = null; }).catch(() => {});
+    void promise.finally(() => {
+      if (this.connecting !== promise) return;
+      this.connecting = null;
+      // Constructor failures have no socket close event to release the window's reference.
+      if (this.socket?.readyState !== WebSocket.OPEN) {
+        window.removeEventListener('pagehide', this.onPageHide);
+        if (!this.session && this.ownsAudio) this.audio.remove();
+      }
+    }).catch(() => {});
     return promise;
   }
   /**
@@ -303,12 +410,20 @@ export class StageClient extends EventTarget {
   private socketLost(ws: WebSocket): void {
     if (this.socket !== ws) return;
     this.socket = null;
+    window.removeEventListener('pagehide', this.onPageHide);
     this.stopKeepalive();
     this.rejectPending();
     // An acknowledged offer may still be waiting for its answer; do not let it block resume.
     this.answerWait?.reject(new StageError('disconnected', '音訊協商已中斷。'));
     if (!this.intentional && this.session) this.scheduleReconnect();
-    else { this.destroyMedia(); this.setStatus('disconnected'); }
+    else { this.destroyMedia(); if (this.ownsAudio) this.audio.remove(); this.setStatus('disconnected'); }
+  }
+  private abandonSocket(ws: WebSocket): void {
+    // A failed hello/resume must not wait for a close handshake on an unresponsive transport.
+    // Clear the old promise before callbacks can synchronously start a replacement connection.
+    if (this.socket === ws) this.connecting = null;
+    this.socketLost(ws);
+    try { ws.close(); } catch { /* already dead */ }
   }
   /**
    * Application-level liveness: a half-open TCP connection (network switch, sleep) would otherwise
@@ -317,10 +432,10 @@ export class StageClient extends EventTarget {
    */
   private startKeepalive(ws: WebSocket): void {
     this.stopKeepalive();
-    this.lastHeardAt = Date.now();
+    this.lastHeardAt = performance.now();
     this.keepaliveTimer = setInterval(() => {
       if (this.socket !== ws || ws.readyState !== WebSocket.OPEN) { this.stopKeepalive(); return; }
-      if (Date.now() - this.lastHeardAt > KEEPALIVE_TIMEOUT_MS) {
+      if (performance.now() - this.lastHeardAt > KEEPALIVE_TIMEOUT_MS) {
         this.report(new StageError('timeout', '伺服器沒有回應，正在重新連線。'));
         ws.onclose = null;
         this.socketLost(ws);
@@ -335,28 +450,43 @@ export class StageClient extends EventTarget {
     this.keepaliveTimer = undefined;
   }
   async createRoom(options: { name: string; roomName?: string; codeRequired?: boolean; token?: string }): Promise<{ roomId: string; code?: string }> {
+    const admissionError = this.controlCapacityError();
+    if (admissionError) throw admissionError;
     const revision = this.sessionRevision;
     await this.connect();
     if (revision !== this.sessionRevision) throw new StageError('disconnected', '連線已中斷。');
-    this.created = null;
+    const capacityError = this.controlCapacityError();
+    if (capacityError) throw capacityError;
+    // An overlapping create must not erase a result already delivered to another caller.
+    const previousCreated = this.created;
     await this.request('room:create', options);
     if (revision !== this.sessionRevision) throw new StageError('disconnected', '連線已中斷。');
-    if (!this.created) throw new StageError('internal', '伺服器未回傳房間資訊。');
+    if (!this.created || this.created === previousCreated) throw new StageError('internal', '伺服器未回傳房間資訊。');
     const result = this.created as ServerMessageMap['room:created'];
-    this.session = { roomId: result.roomId, code: result.code, name: options.name };
+    this.installSession({ roomId: result.roomId, code: result.code, name: options.name });
     return result;
   }
   async join(options: { roomId: string; code?: string; name: string }): Promise<void> {
+    const admissionError = this.controlCapacityError();
+    if (admissionError) throw admissionError;
     const revision = this.sessionRevision;
     await this.connect();
     if (revision !== this.sessionRevision) throw new StageError('disconnected', '連線已中斷。');
     await this.request('join', options);
     if (revision !== this.sessionRevision) throw new StageError('disconnected', '連線已中斷。');
-    this.session = { ...options };
+    this.installSession({ ...options });
+  }
+  private installSession(session: JoinOptions): void {
+    // An explicit successful join/create may replace a dropped session before its retry fires.
+    clearTimeout(this.reconnectTimer);
+    this.reconnectTimer = undefined;
+    this.session = session;
   }
   raiseHand(): Promise<void> {
     if (this.handCooldownMs > 0) return Promise.reject(new StageError('rate_limited', `每次舉手需間隔 ${Math.ceil(this.limits.handRaiseIntervalMs / 1000)} 秒。`));
-    this.lastHandAt = Date.now();
+    const capacityError = this.controlCapacityError();
+    if (capacityError) return Promise.reject(capacityError);
+    this.lastHandAt = performance.now();
     return this.request('hand:raise', {});
   }
   withdrawHand(): Promise<void> { return this.request('hand:withdraw', {}); }
@@ -386,28 +516,40 @@ export class StageClient extends EventTarget {
     ++this.sessionRevision;
     this.connecting = null;
     ++this.testRevision;
+    for (const request of this.micTestRequests) request.abort(new StageError('disconnected', '麥克風測試已取消。'));
+    this.micTestRequests.clear();
     for (const test of this.micTests) test.stop();
     clearTimeout(this.reconnectTimer);
     this.reconnectTimer = undefined;
     this.session = null;
     this.snapshot = null;
+    this.lastHandAt = -Infinity;
     this.speakingIds = new Set();
     this.stopKeepalive();
-    this.socket?.close(1000);
+    const socket = this.socket;
     this.socket = null;
     this.rejectPending();
     this.destroyMedia();
-    this.setStatus('disconnected');
     if (this.ownsAudio) this.audio.remove();
     window.removeEventListener('pagehide', this.onPageHide);
+    // Retire all old resources before close/status callbacks can reconnect this client.
+    try { socket?.close(1000); } catch { /* local cleanup must not depend on the transport */ }
+    this.setStatus('disconnected');
   }
   async unlockAudio(): Promise<void> { await this.audio.play(); }
 
-  private request<K extends Exclude<ClientMessageType, 'ping'>>(type: K, payload: Omit<ClientMessageMap[K], 'requestId'>): Promise<void> {
+  private controlCapacityError(): StageError | undefined {
+    if (this.pendingControlRequests >= this.maxPendingControlRequests) return new StageError('queue_full', '待回覆控制請求已滿，請等待完成後再試。');
+    return undefined;
+  }
+  private request<K extends Exclude<ClientMessageType, 'ping'>>(type: K, payload: Omit<ClientMessageMap[K], 'requestId'>, onSend?: () => void, internal = false): Promise<void> {
     const ws = this.socket;
     if (!ws || ws.readyState !== WebSocket.OPEN) return Promise.reject(new StageError('disconnected', '尚未連線至舞台。'));
+    const control = !internal && type !== 'rtc:offer' && type !== 'rtc:ice';
+    const capacityError = control ? this.controlCapacityError() : undefined;
+    if (capacityError) return Promise.reject(capacityError);
     const requestId = crypto.randomUUID();
-    const now = Date.now();
+    const now = performance.now();
     const ice = type === 'rtc:ice';
     // The server's buckets refill at the advertised rate; pacing at half (control) / two thirds (ICE)
     // of it leaves headroom for clock skew and for frames the page sends outside this client.
@@ -417,17 +559,20 @@ export class StageClient extends EventTarget {
     else this.nextControlAt = sendAt + Math.ceil(2000 / this.limits.controlPerSecond);
     return new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => {
-        this.pending.delete(requestId);
-        reject(new StageError('timeout', '請求逾時，請重試。'));
-      }, REQUEST_TIMEOUT + sendAt - now);
-      this.pending.set(requestId, { resolve, reject, timer });
-      setTimeout(() => {
+        this.finish(requestId, new StageError('timeout', '請求逾時，請重試。'));
+      }, this.requestTimeoutMs + sendAt - now);
+      const pending: Pending = { control, resolve, reject, timer };
+      this.pending.set(requestId, pending);
+      if (control) this.pendingControlRequests++;
+      pending.sendTimer = setTimeout(() => {
+        delete pending.sendTimer;
         if (!this.pending.has(requestId)) return;
         if (this.socket !== ws || ws.readyState !== WebSocket.OPEN) {
           this.finish(requestId, new StageError('disconnected', '連線已中斷。'));
           return;
         }
-        ws.send(JSON.stringify({ type, ...payload, requestId }));
+        try { onSend?.(); ws.send(JSON.stringify({ type, ...payload, requestId })); }
+        catch { this.finish(requestId, new StageError('disconnected', '無法送出請求，連線可能已中斷。')); }
       }, sendAt - now);
     });
   }
@@ -435,7 +580,9 @@ export class StageClient extends EventTarget {
     const pending = this.pending.get(id);
     if (!pending) return;
     clearTimeout(pending.timer);
+    clearTimeout(pending.sendTimer);
     this.pending.delete(id);
+    if (pending.control) this.pendingControlRequests--;
     if (error) pending.reject(error); else pending.resolve();
   }
   private rejectPending(): void {
@@ -458,17 +605,21 @@ export class StageClient extends EventTarget {
       case 'room:state': {
         const { type: _, ...state } = message;
         const previousId = this.snapshot?.me.participantId;
+        if (previousId !== state.me.participantId) this.lastHandAt = -Infinity;
         this.snapshot = state;
         if (!state.me.onStage) this.micFailed = false;
         if (this.session) this.session.resumeToken = state.resumeToken;
         this.reconnectAttempt = 0;
         this.setStatus(state.status);
+        // Application callbacks may disconnect, unmount the widget or install a newer snapshot.
+        if (this.snapshot !== state) return;
         this.emit('state', state);
+        if (this.snapshot !== state) return;
         for (const track of this.mic?.getAudioTracks() ?? []) track.enabled = !state.me.muted;
         // First snapshot of a (new) identity → fresh PeerConnection. A resumed seat keeps the one that
         // survived the ws drop unless the network side died meanwhile.
         const pcState = this.pc?.connectionState;
-        if (!this.pc || previousId !== state.me.participantId || pcState === 'failed' || pcState === 'closed') this.createMedia();
+        if (!this.pc || this.pcParticipantId !== state.me.participantId || pcState === 'failed' || pcState === 'closed') this.createMedia();
         this.syncMedia();
         break;
       }
@@ -507,34 +658,46 @@ export class StageClient extends EventTarget {
     }
   }
   private scheduleReconnect(): void {
+    const session = this.session, revision = this.sessionRevision;
+    if (!session || this.intentional || this.reconnectTimer !== undefined) return;
+    const current = () => !this.intentional && this.session === session && this.sessionRevision === revision;
     this.setStatus('reconnecting');
+    if (!current()) return;
     const config = this.options.reconnect ?? { initialDelayMs: 500, maxDelayMs: 15000 };
     const delay = Math.min(config.maxDelayMs, config.initialDelayMs * 2 ** Math.min(this.reconnectAttempt++, 20));
-    this.reconnectTimer = setTimeout(() => {
+    const timer = setTimeout(() => {
+      if (this.reconnectTimer !== timer) return;
       this.reconnectTimer = undefined;
-      const session = this.session;
-      if (!session || this.intentional) return;
+      if (!current()) return;
       void (async () => {
+        let attemptedSocket: WebSocket | null = null;
         try {
-          await this.connect();
-          if (this.intentional || this.session !== session) return;
-          await this.request('join', { ...session, resumeToken: this.snapshot?.resumeToken });
+          const connecting = this.connect();
+          attemptedSocket = this.socket;
+          await connecting;
+          if (!current()) return;
+          // Recovery must not compete with the caller-controlled backlog.
+          await this.request('join', { ...session, resumeToken: this.snapshot?.resumeToken }, undefined, true);
         } catch (error) {
+          if (!current()) return;
           this.report(error);
+          if (!current()) return;
           if (error instanceof StageError && ['unauthorized', 'not_found', 'room_full'].includes(error.code)) {
             await this.disconnect();
           } else if (!this.reconnectTimer && !this.intentional && this.session) {
-            this.socket?.close();
+            if (attemptedSocket) this.abandonSocket(attemptedSocket);
             if (!this.socket) this.scheduleReconnect();
           }
         }
       })();
     }, delay);
+    this.reconnectTimer = timer;
   }
   private createMedia(): void {
     this.destroyMedia();
     const pc = new RTCPeerConnection({ iceServers: this.iceServers });
     this.pc = pc;
+    this.pcParticipantId = this.me?.participantId ?? null;
     this.transceiver = pc.addTransceiver('audio', { direction: 'recvonly' });
     pc.onicecandidate = (event) => {
       if (this.pc !== pc) return;
@@ -564,6 +727,11 @@ export class StageClient extends EventTarget {
     // Wait for the personalised snapshot before choosing the publishing direction.
   }
   private syncMedia(): void {
+    if (!this.me?.onStage) {
+      ++this.captureRevision;
+      this.micRequest?.abort(new StageError('disconnected', '已離開舞台，麥克風要求已取消。'));
+    }
+    const generation = this.mediaAbort;
     const revision = ++this.mediaRevision;
     this.mediaTask = this.mediaTask.catch(() => {}).then(async () => {
       const pc = this.pc;
@@ -571,15 +739,16 @@ export class StageClient extends EventTarget {
       const me = this.me;
       if (!pc || !transceiver || !me || revision !== this.mediaRevision) return;
       if (me.onStage && !this.mic && !this.micFailed) {
+        const captureRevision = this.captureRevision;
         try {
-          const stream = await navigator.mediaDevices.getUserMedia({ audio: this.audioConstraints(this.inputDeviceId) });
-          if (pc !== this.pc || !this.me?.onStage) { stream.getTracks().forEach((track) => track.stop()); return; }
+          const stream = await this.acquireMic(this.inputDeviceId, generation);
+          if (pc !== this.pc || !this.me?.onStage || captureRevision !== this.captureRevision) { stream.getTracks().forEach((track) => track.stop()); return; }
           this.mic = stream;
           try { this.micMeter = createMicMeter(stream); }
           catch (error) { this.mic = null; stream.getTracks().forEach((track) => track.stop()); throw error; }
           this.emit('micready', undefined);
         } catch (error) {
-          if (pc !== this.pc || !this.me?.onStage) return;
+          if (pc !== this.pc || !this.me?.onStage || captureRevision !== this.captureRevision || (error instanceof StageError && error.code === 'disconnected')) return;
           this.micFailed = true;
           const name = error instanceof Error ? error.name : 'UnknownError';
           const message = name === 'NotAllowedError' ? '麥克風權限遭拒，請在瀏覽器網站設定允許麥克風後重新上台。' : name === 'NotFoundError' ? '找不到麥克風，請連接音訊裝置後重新上台。' : '無法啟用麥克風，請確認 HTTPS、裝置及瀏覽器權限後重新上台。';
@@ -599,7 +768,7 @@ export class StageClient extends EventTarget {
       if (pc !== this.pc) return;
       transceiver.direction = direction;
       if (changed || !pc.localDescription || pc.signalingState !== 'stable') this.negotiate();
-    }).catch((error: unknown) => this.report(error));
+    }).catch((error: unknown) => { if (generation === this.mediaAbort) this.report(error); });
   }
   private negotiate(): void {
     this.negotiationDirty = true;
@@ -621,9 +790,13 @@ export class StageClient extends EventTarget {
           if (this.pc !== pc) return;
           const answer = new Promise<void>((resolve, reject) => {
             this.answerWait = { resolve, reject };
-            this.answerTimer = setTimeout(() => reject(new StageError('timeout', '音訊協商逾時。')), REQUEST_TIMEOUT);
           });
-          await Promise.all([answer, this.request('rtc:offer', { payload: { type: 'offer', sdp: pc.localDescription!.sdp } })]);
+          const answerWait = this.answerWait;
+          await Promise.all([answer, this.request('rtc:offer', { payload: { type: 'offer', sdp: pc.localDescription!.sdp } }, () => {
+            if (this.pc !== pc || !answerWait || this.answerWait !== answerWait) throw new StageError('disconnected', '音訊協商已取消。');
+            // Pacing is not time spent waiting for an answer: start only when the offer is sent.
+            this.answerTimer = setTimeout(() => answerWait.reject(new StageError('timeout', '音訊協商逾時。')), this.requestTimeoutMs);
+          })]);
           if (this.pc !== pc) return;
           clearTimeout(this.answerTimer);
           this.answerTimer = undefined;
@@ -642,10 +815,16 @@ export class StageClient extends EventTarget {
   }
   private destroyMedia(): void {
     ++this.mediaRevision;
+    this.mediaAbort.abort(new StageError('disconnected', '音訊連線已中斷。'));
+    this.mediaAbort = new AbortController();
+    // Old permission requests may never settle. Their late results are disposed independently;
+    // a replacement peer must not inherit their serialized work queue.
+    this.mediaTask = Promise.resolve();
     clearTimeout(this.iceRestartTimer);
     this.iceRestartTimer = undefined;
     this.pc?.close();
     this.pc = null;
+    this.pcParticipantId = null;
     this.transceiver = null;
     this.micMeter?.stop();
     this.micMeter = null;
@@ -664,30 +843,61 @@ export class StageClient extends EventTarget {
   }
   async getStats(): Promise<StageStats> {
     const result: StageStats = { inbound: null, outbound: null };
-    if (!this.pc) return result;
-    const stats = await this.pc.getStats();
+    const pc = this.pc;
+    if (!pc) return result;
+    const sequence = ++this.statsSequence;
+    let stats: RTCStatsReport;
+    try { stats = await pc.getStats(); }
+    catch (error) {
+      if (this.pc !== pc || sequence < this.completedStatsSequence) return result;
+      throw error;
+    }
+    // A completed poll from a retired peer or an older overlapping call must not seed new deltas.
+    if (this.pc !== pc || sequence < this.completedStatsSequence) return result;
+    this.completedStatsSequence = sequence;
     let rtt: number | undefined;
-    stats.forEach((entry) => { if (entry.type === 'candidate-pair' && entry.state === 'succeeded' && entry.nominated) rtt = entry.currentRoundTripTime; });
+    stats.forEach((entry) => { if (entry.type === 'candidate-pair' && entry.state === 'succeeded' && entry.nominated) rtt = nonnegative(entry.currentRoundTripTime); });
+    const active = new Set<string>();
     stats.forEach((entry) => {
       if (!['inbound-rtp', 'outbound-rtp'].includes(entry.type) || (entry.kind ?? entry.mediaType) !== 'audio') return;
+      active.add(entry.id);
       const codec = stats.get(entry.codecId);
       const inbound = entry.type === 'inbound-rtp';
-      const bytes = Number(inbound ? entry.bytesReceived : entry.bytesSent);
+      const bytes = nonnegative(inbound ? entry.bytesReceived : entry.bytesSent);
+      const timestamp = finite(entry.timestamp);
       const previous = this.previousStats.get(entry.id);
-      const elapsed = previous ? entry.timestamp - previous.timestamp : 0;
+      const elapsed = timestamp !== undefined && previous ? timestamp - previous.timestamp : 0;
       const remote = entry.remoteId ? stats.get(entry.remoteId) : undefined;
-      const summary: AudioStats = { mimeType: codec?.mimeType, clockRate: codec?.clockRate, channels: codec?.channels, packetsLost: entry.packetsLost ?? remote?.packetsLost, jitter: entry.jitter ?? remote?.jitter, rtt: remote?.roundTripTime ?? rtt };
-      if (previous && elapsed > 0) summary.bitrateKbps = Math.max(0, (bytes - previous.bytes) * 8 / elapsed);
-      const received = Number(entry.packetsReceived ?? 0), lost = Number(entry.packetsLost ?? 0);
-      if (inbound && previous && received + lost > previous.received + previous.lost) summary.lossPercent = 100 * Math.max(0, lost - previous.lost) / (received + lost - previous.received - previous.lost);
-      if (!inbound && typeof remote?.fractionLost === 'number') summary.lossPercent = 100 * remote.fractionLost;
-      const bufferDelay = Number(entry.jitterBufferDelay ?? 0), emitted = Number(entry.jitterBufferEmittedCount ?? 0);
-      if (inbound && previous && emitted > previous.emitted) summary.bufferMs = 1000 * (bufferDelay - previous.bufferDelay) / (emitted - previous.emitted);
-      this.previousStats.set(entry.id, { bytes, timestamp: entry.timestamp, received, lost, bufferDelay, emitted });
+      const summary: AudioStats = { mimeType: codec?.mimeType, clockRate: nonnegative(codec?.clockRate), channels: nonnegative(codec?.channels), packetsLost: finite(entry.packetsLost) ?? finite(remote?.packetsLost), jitter: nonnegative(entry.jitter) ?? nonnegative(remote?.jitter), rtt: nonnegative(remote?.roundTripTime) ?? rtt };
+      const received = nonnegative(entry.packetsReceived), lost = finite(entry.packetsLost);
+      const bufferDelay = nonnegative(entry.jitterBufferDelay), emitted = nonnegative(entry.jitterBufferEmittedCount);
+      if (previous && elapsed > 0 && Number.isFinite(elapsed)) {
+        if (bytes !== undefined && previous.bytes !== undefined && bytes >= previous.bytes) {
+          const rate = (bytes - previous.bytes) * 8 / elapsed;
+          if (Number.isFinite(rate)) summary.bitrateKbps = rate;
+        }
+        if (inbound && received !== undefined && lost !== undefined && previous.received !== undefined && previous.lost !== undefined && received >= previous.received) {
+          const total = received - previous.received + lost - previous.lost;
+          const loss = total > 0 ? 100 * Math.max(0, lost - previous.lost) / total : undefined;
+          if (loss !== undefined && Number.isFinite(loss)) summary.lossPercent = loss;
+        }
+        if (inbound && bufferDelay !== undefined && emitted !== undefined && previous.bufferDelay !== undefined && previous.emitted !== undefined && bufferDelay >= previous.bufferDelay && emitted > previous.emitted) {
+          const delay = 1000 * (bufferDelay - previous.bufferDelay) / (emitted - previous.emitted);
+          if (Number.isFinite(delay)) summary.bufferMs = delay;
+        }
+      }
+      const fraction = nonnegative(remote?.fractionLost);
+      if (!inbound && fraction !== undefined && fraction <= 1) summary.lossPercent = 100 * fraction;
+      if (timestamp !== undefined && (!previous || timestamp > previous.timestamp)) {
+        this.previousStats.set(entry.id, { bytes, timestamp, received, lost, bufferDelay, emitted });
+      }
       if (inbound) result.inbound = summary; else result.outbound = summary;
     });
+    // SSRC/track changes can create new report IDs without replacing the PeerConnection.
+    for (const id of this.previousStats.keys()) if (!active.has(id)) this.previousStats.delete(id);
     return result;
   }
+
 }
 
 function opusMonoSdp(sdp: string): string {

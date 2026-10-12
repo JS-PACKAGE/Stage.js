@@ -330,6 +330,92 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 
 27. **靜態資源預壓縮**：根建置以 Node 內建 zlib 產生較小的 Brotli／gzip sidecar（原子替換、不追 symlink、不重複壓縮）；HTTP 依 Accept-Encoding 權重、wildcard、identity 與 q=0 協商，版本獨立 ETag、Vary、HEAD／304 及原 MIME／CORS 一致。舊於原檔或 symlink 的 sidecar 不使用；沒有可接受版本時回 406，其餘退回原檔，不在請求期間壓縮。mtime 比較用 stat 原始精度，避免 Date 的毫秒四捨五入誤判新副本。開發模式不變，部署原檔與 sidecar 一起更新。
 
+28. **client 統計生命週期**：音訊 RTP 差量只採有效、遞增時間戳及可用計數器；計數器重置先重新建立基準，不產生 NaN／負 jitter buffer 延遲。舊 peer 與被較新完成結果取代的輪詢回空統計，不污染新連線；歷史只保留當前 RTP ID，避免同一 PeerConnection 多次換 SSRC 後無限累積。單位與現有 getStats API 維持，當前 peer 的實際錯誤仍向呼叫端拒絕。
+
+29. **監控收集去重**：每個 HTTP server 僅共用同時進行的 metrics promise，授權檢查仍逐請求先執行，成功／拒絕後立即清除。不跨伺服器共用、不設 TTL，新的 scrape 重新收集；同步 throw 也轉成既有 generic 500。重疊請求不再各自掃描房間與發出 worker counters RPC。
+
+30. **輸入工作上限**：每條 ws 以可清空的明確佇列取代逐訊息 promise closure，等待工作受 maxPendingMessages／maxPendingBytes 雙上限約束，單一執行中工作另受 maxFrameBytes 限制。超限立即 terminate 並清除等待 payload，所有關閉均停止接收／執行新工作，僅等待執行中工作完成後 detach；正常 FIFO 不變，其他連線不受影響。觀測 inbound queue disconnect counter，舊設定採有界預設。
+
+31. **停機准入與 readiness**：server.close 開始時同步標記 draining、停止所有 session 輸入工作；新 upgrade 回 503，不再接受排空期間新增連線／控制操作。新增 GET／HEAD /readyz（正常 200、排空 503、no-store），/healthz 繼續表示程序存活；不是 WebRTC 健康探針。close 共用同一 promise，房間通知／關閉握手維持原順序，避免重複停機。
+
+32. **單調間隔計時**：伺服器 token bucket 與 client 請求排程、舉手冷卻、keepalive 只使用 performance.now 的經過時間；系統牆鐘校正不得造成額外配額、誤斷線或長時間延後送出。房間事件與日誌的絕對時間不改。注入 clock／timer 回歸測試覆蓋正負一小時校正及真正的靜默逾時。
+
+33. **client 延遲送出清理**：每個 pending 同時保存 ACK 期限與 pacing send timer，所有 settle／斷線路徑統一清除兩者，避免已取消請求的 payload 被未來送出 slot 保留。逾時透過 finish 清理；同步 stringify／ws.send 失敗拒絕該請求，不從 timer 拋出例外。
+
+34. **client 可調期限**：StageClientOptions.requestTimeoutMs 可設定 hello／ACK／SDP answer 期限（1–300000 整數毫秒，省略維持 15000），建構時先驗證。ACK 仍預留 pacing 排程時間，answer 期限改從 offer 實際送出開始，並綁定 peer／answer waiter 身分，過期 peer 不得送出排隊 offer 或改動新期限。不改 keepalive／重連／server watchdog，也不宣稱取消已送出的伺服器操作。
+
+35. **遞迴日誌遮蔽**：敏感欄位名稱防護延伸到巢狀物件與陣列，透過 own descriptor 複製不修改來源；不呼叫 getter／toJSON／Proxy traps，循環、深度與遞迴複製／輸出欄位數有界（不是 Object.keys 列舉或字串位元組的固定成本保證）。Error 資料欄位／cause、Date、bigint 保留可用診斷，accessor 明確標記。這不是任意字串秘密偵測，原本不得傳入憑證／原始 SDP 的規則不變。
+
+36. **可取消麥克風預覽**：startMicTest 可選 AbortSignal；預先取消不要求權限，等待中取消立即拒絕且停止遲到串流，啟動後取消只停止該 preview。原生 permission prompt 不能自動關閉；signal reason 保留，正常失敗保留原錯誤，stop 冪等並清除 listener，不觸及房間 microphone 或其他 preview。
+
 ---
 
 開始執行。
+
+37. **300 位觀眾控制面煙霧測試（2026-10-12）：** 新增 local-only `bench-control-plane.ts`，真實 WebSocket 搭配 MockMediaTransport、不送音訊，驗證 300 位進房／SDP、滿房拒絕、10 位原席位與 peer 保留、301 位 shutdown 通知及 1001 關閉碼；可用的 overflow 指標須為零。30 秒硬期限、連線／伺服器清理，輸出同程序 ACK／CPU／RSS／event-loop 數據。初版主線與改善分支各三次均通過；join p95 範圍主線 1.93–3.24 ms、改善分支 1.99–2.46 ms，RSS 高點約 96–100 MiB。因本機共用程序、presence 視窗與排程變異，不宣稱吞吐提升或實際音訊容量。
+
+38. **舉手突發的完整快照合併（2026-10-12）：** 300 位同時舉手的本機控制面探測揭露反覆傳送成長中 hands 陣列：原始主線耗盡約 2 GiB Node heap，已有輸出保護的分支則觸發 301 次 backpressure 斷線。不得提高上限掩蓋。現在保留逐筆 hand 事件與發起者 state-before-ACK，其他完整快照以每房單一 0ms 計時器合併；較慢 presence timer 被取代，後續 hand 不重置期限，即時台位變更／關房取消待送；觀眾正常離開或寬限期到期的純 hand:withdraw 同樣合併，避免另一條群體離場突發路徑。首輪修正探測 300/300 ACK、0 斷線，收到的資料約 385.8 MB → 32.0 MB（失敗舊版未完成所有工作，並非等量完成吞吐比較）；RSS 結束取樣約 618 → 192 MB。以 ordered events／最終狀態／混合收回／回座／關房測試及 `bench-control-plane.ts --hands` 驗證，無實際音訊容量宣稱。
+
+39. **Web Component 請求中的按鈕狀態（2026-10-12）：** 原本 onclick 暫設 disabled，但每秒 cooldown render／任何 state render 都會提早重新啟用按鈕，慢速 ACK 可造成重複提交。以每按鈕 pending set 守護，render 合併 pending 與冷卻／force-muted 政策，操作期間 aria-busy=true；同步 throw 與非同步拒絕都收斂到錯誤呈現與清理。generation 隔離舊房间操作，leave 清空 pending。6 個原生最小 DOM fake 測試涵蓋重繪、重入、失敗、政策、代際隔離及獨立按鈕；不等同瀏覽器版面／鍵盤／真實麥克風驗證。
+
+40. **媒體工作佇列的 PeerConnection 代際隔離（2026-10-12）：** 重現舊 getUserMedia 未回覆時 disconnect／再加入的新 peer 無法協商，因 mediaTask 尾端仍連到舊 permission promise。destroyMedia 取消該代權限等待並建立新佇列；helper 停止遲到串流，setInputDevice 在排隊時捕捉代際，過期工作拒絕而非改動新偏好。保留同一 peer 裝置切換序列與既有跨 await 身分檢查。9 個 fake-media 測試涵蓋新 peer 不等待舊授權、新麥克風不被舊串流清理誤停、遲到拒絕、排隊／執行中裝置切換及 replaceTrack continuation（含舊 peer 遲到錯誤不污染新連線）；不宣稱已解除瀏覽器原生 permission prompt，也不等同真實音訊端到端驗證。
+
+41. **同一 peer 下台取消擷取等待（2026-10-12）：** 重現未回覆的 getUserMedia 阻塞同一 peer 下台後 recvonly 協商。房間擷取新增單一 permission token，連到 peer 代際，並在下台中止；完成／失敗／取消清除連結 listener。captureRevision 防止授權成功與安裝間的快速下台／再上台競態採用舊串流，正常權限拒絕仍走 micerror，獨立 preview 不受影響。同 peer 工作仍序列化；不取消已進瀏覽器的 replaceTrack。增加 7 個 fake-media 測試，包含 listener 清理、快速往返、裝置切換、preview 隔離與 acquisition→installation 競態，以及拒絕先排入 microtask 後才下台／再上台的舊錯誤。
+
+42. **靜態掛載 canonical containment（2026-10-12）：** synthetic 測試重現 lexical path 檢查仍會透過來源檔／父目錄 symlink 送出 mount 之外內容。每請求解析實際 root/source 路徑並驗證目錄邊界，選中的 sidecar 亦須在 canonical root 內；讀取解析後的檔案路徑。保留 mount 內 symlink、部署 release-root symlink、啟動後建立輸出目錄與 root 切換。測試含相似前綴 sibling、外部 directory→內部來源回鏈但外部 sidecar、dangling/cycle、GET/HEAD。增加 metadata I/O，無加速宣稱；不宣稱防禦惡意本機 writer 在檢查與開檔間替換檔案的 TOCTOU。
+
+43. **嵌入元件本機收聽靜音（2026-10-12）：** `<stage-client>` 增加「靜音收聽／恢復收聽」原生按鈕（aria-pressed）與 playback-muted 布林 attribute／playbackMuted property，清楚區別台上麥克風靜音。只改本機 audio，不傳控制面訊息、不重新進房；偏好在新 client 開始 connect 前套用，保留於 rejoin／重掛載／信令 reconnect，未進房隱藏操作。增加 4 個 DOM fake 測試（含實際元件 lifecycle callbacks，SDK connect/join 以 stub 取代）；不宣稱瀏覽器鍵盤／版面／實際音訊 QA。
+
+44. **自訂嵌入標籤 constructor 唯一性（2026-10-12）：** README 原先承諾 default/custom tag 可共存，但 defineStageElement 重用同一 constructor，違反 CustomElementRegistry.define 的 constructor 唯一性規則（WHATWG HTML Custom elements：https://html.spec.whatwg.org/multipage/custom-elements.html）。以遵循該規則的 registry fake 重現 NotSupportedError。每個 custom alias 改用獨立 StageElement 子類別；預設 stage-client 保留原 export constructor。同名 no-op／第三方既有定義不覆寫／原生無效名稱錯誤不吞掉；3 個測試涵蓋 default-first、custom-first、多 alias、instanceof／繼承 attributes 與獨立狀態。實際瀏覽器 registry QA 仍受環境限制未執行。
+
+45. **SDK 真實 WebSocket 控制面整合（2026-10-12）：** 補足既有 SDK fake socket 與容量工具自訂 participant 之間的缺口：實際 StageClient 連到獨立子程序的 createStageServer／StageHub，伺服器使用 MockMediaTransport，瀏覽器媒體 fake。涵蓋建立／加入、個人化快照、舉手／核准、個人／主控靜音及禁止解除錯誤、下台、強制斷線後自動同席位／同 client PC／同 server peer identity 恢復、收聽偏好保留、kick／shutdown 清除 session 與 reconnect timer。失敗清理具有 child kill deadline；IPC／狀態等待有界。不改生產碼，不宣稱真實 ICE／麥克風／音訊 E2E 或效能增益。
+
+46. **嵌入元件按需冷卻排程（2026-10-12）：** probe 以控制時間量到無狀態變更的 mounted widget 每模擬分鐘仍觸發 60 次 render，關房也不停止原 interval。改為只在觀眾未舉手且可見倒數尚未結束時保留一個 timeout；對齊下一個顯示秒數邊界，重繪不延後已排程 wake，失去倒數需求／卸載立即取消。6 個測試涵蓋遲到 wake 不重播舊 tick、小數毫秒期限向上取整避免過早重繪、idle 60→0 callbacks、1.5 秒冷卻只做 2 次必要 tick、raise／stage／controller／closed／disconnect 清除與 pending action 不提前解鎖。這是 controlled-clock 工作量比較，不宣稱真實瀏覽器 CPU／電量或頁面延遲改善；既有 DOM fake 範圍不變。
+
+47. **斷線即取消待授權麥克風預覽（2026-10-12）：** scratch regression 重現 startMicTest 無 signal 時，disconnect 後 promise 仍等原生權限回應，原測試先 grant 才 assert 而未覆蓋。每個擷取請求使用自己的 AbortController，加入 pending set；disconnect 同步 abort／clear，完成或失敗 finally 移除 caller listener 與 set entry。保留獨立 caller signal 及 active preview stop，晚到 stream 停止／reject 接住；revision 檢查補 meter 建立與 micready 回呼重入斷線。6 個新測試涵蓋多 pending、立即 reuse、外部 signal ownership／cleanup、兩種重入及同步 getUserMedia throw。僅 fake browser media，不提出真麥克風權限、不宣稱能關閉原生提示。
+
+48. **舉手冷卻的身分生命週期（2026-10-12）：** controlled-clock probe 重現 raise 後 explicit disconnect 仍保留 10000ms 冷卻，重用 SDK 進新房間會無故無法舉手。disconnect 與新 participantId 快照將 lastHandAt 重置為 -Infinity；同身分快照／自動同席恢復不重置。增加 2 個 clock regressions，並擴充真實 WebSocket SDK 整合測試：同席恢復保留起點、明確離房再 join 得新身分且立即 raise 成功。保持 monotonic clock 與伺服器限流不變，無媒體層修改。
+
+49. **room:state 回呼重入取消保護（2026-10-12）：** read-only probe 與 4 個 failing regressions 重現 status／state listener 同步 disconnect 後舊 handler 仍建立未關閉 PC，或重入新快照後舊 handler 再次建立 PC 並關閉新 peer。setStatus 與 state event 各返回後比對目前 snapshot identity；已被 disconnect 清除或新快照取代即停止。review 發現舊 peer A→外層 B→重入 B 會跳過必要替換，另記錄 PC 實際綁定的 participantId，不以暫時 snapshot 推論 ownership；destroyMedia 清除。6 個測試涵蓋兩個事件位置的取消／替換及同新身分重入，驗證不發 stale state、不建立舊 peer／permission、不停止新 mic。維持同步事件順序及正常同席恢復；client-only，browser media 使用 fake。
+
+50. **自動重連 session ownership（2026-10-12）：** 4 個獨立 probe 與 9 個 failing regressions 重現 reconnecting listener 換房後舊 timer 重複 join 新房、舊 hello 失敗關閉新 socket，以及 resume error listener 換房後 stale catch 再報錯／disconnect。setStatus 前捕捉 session／revision；排程前、timer entry、connect await 後、catch report 前後確認 ownership，timer handle 也需相符；已排程不再重複建立。review 補正成功 public join/createRoom 替換 session 時取消舊 timer，owned callback 先清 slot 再判 session，避免殘留 handle 阻止新重連。15 個 tests 涵蓋新 session 在舊期限前／後再斷線、disconnect-only、立即 public join、三種 terminal code 在兩個 error callback 時機換房、延遲 hello failure，另保留正常 resume／退避／目前 terminal cleanup。client-only，無傳輸／混音層變更。
+
+51. **SDK 文件按使用情境整理（2026-10-12）：** 將連續功能批次累積在 README 尾端／測試章節之後的 lifecycle、冷卻、widget、preview 說明移回相應 API 章節，增加快速導覽與房間／事件／連線／統計標題。保留每一原始內容 block 與既有 caveat；逾時文字明確標示可配置的預設值，統計欄位 codec 說明改為實際公開名稱 mimeType。不改生產碼；檢查章節連結及來源 API 對照。
+
+52. **連線品質 polling 失敗恢復（2026-10-12）：** read-only probe 重現任一 getStats reject 使 Promise.all 失敗且不再安排下一輪。將 reschedule 移至 finally，並以 qualityInFlight 保持每房一輪；allSettled（含 sync throw 包裝）略過個別失敗，保留健康報告，整輪失敗仍重試。publisher set 改為 id→generation token map，防止下台再發布的舊結果播送或回填新 baseline。9 個 tests 含失敗後沿用上次成功 counter baseline、部分／全 async／sync failure、關房／最後 publisher 離開期間 pending、新 publisher 不重疊收集、同 id 再發布與停用設定；其中 5 個 before-fix 失敗。只改 hub 控制面，不改 transport／mixer。
+
+53. **失敗／未進房連線的資源清理（2026-10-12）：** 3 個 failing regressions 重現 WebSocket constructor throw、hello timeout、未 join socket close 仍由 window listener 保留 client（8 次失敗留下 8 個 listener）。socketLost 在派發狀態前移除舊 listener；connect promise finally 僅清理仍屬於自己的失敗嘗試，補沒有 close event 的 constructor failure。另 2 個 failing regressions 重現自建 audio 節點殘留；無 session 才移除 owned audio，自動同席 resume 保留，reuse 掛回同一元素／偏好，custom audio 不移除。9 個 tests 含 reconnect callback 立即替換、舊 close 在新 CONNECTING 期間遲到、新連線 pagehide 仍作用、audio ownership／reuse；不宣稱實際瀏覽器 GC／heap 數值改善。
+
+54. **完整範例前端個人操作 pending ownership（2026-10-12）：** production-function probe 重現返回舞台 promise 未完成時，250ms updateCooldown 將原按鈕解鎖，第二次點擊重複送出；既有 §39 只修嵌入元件。個人 mute／stage／hand 操作以 logical key 追蹤 token，跨快照重建 DOM 保留 disabled／aria-busy；同 roomId＋participantId 保留，landing／身分切換增加 generation 並清除 pending，舊 settlement／舊 DOM callback 不影響新房。完成時重新套用 reconnect／force-mute／cooldown 政策。8 個 Node VM 測試直接取 production handlers／renderRoom，以 DOM／SDK doubles 驗證 timer／重建／拒絕重試／換房／政策；未執行實際 browser click／accessibility QA，不擴及主控管理列或 slider。
+
+55. **完整範例倒數按需排程（2026-10-12）：** production scheduler 的 controlled-clock probe 量到房內無倒數時每分鐘 240 次 cooldown 更新（另 30 次 stats）。移除固定 250ms interval，只有 connected 舉手按鈕的剩餘冷卻才安排單一 timeout，向上取整至下個顯示秒數邊界，不因重繪延後已排定 wake；landing／舉手後／上台取消，late wake 直接重算。5 個新增 VM 測試涵蓋 landing／重入與 controller 轉換、idle cooldown 240→0、stats 30 不變、1500.75ms 倒數 2 callbacks、小數／延遲／角色切換與 pending ACK 保護。不宣稱實際 browser CPU／電量或 latency 增益。
+
+56. **完整範例主控操作 pending ownership（2026-10-12）：** read-only production renderRoom／personRow probe 重現 8 種管理按鈕在 snapshot 重建後重複送出；Room 模型確認 rotateCode 可連續有效換碼，舊成功通知也會寫進新房。沿用 roomButton：核准／婉拒／移除以 stage:target 共用、強制靜音切換共用、kick 依 target、transfer 全房、rotate／close 各一 key；generation 保護換碼後 success notice。12 個新 VM tests 使用實際 panelList／personRow，涵蓋 9 種按鈕、對向狀態、跨目標 transfer 與舊房成功隔離。保留確認對話框與伺服器政策；slider 不變。僅 DOM／SDK doubles，無實際 browser 或控制生產房間。
+
+57. **HTTP 停機排空期限（2026-10-12）：** 單一本機 paused 靜態下載／deferred metrics probe 重現最後 server.close callback 無限等待；既有 1 秒契約僅 WS handshake，並非 HTTP／總停機期限。新增 server.httpShutdownDrainMs（legacy default 1000，整數 0–60000），保持 hub／WS／readiness 原順序，最後 HTTP listener close 後才啟動 timer，到期 closeAllConnections，finally 清 timer。4 個 real HTTP regressions 覆蓋 deferred metrics 晚到成功／失敗、正常完整回應、8MiB paused download、primary hub error 與 0ms；另測 config default／bounds。不取消底層工作、不宣稱 hub 或整體 shutdown 有界；無媒體層變更。
+
+58. **完整範例統計顯示 ownership（2026-10-12）：** production refreshConnectionLine＋fake RTC probe 重現新版 40ms RTT 顯示被較舊 SDK empty 結果清空，離房／重入亦會被舊 peer 完成覆寫。僅在 sample 更新前比對 room generation 與最新 request sequence，landing 不啟動收集；保留每 2 秒與新請求不等舊 pending 的行為。5 個 VM regressions 涵蓋同身分經 landing 重入、同房 snapshot、empty 最新／舊結果、rejection recovery、舊 pending 不阻塞與 retired tick。SDK §28 的 supersession／result ownership 完全不變；不做 synthetic single-flight 數字的效能宣稱。
+
+59. **完整範例麥克風設定操作 ownership（2026-10-12）：** production VM probe 重現 active preview 換裝置時 test button 仍可點，兩個 pending preview 都賦值 micTest，Stop 只能停止最後一個。toggle／input onchange 共用 testingBusy 入口 guard，開始即 syncMeter；landing 增加設定 generation、停止 active preview／清 busy，await 後舊 result 自行 stop，舊 finally／failure 不解鎖或覆寫新操作。10 個 fake SDK／DOM tests 涵蓋互斥、兩種晚到順序、拒絕重試、舊 device-change completion、on-stage 政策；其中 2 個 before-fix 失敗。SDK 獨立 preview 語意不變，未要求真實麥克風權限或執行 browser QA。
+
+60. **完整範例全模組 lifecycle 測試（2026-10-12）：** 原 VM regressions 只取 production function fragments，不能驗證頂層 event registration 與 status→landing→同身分 rejoin 串接。新增 bounded fake DOM／SDK fixture，assert 並移除唯一 3 個 imports 後 strict-evaluate 全 main.ts，保留全部 initializer／subscription／landing；不暴露內部 helper。3 個場景經真實表單／按鈕 handler 與符合 SDK 的 snapshot→status→state、disconnect→terminal 順序，驗證 pending preview reject／已 fulfill 但 UI continuation 晚到、stats／cooldown／ACK 交互、reparent／detach、50ms preview→stage→offstage meter、quality／speaking badge 和 shutdown／kick。cleanup settle 所有 deferred／停止 preview 並清 fake timers，advance 最多 1000 callbacks；不修改 production／dependencies，不宣稱 native browser 或 real SDK interoperability。
+
+61. **根目錄操作文件導覽與事實校正（2026-10-12）：** 將誤置授權章節下的輸入佇列／日誌／控制面煙霧測試／靜態邊界段落移回設定、驗證與靜態資源章節，保留全部行為與驗證限制，授權維持最後。增加導覽與操作小標題，依 config parser 補齊五個相容 fallback 與設定表，修正範本註解、開發 TS 與建置 start 區別、frame size 1009／rate limit 1008 說明；只改文件，不改執行碼或設定值。
+
+62. **逾時重連不等待舊 close handshake（2026-10-12）：** actual SDK＋本機 ws probe 重現 hello 不回覆與 resume ACK 不回覆後 close handshake 卡住，40ms 請求期限後仍停在第二次連線，直到遠端恢復讀取才嘗試第三次。沿用 socketLost 的 ownership／session 清理，先放棄 failed socket 再 best-effort close；hello timeout 在 callback 前解除舊 connecting promise，自動回座捕捉實際嘗試的 socket，避免舊 catch 關閉替代連線。4 個 controlled-clock regressions 守退避、晚到事件、同步 callback reuse 與 close throw；2 個 real localhost ws tests 暫停遠端讀取，驗證舊 socket 仍 CLOSING 時第三次已回座，並在 finally 終止所有 transport／清理 timer。測試期限採 250ms，5 秒場景上限；ACK-only session 不代表實際媒體整合。保持終止錯誤、退避、取消與媒體保留語意；不宣稱底層 socket 立即釋放，不修改 transport／mixer。
+
+63. **disconnect callback 重入前完成資源清理（2026-10-12）：** asynchronous-close probe 重現 disconnected listener 立即 connect，舊 disconnect 的尾端隨後移除新 pagehide listener 與 owned audio；replacement hello 成功但 pagehide 無作用。將 socket ownership 先清空、所有本機清理置於 status 派發前，最後 best-effort close 舊 socket；同步／遲到 onclose 不可重新進入舊 cleanup，close throw 不阻止終止狀態。5 個 public-callback regressions 覆蓋 owned／custom audio、晚到 close、立即 connect／join、同步／非同步／throwing close 與再次正常清理；最初兩個回歸在修正前失敗。不改媒體 transport／mixer，不宣稱原生 browser 驗證。
+
+64. **可選的 SDK 呼叫端控制 backlog 上限（2026-10-12）：** bounded fake-clock probe 共 1000 次 public setGain：600 次 burst 保留 600 pending／1200 request timers，250ms ACK 設定下最後送出仍在 59900ms；另 400 次以 20/s 產生、10/s 排空後累積 200 unsent。這是既有 pacing 契約，不是 timeout cleanup bug。新增 maxPendingControlRequests 正安全整數選項，省略保持 unlimited；只計 public controls 的 queued＋unacked，超限本機 queue_full，先於 UUID／timer／pacing admission，raiseHand／createRoom 副作用也先 guard。finish 統一釋放 counter。否決 all-request cap：未 ACK join 占滿後拒絕已 setLocalDescription 的 offer，可能留下 orphan ICE；因此內部 RTC 與 automatic resume 明確豁免，但保留同 scheduler／順序。18 個 deterministic regressions 涵蓋所有 settlement、pre-hello concurrent create／join、既有 session／created／cooldown 保留與 cap=1 的 signaling／resume 豁免；1000 次 burst 在 omitted 時保留 1000 entries／2000 request timers，cap=3 時為 3／6 並拒絕 997 次。不宣稱總記憶體、payload byte 或真實效能上限，不改 server config／wire ErrorCode。
+
+65. **控制容量的真實信令整合驗證（2026-10-12）：** 將既有 actual SDK＋本機 real WebSocket／MockMediaTransport 完整流程參數化為 omitted 與 maxPendingControlRequests=1，保留原預設 coverage。cap=1 的 child fixture 明確 gate 初次 guest join ACK，但不阻塞 server 工作佇列；先確認 SDK remoteDescription／server peer 與 pendingControlRequests=1，再經 IPC release ACK，避免只靠 incidental ordering。其後在 raise pending 時立即 withdraw 必須本機 queue_full，原舉手與後續 state-before-ACK 媒體協商／管理操作／same-peer resume／reuse／kick／shutdown 仍通過，終止後 control counter 為零且無額外 error event。僅新增驗證，browser media 仍 fake，不宣稱真 ICE／麥克風音訊。
+
+66. **重疊 createRoom 的結果 ownership（2026-10-12）：** unchanged real localhost SDK/server 重現 created／state listener 立即再開房，使第二次 this.created=null 清掉第一次已收到的結果；第一個 internal、第二個 already_joined，但 server 為 live controller／SDK session=null，斷線不回座。改為每次 request 前記錄 created identity，ACK 後要求 fresh identity，不清共享結果；保留 server rejection、revision cancellation 與無新 created 時 internal。8 個 deterministic tests 守兩種 callback reentry／concurrent creates／error-ACK ordering／stale result／disconnect-reuse／cap=1，其中 3 個 baseline 失敗；2 個 native WS baseline-failing scenarios 修正後繼續整段 lifecycle，並新增 host 斷線後的 seat／browser peer／server MockPeer identity assertions；更新 cap regression 的舊 reset-write 假設。無新鎖、排隊策略或 wire 變更。
+
+67. **滿台時的主控到期自動接任（2026-10-12）：** deterministic／native timer probe 重現 8 位 speaker 全在 disconnected grace、只剩 connected audience 可接任時，Room.transfer 將即將移除的舊主控暫時計為第 9 位 speaker，stage_full 被 timer catch 視為內部錯誤而關房。只在 on-stage departing／off-stage successor／speaker cap 已滿的 expiry 分支，先用既有 leaveStage 釋放舊主控舞台狀態，再 transfer＋remove，於同 room queue 一次 apply events／snapshot。5 個 deterministic tests 覆蓋原本失敗的滿台 audience 接任、manual rejection、7 人邊界、connected speaker 優先、無 successor 關房；驗證單次 snapshot／ordered events、8 個同一 peer／grace timer、old media 清理與新 controller 私有資料／權限。保留 manual transfer guard、正常 successor 選序、其他 peer／grace timer、不自動開接任者麥克風；不修改 model invariant 或 transport／mixer。
+
+68. **主控接任依事件順序而非牆上時鐘（2026-10-12）：** model 與實際 hub grace-expiry probe 重現時鐘回撥後，較晚加入的觀眾／較晚上台的發言者反而優先接任。既有 participants Map 與 speakers Set 已記錄加入／本次上台的 insertion order，改為回傳第一位 eligible connected speaker，否則第一位 connected audience；不新增序號，不改公開 joinedAt 或內部 stageSince 時戳。resume／角色移交保留順序，下台再核准與移除再加入重新排尾；保留 speaker 優先、controller 排除、滿台與無 successor 行為。12 個 regressions（baseline 9 fail／3 pass）涵蓋 rollback／同時戳／斷線回座／reentry／transfer 與 hub 到期的實際 transfer event，不宣稱效能或真媒體驗證。
+
+69. **遲到 offer failure 的清理 ownership（2026-10-12）：** gated MockMediaTransport 重現舊 socket 的 negotiate 尚未完成時，同席 resume 的新 socket 已成功協商；舊 promise reject 後 hub catch 仍 unpublish／closePeer，刪除新 peer、subscriber 與 publisher。以 Participant 為 WeakMap key，通過 queued policy check 才替換 latest-offer token；catch 只清理仍存在且 object／token 相同的席位。單純 detach 或 resume 未發新 offer 保留既有 failed-peer 清理；新版 offer 即使仍 pending、已失敗或其 socket 再 detach，舊 callback 都不重新取得 ownership。11 個 bounded MockMedia regressions（baseline 4 fail／7 pass）守 retained／recreated peer、新 offer pending／failure、detach-only／resume-without-offer、policy rejection、removed seat／closed room 與 old success。WeakMap 不保留 Session／socket／promise，removed participant 不需額外 map 清理；不改底層 WebRTC 工作的取消／串行語意或 transport／mixer。
+
+70. **範例裝置列舉的最新請求 ownership（2026-10-12）：** whole-module VM probe 重現慢速初始 listAudioDevices 回覆覆蓋較新的 micready 清單，也可移除已成功選取的 deviceId 選項而 SDK 未切換裝置。refreshDevices 在 await 前遞增／捕捉 sequence，回覆後先檢查再更新兩個 select；selectedInput／selectedOutput 維持在 await 後讀取，不回填舊選擇。最新失敗保留現有顯示、較舊成功不再覆蓋，後續新成功仍恢復。7 個 whole-module regressions（baseline 3 fail／4 pass）經實際 init／micready／devicechange wiring 驗證雙清單、選擇保留、失敗恢復與 default／empty／label fallback。只改 sample UI，不改 SDK 列舉、權限或 polling 語意；whole-module fake DOM／SDK coverage 不宣稱 native select 顯示、實際瀏覽器或音訊驗證。

@@ -20,6 +20,8 @@ export interface AppConfig {
     metrics: { enabled: boolean; token: string };
     /** Behind a reverse proxy: take the client address from `X-Forwarded-For` for per-IP limits. */
     trustProxy: boolean;
+    /** Grace for unfinished HTTP responses after listener shutdown begins (0 = cut off immediately). */
+    httpShutdownDrainMs: number;
   };
   limits: {
     maxRooms: number;
@@ -29,6 +31,9 @@ export interface AppConfig {
     maxFrameBytes: number;
     /** Maximum pending outbound bytes, including the next message; slow readers are disconnected. */
     maxSendBufferBytes: number;
+    /** Waiting inbound work, excluding the single active operation. */
+    maxPendingMessages: number;
+    maxPendingBytes: number;
     controlPerSecond: number;
     handRaiseIntervalMs: number;
     icePerSecond: number;
@@ -195,6 +200,7 @@ export function parseConfig(raw: unknown): AppConfig {
     }),
     metrics: { enabled: bool(mt, 'enabled', 'server.metrics'), token: str(mt, 'token', 'server.metrics') },
     trustProxy: bool(s, 'trustProxy', 'server'),
+    httpShutdownDrainMs: s.httpShutdownDrainMs === undefined ? 1000 : int(s, 'httpShutdownDrainMs', 'server', 0, 60000),
   };
   if (server.metrics.enabled && server.metrics.token === '' && LOOPBACK[server.host] !== true) {
     throw new ConfigError('server.metrics.token: required when metrics are enabled on a non-loopback host');
@@ -219,6 +225,10 @@ export function parseConfig(raw: unknown): AppConfig {
     maxSendBufferBytes: l.maxSendBufferBytes === undefined
       ? Math.min(Number.MAX_SAFE_INTEGER, int(l, 'maxFrameBytes', 'limits', 1024) * 16)
       : int(l, 'maxSendBufferBytes', 'limits', 1024),
+    maxPendingMessages: l.maxPendingMessages === undefined ? 128 : int(l, 'maxPendingMessages', 'limits', 1),
+    maxPendingBytes: l.maxPendingBytes === undefined
+      ? Math.min(Number.MAX_SAFE_INTEGER, int(l, 'maxFrameBytes', 'limits', 1024) * 16)
+      : int(l, 'maxPendingBytes', 'limits', 1024),
     controlPerSecond: int(l, 'controlPerSecond', 'limits', 1),
     handRaiseIntervalMs: int(l, 'handRaiseIntervalMs', 'limits', 0),
     icePerSecond: int(l, 'icePerSecond', 'limits', 1),

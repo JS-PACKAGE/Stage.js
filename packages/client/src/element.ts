@@ -25,12 +25,13 @@ button.primary { background: var(--stage-accent, #2563eb); border-color: transpa
  * Joins when it is in the document and has `room` and `name`; leaves when removed. Changing
  * `url`, `room`, `code` or `name` rejoins. `url` defaults to `/ws` on the origin the library was
  * loaded from. The underlying client is exposed as `.client` for anything the widget does not
- * offer, and every client event is re-dispatched from the element as `stage-<type>` (bubbling,
+ * offer. `playback-muted` / `.playbackMuted` controls local listening without rejoining,
+ * and every client event is re-dispatched from the element as `stage-<type>` (bubbling,
  * composed) with the same `detail`. Style through `::part(panel|status|actions)` and the
  * `--stage-*` custom properties.
  */
 export class StageElement extends HTMLElement {
-  static readonly observedAttributes = ['url', 'room', 'code', 'name'];
+  static readonly observedAttributes = ['url', 'room', 'code', 'name', 'playback-muted'];
   private current: StageClient | null = null;
   private readonly status: HTMLParagraphElement;
   /** Last failure (request rejected, mic denied…); stays until the next action or join. */
@@ -39,7 +40,9 @@ export class StageElement extends HTMLElement {
   private readonly hand: HTMLButtonElement;
   private readonly mic: HTMLButtonElement;
   private readonly leaveStage: HTMLButtonElement;
-  private cooldownTimer: ReturnType<typeof setInterval> | undefined;
+  private readonly listen: HTMLButtonElement;
+  private readonly pendingActions = new Set<HTMLButtonElement>();
+  private cooldownTimer: ReturnType<typeof setTimeout> | undefined;
   /** Bumped on every (re)join, so a superseded join cannot touch the widget. */
   private generation = 0;
 
@@ -69,7 +72,9 @@ export class StageElement extends HTMLElement {
     this.hand = this.button('舉手發言', () => (this.current?.me?.handRaised ? this.current.withdrawHand() : this.current?.raiseHand()));
     this.mic = this.button('靜音', () => (this.current?.me?.muted ? this.current.unmute() : this.current?.mute()));
     this.leaveStage = this.button('離開舞台', () => this.current?.leaveStage());
-    actions.append(this.unlock, this.hand, this.mic, this.leaveStage);
+    this.listen = this.button('靜音收聽', () => { this.playbackMuted = !this.playbackMuted; });
+    this.listen.setAttribute('aria-label', '靜音收聽');
+    actions.append(this.unlock, this.listen, this.hand, this.mic, this.leaveStage);
     panel.append(this.status, this.error, actions);
     root.append(style, panel);
     this.render();
@@ -78,26 +83,43 @@ export class StageElement extends HTMLElement {
   /** The StageClient behind the widget; null while not joined. */
   get client(): StageClient | null { return this.current; }
 
+  /** Local listening preference; reflected as a boolean attribute and retained across rejoins. */
+  get playbackMuted(): boolean { return this.hasAttribute('playback-muted'); }
+  set playbackMuted(value: boolean) { this.toggleAttribute('playback-muted', Boolean(value)); }
+
   connectedCallback(): void { this.rejoin(); }
   disconnectedCallback(): void { ++this.generation; void this.leave(); }
-  attributeChangedCallback(_name: string, previous: string | null, next: string | null): void {
-    if (previous !== next && this.isConnected) this.rejoin();
+  attributeChangedCallback(name: string, previous: string | null, next: string | null): void {
+    if (previous === next) return;
+    if (name === 'playback-muted') { this.current?.setPlaybackMuted(this.playbackMuted); this.render(); return; }
+    if (this.isConnected) this.rejoin();
   }
 
-  private button(label: string, action: () => Promise<unknown> | undefined, className = ''): HTMLButtonElement {
+  private button(label: string, action: () => Promise<unknown> | void, className = ''): HTMLButtonElement {
     const b = document.createElement('button');
     b.type = 'button';
     b.textContent = label;
     if (className) b.className = className;
     b.onclick = () => {
+      if (b.disabled || this.pendingActions.has(b)) return;
       const generation = this.generation;
+      this.pendingActions.add(b);
       b.disabled = true;
+      b.setAttribute('aria-busy', 'true');
       this.error.hidden = true;
-      void Promise.resolve(action()).catch((error: unknown) => {
-        if (generation === this.generation) this.show(error);
-      }).finally(() => {
-        if (generation === this.generation) { b.disabled = false; this.render(); }
-      });
+      // Invoke synchronously to retain the clicked client's identity, but catch synchronous
+      // failures too. A later render must not unlock the action before its promise settles.
+      void (async () => {
+        try { await action(); }
+        catch (error) { if (generation === this.generation) this.show(error); }
+        finally {
+          if (generation === this.generation) {
+            this.pendingActions.delete(b);
+            b.removeAttribute('aria-busy');
+            this.render();
+          }
+        }
+      })();
     };
     return b;
   }
@@ -108,6 +130,7 @@ export class StageElement extends HTMLElement {
       const room = this.getAttribute('room')?.trim(), name = this.getAttribute('name')?.trim();
       if (generation !== this.generation || !this.isConnected || !room || !name) { this.render(); return; }
       const client = new StageClient({ url: this.wsUrl() });
+      client.setPlaybackMuted(this.playbackMuted);
       this.current = client;
       for (const type of EVENTS) {
         client.on(type, ({ detail }) => {
@@ -119,7 +142,6 @@ export class StageElement extends HTMLElement {
           if (type === 'state' || type === 'status' || type === 'mic' || type === 'closed' || type === 'kicked') this.render();
         });
       }
-      this.cooldownTimer = setInterval(() => this.render(), 1000);
       this.error.hidden = true;
       this.render();
       try {
@@ -134,7 +156,9 @@ export class StageElement extends HTMLElement {
   }
 
   private async leave(): Promise<void> {
-    clearInterval(this.cooldownTimer);
+    for (const button of this.pendingActions) button.removeAttribute('aria-busy');
+    this.pendingActions.clear();
+    clearTimeout(this.cooldownTimer);
     this.cooldownTimer = undefined;
     const client = this.current;
     this.current = null;
@@ -159,6 +183,21 @@ export class StageElement extends HTMLElement {
     this.error.hidden = false;
   }
 
+  /** Only a visible countdown needs clock-driven renders; other changes arrive as SDK events. */
+  private scheduleCooldown(active: boolean, remaining: number): void {
+    if (!active) {
+      clearTimeout(this.cooldownTimer);
+      this.cooldownTimer = undefined;
+    } else if (this.cooldownTimer === undefined) {
+      // Wake at the next displayed-second boundary (or expiry), never postpone an existing wake.
+      const delay = Math.max(1, Math.ceil(remaining - (Math.ceil(remaining / 1000) - 1) * 1000));
+      this.cooldownTimer = setTimeout(() => {
+        this.cooldownTimer = undefined;
+        this.render();
+      }, delay);
+    }
+  }
+
   private render(): void {
     const client = this.current;
     const me = client?.me ?? null;
@@ -170,19 +209,29 @@ export class StageElement extends HTMLElement {
       this.status.textContent = this.getAttribute('room') && this.getAttribute('name') ? '' : '請設定 room 與 name 屬性。';
     }
     const audience = Boolean(me && !me.onStage && me.role !== 'controller');
-    const cooldown = Math.ceil((client?.handCooldownMs ?? 0) / 1000);
+    const remaining = client?.handCooldownMs ?? 0;
+    const cooldown = Math.ceil(remaining / 1000);
+    this.scheduleCooldown(audience && !me?.handRaised && remaining > 0, remaining);
     this.hand.hidden = !audience;
-    this.hand.disabled = !me || (!me.handRaised && cooldown > 0);
+    this.listen.hidden = !me;
+    this.listen.disabled = !client || this.pendingActions.has(this.listen);
+    this.listen.textContent = this.playbackMuted ? '恢復收聽' : '靜音收聽';
+    this.listen.setAttribute('aria-pressed', String(this.playbackMuted));
+    this.unlock.disabled = this.pendingActions.has(this.unlock);
+    this.hand.disabled = this.pendingActions.has(this.hand) || !me || (!me.handRaised && cooldown > 0);
     this.hand.textContent = me?.handRaised ? '收回舉手' : cooldown > 0 ? `舉手發言（${cooldown} 秒）` : '舉手發言';
     this.mic.hidden = this.leaveStage.hidden = !me?.onStage;
-    this.mic.disabled = Boolean(me?.forceMuted);
+    this.mic.disabled = this.pendingActions.has(this.mic) || Boolean(me?.forceMuted);
     this.mic.textContent = me?.muted ? '取消靜音' : '靜音';
     this.mic.setAttribute('aria-pressed', String(Boolean(me?.muted)));
-    this.leaveStage.disabled = false;
+    this.leaveStage.disabled = this.pendingActions.has(this.leaveStage);
   }
 }
 
 /** Registers the element (default tag `stage-client`); a no-op when the tag is already defined. */
 export function defineStageElement(tagName = 'stage-client'): void {
-  if (!customElements.get(tagName)) customElements.define(tagName, StageElement);
+  if (customElements.get(tagName)) return;
+  // A registry can use each constructor only once. Aliases inherit the complete widget
+  // while the default registration keeps the exported StageElement constructor.
+  customElements.define(tagName, tagName === 'stage-client' ? StageElement : class extends StageElement {});
 }

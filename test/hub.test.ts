@@ -6,6 +6,13 @@ import { FakeSession, harness, RECVONLY_OFFER, SENDRECV_OFFER, sine, testConfig,
 
 const FRAME = 960;
 
+function flushHandState(h: Harness): void {
+  for (const timer of h.timers.filter(timer => !timer.cleared && timer.ms === 0)) {
+    timer.cleared = true;
+    timer.fn();
+  }
+}
+
 function energy(x: Float32Array): number {
   let e = 0;
   for (const v of x) e += v * v;
@@ -23,6 +30,7 @@ describe('flow 1 — raise hand → approve → on stage with uplink', () => {
     assert.equal(await h.req(other.s, { type: 'rtc:offer', payload: RECVONLY_OFFER }), 'ok');
     assert.equal(await h.req(aud.s, { type: 'hand:raise' }), 'ok');
     assert.deepEqual(other.s.last('hand:raise'), { type: 'hand:raise', participantId: aud.id });
+    flushHandState(h);
     assert.deepEqual(host.s.last('room:state')!.hands.map((p) => p.participantId), [aud.id]);
 
     assert.equal(await h.req(host.s, { type: 'stage:approve', targetId: aud.id }), 'ok');
@@ -190,6 +198,7 @@ describe('ws drop with the seat held (rooms.participantGraceMs)', () => {
     await h.req(b.s, { type: 'hand:raise' });
     const token = a.s.last('room:state')!.resumeToken!;
     await h.hub.detach(a.s);
+    flushHandState(h);
     assert.deepEqual(host.s.last('room:state')!.hands.map((p) => p.participantId), [a.id, b.id], 'queue position kept');
     const back = new FakeSession();
     h.hub.attach(back);
@@ -371,8 +380,10 @@ describe('presence broadcasts', () => {
     host.s.clear();
     await h.hub.detach(crowd[0]!.s);
     assert.equal(host.s.all('room:state').length, 0, 'a plain audience leave is coalesced too');
-    // A raised hand changes the queue everyone sees: broadcast now, superseding the pending one.
+    // A raised hand supersedes the presence delay with one next-turn snapshot.
     await h.req(crowd[1]!.s, { type: 'hand:raise' });
+    assert.equal(h.timers.filter(t => !t.cleared && t.ms === 0).length, 1);
+    flushHandState(h);
     assert.equal(host.s.last('room:state')!.audienceCount, 2);
     assert.ok(h.timers.every((t) => t.cleared || t === pending[0]), 'pending presence broadcast superseded');
   });

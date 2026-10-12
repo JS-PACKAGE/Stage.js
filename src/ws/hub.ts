@@ -12,7 +12,7 @@ import type { AppConfig } from '../config.ts';
 import type { Logger } from '../log.ts';
 import type { MetricSample } from '../metrics.ts';
 import { ERROR_MESSAGES, InvariantViolation, StageError } from '../model/errors.ts';
-import { Room, type RoomEvent } from '../model/room.ts';
+import { Room, type Participant, type RoomEvent } from '../model/room.ts';
 import { offerSendsAudio, summarizeOffer } from '../rtc/sdp.ts';
 import { iceServersFor } from '../rtc/turn.ts';
 import type { MediaTransport, MixedPcmSource } from '../transport/MediaTransport.ts';
@@ -60,14 +60,17 @@ interface RoomRuntime {
   readonly queue: SerialQueue;
   readonly mixer: Mixer;
   readonly sessions: Map<string, Session>;
-  readonly publishers: Set<string>;
+  /** Token changes when a participant stops and resumes publishing. */
+  readonly publishers: Map<string, symbol>;
   graceTimer: unknown;
   /** Seat-hold timers of disconnected non-controllers (`rooms.participantGraceMs`). */
   readonly graceTimers: Map<string, unknown>;
   /** Pending coalesced `room:state` broadcast (see `presenceChanged`). */
   stateTimer: unknown;
+  stateTimerDelay: number | undefined;
   /** Next connection-quality report; scheduled only while someone publishes. */
   qualityTimer: unknown;
+  qualityInFlight: boolean;
   /** Uplink counters at the previous report, so each report covers one interval. */
   readonly uplinkCounts: Map<string, { received: number; lost: number }>;
   lastStatus: 'waiting' | 'live';
@@ -92,6 +95,8 @@ function safeEqual(a: string, b: string): boolean {
 export class StageHub {
   private readonly rooms = new Map<string, RoomRuntime>();
   private readonly bindings = new Map<Session, Binding>();
+  /** Latest policy-accepted offer; weak keys do not retain removed participants or sockets. */
+  private readonly negotiations = new WeakMap<Participant, symbol>();
   private readonly deps: HubDeps;
   private readonly now: () => number;
   private readonly setTimer: (fn: () => void, ms: number) => unknown;
@@ -222,11 +227,13 @@ export class StageHub {
       queue: new SerialQueue(),
       mixer,
       sessions: new Map([[controller.participantId, session]]),
-      publishers: new Set(),
+      publishers: new Map(),
       graceTimer: undefined,
       graceTimers: new Map(),
       stateTimer: undefined,
+      stateTimerDelay: undefined,
       qualityTimer: undefined,
+      qualityInFlight: false,
       uplinkCounts: new Map(),
       lastStatus: room.status,
       closed: false,
@@ -355,7 +362,11 @@ export class StageHub {
       default:
         throw new StageError('bad_request', `unroutable ${msg.type}`);
     }
-    this.apply(rt, events);
+    const handOnly = msg.type === 'hand:raise' || msg.type === 'hand:withdraw';
+    this.apply(rt, events, handOnly);
+    // Preserve the requester's state-before-ACK contract without sending N full snapshots
+    // for every hand in a crowd. Other clients receive ordered events, then one fresh snapshot.
+    if (handOnly) session.send({ type: 'room:state', ...room.snapshot(pid) });
     session.send({ type: 'ok', requestId: msg.requestId });
     if (msg.type === 'control:transfer') this.deps.log.info('control transferred', { roomId: room.roomId, fromId: pid, toId: msg.targetId });
   }
@@ -408,7 +419,7 @@ export class StageHub {
     const summary = summarizeOffer(msg.payload.sdp);
     if (summary.audioDirections.length === 0) throw new StageError('bad_request', 'offer without audio');
     const sends = offerSendsAudio(summary);
-    const allowUplink = await rt.queue.run(() => {
+    const negotiation = await rt.queue.run(() => {
       if (stale()) throw new StageError('not_joined', 'stale binding');
       const p = rt.room.get(pid);
       if (!p) throw new StageError('not_joined', 'participant gone');
@@ -417,16 +428,20 @@ export class StageHub {
         log.warn('uplink offer from off-stage participant rejected', { roomId, participantId: pid });
         throw new StageError('forbidden', 'audience offer must be recvonly');
       }
-      return p.onStage;
+      const token = Symbol();
+      this.negotiations.set(p, token);
+      return { participant: p, token, allowUplink: p.onStage };
     });
     let answer: SessionDescriptionPayload;
     try {
-      answer = await transport.negotiate(roomId, pid, msg.payload, { allowUplink });
+      answer = await transport.negotiate(roomId, pid, msg.payload, { allowUplink: negotiation.allowUplink });
     } catch (err) {
       // A bad offer is that client's problem, not a reason to tear down the room.
       log.warn('negotiation failed', { roomId, participantId: pid, error: String(err) });
       await rt.queue.run(() => {
-        if (rt.closed || !rt.room.get(pid)) return;
+        // A newer accepted offer owns cleanup even if its replacement socket has since detached.
+        if (rt.closed || rt.room.get(pid) !== negotiation.participant ||
+            this.negotiations.get(negotiation.participant) !== negotiation.token) return;
         this.unpublish(rt, pid);
         transport.closePeer(roomId, pid);
       });
@@ -443,7 +458,7 @@ export class StageHub {
       session.send({ type: 'rtc:answer', fromId: SERVER_PEER_ID, payload: answer });
       transport.subscribe(roomId, pid);
       if (sends && p.onStage && !rt.publishers.has(pid)) {
-        rt.publishers.add(pid);
+        rt.publishers.set(pid, Symbol());
         rt.mixer.addSource(pid);
         rt.mixer.setGain(pid, p.gainDb);
         this.scheduleQuality(rt);
@@ -485,7 +500,7 @@ export class StageHub {
     }
     this.dropMedia(rt, pid);
     const events = room.remove(pid);
-    if (events.length) this.apply(rt, events);
+    if (events.length) this.apply(rt, events, events.every(event => event.type === 'hand:withdraw'));
     else this.presenceChanged(rt);
   }
 
@@ -500,7 +515,7 @@ export class StageHub {
     if (rt.closed || !p || p.connected || p.role === 'controller') return;
     this.dropMedia(rt, pid);
     const events = rt.room.remove(pid);
-    if (events.length) this.apply(rt, events);
+    if (events.length) this.apply(rt, events, events.every(event => event.type === 'hand:withdraw'));
     else this.presenceChanged(rt);
   }
 
@@ -516,14 +531,17 @@ export class StageHub {
     }
     this.deps.log.info('controller auto-transfer', { roomId: room.roomId, fromId: pid, toId: successor.participantId });
     this.dropMedia(rt, pid);
-    const events = room.transfer(pid, successor.participantId, 'auto');
-    this.apply(rt, [...events, ...room.remove(pid)]);
+    // The expired controller is removed immediately, so unlike a manual transfer it needs no extra speaker seat.
+    const events = p.onStage && !successor.onStage && room.speakerCount >= room.limits.maxSpeakers
+      ? room.leaveStage(pid) : [];
+    events.push(...room.transfer(pid, successor.participantId, 'auto'), ...room.remove(pid));
+    this.apply(rt, events);
   }
 
   // ─────────────────────────────── effects ───────────────────────────────
 
   /** Broadcast transition events, mirror them into the media plane, then push fresh snapshots. */
-  private apply(rt: RoomRuntime, events: RoomEvent[]): void {
+  private apply(rt: RoomRuntime, events: RoomEvent[], deferState = false): void {
     for (const ev of events) {
       if (ev.type === 'stage:left') this.unpublish(rt, ev.participantId);
       if (ev.type === 'mic:muted' || ev.type === 'mic:unmuted') {
@@ -531,7 +549,8 @@ export class StageHub {
       }
       this.broadcast(rt, ev);
     }
-    this.broadcastState(rt);
+    if (deferState) this.scheduleState(rt, 0);
+    else this.broadcastState(rt);
   }
 
   private unpublish(rt: RoomRuntime, pid: string): void {
@@ -543,10 +562,13 @@ export class StageHub {
 
   private scheduleQuality(rt: RoomRuntime): void {
     const interval = this.deps.config.rooms.qualityIntervalMs;
-    if (interval === 0 || rt.qualityTimer !== undefined) return;
+    if (rt.closed || !rt.publishers.size || interval === 0 || rt.qualityTimer !== undefined || rt.qualityInFlight) return;
     rt.qualityTimer = this.setTimer(() => {
       rt.qualityTimer = undefined;
-      void this.reportQuality(rt).catch((err) => this.deps.log.warn('quality report failed', { roomId: rt.room.roomId, error: String(err) }));
+      rt.qualityInFlight = true;
+      void this.reportQuality(rt)
+        .catch((err) => this.deps.log.warn('quality report failed', { roomId: rt.room.roomId, error: String(err) }))
+        .finally(() => { rt.qualityInFlight = false; this.scheduleQuality(rt); });
     }, interval);
   }
 
@@ -557,13 +579,19 @@ export class StageHub {
   private async reportQuality(rt: RoomRuntime): Promise<void> {
     if (rt.closed || !rt.publishers.size) return;
     const { roomId } = rt.room;
-    const ids = [...rt.publishers];
-    const stats = await Promise.all(ids.map((id) => this.deps.transport.getStats(roomId, id)));
+    const publishers = [...rt.publishers];
+    const stats = await Promise.allSettled(publishers.map(async ([id]) => this.deps.transport.getStats(roomId, id)));
     if (rt.closed) return;
     const participants: ConnectionQuality[] = [];
-    ids.forEach((participantId, i) => {
-      const s = stats[i];
-      if (!s || !rt.publishers.has(participantId)) return;
+    publishers.forEach(([participantId, generation], i) => {
+      if (rt.publishers.get(participantId) !== generation) return;
+      const result = stats[i]!;
+      if (result.status === 'rejected') {
+        this.deps.log.warn('publisher quality stats failed', { roomId, participantId, error: String(result.reason) });
+        return;
+      }
+      const s = result.value;
+      if (!s) return;
       const q: ConnectionQuality = { participantId };
       const received = s.inbound?.packetsReceived, lost = s.inbound?.packetsLost;
       if (received !== undefined && lost !== undefined) {
@@ -584,7 +612,6 @@ export class StageHub {
         if (p && (p.onStage || pid === rt.room.controllerId)) session.send(msg, encoded);
       }
     }
-    if (rt.publishers.size) this.scheduleQuality(rt);
   }
 
   private setPublisherMuted(rt: RoomRuntime, pid: string, muted: boolean): void {
@@ -605,15 +632,26 @@ export class StageHub {
   private presenceChanged(rt: RoomRuntime): void {
     const delay = this.deps.config.rooms.presenceBroadcastMs;
     if (delay === 0) { this.broadcastState(rt); return; }
-    rt.stateTimer ??= this.setTimer(() => {
+    this.scheduleState(rt, delay);
+  }
+
+  /** One bounded timer per room; urgent hand state supersedes a slower presence window. */
+  private scheduleState(rt: RoomRuntime, delay: number): void {
+    if (rt.stateTimer !== undefined) {
+      if (delay >= rt.stateTimerDelay!) return;
+      this.clearTimer(rt.stateTimer);
+    }
+    rt.stateTimerDelay = delay;
+    rt.stateTimer = this.setTimer(() => {
       rt.stateTimer = undefined;
+      rt.stateTimerDelay = undefined;
       if (!rt.closed) this.broadcastState(rt);
     }, delay);
   }
 
   private broadcastState(rt: RoomRuntime): void {
     // Supersedes a pending coalesced broadcast.
-    if (rt.stateTimer !== undefined) { this.clearTimer(rt.stateTimer); rt.stateTimer = undefined; }
+    if (rt.stateTimer !== undefined) { this.clearTimer(rt.stateTimer); rt.stateTimer = undefined; rt.stateTimerDelay = undefined; }
     // Views shared by all recipients are built and serialized once; only `me` & co. are per session.
     const shared = rt.room.sharedSnapshot();
     const prefix = JSON.stringify({ type: 'room:state', ...shared }).slice(0, -1);
