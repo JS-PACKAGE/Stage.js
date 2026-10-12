@@ -81,7 +81,7 @@ export class StageElement extends HTMLElement {
     this.render();
   }
 
-  /** The StageClient behind the widget; null while not joined. */
+  /** The SDK instance; null before initialization or after element teardown, not a joined-state indicator. */
   get client(): StageClient | null { return this.current; }
 
   /** Local listening preference; reflected as a boolean attribute and retained across rejoins. */
@@ -150,7 +150,10 @@ export class StageElement extends HTMLElement {
         client.on(type, ({ detail }) => {
           if (generation !== this.generation || this.current !== client) return;
           if (type === 'audioblocked') this.unlock.hidden = false;
-          if (type === 'closed' || type === 'kicked') this.status.textContent = type === 'kicked' ? '你已被主控移出房間。' : '房間已關閉。';
+          if (type === 'status' && detail === 'disconnected') this.status.textContent = STATUS_LABELS.disconnected;
+          if (type === 'closed') this.status.textContent = (detail as StageEventMap['closed']).reason === 'shutdown'
+            ? '伺服器維護或重新啟動，房間已關閉。' : '房間已關閉。';
+          if (type === 'kicked') this.status.textContent = '你已被主控移出房間。';
           if (type === 'error' || type === 'micerror') this.show(detail);
           this.dispatchEvent(new CustomEvent(`stage-${type}`, { detail, bubbles: true, composed: true }));
           if (type === 'state' || type === 'status' || type === 'mic' || type === 'closed' || type === 'kicked') this.render();

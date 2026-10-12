@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { after, afterEach, describe, it } from 'node:test';
+import type { TestContext } from 'node:test';
 import { StageClient } from '../src/index.ts';
+import type { RoomStatePayload, ServerMessage } from '../../../shared/protocol.ts';
 
 /** Minimal DOM surface for widget state tests; this does not simulate a browser layout or input system. */
 class Node extends EventTarget {
@@ -15,6 +17,7 @@ class Node extends EventTarget {
   isConnected = true;
   onclick?: () => void;
   append(...nodes: Node[]): void { this.children.push(...nodes); }
+  remove(): void { this.isConnected = false; }
   attachShadow(): Node { const root = new Node(); this.children.push(root); return root; }
   setAttribute(name: string, value: string): void { const previous = this.getAttribute(name); this.attributes.set(name, value); this.changed(name, previous, value); }
   getAttribute(name: string): string | null { return this.attributes.get(name) ?? null; }
@@ -27,9 +30,15 @@ class Node extends EventTarget {
     if (previous !== next && type.observedAttributes?.includes(name)) element.attributeChangedCallback?.(name, previous, next);
   }
 }
-const originals = new Map(['HTMLElement', 'document', 'customElements'].map(name => [name, Object.getOwnPropertyDescriptor(globalThis, name)]));
+class Audio extends Node {
+  volume = 1;
+  muted = false;
+  pause(): void {}
+}
+const originals = new Map(['HTMLElement', 'document', 'customElements', 'window'].map(name => [name, Object.getOwnPropertyDescriptor(globalThis, name)]));
 Object.defineProperty(globalThis, 'HTMLElement', { configurable: true, value: Node });
-Object.defineProperty(globalThis, 'document', { configurable: true, value: { createElement: () => new Node(), body: { append() {} } } });
+Object.defineProperty(globalThis, 'document', { configurable: true, value: { createElement: (tag: string) => tag === 'audio' ? new Audio() : new Node(), body: { append() {} } } });
+Object.defineProperty(globalThis, 'window', { configurable: true, value: new EventTarget() });
 const { StageElement, defineStageElement } = await import('../src/element.ts');
 after(() => { for (const [name, descriptor] of originals) { if (descriptor) Object.defineProperty(globalThis, name, descriptor); else Reflect.deleteProperty(globalThis, name); } });
 
@@ -59,6 +68,181 @@ function widget(onStage = false) {
   return { element, pending, client, calls: () => calls };
 }
 function click(button: HTMLButtonElement): void { button.onclick?.call(button, {} as PointerEvent); }
+
+function roomState(onStage = false, roomId = 'one'): RoomStatePayload {
+  return {
+    roomId, name: 'Room &amp; Hall', controllerId: 'host', speakers: [], hands: [], audienceCount: 1,
+    codeRequired: false, limits: { maxSpeakers: 8, maxAudience: 300 }, status: 'live',
+    me: { participantId: 'me', name: 'Listener', role: onStage ? 'speaker' : 'audience', onStage,
+      handRaised: false, muted: false, forceMuted: false, gainDb: 0, connected: true, joinedAt: 0 },
+  };
+}
+
+async function subscribedWidget(t: TestContext, onStage = false) {
+  t.mock.method(StageClient.prototype, 'connect', async () => {});
+  t.mock.method(StageClient.prototype, 'join', async () => {});
+  t.mock.method(StageClient.prototype as unknown as { createMedia(): void }, 'createMedia', () => {});
+  const element = new StageElement(); widgets.push(element);
+  Object.assign(element, { isConnected: false });
+  element.setAttribute('room', 'one'); element.setAttribute('name', 'Listener');
+  Object.assign(element, { isConnected: true }); element.connectedCallback(); await settle();
+  const client = element.client;
+  assert.ok(client);
+  await client['receive']({ type: 'room:state', ...roomState(onStage) });
+  return { element, client };
+}
+
+function assertRoomControlsHidden(element: InstanceType<typeof StageElement>): void {
+  for (const key of ['hand', 'mic', 'leaveStage', 'listen'] as const) assert.equal(element[key].hidden, true, key);
+}
+
+const terminalCases = [
+  { title: 'ordinary close', message: { type: 'room:closed', roomId: 'one' }, event: 'closed', text: '房間已關閉。' },
+  { title: 'kick', message: { type: 'kicked', roomId: 'one' }, event: 'kicked', text: '你已被主控移出房間。' },
+  { title: 'shutdown', message: { type: 'room:closed', roomId: 'one', reason: 'shutdown' }, event: 'closed', text: '伺服器維護或重新啟動，房間已關閉。' },
+] as const satisfies readonly { title: string; message: ServerMessage; event: 'closed' | 'kicked'; text: string }[];
+
+describe('widget subscribed connection status', () => {
+  it('shows disconnected and hides room controls after the exposed live client disconnects', async t => {
+    for (const onStage of [false, true]) {
+      const { element, client } = await subscribedWidget(t, onStage);
+      assert.equal(element['status'].textContent, `Room & Hall · 直播中 · ${onStage ? '台上' : '收聽中'}`);
+      assert.equal(element['listen'].hidden, false);
+      assert.equal(element[onStage ? 'mic' : 'hand'].hidden, false);
+      const forwarded: CustomEvent[] = [];
+      const textAtForward: string[] = [];
+      element.addEventListener('stage-status', event => {
+        forwarded.push(event as CustomEvent);
+        textAtForward.push(element['status'].textContent ?? '');
+      });
+      await element.client!.disconnect();
+      assert.equal(element.client, client, 'the exposed client is retained until a rejoin or unmount');
+      assert.equal(client.state, null);
+      assert.equal(client.status, 'disconnected');
+      assertRoomControlsHidden(element);
+      assert.equal(element['status'].textContent, '未連線');
+      assert.deepEqual(textAtForward, ['未連線'], 'the status label is updated before forwarding');
+      assert.deepEqual(forwarded.map(event => event.detail), ['disconnected']);
+      assert.equal(forwarded[0]!.bubbles, true);
+      assert.equal(forwarded[0]!.composed, true);
+      element.playbackMuted = true;
+      assert.equal(element['status'].textContent, '未連線');
+    }
+  });
+
+  it('retains current room state during reconnect and renders subsequent live state', async t => {
+    const { element, client } = await subscribedWidget(t);
+    const previous = client.state;
+    await client['receive']({ type: 'status', state: 'reconnecting' });
+    assert.equal(element.client, client);
+    assert.equal(client.state, previous);
+    assert.equal(element['status'].textContent, 'Room & Hall · 重新連線中 · 收聽中');
+    assert.equal(element['hand'].hidden, false);
+    assert.equal(element['listen'].hidden, false);
+    assert.equal(element['listen'].disabled, false);
+    await client['receive']({ type: 'room:state', ...roomState(true) });
+    assert.equal(element['status'].textContent, 'Room & Hall · 直播中 · 台上');
+    assert.equal(element['mic'].hidden, false);
+    assert.equal(element['leaveStage'].hidden, false);
+    assert.equal(element['hand'].hidden, true);
+  });
+
+  for (const terminal of terminalCases) {
+    it(`preserves the ${terminal.title} notice and forwards the same terminal detail`, async t => {
+      const { element, client } = await subscribedWidget(t, true);
+      let sdkDetail: unknown;
+      const forwarded: CustomEvent[] = [];
+      const textAtForward: string[] = [];
+      client.on(terminal.event, ({ detail }) => { sdkDetail = detail; });
+      element.addEventListener(`stage-${terminal.event}`, event => {
+        forwarded.push(event as CustomEvent);
+        textAtForward.push(element['status'].textContent ?? '');
+      });
+      await client['receive'](terminal.message);
+      assert.equal(client.state, null);
+      assert.equal(client.status, 'disconnected');
+      assertRoomControlsHidden(element);
+      assert.equal(element['status'].textContent, terminal.text);
+      assert.deepEqual(textAtForward, [terminal.text]);
+      assert.equal(forwarded.length, 1);
+      assert.equal(forwarded[0]!.detail, sdkDetail, 'event detail is forwarded without cloning or replacement');
+      const { type: _, ...expectedDetail } = terminal.message;
+      assert.deepEqual(sdkDetail, expectedDetail);
+      assert.equal(forwarded[0]!.bubbles, true);
+      assert.equal(forwarded[0]!.composed, true);
+      element.playbackMuted = true;
+      assert.equal(element['status'].textContent, terminal.text, 'an unrelated preference render keeps the notice');
+      element.playbackMuted = false;
+      assert.equal(element['status'].textContent, terminal.text);
+    });
+  }
+
+  for (const transition of ['room change', 'remount'] as const) {
+    it(`clears terminal notices on ${transition} before receiving a new room state`, async t => {
+      for (const terminal of terminalCases) {
+        const { element, client } = await subscribedWidget(t);
+        await client['receive'](terminal.message);
+        assert.equal(element['status'].textContent, terminal.text);
+        if (transition === 'room change') element.setAttribute('room', 'two');
+        else {
+          Object.assign(element, { isConnected: false }); element.disconnectedCallback(); await settle();
+          assert.equal(element.client, null);
+          Object.assign(element, { isConnected: true }); element.connectedCallback();
+        }
+        assert.equal(element['status'].textContent, '');
+        await settle();
+        const replacement = element.client as StageClient | null;
+        assert.ok(replacement);
+        assert.notEqual(replacement, client);
+        assert.equal(element['status'].textContent, '');
+        assertRoomControlsHidden(element);
+        await replacement['receive']({ type: 'room:state', ...roomState(false, 'two'), name: 'New room' });
+        assert.equal(element['status'].textContent, 'New room · 直播中 · 收聽中');
+      }
+    });
+  }
+
+  it('ignores late status and terminal events from a retired client', async t => {
+    const { element, client } = await subscribedWidget(t);
+    element.setAttribute('room', 'two'); await settle();
+    const replacement = element.client;
+    assert.ok(replacement);
+    assert.notEqual(replacement, client);
+    await replacement['receive']({ type: 'room:state', ...roomState(false, 'two'), name: 'New room' });
+    const forwarded: string[] = [];
+    for (const type of ['status', 'state', 'closed', 'kicked']) element.addEventListener(`stage-${type}`, () => { forwarded.push(type); });
+    await client['receive']({ type: 'status', state: 'reconnecting' });
+    await client['receive']({ type: 'room:state', ...roomState(true), name: 'Old room' });
+    for (const terminal of terminalCases) await client['receive'](terminal.message);
+    assert.deepEqual(forwarded, []);
+    assert.equal(element.client, replacement);
+    assert.equal(element['status'].textContent, 'New room · 直播中 · 收聽中');
+    assert.equal(element['hand'].hidden, false);
+    assert.equal(element['mic'].hidden, true);
+  });
+
+  it('keeps a reentrant replacement clean when a forwarded disconnect starts a new room', async t => {
+    const { element, client } = await subscribedWidget(t, true);
+    const statusAtForward: string[] = [];
+    const terminalEvents: Event[] = [];
+    element.addEventListener('stage-status', event => {
+      if ((event as CustomEvent).detail !== 'disconnected') return;
+      statusAtForward.push(element['status'].textContent ?? '');
+      element.setAttribute('room', 'two');
+    });
+    element.addEventListener('stage-closed', event => { terminalEvents.push(event); });
+    await client['receive']({ type: 'room:closed', roomId: 'one', reason: 'shutdown' });
+    await settle();
+    assert.deepEqual(statusAtForward, ['未連線']);
+    const replacement = element.client;
+    assert.ok(replacement);
+    assert.notEqual(replacement, client);
+    assert.deepEqual(terminalEvents, [], 'the now-retired terminal event is not forwarded');
+    assert.equal(element['status'].textContent, '', 'the old handler cannot restore its disconnect or terminal notice');
+    await replacement['receive']({ type: 'room:state', ...roomState(false, 'two'), name: 'New room' });
+    assert.equal(element['status'].textContent, 'New room · 直播中 · 收聽中');
+  });
+});
 
 describe('widget actions and local playback', () => {
   it('keeps hand, mic and leave-stage actions disabled across renders until their request settles', async () => {
