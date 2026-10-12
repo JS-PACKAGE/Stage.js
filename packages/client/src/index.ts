@@ -104,7 +104,7 @@ interface StatsCounters { timestamp: number; bytes?: number; received?: number; 
 const finite = (value: unknown): number | undefined => typeof value === 'number' && Number.isFinite(value) ? value : undefined;
 const nonnegative = (value: unknown): number | undefined => { const n = finite(value); return n !== undefined && n >= 0 ? n : undefined; };
 
-interface Pending { resolve: () => void; reject: (error: StageError) => void; timer: ReturnType<typeof setTimeout> }
+interface Pending { resolve: () => void; reject: (error: StageError) => void; timer: ReturnType<typeof setTimeout>; sendTimer?: ReturnType<typeof setTimeout> }
 type JoinOptions = { roomId: string; code?: string; name: string; resumeToken?: string };
 const REQUEST_TIMEOUT = 15000;
 /** Until the server's `hello` says otherwise: the config.example.yaml defaults. */
@@ -423,17 +423,19 @@ export class StageClient extends EventTarget {
     else this.nextControlAt = sendAt + Math.ceil(2000 / this.limits.controlPerSecond);
     return new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => {
-        this.pending.delete(requestId);
-        reject(new StageError('timeout', '請求逾時，請重試。'));
+        this.finish(requestId, new StageError('timeout', '請求逾時，請重試。'));
       }, REQUEST_TIMEOUT + sendAt - now);
-      this.pending.set(requestId, { resolve, reject, timer });
-      setTimeout(() => {
+      const pending: Pending = { resolve, reject, timer };
+      this.pending.set(requestId, pending);
+      pending.sendTimer = setTimeout(() => {
+        delete pending.sendTimer;
         if (!this.pending.has(requestId)) return;
         if (this.socket !== ws || ws.readyState !== WebSocket.OPEN) {
           this.finish(requestId, new StageError('disconnected', '連線已中斷。'));
           return;
         }
-        ws.send(JSON.stringify({ type, ...payload, requestId }));
+        try { ws.send(JSON.stringify({ type, ...payload, requestId })); }
+        catch { this.finish(requestId, new StageError('disconnected', '無法送出請求，連線可能已中斷。')); }
       }, sendAt - now);
     });
   }
@@ -441,6 +443,7 @@ export class StageClient extends EventTarget {
     const pending = this.pending.get(id);
     if (!pending) return;
     clearTimeout(pending.timer);
+    clearTimeout(pending.sendTimer);
     this.pending.delete(id);
     if (error) pending.reject(error); else pending.resolve();
   }

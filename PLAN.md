@@ -340,6 +340,8 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 
 32. **單調間隔計時**：伺服器 token bucket 與 client 請求排程、舉手冷卻、keepalive 只使用 performance.now 的經過時間；系統牆鐘校正不得造成額外配額、誤斷線或長時間延後送出。房間事件與日誌的絕對時間不改。注入 clock／timer 回歸測試覆蓋正負一小時校正及真正的靜默逾時。
 
+33. **client 延遲送出清理**：每個 pending 同時保存 ACK 期限與 pacing send timer，所有 settle／斷線路徑統一清除兩者，避免已取消請求的 payload 被未來送出 slot 保留。逾時透過 finish 清理；同步 stringify／ws.send 失敗拒絕該請求，不從 timer 拋出例外。
+
 ---
 
 開始執行。
