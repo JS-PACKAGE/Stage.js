@@ -54,7 +54,7 @@
 - 本機收聽靜音：布林屬性 `playback-muted` 與反映它的 `element.playbackMuted` property。加入 `playback-muted` 可初始靜音；移除屬性或設定 property 為 false 恢復收聽。HTML 布林屬性只看是否存在，`playback-muted="false"` 仍表示靜音。變更立即套用於本機 audio，不重新進房、不送控制請求、不改麥克風；更換房間、移除再掛載與 ws 重連保留設定。建議透過此 widget property 控制收聽偏好；直接修改 `element.client` 的 audio 設定不會反映回 widget attribute。按鈕使用原生 button 與 `aria-pressed`，未進房時隱藏。
 - 事件：所有 client 事件以 `stage-<type>` 從元素派發（`bubbles`、`composed`，`detail` 相同），例如 `stage-state`、`stage-hand`、`stage-kicked`。
 - 樣式：`::part(panel)`、`::part(status)`、`::part(error)`、`::part(actions)`，以及 CSS 變數 `--stage-fg`、`--stage-bg`、`--stage-border`、`--stage-radius`、`--stage-button-bg`、`--stage-accent`、`--stage-accent-fg`、`--stage-error`。
-- 自訂標籤名：`import { defineStageElement } from 'https://host/lib/stage-element.js'` 後呼叫 `defineStageElement('my-stage')`（`stage-client` 已於載入時註冊，兩個標籤可並存）。
+- 自訂標籤名：`import { defineStageElement } from 'https://host/lib/stage-element.js'` 後呼叫 `defineStageElement('my-stage')`（`stage-client` 已於載入時註冊，多個自訂標籤可並存）。每個自訂標籤使用 `StageElement` 的獨立子類別，因此仍是 `instanceof StageElement`，但 constructor 不與預設／其他標籤相同；重複註冊同名標籤為 no-op，既有其他元件不被覆寫。
 
 ## 嵌入與瀏覽器政策
 

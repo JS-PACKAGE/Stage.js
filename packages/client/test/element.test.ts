@@ -27,10 +27,10 @@ class Node extends EventTarget {
     if (previous !== next && type.observedAttributes?.includes(name)) element.attributeChangedCallback?.(name, previous, next);
   }
 }
-const originals = new Map(['HTMLElement', 'document'].map(name => [name, Object.getOwnPropertyDescriptor(globalThis, name)]));
+const originals = new Map(['HTMLElement', 'document', 'customElements'].map(name => [name, Object.getOwnPropertyDescriptor(globalThis, name)]));
 Object.defineProperty(globalThis, 'HTMLElement', { configurable: true, value: Node });
 Object.defineProperty(globalThis, 'document', { configurable: true, value: { createElement: () => new Node(), body: { append() {} } } });
-const { StageElement } = await import('../src/element.ts');
+const { StageElement, defineStageElement } = await import('../src/element.ts');
 after(() => { for (const [name, descriptor] of originals) { if (descriptor) Object.defineProperty(globalThis, name, descriptor); else Reflect.deleteProperty(globalThis, name); } });
 
 function deferred() {
@@ -221,6 +221,60 @@ describe('widget actions and local playback', () => {
     assert.equal(element['listen'].hidden, true);
     assert.equal(element['listen'].disabled, true);
     assert.equal(element.playbackMuted, true);
+  });
+
+});
+
+
+/** Enforces registry name/constructor uniqueness; name syntax is only a fixture subset. */
+class Registry {
+  readonly definitions = new Map<string, CustomElementConstructor>();
+  get(name: string): CustomElementConstructor | undefined { return this.definitions.get(name); }
+  define(name: string, constructor: CustomElementConstructor): void {
+    if (!/^[a-z][a-z0-9]*-[a-z0-9-]+$/.test(name)) throw new DOMException('invalid custom element name', 'SyntaxError');
+    if (this.definitions.has(name) || [...this.definitions.values()].includes(constructor)) throw new DOMException('duplicate name or constructor', 'NotSupportedError');
+    this.definitions.set(name, constructor);
+  }
+}
+function registry(): Registry {
+  const registry = new Registry();
+  Object.defineProperty(globalThis, 'customElements', { configurable: true, value: registry });
+  return registry;
+}
+describe('custom widget tag registration', () => {
+  it('registers the default widget and multiple custom aliases with independent instances', () => {
+    const custom = registry();
+    defineStageElement(); defineStageElement('my-stage'); defineStageElement('other-stage');
+    const Default = custom.get('stage-client')!, Alias = custom.get('my-stage')!, Other = custom.get('other-stage')!;
+    assert.equal(Default, StageElement);
+    assert.notEqual(Default, Alias); assert.notEqual(Alias, Other);
+    const original = new Default() as InstanceType<typeof StageElement>;
+    const alias = new Alias() as InstanceType<typeof StageElement>;
+    assert.ok(alias instanceof StageElement);
+    assert.deepEqual((Alias as typeof StageElement).observedAttributes, StageElement.observedAttributes);
+    original.playbackMuted = true;
+    assert.equal(alias.playbackMuted, false);
+  });
+
+  it('supports custom-first registration and makes repeated names a no-op', () => {
+    const custom = registry();
+    defineStageElement('my-stage');
+    const alias = custom.get('my-stage');
+    defineStageElement(); defineStageElement('my-stage'); defineStageElement();
+    assert.equal(custom.get('my-stage'), alias);
+    assert.equal(custom.get('stage-client'), StageElement);
+    assert.equal(custom.definitions.size, 2);
+  });
+
+  it('preserves another component registered under the requested name and propagates invalid names', () => {
+    const custom = registry();
+    class Existing extends Node {}
+    custom.define('existing-widget', Existing as unknown as CustomElementConstructor);
+    defineStageElement('existing-widget');
+    assert.equal(custom.get('existing-widget'), Existing);
+    assert.throws(() => defineStageElement('invalid'), error => error instanceof DOMException && error.name === 'SyntaxError');
+    defineStageElement();
+    assert.equal(custom.get('stage-client'), StageElement);
   });
 
 });

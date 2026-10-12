@@ -214,5 +214,8 @@ export class StageElement extends HTMLElement {
 
 /** Registers the element (default tag `stage-client`); a no-op when the tag is already defined. */
 export function defineStageElement(tagName = 'stage-client'): void {
-  if (!customElements.get(tagName)) customElements.define(tagName, StageElement);
+  if (customElements.get(tagName)) return;
+  // A registry can use each constructor only once. Aliases inherit the complete widget
+  // while the default registration keeps the exported StageElement constructor.
+  customElements.define(tagName, tagName === 'stage-client' ? StageElement : class extends StageElement {});
 }
