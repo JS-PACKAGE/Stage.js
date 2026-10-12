@@ -134,4 +134,4 @@ WebSocket 建構失敗、hello 逾時或尚未進房的連線關閉，也會釋�
 
 ## 信令整合測試
 
-`npm test -w packages/client` 也會啟動獨立 Node 子程序的 loopback 伺服器，讓實際 StageClient 經真實 WebSocket 完成建立／加入房間、舉手核准、個人／主控靜音、下台、同席位與同媒體 peer 自動恢復、被踢與伺服器關閉。測試檢查個人化快照、ACK 錯誤、收聽偏好保留，以及終止後不重連；伺服器使用 MockMediaTransport，瀏覽器 PeerConnection／音軌／AudioContext 為 fake，不代表實際 ICE、音訊品質或瀏覽器權限驗證。需允許本機 loopback listener 與 Node 子程序；不使用外部服務。
+`npm test -w packages/client` 也會啟動獨立 Node 子程序的 loopback 伺服器，讓實際 StageClient 經真實 WebSocket 完成建立／加入房間、舉手核准、個人／主控靜音、下台、同席位與同媒體 peer 自動恢復、被踢與伺服器關閉。同一流程會分別使用預設 unlimited 與 maxPendingControlRequests=1，並檢查額外控制操作的本機拒絕、名額釋放與信令仍可完成；cap=1 的 child fixture 刻意延後初次 join ACK，確認名額仍占用時 SDP 已完成，再釋放 ACK。測試檢查個人化快照、ACK 錯誤、收聽偏好保留，以及終止後不重連；伺服器使用 MockMediaTransport，瀏覽器 PeerConnection／音軌／AudioContext 為 fake，不代表實際 ICE、音訊品質或瀏覽器權限驗證。需允許本機 loopback listener 與 Node 子程序；不使用外部服務。

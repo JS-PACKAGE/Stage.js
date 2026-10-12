@@ -41,15 +41,15 @@ async function until(predicate: () => boolean, label: string): Promise<void> {
   while (!predicate()) { if (performance.now() >= deadline) throw new Error(`timed out: ${label}`); await sleep(5); }
 }
 
-it('runs SDK room actions, same-peer resume, kick and shutdown over real WebSockets', async () => {
-  const child = fork(new URL('../../../test/fixtures/sdkServer.ts', import.meta.url), [], { stdio: ['ignore', 'ignore', 'pipe', 'ipc'] });
+for (const maxPendingControlRequests of [undefined, 1]) it(`runs SDK room actions, same-peer resume, kick and shutdown over real WebSockets with ${maxPendingControlRequests ?? 'unlimited'} caller capacity`, async () => {
+  const child = fork(new URL('../../../test/fixtures/sdkServer.ts', import.meta.url), maxPendingControlRequests === 1 ? ['--hold-first-join-ack'] : [], { stdio: ['ignore', 'ignore', 'pipe', 'ipc'] });
   const exit = once(child, 'exit');
   let stderr = ''; child.stderr?.on('data', data => { stderr += String(data); });
   const originals = new Map(['window', 'WebSocket', 'RTCPeerConnection', 'AudioContext', 'navigator'].map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
   const clients: StageClient[] = [];
   const errors: StageError[] = [];
   const replies = new Map<number, (message: Reply) => void>();
-  interface Reply { id: number; peers: { roomId: string; participantId: string; identity: number }[] }
+  interface Reply { id: number; heldJoinAck: boolean; peers: { roomId: string; participantId: string; identity: number }[] }
   let nextRequest = 0;
   child.on('message', message => { const reply = message as Reply; const resolve = replies.get(reply.id); replies.delete(reply.id); resolve?.(reply); });
   async function request(type: string): Promise<Reply> {
@@ -74,16 +74,34 @@ it('runs SDK room actions, same-peer resume, kick and shutdown over real WebSock
     } } } });
     function make() {
       const audio = { volume: 1, muted: false, pause() {}, srcObject: null } as unknown as HTMLAudioElement;
-      const client = new StageClient({ url, audioElement: audio, requestTimeoutMs: 5000, reconnect: { initialDelayMs: 1, maxDelayMs: 1 } });
+      const client = new StageClient({ url, audioElement: audio, requestTimeoutMs: 5000, ...(maxPendingControlRequests === undefined ? {} : { maxPendingControlRequests }), reconnect: { initialDelayMs: 1, maxDelayMs: 1 } });
       client.on('error', event => errors.push(event.detail)); clients.push(client); return client;
     }
     const host = make(), guest = make();
     const room = await host.createRoom({ name: 'Host', roomName: 'SDK integration', codeRequired: true });
-    await guest.join({ ...room, name: 'Guest' });
+    const joining = guest.join({ ...room, name: 'Guest' });
+    // The branch below awaits other work before joining, so observe early failures immediately.
+    joining.catch(() => {});
+    if (maxPendingControlRequests === 1) {
+      await until(() => guest['pc']?.remoteDescription != null && !guest['negotiating'], 'SDP completes with join ACK held');
+      assert.equal(guest['pendingControlRequests'], 1);
+      assert.equal(guest['session'], null, 'the caller join has not settled');
+      const held = await request('inspect');
+      assert.equal(held.heldJoinAck, true);
+      assert.ok(held.peers.some(peer => peer.participantId === guest.me?.participantId));
+      await request('release-join-ack');
+    }
+    await joining;
     const id = guest.me!.participantId;
     assert.equal(guest.me!.role, 'audience'); assert.equal(guest.state!.code, undefined);
     assert.equal(host.state!.code, room.code);
-    await guest.raiseHand();
+    const raising = guest.raiseHand();
+    if (maxPendingControlRequests === 1) {
+      await assert.rejects(guest.withdrawHand(), error => error instanceof StageError && error.code === 'queue_full');
+      assert.equal(guest['pendingControlRequests'], 1);
+    }
+    await raising;
+    assert.equal(guest['pendingControlRequests'], 0);
     const raisedAt = guest['lastHandAt'];
     await until(() => host.state!.hands.some(person => person.participantId === id), 'controller sees raised hand');
     await host.approve(id);
@@ -126,6 +144,7 @@ it('runs SDK room actions, same-peer resume, kick and shutdown over real WebSock
     assert.equal(detail.reason, 'shutdown');
     assert.equal(host.status, 'disconnected'); assert.equal(host['reconnectTimer'], undefined);
     assert.equal(host.state, null); assert.equal(host['session'], null); assert.equal(host['pc'], null); assert.equal(host['mic'], null);
+    assert.equal(host['pendingControlRequests'], 0); assert.equal(guest['pendingControlRequests'], 0);
     // Observe actual socket close before checking beyond the configured 1 ms reconnect delay.
     await sleep(25);
     assert.equal(Socket.instances.length, socketCount);
