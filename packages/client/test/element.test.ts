@@ -52,6 +52,7 @@ function widget(onStage = false) {
     state: { name: 'Room' }, status: 'live', handCooldownMs: 0,
     raiseHand: action, withdrawHand: action, mute: action, unmute: action, leaveStage: action,
     disconnect: async () => {}, playbackMuted: false, setPlaybackMuted(muted: boolean) { this.playbackMuted = muted; },
+    playbackVolume: 1, setPlaybackVolume(volume: number) { this.playbackVolume = volume; },
   };
   element['current'] = client as unknown as StageClient;
   element['render']();
@@ -229,6 +230,205 @@ describe('widget actions and local playback', () => {
 });
 
 
+describe('widget playback volume', () => {
+  it('defaults to full volume and reads finite numeric attributes including zero, one and fractions', () => {
+    const { element, client } = widget();
+    assert.ok(StageElement.observedAttributes.includes('playback-volume'));
+    assert.equal(element.playbackVolume, 1);
+    assert.equal(element.hasAttribute('playback-volume'), false);
+    for (const [attribute, expected] of [['0', 0], ['1', 1], ['0.375', 0.375], [' 0.25 ', 0.25], ['1e-1', 0.1]] as const) {
+      element.setAttribute('playback-volume', attribute);
+      assert.equal(element.playbackVolume, expected, attribute);
+      assert.equal(client.playbackVolume, expected, attribute);
+      assert.equal(element.getAttribute('playback-volume'), attribute, 'reading does not rewrite an attribute');
+    }
+  });
+
+  it('uses full volume for empty, invalid and out-of-range attributes and for attribute removal', () => {
+    const { element, client } = widget();
+    for (const attribute of ['', ' ', '\t\n', 'NaN', 'Infinity', '-Infinity', '1e309', 'invalid', '0.5oops', '-0.01', '1.01']) {
+      element.playbackVolume = 0.4;
+      assert.doesNotThrow(() => element.setAttribute('playback-volume', attribute));
+      assert.equal(element.playbackVolume, 1, JSON.stringify(attribute));
+      assert.equal(client.playbackVolume, 1, JSON.stringify(attribute));
+      assert.equal(element.getAttribute('playback-volume'), attribute);
+    }
+    element.playbackVolume = 0;
+    element.removeAttribute('playback-volume');
+    assert.equal(element.playbackVolume, 1);
+    assert.equal(client.playbackVolume, 1);
+    assert.equal(element.hasAttribute('playback-volume'), false);
+  });
+
+  it('reflects valid property values and derives its preference from the attribute rather than the client', () => {
+    const { element, client } = widget();
+    for (const volume of [0, 0.375, 1]) {
+      element.playbackVolume = volume;
+      assert.equal(element.getAttribute('playback-volume'), String(volume));
+      assert.equal(element.playbackVolume, volume);
+      assert.equal(client.playbackVolume, volume);
+    }
+    element.playbackVolume = 0.4;
+    client.setPlaybackVolume(0.7);
+    assert.equal(element.playbackVolume, 0.4, 'direct SDK changes do not replace the widget preference');
+    element.setAttribute('playback-volume', '0.6');
+    assert.equal(element.playbackVolume, 0.6);
+    assert.equal(client.playbackVolume, 0.6);
+  });
+
+  it('rejects invalid property values with RangeError before mutating the attribute or client', t => {
+    const { element, client } = widget();
+    element.playbackVolume = 0.4;
+    const reflect = t.mock.method(element, 'setAttribute');
+    const apply = t.mock.method(client, 'setPlaybackVolume');
+    const invalid: unknown[] = [NaN, Infinity, -Infinity, -0.01, 1.01, '0.4', '', ' ', null, undefined, true, false, {}, [], 0n];
+    for (const value of invalid) {
+      assert.throws(() => { element.playbackVolume = value as number; }, RangeError);
+      assert.equal(element.getAttribute('playback-volume'), '0.4');
+      assert.equal(element.playbackVolume, 0.4);
+      assert.equal(client.playbackVolume, 0.4);
+    }
+    assert.equal(reflect.mock.callCount(), 0);
+    assert.equal(apply.mock.callCount(), 0);
+  });
+
+  it('applies changes immediately during live and reconnecting states without rejoining or issuing control requests', () => {
+    const { element, client, calls } = widget(true);
+    const current = element.client, generation = element['generation'], before = { ...client.me };
+    for (const status of ['live', 'reconnecting']) {
+      client.status = status;
+      element['render']();
+      element.playbackVolume = 0;
+      assert.equal(client.playbackVolume, 0);
+      element.setAttribute('playback-volume', '0.65');
+      assert.equal(client.playbackVolume, 0.65);
+      element.removeAttribute('playback-volume');
+      assert.equal(client.playbackVolume, 1);
+      assert.equal(element.client, current);
+      assert.equal(element['generation'], generation);
+      assert.equal(client.status, status);
+      assert.equal(calls(), 0);
+      assert.deepEqual(client.me, before);
+    }
+  });
+
+  it('keeps volume independent of listening mute and microphone state, including zero volume', async () => {
+    const { element, client, calls } = widget(true);
+    client.me.muted = true;
+    const before = { ...client.me };
+    for (const muted of [false, true]) {
+      element.playbackMuted = muted;
+      for (const volume of [0, 0.45, 1]) {
+        element.playbackVolume = volume;
+        assert.equal(client.playbackVolume, volume);
+        assert.equal(element.playbackMuted, muted);
+        assert.equal(client.playbackMuted, muted);
+        assert.equal(element.hasAttribute('playback-muted'), muted);
+      }
+    }
+    element.playbackVolume = 0;
+    click(element['listen']); await settle();
+    assert.equal(element.playbackMuted, false);
+    assert.equal(client.playbackMuted, false);
+    assert.equal(element.playbackVolume, 0);
+    assert.equal(client.playbackVolume, 0);
+    element.playbackMuted = true;
+    element.removeAttribute('playback-volume');
+    assert.equal(client.playbackVolume, 1);
+    assert.equal(client.playbackMuted, true);
+    assert.equal(calls(), 0);
+    assert.deepEqual(client.me, before);
+  });
+
+  it('applies the preference before connect and preserves it across room changes and actual remount callbacks', async t => {
+    const initialVolumes: number[] = [];
+    t.mock.method(StageClient.prototype, 'connect', async function (this: StageClient) { initialVolumes.push(this.playbackVolume); });
+    const join = t.mock.method(StageClient.prototype, 'join', async () => {});
+    t.mock.method(StageClient.prototype, 'disconnect', async () => {});
+    const element = new StageElement();
+    try {
+      Object.assign(element, { isConnected: false });
+      element.setAttribute('playback-volume', '0.25');
+      element.setAttribute('room', 'one'); element.setAttribute('name', 'Listener');
+      assert.equal(element.client, null);
+      Object.assign(element, { isConnected: true }); element.connectedCallback(); await settle();
+      const first = element.client as StageClient | null;
+      assert.ok(first);
+      assert.equal(first.playbackVolume, 0.25);
+      element.playbackVolume = 0.625;
+      element.setAttribute('room', 'two'); await settle();
+      const second = element.client as StageClient | null;
+      assert.ok(second);
+      assert.notEqual(second, first);
+      assert.equal(second.playbackVolume, 0.625);
+      Object.assign(element, { isConnected: false }); element.disconnectedCallback(); await settle();
+      assert.equal(element.client, null);
+      assert.equal(element.playbackVolume, 0.625);
+      assert.equal(element.getAttribute('playback-volume'), '0.625');
+      Object.assign(element, { isConnected: true }); element.connectedCallback(); await settle();
+      const remounted = element.client as StageClient | null;
+      assert.ok(remounted);
+      assert.notEqual(remounted, second);
+      assert.equal(remounted.playbackVolume, 0.625);
+      assert.deepEqual(initialVolumes, [0.25, 0.625, 0.625], 'the preference is applied before each connection starts');
+      assert.equal(join.mock.callCount(), 3);
+      const generation = element['generation'];
+      element.removeAttribute('playback-volume');
+      assert.equal(element.playbackVolume, 1);
+      assert.equal(remounted.playbackVolume, 1);
+      assert.equal(element.client, remounted);
+      assert.equal(element['generation'], generation);
+    } finally { element.disconnectedCallback(); await settle(); }
+  });
+
+  it('updates a client while connect is pending and ignores the retired connection after a room change', async t => {
+    const connections: ReturnType<typeof deferred>[] = [];
+    t.mock.method(StageClient.prototype, 'connect', function () {
+      const pending = deferred(); connections.push(pending); return pending.promise;
+    });
+    const join = t.mock.method(StageClient.prototype, 'join', async () => {});
+    t.mock.method(StageClient.prototype, 'disconnect', async () => {});
+    const element = new StageElement();
+    try {
+      element.playbackVolume = 0.2;
+      element.setAttribute('room', 'one'); element.setAttribute('name', 'Listener'); await settle();
+      const first = element.client;
+      assert.ok(first);
+      assert.equal(connections.length, 1);
+      const generation = element['generation'];
+      element.playbackVolume = 0.4;
+      assert.equal(first.playbackVolume, 0.4);
+      element.setAttribute('playback-volume', '0.6');
+      assert.equal(first.playbackVolume, 0.6);
+      assert.equal(element.client, first);
+      assert.equal(element['generation'], generation);
+      assert.equal(connections.length, 1);
+      assert.equal(join.mock.callCount(), 0);
+      element.setAttribute('room', 'two'); await settle();
+      const second = element.client;
+      assert.ok(second);
+      assert.notEqual(second, first);
+      assert.equal(connections.length, 2);
+      assert.equal(second.playbackVolume, 0.6);
+      element.playbackVolume = 0.75;
+      assert.equal(second.playbackVolume, 0.75);
+      assert.equal(first.playbackVolume, 0.6, 'only the current client receives subsequent preference changes');
+      connections[0]!.resolve(); await settle();
+      assert.equal(join.mock.callCount(), 0, 'a superseded connection must not join its old room');
+      assert.equal(element.client, second);
+      assert.equal(second.playbackVolume, 0.75);
+      connections[1]!.resolve(); await settle();
+      assert.equal(join.mock.callCount(), 1);
+      assert.equal(join.mock.calls[0]!.arguments[0]!.roomId, 'two');
+    } finally {
+      element.disconnectedCallback();
+      for (const pending of connections) pending.resolve();
+      await settle();
+    }
+  });
+});
+
+
 /** Enforces registry name/constructor uniqueness; name syntax is only a fixture subset. */
 class Registry {
   readonly definitions = new Map<string, CustomElementConstructor>();
@@ -257,6 +457,13 @@ describe('custom widget tag registration', () => {
     assert.deepEqual((Alias as typeof StageElement).observedAttributes, StageElement.observedAttributes);
     original.playbackMuted = true;
     assert.equal(alias.playbackMuted, false);
+    original.playbackVolume = 0.25;
+    assert.equal(alias.playbackVolume, 1);
+    alias.playbackVolume = 0.75;
+    assert.equal(alias.getAttribute('playback-volume'), '0.75');
+    assert.equal(original.playbackVolume, 0.25);
+    alias.removeAttribute('playback-volume');
+    assert.equal(alias.playbackVolume, 1);
   });
 
   it('supports custom-first registration and makes repeated names a no-op', () => {
