@@ -33,6 +33,7 @@ limits:
   maxSpeakersPerRoom: 8        # 裁示定值（主控以外的台上者；主控席位另計）
   maxAudiencePerRoom: 300      # 裁示定值
   maxFrameBytes: 65536         # 可調整（64KB）
+  maxSendBufferBytes: 1048576  # 每條 ws 待送位元組上限，含下一則訊息；慢速讀取端超過即斷線，依正常寬限期回座（可調整）
   controlPerSecond: 20         # 可調整
   handRaiseIntervalMs: 10000   # 可調整
   icePerSecond: 30             # 可調整

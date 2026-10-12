@@ -27,6 +27,8 @@ export interface AppConfig {
     maxSpeakersPerRoom: number;
     maxAudiencePerRoom: number;
     maxFrameBytes: number;
+    /** Maximum pending outbound bytes, including the next message; slow readers are disconnected. */
+    maxSendBufferBytes: number;
     controlPerSecond: number;
     handRaiseIntervalMs: number;
     icePerSecond: number;
@@ -211,6 +213,10 @@ export function parseConfig(raw: unknown): AppConfig {
     maxSpeakersPerRoom: int(l, 'maxSpeakersPerRoom', 'limits', 1),
     maxAudiencePerRoom: int(l, 'maxAudiencePerRoom', 'limits', 1),
     maxFrameBytes: int(l, 'maxFrameBytes', 'limits', 1024),
+    // Older configuration files derive a bounded allowance from their existing frame limit.
+    maxSendBufferBytes: l.maxSendBufferBytes === undefined
+      ? Math.min(Number.MAX_SAFE_INTEGER, int(l, 'maxFrameBytes', 'limits', 1024) * 16)
+      : int(l, 'maxSendBufferBytes', 'limits', 1024),
     controlPerSecond: int(l, 'controlPerSecond', 'limits', 1),
     handRaiseIntervalMs: int(l, 'handRaiseIntervalMs', 'limits', 0),
     icePerSecond: int(l, 'icePerSecond', 'limits', 1),

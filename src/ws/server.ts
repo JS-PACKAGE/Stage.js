@@ -3,15 +3,16 @@ import { createServer as createHttpServer, type IncomingMessage, type Server, ty
 import { createServer as createHttpsServer, type Server as HttpsServer } from 'node:https';
 import type { AddressInfo } from 'node:net';
 import { basename, dirname } from 'node:path';
-import { randomBytes, timingSafeEqual } from 'node:crypto';
+import { timingSafeEqual } from 'node:crypto';
 import { once } from 'node:events';
 import { WebSocketServer, type WebSocket } from 'ws';
-import type { ServerMessage } from '../../shared/protocol.ts';
 import type { AppConfig } from '../config.ts';
 import { createStaticHandler } from '../http/static.ts';
 import type { Logger } from '../log.ts';
+import { renderPrometheus } from '../metrics.ts';
+import { WsSession } from './session.ts';
 import { ERROR_MESSAGES } from '../model/errors.ts';
-import type { Session, StageHub } from './hub.ts';
+import type { StageHub } from './hub.ts';
 import { ConnectionRateLimiter } from './rateLimit.ts';
 import { ValidationError, parseClientMessage } from './validate.ts';
 
@@ -42,26 +43,11 @@ const SHUTDOWN_DRAIN_MS = 1000;
 /** Cert and key are usually rewritten one after the other; wait for both before reloading. */
 const TLS_RELOAD_DEBOUNCE_MS = 2000;
 
-class WsSession implements Session {
-  readonly id = randomBytes(6).toString('base64url');
-  readonly ws: WebSocket;
-  alive = true;
-  /** Per-connection ordering: a message is handled only after the previous one settled. */
-  chain: Promise<void> = Promise.resolve();
-  constructor(ws: WebSocket) {
-    this.ws = ws;
-  }
-  send(msg: ServerMessage, encoded?: string): void {
-    if (this.ws.readyState === this.ws.OPEN) this.ws.send(encoded ?? JSON.stringify(msg));
-  }
-  close(code: number, reason: string): void {
-    this.ws.close(code, reason);
-  }
-}
 
 export function createStageServer(deps: StageServerDeps): StageServer {
   const { config, hub, log } = deps;
   const now = deps.now ?? Date.now;
+  let backpressureDisconnects = 0;
   const serveStatic = createStaticHandler(config.server.static, deps.baseDir);
 
   const onRequest = (req: IncomingMessage, res: ServerResponse) => {
@@ -78,7 +64,7 @@ export function createStageServer(deps: StageServerDeps): StageServer {
         return;
       }
       deps.metrics().then(
-        (text) => res.writeHead(200, { 'Content-Type': 'text/plain; version=0.0.4', 'Cache-Control': 'no-store' }).end(text),
+        (text) => res.writeHead(200, { 'Content-Type': 'text/plain; version=0.0.4', 'Cache-Control': 'no-store' }).end(text + renderPrometheus([{ name: 'stage_ws_backpressure_disconnects_total', help: 'WebSocket connections terminated for exceeding the outbound buffer limit.', type: 'counter', value: backpressureDisconnects }])),
         (err) => { log.error('metrics error', { error: String(err) }); res.writeHead(500).end(); },
       );
       return;
@@ -162,7 +148,10 @@ export function createStageServer(deps: StageServerDeps): StageServer {
   });
 
   wss.on('connection', (ws: WebSocket, req: IncomingMessage) => {
-    const session = new WsSession(ws);
+    const session = new WsSession(ws, config.limits.maxSendBufferBytes, (bufferedBytes, messageBytes) => {
+      backpressureDisconnects++;
+      log.warn('ws outbound buffer exceeded, disconnecting', { session: session.id, bufferedBytes, messageBytes, limitBytes: config.limits.maxSendBufferBytes });
+    });
     const limiter = new ConnectionRateLimiter(config.limits, now());
     const ip = clientAddress(req);
     sessions.add(session);
