@@ -173,6 +173,8 @@ export class StageClient extends EventTarget {
   private remoteIce: (IceCandidatePayload | null)[] = [];
   private mediaRevision = 0;
   private mediaTask: Promise<void> = Promise.resolve();
+  /** Permission waits and queued device changes belong to one PeerConnection generation. */
+  private mediaAbort = new AbortController();
   private negotiationDirty = false;
   private negotiating = false;
   private answerWait: { resolve: () => void; reject: (error: Error) => void } | null = null;
@@ -241,11 +243,13 @@ export class StageClient extends EventTarget {
     catch (error) { throw new StageError('media_error', error instanceof Error ? error.message : '無法切換揚聲器。'); }
   }
   setInputDevice(deviceId: string): Promise<void> {
+    const generation = this.mediaAbort;
     const task = this.mediaTask.catch(() => {}).then(async () => {
+      if (generation !== this.mediaAbort) throw new StageError('disconnected', '音訊連線已中斷。');
       const pc = this.pc;
       const transceiver = this.transceiver;
       if (!this.mic || !pc || !transceiver || !this.me?.onStage) { this.inputDeviceId = deviceId; return; }
-      const stream = await navigator.mediaDevices.getUserMedia({ audio: this.audioConstraints(deviceId) });
+      const stream = await abortableMicStream(navigator.mediaDevices.getUserMedia({ audio: this.audioConstraints(deviceId) }), generation.signal);
       let meter: MicTest | null = null;
       try {
         if (pc !== this.pc || !this.me?.onStage) return;
@@ -618,6 +622,7 @@ export class StageClient extends EventTarget {
     // Wait for the personalised snapshot before choosing the publishing direction.
   }
   private syncMedia(): void {
+    const generation = this.mediaAbort;
     const revision = ++this.mediaRevision;
     this.mediaTask = this.mediaTask.catch(() => {}).then(async () => {
       const pc = this.pc;
@@ -626,7 +631,7 @@ export class StageClient extends EventTarget {
       if (!pc || !transceiver || !me || revision !== this.mediaRevision) return;
       if (me.onStage && !this.mic && !this.micFailed) {
         try {
-          const stream = await navigator.mediaDevices.getUserMedia({ audio: this.audioConstraints(this.inputDeviceId) });
+          const stream = await abortableMicStream(navigator.mediaDevices.getUserMedia({ audio: this.audioConstraints(this.inputDeviceId) }), generation.signal);
           if (pc !== this.pc || !this.me?.onStage) { stream.getTracks().forEach((track) => track.stop()); return; }
           this.mic = stream;
           try { this.micMeter = createMicMeter(stream); }
@@ -653,7 +658,7 @@ export class StageClient extends EventTarget {
       if (pc !== this.pc) return;
       transceiver.direction = direction;
       if (changed || !pc.localDescription || pc.signalingState !== 'stable') this.negotiate();
-    }).catch((error: unknown) => this.report(error));
+    }).catch((error: unknown) => { if (generation === this.mediaAbort) this.report(error); });
   }
   private negotiate(): void {
     this.negotiationDirty = true;
@@ -700,6 +705,11 @@ export class StageClient extends EventTarget {
   }
   private destroyMedia(): void {
     ++this.mediaRevision;
+    this.mediaAbort.abort(new StageError('disconnected', '音訊連線已中斷。'));
+    this.mediaAbort = new AbortController();
+    // Old permission requests may never settle. Their late results are disposed independently;
+    // a replacement peer must not inherit their serialized work queue.
+    this.mediaTask = Promise.resolve();
     clearTimeout(this.iceRestartTimer);
     this.iceRestartTimer = undefined;
     this.pc?.close();
