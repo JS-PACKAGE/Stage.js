@@ -167,7 +167,7 @@ JSON frame，型別定義在 [`shared/protocol.ts`](shared/protocol.ts)。每個
 
 本機收聽可用 `setPlaybackVolume(0.5)`／`setPlaybackMuted(true)` 調整，`playbackVolume`／`playbackMuted` 即時讀取；不影響麥克風或其他人，重連時保留。範例前端的「音訊設定」也提供音量與靜音收聽控制。
 
-範例前端的個人靜音、上下台及舉手操作，在等待回覆期間保留停用狀態與 `aria-busy`，不會因冷卻 tick 或房間快照重繪而再次送出。離房／切換身分會清除舊 pending 狀態，舊完成事件不會解鎖新房操作；主控管理列表與音量 slider 不在這個個人操作保護範圍。 舉手倒數只在畫面可見且尚未歸零時排程下一個顯示秒數邊界；沒有倒數時不執行冷卻輪詢，房內連線統計仍每 2 秒更新。
+範例前端的個人靜音、上下台、舉手與主控管理按鈕，在等待回覆期間保留停用狀態與 `aria-busy`，不會因冷卻 tick 或房間快照重繪而再次送出。離房／切換身分會清除舊 pending 狀態，舊完成事件不會解鎖新房操作；核准／婉拒／移出舞台共用每人的 pending key，強制靜音與解除亦共用；控制權移交在全列表保留單一 pending，換碼與關房也受保護。舊房間換碼完成不會覆寫新房通知。音量 slider 不在這個按鈕保護範圍。 舉手倒數只在畫面可見且尚未歸零時排程下一個顯示秒數邊界；沒有倒數時不執行冷卻輪詢，房內連線統計仍每 2 秒更新。
 
 完整 API 見 [`packages/client/README.md`](packages/client/README.md)；`web/embed.html` 是最小嵌入範例。
 

@@ -7,11 +7,13 @@ import { it } from 'node:test';
 const source = readFileSync(new URL('../web/src/main.ts', import.meta.url), 'utf8');
 // Exercise the production handlers with DOM/SDK doubles, not a duplicate pending-state model.
 const actions = source.slice(source.indexOf('function resetRoomActions('), source.indexOf('function showError('));
+const people = source.slice(source.indexOf('function panelList('), source.indexOf('/** Controller\'s per-speaker')) ;
 const landing = source.slice(source.indexOf('function landing()'), source.indexOf('function renderNotices()'));
 const render = source.slice(source.indexOf('function renderRoom('), source.indexOf('function panelList('));
 const cooldown = source.slice(source.indexOf('function updateCooldown('), source.indexOf("client.on('state', ({ detail })"));
 interface Button {
   disabled: boolean;
+  textContent: string;
   dataset: Record<string, string>;
   attrs: Record<string, string>;
   onclick(): void;
@@ -25,19 +27,20 @@ interface Harness {
   tick(): void;
   render(state: unknown): void;
   landing(): void;
+  invitation(): string;
   delays(): number[];
   callbacks(): number;
   advance(ms: number): void;
 }
 function setup(): Harness {
   return runInNewContext(stripTypeScriptTypes(`
-    let roomActionIdentity = '', roomActionGeneration = 0, cooldownButton = null, cooldownTimer;
+    let roomActionIdentity = '', roomActionGeneration = 0, cooldownButton = null, cooldownTimer, invitation = '';
     const pendingRoomActions = new Map(), nodes = [], errors = [];
     let nextTimer = 0, clock = 0, callbacks = 0;
     const timers = new Map();
     const setTimeout = (fn, delay) => { const id = ++nextTimer; timers.set(id, { fn, at: clock + delay }); return id; };
     const clearTimeout = id => timers.delete(id);
-    const client = { status: 'waiting', handCooldownMs: 0, me: { handRaised: false } };
+    const client = { status: 'waiting', handCooldownMs: 0, me: { handRaised: false }, speaking: new Set() };
     const content = { querySelectorAll: () => nodes, querySelector: () => nodes.find(node => node.dataset.returnStage),
       replaceChildren(...children) {
         nodes.length = 0;
@@ -48,18 +51,21 @@ function setup(): Harness {
     const statusLabels = {}, roleLabels = {}, createdRoom = null;
     const location = { pathname: '/', origin: 'https://example.test' };
     const decodeName = value => value;
-    const button = () => element(), panelList = () => element(), field = () => element();
+    const button = () => element(), field = () => element(), gainSlider = () => element();
+    const window = { confirm: () => true };
+    function applyQuality() {}
     const params = { get: () => null }, document = { createTextNode: () => element() };
     function renderNotices() {}
     const errorBox = { hidden: true };
-    function element() { return { isConnected: true, disabled: false, dataset: {}, attrs: {}, children: [], append(...children) { this.children.push(...children); }, setAttribute(k, v) { this.attrs[k] = v; } }; }
+    function element(tag, className, text) { return { textContent: text ?? '', classList: { toggle() {} }, isConnected: true, disabled: false, dataset: {}, attrs: {}, children: [], append(...children) { this.children.push(...children); }, setAttribute(k, v) { this.attrs[k] = v; } }; }
     function showError(error) { errors.push(error); }
     function syncMeter() {}
     ${actions}
     ${cooldown}
     ${render}
+    ${people}
     ${landing}
-    ({ client, errors, nodes, landing,
+    ({ client, errors, nodes, landing, invitation: () => invitation,
       delays: () => [...timers.values()].map(timer => timer.at - clock), callbacks: () => callbacks,
       advance(ms) {
         clock += ms; client.handCooldownMs = Math.max(0, client.handCooldownMs - ms);
@@ -213,4 +219,63 @@ it('landing cancels the old countdown and rejoin/controller transitions own only
   const state = audienceState(); h.render({ ...state, me: { ...state.me, role: 'controller' } });
   assert.equal(h.delays().length, 0); h.client.status = 'disconnected'; h.landing();
   h.advance(60000); assert.equal(h.callbacks(), 0);
+});
+
+function moderatorState(kind: 'hand' | 'speaker' | 'audience' = 'hand', forceMuted = false) {
+  const person = { participantId: 'target', name: 'Target', role: kind === 'speaker' ? 'speaker' : 'audience',
+    connected: true, muted: forceMuted, forceMuted, gainDb: 0, handRaised: kind === 'hand', onStage: kind === 'speaker' };
+  return { ...audienceState(), codeRequired: true, code: 'OLD123', controllerId: 'p',
+    me: { ...audienceState().me, role: 'controller' },
+    hands: kind === 'hand' ? [person] : [], speakers: kind === 'speaker' ? [person] : [],
+    audience: kind === 'audience' ? [person] : [] };
+}
+
+for (const [method, label, kind] of [
+  ['approve', '核准上台', 'hand'], ['reject', '婉拒', 'hand'],
+  ['forceMute', '強制靜音', 'speaker'], ['forceUnmute', '解除強制靜音', 'speaker'],
+  ['removeFromStage', '移出舞台', 'speaker'], ['transferControl', '移交控制權', 'audience'],
+  ['kick', '踢出房間', 'audience'], ['rotateCode', '更換房間代碼', 'hand'], ['closeRoom', '關閉房間', 'hand'],
+] as const) {
+  it(`keeps ${method} pending across actual management list/room reconstruction`, async () => {
+    const h = setup(), work = Promise.withResolvers<void>(); let calls = 0;
+    Object.assign(h.client, { [method]: () => { calls++; return work.promise; } });
+    const state = moderatorState(kind, method === 'forceUnmute'); h.render(state);
+    h.nodes.find(node => node.textContent === label)!.onclick();
+    h.render({ ...state, code: 'NEW111' });
+    const replacement = h.nodes.find(node => node.textContent === label)!;
+    assert.equal(replacement.disabled, true); assert.equal(replacement.attrs['aria-busy'], 'true');
+    replacement.onclick(); assert.equal(calls, 1);
+    work.resolve(); await flush(); assert.equal(replacement.disabled, false);
+  });
+}
+
+it('shares target stage and force-mute keys across opposite action snapshots', async () => {
+  const h = setup(), stage = Promise.withResolvers<void>(), mute = Promise.withResolvers<void>();
+  Object.assign(h.client, { approve: () => stage.promise, forceMute: () => mute.promise });
+  h.render(moderatorState('hand')); h.nodes.find(node => node.textContent === '核准上台')!.onclick();
+  assert.equal(h.nodes.find(node => node.textContent === '婉拒')!.disabled, true);
+  h.render(moderatorState('speaker')); assert.equal(h.nodes.find(node => node.textContent === '移出舞台')!.disabled, true);
+  h.nodes.find(node => node.textContent === '強制靜音')!.onclick();
+  h.render(moderatorState('speaker', true)); assert.equal(h.nodes.find(node => node.textContent === '解除強制靜音')!.disabled, true);
+  stage.resolve(); mute.resolve(); await flush();
+});
+
+it('one transfer locks all target transfer buttons without locking unrelated targets', async () => {
+  const h = setup(), work = Promise.withResolvers<void>();
+  Object.assign(h.client, { transferControl: () => work.promise });
+  const state = moderatorState('audience'); state.audience.push({ ...state.audience[0]!, participantId: 'other' });
+  h.render(state); h.nodes.find(node => node.dataset.roomAction === 'transfer')!.onclick();
+  assert.ok(h.nodes.filter(node => node.dataset.roomAction === 'transfer').every(node => node.disabled));
+  assert.ok(h.nodes.filter(node => node.dataset.roomAction?.startsWith('kick:')).every(node => !node.disabled));
+  work.resolve(); await flush();
+});
+
+it('old rotation success cannot change the replacement room notice or pending state', async () => {
+  const h = setup(), old = Promise.withResolvers<void>(), next = Promise.withResolvers<void>(); let calls = 0;
+  Object.assign(h.client, { rotateCode: () => ++calls === 1 ? old.promise : next.promise });
+  h.render(moderatorState()); h.nodes.find(node => node.dataset.roomAction === 'rotate-code')!.onclick();
+  h.render({ ...moderatorState(), roomId: 'new-room' });
+  const replacement = h.nodes.find(node => node.dataset.roomAction === 'rotate-code')!; replacement.onclick();
+  old.resolve(); await flush(); assert.equal(h.invitation(), ''); assert.equal(replacement.disabled, true);
+  next.resolve(); await flush(); assert.match(h.invitation(), /已更換房間代碼/); assert.equal(replacement.disabled, false);
 });
