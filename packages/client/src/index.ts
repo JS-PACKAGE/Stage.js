@@ -163,6 +163,7 @@ export class StageClient extends EventTarget {
   private reconnectTimer: ReturnType<typeof setTimeout> | undefined;
   private reconnectAttempt = 0;
   private pc: RTCPeerConnection | null = null;
+  private pcParticipantId: string | null = null;
   private transceiver: RTCRtpTransceiver | null = null;
   private mic: MediaStream | null = null;
   private micFailed = false;
@@ -558,12 +559,15 @@ export class StageClient extends EventTarget {
         if (this.session) this.session.resumeToken = state.resumeToken;
         this.reconnectAttempt = 0;
         this.setStatus(state.status);
+        // Application callbacks may disconnect, unmount the widget or install a newer snapshot.
+        if (this.snapshot !== state) return;
         this.emit('state', state);
+        if (this.snapshot !== state) return;
         for (const track of this.mic?.getAudioTracks() ?? []) track.enabled = !state.me.muted;
         // First snapshot of a (new) identity → fresh PeerConnection. A resumed seat keeps the one that
         // survived the ws drop unless the network side died meanwhile.
         const pcState = this.pc?.connectionState;
-        if (!this.pc || previousId !== state.me.participantId || pcState === 'failed' || pcState === 'closed') this.createMedia();
+        if (!this.pc || this.pcParticipantId !== state.me.participantId || pcState === 'failed' || pcState === 'closed') this.createMedia();
         this.syncMedia();
         break;
       }
@@ -630,6 +634,7 @@ export class StageClient extends EventTarget {
     this.destroyMedia();
     const pc = new RTCPeerConnection({ iceServers: this.iceServers });
     this.pc = pc;
+    this.pcParticipantId = this.me?.participantId ?? null;
     this.transceiver = pc.addTransceiver('audio', { direction: 'recvonly' });
     pc.onicecandidate = (event) => {
       if (this.pc !== pc) return;
@@ -756,6 +761,7 @@ export class StageClient extends EventTarget {
     this.iceRestartTimer = undefined;
     this.pc?.close();
     this.pc = null;
+    this.pcParticipantId = null;
     this.transceiver = null;
     this.micMeter?.stop();
     this.micMeter = null;

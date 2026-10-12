@@ -106,3 +106,5 @@
 `disconnect()` 會立即以 `StageError('disconnected')` 拒絕仍等待權限的 `startMicTest()`，即使沒有傳入 AbortSignal；呼叫端應處理這個拒絕。它不會取消你自己的 AbortController，也無法關閉原生權限提示。遲到取得的舊串流仍會停止，遲到拒絕會被接住；同一 client 立即啟動的新預覽不受影響。在 meter 建立或 micready 監聽器中同步斷線，也不會回傳已失效的預覽。
 
 舉手冷卻屬於目前參與者：明確 disconnect（包含被踢／關房）或收到不同 participantId 的新身分時清除，同一個 StageClient 可立即在新房間舉手；同席位的自動恢復與一般 state 更新保留原本冷卻。伺服器的速率限制仍會獨立檢查請求。
+
+`status`／`state` 的監聽器可同步呼叫 `disconnect()`（例如移除嵌入元件）；舊 room:state handler 會停止，不在斷線後繼續建立 PeerConnection／取得麥克風，也不在 status 監聽器取消後發出舊 state。若處理期間已有更新快照，舊 handler 不會取代較新的媒體連線。

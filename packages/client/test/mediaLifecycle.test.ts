@@ -326,4 +326,55 @@ describe('media task lifecycle isolation', () => {
     assert.equal(client['mic'], current.value);
   });
 
+  for (const callback of ['state', 'status'] as const) it(`does not create media after a ${callback} listener disconnects`, async () => {
+    const seen: string[] = [];
+    client.on('state', () => { seen.push('state'); if (callback === 'state') void client.disconnect(); });
+    client.on('status', event => { seen.push(`status:${event.detail}`); if (callback === 'status' && event.detail === 'live') void client.disconnect(); });
+    await client['receive']({ type: 'room:state', ...state(true, 'cancelled') }); await settle();
+    assert.equal(client.state, null); assert.equal(client.status, 'disconnected'); assert.equal(client['pc'], null);
+    assert.equal(Peer.instances.length, 0); assert.equal(requests.length, 0); assert.equal(negotiations, 0);
+    assert.deepEqual(seen, callback === 'state'
+      ? ['status:live', 'state', 'status:disconnected']
+      : ['status:live', 'status:disconnected']);
+  });
+
+  for (const callback of ['state', 'status'] as const) it(`keeps a newer reentrant snapshot and its peer after the older ${callback} callback returns`, async () => {
+    let replaced = false;
+    const seen: string[] = [];
+    const replace = () => {
+      if (replaced) return;
+      replaced = true;
+      void client['receive']({ type: 'room:state', ...state(true, 'replacement') });
+    };
+    client.on('state', event => { seen.push(event.detail.me.participantId); if (callback === 'state') replace(); });
+    client.on('status', event => { if (callback === 'status' && event.detail === 'live') replace(); });
+    await client['receive']({ type: 'room:state', ...state(false, 'retired') }); await settle();
+    assert.equal(client.me!.participantId, 'replacement');
+    assert.equal(Peer.instances.length, 1); assert.equal(Peer.instances[0]!.closed, false);
+    assert.equal(client['pc'], Peer.instances[0]); assert.equal(requests.length, 1);
+    const source = stream(); requests[0]!.resolve(source.value); await settle();
+    assert.equal(client['mic'], source.value); assert.equal(source.track.stops, 0);
+    assert.deepEqual(seen, callback === 'state' ? ['retired', 'replacement'] : ['replacement']);
+  });
+
+  for (const callback of ['state', 'status'] as const) it(`replaces the actual old peer when a ${callback} listener repeats the new identity snapshot`, async () => {
+    await client['receive']({ type: 'room:state', ...state(false, 'A'), status: 'waiting' }); await settle();
+    const old = Peer.instances[0]!; let repeated = false;
+    const repeat = () => {
+      if (repeated) return;
+      repeated = true;
+      void client['receive']({ type: 'room:state', ...state(true, 'B') });
+    };
+    client.on('state', event => { if (callback === 'state' && event.detail.me.participantId === 'B') repeat(); });
+    client.on('status', event => { if (callback === 'status' && event.detail === 'live') repeat(); });
+    await client['receive']({ type: 'room:state', ...state(true, 'B') }); await settle();
+    assert.equal(client.me!.participantId, 'B'); assert.equal(Peer.instances.length, 2);
+    assert.equal(old.closed, true); assert.equal(client['pc'], Peer.instances[1]);
+    assert.equal(client['pcParticipantId'], 'B'); assert.equal(Peer.instances[1]!.closed, false);
+    assert.equal(requests.length, 1);
+    const source = stream(); requests[0]!.resolve(source.value); await settle();
+    assert.equal(client['mic'], source.value); assert.equal(source.track.stops, 0);
+    await client.disconnect(); assert.equal(client['pcParticipantId'], null);
+  });
+
 });
