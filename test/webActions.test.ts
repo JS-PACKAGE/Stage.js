@@ -56,6 +56,7 @@ function setup(): Harness {
     function applyQuality() {}
     const params = { get: () => null }, document = { createTextNode: () => element() };
     function renderNotices() {}
+    function resetMicSettings() {}
     const errorBox = { hidden: true };
     function element(tag, className, text) { return { textContent: text ?? '', classList: { toggle() {} }, isConnected: true, disabled: false, dataset: {}, attrs: {}, children: [], append(...children) { this.children.push(...children); }, setAttribute(k, v) { this.attrs[k] = v; } }; }
     function showError(error) { errors.push(error); }

@@ -86,17 +86,25 @@ playbackMute.setAttribute('aria-pressed', String(client.playbackMuted));
 settings.append(playbackLabel, playbackMute, element('p', 'muted', '僅調整你聽到的聲音，不影響麥克風或其他人。'));
 let micTest: MicTest | null = null;
 let testingBusy = false;
+let micSettingsGeneration = 0;
 let selectedInput = '';
 let selectedOutput = '';
 const testButton = button('測試麥克風', async () => {
+  if (testingBusy || client.me?.onStage) return;
+  const generation = micSettingsGeneration;
   testingBusy = true;
-  micSelect.disabled = true;
+  micSelect.disabled = true; syncMeter();
   try {
     if (micTest) { micTest.stop(); micTest = null; }
-    else micTest = await client.startMicTest();
+    else {
+      const preview = await client.startMicTest();
+      if (generation !== micSettingsGeneration) { preview.stop(); return; }
+      micTest = preview;
+    }
     testButton.textContent = micTest ? '停止測試' : '測試麥克風';
     testButton.setAttribute('aria-pressed', String(Boolean(micTest)));
-  } finally { testingBusy = false; micSelect.disabled = false; syncMeter(); }
+  } catch (error) { if (generation === micSettingsGeneration) throw error; }
+  finally { if (generation === micSettingsGeneration) { testingBusy = false; micSelect.disabled = false; syncMeter(); } }
 });
 testButton.id = 'mic-test';
 testButton.setAttribute('aria-pressed', 'false');
@@ -108,19 +116,29 @@ levelLabel.append(level);
 settings.append(testButton, levelLabel);
 app.append(settings);
 micSelect.onchange = () => {
+  if (testingBusy) return;
+  const generation = micSettingsGeneration;
   const deviceId = micSelect.value;
   micSelect.disabled = true;
-  testingBusy = true;
+  testingBusy = true; syncMeter();
   void run(async () => {
-    await client.setInputDevice(deviceId);
-    selectedInput = deviceId;
-    if (micTest) {
-      micTest.stop(); micTest = null;
-      testButton.textContent = '測試麥克風'; testButton.setAttribute('aria-pressed', 'false');
-      micTest = await client.startMicTest();
-      testButton.textContent = '停止測試'; testButton.setAttribute('aria-pressed', 'true');
-    }
-  }).finally(() => { testingBusy = false; micSelect.disabled = false; micSelect.value = selectedInput; syncMeter(); });
+    try {
+      await client.setInputDevice(deviceId);
+      if (generation !== micSettingsGeneration) return;
+      selectedInput = deviceId;
+      if (micTest) {
+        micTest.stop(); micTest = null;
+        testButton.textContent = '測試麥克風'; testButton.setAttribute('aria-pressed', 'false');
+        const preview = await client.startMicTest();
+        if (generation !== micSettingsGeneration) { preview.stop(); return; }
+        micTest = preview;
+        testButton.textContent = '停止測試'; testButton.setAttribute('aria-pressed', 'true');
+      }
+    } catch (error) { if (generation === micSettingsGeneration) throw error; }
+  }).finally(() => {
+    if (generation !== micSettingsGeneration) return;
+    testingBusy = false; micSelect.disabled = false; micSelect.value = selectedInput; syncMeter();
+  });
 };
 speakerSelect.onchange = () => {
   const deviceId = speakerSelect.value;
@@ -147,6 +165,14 @@ navigator.mediaDevices?.addEventListener('devicechange', () => { void refreshDev
 void refreshDevices().catch(() => {});
 /** The level meter polls only while there is something to meter: a mic test or an on-stage mic. */
 let meterTimer: ReturnType<typeof setInterval> | undefined;
+/** Leave/rejoin releases the UI immediately; late previews still dispose only their own stream. */
+function resetMicSettings(): void {
+  micSettingsGeneration++;
+  micTest?.stop(); micTest = null; testingBusy = false;
+  micSelect.disabled = false; micSelect.value = selectedInput;
+  testButton.textContent = '測試麥克風'; testButton.setAttribute('aria-pressed', 'false');
+  syncMeter();
+}
 function syncMeter(): void {
   if (client.me?.onStage && micTest) {
     micTest.stop(); micTest = null;
@@ -236,6 +262,7 @@ function field(form: HTMLFormElement, label: string, name: string, value = '', r
   return input;
 }
 function landing(): void {
+  resetMicSettings();
   resetRoomActions('');
   cooldownButton = null; scheduleCooldown(0);
   brand.textContent = 'Stage.js 音訊舞台';
