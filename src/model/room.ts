@@ -15,7 +15,7 @@ export interface Participant {
   readonly joinedAt: number;
   role: Role;
   onStage: boolean;
-  /** When the participant last stepped on stage; orders auto-transfer successors. */
+  /** Wall-clock timestamp when the participant last stepped on stage. */
   stageSince: number;
   handRaised: boolean;
   selfMuted: boolean;
@@ -306,16 +306,15 @@ export class Room {
    * speaker, else earliest audience member (PLAN 假設 4). Only connected people qualify.
    */
   pickSuccessor(): Participant | undefined {
-    let best: Participant | undefined;
+    // Collection order records actual entry order even when the wall clock moves backwards.
     for (const id of this.speakers) {
       const p = this.participants.get(id);
-      if (p && id !== this.controllerId && p.connected && (!best || p.stageSince < best.stageSince)) best = p;
+      if (p && id !== this.controllerId && p.connected) return p;
     }
-    if (best) return best;
     for (const p of this.participants.values()) {
-      if (p.role === 'audience' && p.connected && (!best || p.joinedAt < best.joinedAt)) best = p;
+      if (p.role === 'audience' && p.connected) return p;
     }
-    return best;
+    return undefined;
   }
 
   // ─────────────────────────────── mic ───────────────────────────────
