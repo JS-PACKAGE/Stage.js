@@ -17,6 +17,8 @@ export class StageError extends Error {
 }
 export interface StageClientOptions {
   url: string;
+  /** Connection hello, request acknowledgement and SDP answer deadline; default 15000 ms. */
+  requestTimeoutMs?: number;
   reconnect?: { initialDelayMs: number; maxDelayMs: number };
   audioElement?: HTMLAudioElement;
   micConstraints?: MediaTrackConstraints;
@@ -106,7 +108,7 @@ const nonnegative = (value: unknown): number | undefined => { const n = finite(v
 
 interface Pending { resolve: () => void; reject: (error: StageError) => void; timer: ReturnType<typeof setTimeout>; sendTimer?: ReturnType<typeof setTimeout> }
 type JoinOptions = { roomId: string; code?: string; name: string; resumeToken?: string };
-const REQUEST_TIMEOUT = 15000;
+const DEFAULT_REQUEST_TIMEOUT = 15000;
 /** Until the server's `hello` says otherwise: the config.example.yaml defaults. */
 const DEFAULT_LIMITS: RateLimits = { controlPerSecond: 20, icePerSecond: 30, handRaiseIntervalMs: 10000 };
 const KEEPALIVE_INTERVAL_MS = 15000;
@@ -122,6 +124,7 @@ export class StageClient extends EventTarget {
   private readonly audio: HTMLAudioElement;
   private readonly ownsAudio: boolean;
   private socket: WebSocket | null = null;
+  private readonly requestTimeoutMs: number;
   private connecting: Promise<void> | null = null;
   private pending = new Map<string, Pending>();
   private snapshot: RoomStatePayload | null = null;
@@ -164,6 +167,9 @@ export class StageClient extends EventTarget {
 
   constructor(options: StageClientOptions) {
     super();
+    const timeout = options.requestTimeoutMs === undefined ? DEFAULT_REQUEST_TIMEOUT : options.requestTimeoutMs;
+    if (!Number.isInteger(timeout) || timeout < 1 || timeout > 300000) throw new RangeError('請求逾時必須是 1 到 300000 之間的整數毫秒。');
+    this.requestTimeoutMs = timeout;
     this.options = options;
     this.ownsAudio = !options.audioElement;
     this.audio = options.audioElement ?? document.createElement('audio');
@@ -280,7 +286,7 @@ export class StageClient extends EventTarget {
       const ws = new WebSocket(this.options.url);
       this.socket = ws;
       let ready = false;
-      const timer = setTimeout(() => { reject(new StageError('timeout', '連線逾時，請稍後再試。')); ws.close(); }, REQUEST_TIMEOUT);
+      const timer = setTimeout(() => { reject(new StageError('timeout', '連線逾時，請稍後再試。')); ws.close(); }, this.requestTimeoutMs);
       ws.onmessage = (event) => {
         if (this.socket !== ws) return;
         this.lastHeardAt = performance.now();
@@ -409,7 +415,7 @@ export class StageClient extends EventTarget {
   }
   async unlockAudio(): Promise<void> { await this.audio.play(); }
 
-  private request<K extends Exclude<ClientMessageType, 'ping'>>(type: K, payload: Omit<ClientMessageMap[K], 'requestId'>): Promise<void> {
+  private request<K extends Exclude<ClientMessageType, 'ping'>>(type: K, payload: Omit<ClientMessageMap[K], 'requestId'>, onSend?: () => void): Promise<void> {
     const ws = this.socket;
     if (!ws || ws.readyState !== WebSocket.OPEN) return Promise.reject(new StageError('disconnected', '尚未連線至舞台。'));
     const requestId = crypto.randomUUID();
@@ -424,7 +430,7 @@ export class StageClient extends EventTarget {
     return new Promise<void>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.finish(requestId, new StageError('timeout', '請求逾時，請重試。'));
-      }, REQUEST_TIMEOUT + sendAt - now);
+      }, this.requestTimeoutMs + sendAt - now);
       const pending: Pending = { resolve, reject, timer };
       this.pending.set(requestId, pending);
       pending.sendTimer = setTimeout(() => {
@@ -434,7 +440,7 @@ export class StageClient extends EventTarget {
           this.finish(requestId, new StageError('disconnected', '連線已中斷。'));
           return;
         }
-        try { ws.send(JSON.stringify({ type, ...payload, requestId })); }
+        try { onSend?.(); ws.send(JSON.stringify({ type, ...payload, requestId })); }
         catch { this.finish(requestId, new StageError('disconnected', '無法送出請求，連線可能已中斷。')); }
       }, sendAt - now);
     });
@@ -630,9 +636,13 @@ export class StageClient extends EventTarget {
           if (this.pc !== pc) return;
           const answer = new Promise<void>((resolve, reject) => {
             this.answerWait = { resolve, reject };
-            this.answerTimer = setTimeout(() => reject(new StageError('timeout', '音訊協商逾時。')), REQUEST_TIMEOUT);
           });
-          await Promise.all([answer, this.request('rtc:offer', { payload: { type: 'offer', sdp: pc.localDescription!.sdp } })]);
+          const answerWait = this.answerWait;
+          await Promise.all([answer, this.request('rtc:offer', { payload: { type: 'offer', sdp: pc.localDescription!.sdp } }, () => {
+            if (this.pc !== pc || !answerWait || this.answerWait !== answerWait) throw new StageError('disconnected', '音訊協商已取消。');
+            // Pacing is not time spent waiting for an answer: start only when the offer is sent.
+            this.answerTimer = setTimeout(() => answerWait.reject(new StageError('timeout', '音訊協商逾時。')), this.requestTimeoutMs);
+          })]);
           if (this.pc !== pc) return;
           clearTimeout(this.answerTimer);
           this.answerTimer = undefined;
