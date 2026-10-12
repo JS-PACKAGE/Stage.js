@@ -138,3 +138,46 @@ for (const operation of ['join', 'create'] as const) {
     assert.equal(client['session']!.roomId, 'new'); assert.equal(client['reconnectTimer'], undefined);
   });
 }
+
+for (const phase of ['hello', 'resume'] as const) {
+  it(`retries a stalled ${phase} without waiting for its close event`, async t => {
+    const client = setup(t), old = await joined(t, client, 'old'), session = client['session'];
+    old.close(); t.mock.timers.tick(500); const stalled = Socket.instances.at(-1)!;
+    stalled.deferClose = true;
+    if (phase === 'resume') { hello(stalled); await flush(); t.mock.timers.tick(0); }
+    t.mock.timers.tick(5000); await flush();
+    assert.equal(client['socket'], null); assert.ok(client['reconnectTimer']);
+    assert.equal(client['session'], session); assert.equal(client['connecting'], null);
+    t.mock.timers.tick(999); assert.equal(Socket.instances.length, 2);
+    t.mock.timers.tick(1); assert.equal(Socket.instances.length, 3);
+    const recovered = Socket.instances.at(-1)!; await answerJoin(t, recovered);
+    stalled.onclose?.(); hello(stalled); await flush();
+    assert.equal(client['socket'], recovered); assert.equal(recovered.readyState, Socket.OPEN);
+    assert.equal(client['session'], session); assert.equal(client['reconnectTimer'], undefined);
+    assert.equal(recovered.sent.filter(message => message.type === 'join').length, 1);
+  });
+}
+
+it('lets a timeout status callback immediately connect without reusing its rejected hello promise', async t => {
+  const client = setup(t); const first = client.connect(); first.catch(() => {});
+  const stalled = Socket.instances[0]!; stalled.deferClose = true;
+  // Start from a visible nonterminal status so the disconnected callback is emitted.
+  stalled.deliver({ type: 'status', state: 'waiting' });
+  let replacement: Promise<void> | undefined;
+  client.on('status', event => { if (event.detail === 'disconnected') replacement = client.connect(); });
+  t.mock.timers.tick(5000); await assert.rejects(first, /逾時/); await flush();
+  assert.ok(replacement); assert.notEqual(replacement, first); assert.equal(Socket.instances.length, 2);
+  const next = Socket.instances[1]!; hello(next); await replacement;
+  stalled.onclose?.(); await flush(); assert.equal(client['socket'], next);
+});
+
+it('keeps retry scheduled when closing the timed-out transport throws', async t => {
+  const client = setup(t), old = await joined(t, client, 'old');
+  old.close(); t.mock.timers.tick(500); const stalled = Socket.instances.at(-1)!;
+  stalled.close = () => { throw new Error('transport already failed'); };
+  t.mock.timers.tick(5000); await flush();
+  assert.equal(client['socket'], null); assert.ok(client['reconnectTimer']);
+  t.mock.timers.tick(1000); const recovered = Socket.instances.at(-1)!;
+  assert.notEqual(recovered, stalled); await answerJoin(t, recovered);
+  assert.equal(client['socket'], recovered); assert.equal(client['reconnectTimer'], undefined);
+});

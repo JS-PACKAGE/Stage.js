@@ -363,7 +363,10 @@ export class StageClient extends EventTarget {
       const ws = new WebSocket(this.options.url);
       this.socket = ws;
       let ready = false;
-      const timer = setTimeout(() => { reject(new StageError('timeout', '連線逾時，請稍後再試。')); ws.close(); }, this.requestTimeoutMs);
+      const timer = setTimeout(() => {
+        reject(new StageError('timeout', '連線逾時，請稍後再試。'));
+        this.abandonSocket(ws);
+      }, this.requestTimeoutMs);
       ws.onmessage = (event) => {
         if (this.socket !== ws) return;
         this.lastHeardAt = performance.now();
@@ -407,6 +410,13 @@ export class StageClient extends EventTarget {
     this.answerWait?.reject(new StageError('disconnected', '音訊協商已中斷。'));
     if (!this.intentional && this.session) this.scheduleReconnect();
     else { this.destroyMedia(); if (this.ownsAudio) this.audio.remove(); this.setStatus('disconnected'); }
+  }
+  private abandonSocket(ws: WebSocket): void {
+    // A failed hello/resume must not wait for a close handshake on an unresponsive transport.
+    // Clear the old promise before callbacks can synchronously start a replacement connection.
+    if (this.socket === ws) this.connecting = null;
+    this.socketLost(ws);
+    try { ws.close(); } catch { /* already dead */ }
   }
   /**
    * Application-level liveness: a half-open TCP connection (network switch, sleep) would otherwise
@@ -633,8 +643,11 @@ export class StageClient extends EventTarget {
       this.reconnectTimer = undefined;
       if (!current()) return;
       void (async () => {
+        let attemptedSocket: WebSocket | null = null;
         try {
-          await this.connect();
+          const connecting = this.connect();
+          attemptedSocket = this.socket;
+          await connecting;
           if (!current()) return;
           await this.request('join', { ...session, resumeToken: this.snapshot?.resumeToken });
         } catch (error) {
@@ -644,7 +657,7 @@ export class StageClient extends EventTarget {
           if (error instanceof StageError && ['unauthorized', 'not_found', 'room_full'].includes(error.code)) {
             await this.disconnect();
           } else if (!this.reconnectTimer && !this.intentional && this.session) {
-            this.socket?.close();
+            if (attemptedSocket) this.abandonSocket(attemptedSocket);
             if (!this.socket) this.scheduleReconnect();
           }
         }

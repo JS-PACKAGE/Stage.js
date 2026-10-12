@@ -50,7 +50,7 @@
 
 取消仍在連線中的 `createRoom()`／`join()` 時，`disconnect()` 會使舊操作以 `disconnected` 失敗，不會稍後偷偷進房；同一個 client 可重新連線。斷線會同時清除待回覆逾時與尚未到送出時刻的排程，立即釋放排隊 payload；成功、錯誤、逾時也走相同清理路徑。同步送出失敗會拒絕該請求，不會從 timer callback 拋出未捕捉例外。`closed`／`kicked` 事件發出前已清除待回覆請求、麥克風與測試、PeerConnection、自建 audio 及 `pagehide` 監聽，不自動重連。
 
-自動重連的排程與錯誤處理綁定原本 session：若 `status: reconnecting` 或 `error` 監聽器同步斷線並切換房間，舊 timer／遲到的 hello 失敗／resume 拒絕不會再次加入或關閉新房間，也不向新 session 回報過期錯誤。直接 join／createRoom 成功安裝新 session 時也會取消舊重連 timer，新 session 之後斷線仍可正常重連。仍屬於目前 session 的暫時失敗照常退避重試；unauthorized／not_found／room_full 仍停止該 session。
+自動重連的排程與錯誤處理綁定原本 session：若 `status: reconnecting` 或 `error` 監聽器同步斷線並切換房間，舊 timer／遲到的 hello 失敗／resume 拒絕不會再次加入或關閉新房間，也不向新 session 回報過期錯誤。直接 join／createRoom 成功安裝新 session 時也會取消舊重連 timer，新 session 之後斷線仍可正常重連。仍屬於目前 session 的暫時失敗照常退避重試；unauthorized／not_found／room_full 仍停止該 session。 hello 逾時或自動回座暫時失敗時，SDK 會先放棄該次 socket 的控制權再嘗試關閉，不等待可能延遲的 WebSocket close handshake 才開始退避；舊 socket 的晚到訊息／close 不會影響替代連線。這不取消已送達伺服器的操作，也不保證底層 socket 立即釋放；席位恢復仍受伺服器寬限時間限制。
 
 WebSocket 建構失敗、hello 逾時或尚未進房的連線關閉，也會釋放 window 的 pagehide 監聽，不需要另呼叫 disconnect 才解除這個引用。新連線會重新安裝監聽；舊嘗試的遲到失敗不會移除新連線的監聽。尚未進房時，失敗／關閉連線也會移除 SDK 自建的 audio DOM 節點；再次 connect 會掛回同一元素並保留音量／靜音設定。同席自動恢復期間仍保留元素，呼叫端提供的 audioElement 不會被移除。
 
