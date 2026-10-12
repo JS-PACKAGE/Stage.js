@@ -641,10 +641,15 @@ export class StageClient extends EventTarget {
         } catch (error) { if (current()) answerWait.reject(error instanceof Error ? error : new Error('無法套用音訊回應。')); }
         break;
       }
-      case 'rtc:ice':
-        if (!this.pc?.remoteDescription) this.remoteIce.push(message.payload);
-        else await this.pc.addIceCandidate(message.payload ?? undefined);
+      case 'rtc:ice': {
+        const pc = this.pc;
+        if (!pc?.remoteDescription) this.remoteIce.push(message.payload);
+        else {
+          try { await pc.addIceCandidate(message.payload ?? undefined); }
+          catch (error) { if (this.pc === pc) this.report(error); }
+        }
         break;
+      }
       // Either way the seat is gone: forget the session so the socket close does not trigger a rejoin.
       case 'room:closed': case 'kicked':
         await this.disconnect();
@@ -707,7 +712,9 @@ export class StageClient extends EventTarget {
     this.transceiver = pc.addTransceiver('audio', { direction: 'recvonly' });
     pc.onicecandidate = (event) => {
       if (this.pc !== pc) return;
-      void this.request('rtc:ice', { payload: event.candidate?.toJSON() as IceCandidatePayload ?? null }).catch((error: unknown) => this.report(error));
+      void this.request('rtc:ice', { payload: event.candidate?.toJSON() as IceCandidatePayload ?? null }).catch((error: unknown) => {
+        if (this.pc === pc) this.report(error);
+      });
     };
     pc.ontrack = (event) => {
       if (this.pc !== pc) return;

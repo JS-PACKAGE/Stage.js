@@ -82,7 +82,7 @@ WebSocket 建構失敗、hello 逾時或尚未進房的連線關閉，也會釋�
 - `micLevel: number`：目前上台麥克風的 RMS 振幅（0–1，非分貝），未上台或靜音時為 0；可定期讀取以更新音量表。
 - `startMicTest(): Promise<MicTest>`：不需連線或上台，使用所選麥克風，回傳 `{ level(): number, stop(): void }`；`level()` 同樣為 0–1 RMS，不會播放測試音訊。`stop()` 可重複呼叫，停止軌道並關閉 AudioContext；`disconnect()`、關房與被踢也會停止所有測試（包含仍等待授權的測試）。測試期間切換裝置後，請停止並重啟測試。
 
-離開房間或建立替代 PeerConnection 時，舊媒體工作佇列不會阻塞新連線：仍在等待的麥克風授權結果會被忽略並停止遲到的串流，舊代等待授權的 `setInputDevice()` 以 `StageError('disconnected')` 拒絕，已排隊的舊工作在取得執行機會時同樣拒絕。這無法關閉瀏覽器原生授權提示；同一個有效 PeerConnection 內的裝置切換仍依呼叫順序執行。已送入瀏覽器的 `replaceTrack()` 無法由此取消，因此它可能延遲舊佇列內 promise 的完成，但不會阻塞新 peer，其遲到結果也不能取代新連線的麥克風。
+離開房間或建立替代 PeerConnection 時，舊媒體工作佇列不會阻塞新連線：仍在等待的麥克風授權結果會被忽略並停止遲到的串流，舊代等待授權的 `setInputDevice()` 以 `StageError('disconnected')` 拒絕，已排隊的舊工作在取得執行機會時同樣拒絕。這無法關閉瀏覽器原生授權提示；同一個有效 PeerConnection 內的裝置切換仍依呼叫順序執行。 已退場 peer 的本機 ICE 請求或套用遠端候選的遲到失敗不再派發 `error`；同席位重連若沿用 peer，其真正的 ICE 失敗仍會通知。伺服器明確送來的 error 與公開請求的拒絕語意不變，這不是一般錯誤去重機制。已送入瀏覽器的 `replaceTrack()` 無法由此取消，因此它可能延遲舊佇列內 promise 的完成，但不會阻塞新 peer，其遲到結果也不能取代新連線的麥克風。
 
 下台時也會取消尚未完成的房間麥克風授權等待，讓同一 PeerConnection 立即繼續接收音訊的協商，不必等原生提示回覆。快速下台再上台會建立新的擷取嘗試，舊結果不會被安裝；獨立 `startMicTest()` 預覽不受這項取消影響。這仍不能強制關閉瀏覽器權限提示或取消已交給瀏覽器的 `replaceTrack()`。
 
