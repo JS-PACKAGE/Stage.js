@@ -330,6 +330,8 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 
 27. **靜態資源預壓縮**：根建置以 Node 內建 zlib 產生較小的 Brotli／gzip sidecar（原子替換、不追 symlink、不重複壓縮）；HTTP 依 Accept-Encoding 權重、wildcard、identity 與 q=0 協商，版本獨立 ETag、Vary、HEAD／304 及原 MIME／CORS 一致。舊於原檔或 symlink 的 sidecar 不使用；沒有可接受版本時回 406，其餘退回原檔，不在請求期間壓縮。mtime 比較用 stat 原始精度，避免 Date 的毫秒四捨五入誤判新副本。開發模式不變，部署原檔與 sidecar 一起更新。
 
+28. **client 統計生命週期**：音訊 RTP 差量只採有效、遞增時間戳及可用計數器；計數器重置先重新建立基準，不產生 NaN／負 jitter buffer 延遲。舊 peer 與被較新完成結果取代的輪詢回空統計，不污染新連線；歷史只保留當前 RTP ID，避免同一 PeerConnection 多次換 SSRC 後無限累積。單位與現有 getStats API 維持，當前 peer 的實際錯誤仍向呼叫端拒絕。
+
 ---
 
 開始執行。

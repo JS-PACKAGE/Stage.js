@@ -100,6 +100,10 @@ export interface StageEventMap {
   /** Connection quality of everyone publishing (controller and on-stage participants only). */
   quality: ServerMessageMap['quality'];
 }
+interface StatsCounters { timestamp: number; bytes?: number; received?: number; lost?: number; bufferDelay?: number; emitted?: number }
+const finite = (value: unknown): number | undefined => typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+const nonnegative = (value: unknown): number | undefined => { const n = finite(value); return n !== undefined && n >= 0 ? n : undefined; };
+
 interface Pending { resolve: () => void; reject: (error: StageError) => void; timer: ReturnType<typeof setTimeout> }
 type JoinOptions = { roomId: string; code?: string; name: string; resumeToken?: string };
 const REQUEST_TIMEOUT = 15000;
@@ -149,7 +153,9 @@ export class StageClient extends EventTarget {
   private nextIceAt = 0;
   /** Latest scheduled send of any kind: the server processes frames in arrival order, so ICE must never overtake its offer. */
   private lastSendAt = 0;
-  private previousStats = new Map<string, { bytes: number; timestamp: number; received: number; lost: number; bufferDelay: number; emitted: number }>();
+  private previousStats = new Map<string, StatsCounters>();
+  private statsSequence = 0;
+  private completedStatsSequence = 0;
   private speakingIds: ReadonlySet<string> = new Set();
   private keepaliveTimer: ReturnType<typeof setInterval> | undefined;
   private lastHeardAt = 0;
@@ -664,30 +670,61 @@ export class StageClient extends EventTarget {
   }
   async getStats(): Promise<StageStats> {
     const result: StageStats = { inbound: null, outbound: null };
-    if (!this.pc) return result;
-    const stats = await this.pc.getStats();
+    const pc = this.pc;
+    if (!pc) return result;
+    const sequence = ++this.statsSequence;
+    let stats: RTCStatsReport;
+    try { stats = await pc.getStats(); }
+    catch (error) {
+      if (this.pc !== pc || sequence < this.completedStatsSequence) return result;
+      throw error;
+    }
+    // A completed poll from a retired peer or an older overlapping call must not seed new deltas.
+    if (this.pc !== pc || sequence < this.completedStatsSequence) return result;
+    this.completedStatsSequence = sequence;
     let rtt: number | undefined;
-    stats.forEach((entry) => { if (entry.type === 'candidate-pair' && entry.state === 'succeeded' && entry.nominated) rtt = entry.currentRoundTripTime; });
+    stats.forEach((entry) => { if (entry.type === 'candidate-pair' && entry.state === 'succeeded' && entry.nominated) rtt = nonnegative(entry.currentRoundTripTime); });
+    const active = new Set<string>();
     stats.forEach((entry) => {
       if (!['inbound-rtp', 'outbound-rtp'].includes(entry.type) || (entry.kind ?? entry.mediaType) !== 'audio') return;
+      active.add(entry.id);
       const codec = stats.get(entry.codecId);
       const inbound = entry.type === 'inbound-rtp';
-      const bytes = Number(inbound ? entry.bytesReceived : entry.bytesSent);
+      const bytes = nonnegative(inbound ? entry.bytesReceived : entry.bytesSent);
+      const timestamp = finite(entry.timestamp);
       const previous = this.previousStats.get(entry.id);
-      const elapsed = previous ? entry.timestamp - previous.timestamp : 0;
+      const elapsed = timestamp !== undefined && previous ? timestamp - previous.timestamp : 0;
       const remote = entry.remoteId ? stats.get(entry.remoteId) : undefined;
-      const summary: AudioStats = { mimeType: codec?.mimeType, clockRate: codec?.clockRate, channels: codec?.channels, packetsLost: entry.packetsLost ?? remote?.packetsLost, jitter: entry.jitter ?? remote?.jitter, rtt: remote?.roundTripTime ?? rtt };
-      if (previous && elapsed > 0) summary.bitrateKbps = Math.max(0, (bytes - previous.bytes) * 8 / elapsed);
-      const received = Number(entry.packetsReceived ?? 0), lost = Number(entry.packetsLost ?? 0);
-      if (inbound && previous && received + lost > previous.received + previous.lost) summary.lossPercent = 100 * Math.max(0, lost - previous.lost) / (received + lost - previous.received - previous.lost);
-      if (!inbound && typeof remote?.fractionLost === 'number') summary.lossPercent = 100 * remote.fractionLost;
-      const bufferDelay = Number(entry.jitterBufferDelay ?? 0), emitted = Number(entry.jitterBufferEmittedCount ?? 0);
-      if (inbound && previous && emitted > previous.emitted) summary.bufferMs = 1000 * (bufferDelay - previous.bufferDelay) / (emitted - previous.emitted);
-      this.previousStats.set(entry.id, { bytes, timestamp: entry.timestamp, received, lost, bufferDelay, emitted });
+      const summary: AudioStats = { mimeType: codec?.mimeType, clockRate: nonnegative(codec?.clockRate), channels: nonnegative(codec?.channels), packetsLost: finite(entry.packetsLost) ?? finite(remote?.packetsLost), jitter: nonnegative(entry.jitter) ?? nonnegative(remote?.jitter), rtt: nonnegative(remote?.roundTripTime) ?? rtt };
+      const received = nonnegative(entry.packetsReceived), lost = finite(entry.packetsLost);
+      const bufferDelay = nonnegative(entry.jitterBufferDelay), emitted = nonnegative(entry.jitterBufferEmittedCount);
+      if (previous && elapsed > 0 && Number.isFinite(elapsed)) {
+        if (bytes !== undefined && previous.bytes !== undefined && bytes >= previous.bytes) {
+          const rate = (bytes - previous.bytes) * 8 / elapsed;
+          if (Number.isFinite(rate)) summary.bitrateKbps = rate;
+        }
+        if (inbound && received !== undefined && lost !== undefined && previous.received !== undefined && previous.lost !== undefined && received >= previous.received) {
+          const total = received - previous.received + lost - previous.lost;
+          const loss = total > 0 ? 100 * Math.max(0, lost - previous.lost) / total : undefined;
+          if (loss !== undefined && Number.isFinite(loss)) summary.lossPercent = loss;
+        }
+        if (inbound && bufferDelay !== undefined && emitted !== undefined && previous.bufferDelay !== undefined && previous.emitted !== undefined && bufferDelay >= previous.bufferDelay && emitted > previous.emitted) {
+          const delay = 1000 * (bufferDelay - previous.bufferDelay) / (emitted - previous.emitted);
+          if (Number.isFinite(delay)) summary.bufferMs = delay;
+        }
+      }
+      const fraction = nonnegative(remote?.fractionLost);
+      if (!inbound && fraction !== undefined && fraction <= 1) summary.lossPercent = 100 * fraction;
+      if (timestamp !== undefined && (!previous || timestamp > previous.timestamp)) {
+        this.previousStats.set(entry.id, { bytes, timestamp, received, lost, bufferDelay, emitted });
+      }
       if (inbound) result.inbound = summary; else result.outbound = summary;
     });
+    // SSRC/track changes can create new report IDs without replacing the PeerConnection.
+    for (const id of this.previousStats.keys()) if (!active.has(id)) this.previousStats.delete(id);
     return result;
   }
+
 }
 
 function opusMonoSdp(sdp: string): string {
