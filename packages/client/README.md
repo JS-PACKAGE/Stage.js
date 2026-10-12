@@ -130,6 +130,7 @@ WebSocket 建構失敗、hello 逾時或尚未進房的連線關閉，也會釋�
 - 正式環境須 HTTPS/WSS；CSP `script-src` 允許函式庫來源，`connect-src wss://host`（視 WebRTC 部署增加允許來源），`media-src blob: mediastream:`。若自行傳入音訊元件，仍須允許串流播放。
 - iframe 須上層 Permissions-Policy 允許 `microphone` 給嵌入來源，且 iframe 設 `allow="microphone; autoplay"`。跨站頁也須符合自身的 CSP。
 - `audioblocked` 時顯示按鈕，在使用者點擊事件立即呼叫 `unlockAudio()`；不要在等待網路請求後才解鎖。
+- 已退場 PeerConnection 的 `play()` 遲到失敗不會再發出 `audioblocked`，避免離房或新連線已播放後出現過期提示。目前 peer 的播放失敗仍照常通知；`unlockAudio()` 保留瀏覽器播放 promise 的成功／失敗結果，不繞過自動播放政策。
 - 房間代碼及 resume token 僅保存在執行期記憶體，不要記錄到日誌。邀請 URL 含代碼，請當作敏感資訊分享，建議頁面設定 `Referrer-Policy: no-referrer`。
 
 ## 發佈靜態檔案

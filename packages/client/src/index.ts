@@ -706,7 +706,9 @@ export class StageClient extends EventTarget {
     pc.ontrack = (event) => {
       if (this.pc !== pc) return;
       this.audio.srcObject = event.streams[0] ?? new MediaStream([event.track]);
-      void this.audio.play().catch(() => this.emit('audioblocked', { message: '瀏覽器已阻擋自動播放，請點擊啟用音訊。' }));
+      void this.audio.play().catch(() => {
+        if (this.pc === pc) this.emit('audioblocked', { message: '瀏覽器已阻擋自動播放，請點擊啟用音訊。' });
+      });
     };
     pc.onconnectionstatechange = () => {
       if (this.pc !== pc) return;
