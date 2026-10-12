@@ -74,6 +74,8 @@ npm run dev:web    # Vite 前端開發伺服器，/ws 代理到 127.0.0.1:9728
 ./stage.sh help       # 全部指令：install／restart／run／dev／test
 ```
 
+`stage.sh` 的 `STAGE_STOP_TIMEOUT` 接受 0–2147483647 的非負十進位整數秒數；未設定或空值用 15，0 表示送出 SIGTERM 後不等待，若程序仍在執行即送 SIGKILL。上限採可攜的 signed 32-bit 範圍；無效值讓 `stop`／`restart` 在任何程序探測或訊號前以 exit code 1 結束，不刪除 PID 檔，也不啟動替代程序。其他指令不使用這個期限。
+
 Windows 用 `.\stage.ps1 <command>`，指令相同；Windows 無法對背景 node 送 SIGTERM，`stop` 為直接終止。
 
 ## 設定（`config.yaml`）

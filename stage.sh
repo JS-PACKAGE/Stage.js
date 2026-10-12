@@ -64,7 +64,16 @@ cmd_start() {
   fi
 }
 
+validate_stop_timeout() {
+  # Decimal seconds, bounded to signed 32-bit so comparisons work on macOS/Linux shells.
+  case "$STOP_TIMEOUT" in
+    ''|*[!0123456789]*) die "STAGE_STOP_TIMEOUT 必須為 0 到 2147483647 的十進位整數秒數" ;;
+  esac
+  [ "$STOP_TIMEOUT" -le 2147483647 ] 2>/dev/null || die "STAGE_STOP_TIMEOUT 必須為 0 到 2147483647 的十進位整數秒數"
+}
+
 cmd_stop() {
+  validate_stop_timeout
   if ! pid=$(running_pid); then printf '未在執行\n'; return 0; fi
   # SIGTERM 讓伺服器通知所有房間並關閉連線
   kill -TERM "$pid"
@@ -113,7 +122,7 @@ cmd_help() {
 
 環境變數：
   STAGE_CONFIG        設定檔路徑（預設 ./config.yaml，不存在時自動由範例建立）
-  STAGE_STOP_TIMEOUT  stop 等待秒數（預設 15）
+  STAGE_STOP_TIMEOUT  stop 等待秒數（0–2147483647 十進位整數，預設 15；0 不等待）
 EOF
 }
 
