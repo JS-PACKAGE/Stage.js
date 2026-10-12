@@ -338,6 +338,8 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 
 31. **停機准入與 readiness**：server.close 開始時同步標記 draining、停止所有 session 輸入工作；新 upgrade 回 503，不再接受排空期間新增連線／控制操作。新增 GET／HEAD /readyz（正常 200、排空 503、no-store），/healthz 繼續表示程序存活；不是 WebRTC 健康探針。close 共用同一 promise，房間通知／關閉握手維持原順序，避免重複停機。
 
+32. **單調間隔計時**：伺服器 token bucket 與 client 請求排程、舉手冷卻、keepalive 只使用 performance.now 的經過時間；系統牆鐘校正不得造成額外配額、誤斷線或長時間延後送出。房間事件與日誌的絕對時間不改。注入 clock／timer 回歸測試覆蓋正負一小時校正及真正的靜默逾時。
+
 ---
 
 開始執行。

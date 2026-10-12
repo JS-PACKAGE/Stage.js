@@ -183,7 +183,7 @@ export class StageClient extends EventTarget {
   get me(): ParticipantView | null { return this.snapshot?.me ?? null; }
   /** Participants currently audible in the mix (server voice activity). */
   get speaking(): ReadonlySet<string> { return this.speakingIds; }
-  get handCooldownMs(): number { return Math.max(0, this.limits.handRaiseIntervalMs - (Date.now() - this.lastHandAt)); }
+  get handCooldownMs(): number { return Math.max(0, this.limits.handRaiseIntervalMs - (performance.now() - this.lastHandAt)); }
   /** Limits the connected server enforces per connection (from `hello`; defaults before connecting). */
   get rateLimits(): RateLimits { return this.limits; }
   /** Local listening level (0–1); independent of microphone mute and room-wide gain. */
@@ -283,7 +283,7 @@ export class StageClient extends EventTarget {
       const timer = setTimeout(() => { reject(new StageError('timeout', '連線逾時，請稍後再試。')); ws.close(); }, REQUEST_TIMEOUT);
       ws.onmessage = (event) => {
         if (this.socket !== ws) return;
-        this.lastHeardAt = Date.now();
+        this.lastHeardAt = performance.now();
         try {
           const message = JSON.parse(String(event.data)) as ServerMessage;
           if (message.type === 'hello') { this.limits = message.limits; ready = true; clearTimeout(timer); this.startKeepalive(ws); resolve(); }
@@ -323,10 +323,10 @@ export class StageClient extends EventTarget {
    */
   private startKeepalive(ws: WebSocket): void {
     this.stopKeepalive();
-    this.lastHeardAt = Date.now();
+    this.lastHeardAt = performance.now();
     this.keepaliveTimer = setInterval(() => {
       if (this.socket !== ws || ws.readyState !== WebSocket.OPEN) { this.stopKeepalive(); return; }
-      if (Date.now() - this.lastHeardAt > KEEPALIVE_TIMEOUT_MS) {
+      if (performance.now() - this.lastHeardAt > KEEPALIVE_TIMEOUT_MS) {
         this.report(new StageError('timeout', '伺服器沒有回應，正在重新連線。'));
         ws.onclose = null;
         this.socketLost(ws);
@@ -362,7 +362,7 @@ export class StageClient extends EventTarget {
   }
   raiseHand(): Promise<void> {
     if (this.handCooldownMs > 0) return Promise.reject(new StageError('rate_limited', `每次舉手需間隔 ${Math.ceil(this.limits.handRaiseIntervalMs / 1000)} 秒。`));
-    this.lastHandAt = Date.now();
+    this.lastHandAt = performance.now();
     return this.request('hand:raise', {});
   }
   withdrawHand(): Promise<void> { return this.request('hand:withdraw', {}); }
@@ -413,7 +413,7 @@ export class StageClient extends EventTarget {
     const ws = this.socket;
     if (!ws || ws.readyState !== WebSocket.OPEN) return Promise.reject(new StageError('disconnected', '尚未連線至舞台。'));
     const requestId = crypto.randomUUID();
-    const now = Date.now();
+    const now = performance.now();
     const ice = type === 'rtc:ice';
     // The server's buckets refill at the advertised rate; pacing at half (control) / two thirds (ICE)
     // of it leaves headroom for clock skew and for frames the page sends outside this client.

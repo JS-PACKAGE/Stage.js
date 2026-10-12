@@ -47,7 +47,8 @@ const TLS_RELOAD_DEBOUNCE_MS = 2000;
 
 export function createStageServer(deps: StageServerDeps): StageServer {
   const { config, hub, log } = deps;
-  const now = deps.now ?? Date.now;
+  // Rate limits measure intervals; wall-clock corrections must not refill or drain buckets.
+  const now = deps.now ?? (() => performance.now());
   let stopping = false;
   let closing: Promise<void> | undefined;
   let backpressureDisconnects = 0;
