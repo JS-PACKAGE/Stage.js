@@ -12,7 +12,7 @@ import type { AppConfig } from '../config.ts';
 import type { Logger } from '../log.ts';
 import type { MetricSample } from '../metrics.ts';
 import { ERROR_MESSAGES, InvariantViolation, StageError } from '../model/errors.ts';
-import { Room, type RoomEvent } from '../model/room.ts';
+import { Room, type Participant, type RoomEvent } from '../model/room.ts';
 import { offerSendsAudio, summarizeOffer } from '../rtc/sdp.ts';
 import { iceServersFor } from '../rtc/turn.ts';
 import type { MediaTransport, MixedPcmSource } from '../transport/MediaTransport.ts';
@@ -95,6 +95,8 @@ function safeEqual(a: string, b: string): boolean {
 export class StageHub {
   private readonly rooms = new Map<string, RoomRuntime>();
   private readonly bindings = new Map<Session, Binding>();
+  /** Latest policy-accepted offer; weak keys do not retain removed participants or sockets. */
+  private readonly negotiations = new WeakMap<Participant, symbol>();
   private readonly deps: HubDeps;
   private readonly now: () => number;
   private readonly setTimer: (fn: () => void, ms: number) => unknown;
@@ -417,7 +419,7 @@ export class StageHub {
     const summary = summarizeOffer(msg.payload.sdp);
     if (summary.audioDirections.length === 0) throw new StageError('bad_request', 'offer without audio');
     const sends = offerSendsAudio(summary);
-    const allowUplink = await rt.queue.run(() => {
+    const negotiation = await rt.queue.run(() => {
       if (stale()) throw new StageError('not_joined', 'stale binding');
       const p = rt.room.get(pid);
       if (!p) throw new StageError('not_joined', 'participant gone');
@@ -426,16 +428,20 @@ export class StageHub {
         log.warn('uplink offer from off-stage participant rejected', { roomId, participantId: pid });
         throw new StageError('forbidden', 'audience offer must be recvonly');
       }
-      return p.onStage;
+      const token = Symbol();
+      this.negotiations.set(p, token);
+      return { participant: p, token, allowUplink: p.onStage };
     });
     let answer: SessionDescriptionPayload;
     try {
-      answer = await transport.negotiate(roomId, pid, msg.payload, { allowUplink });
+      answer = await transport.negotiate(roomId, pid, msg.payload, { allowUplink: negotiation.allowUplink });
     } catch (err) {
       // A bad offer is that client's problem, not a reason to tear down the room.
       log.warn('negotiation failed', { roomId, participantId: pid, error: String(err) });
       await rt.queue.run(() => {
-        if (rt.closed || !rt.room.get(pid)) return;
+        // A newer accepted offer owns cleanup even if its replacement socket has since detached.
+        if (rt.closed || rt.room.get(pid) !== negotiation.participant ||
+            this.negotiations.get(negotiation.participant) !== negotiation.token) return;
         this.unpublish(rt, pid);
         transport.closePeer(roomId, pid);
       });
