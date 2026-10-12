@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { getEventListeners } from 'node:events';
 import { afterEach, beforeEach, describe, it } from 'node:test';
 import { StageClient, StageError } from '../src/index.ts';
 import type { RoomStatePayload } from '../../../shared/protocol.ts';
@@ -40,7 +41,7 @@ function state(onStage: boolean, id: string): RoomStatePayload {
       handRaised: false, muted: false, forceMuted: false, gainDb: 0, connected: true, joinedAt: 0 } };
 }
 
-describe('media task generation isolation', () => {
+describe('media task lifecycle isolation', () => {
   let originals: Map<string, PropertyDescriptor | undefined>;
   let requests: ReturnType<typeof deferred<MediaStream>>[];
   let client: StageClient;
@@ -203,6 +204,126 @@ describe('media task generation isolation', () => {
     assert.equal(client['inputDeviceId'], 'current');
     assert.equal(requests.length, 2);
     assert.equal(retired.track.stops, 1);
+  });
+
+
+  it('negotiates receive-only on the same peer when stage exit interrupts a permission prompt', async () => {
+    await client['receive']({ type: 'room:state', ...state(true, 'same') }); await settle();
+    assert.equal(requests.length, 1);
+    await client['receive']({ type: 'room:state', ...state(false, 'same') }); await settle();
+    assert.equal(Peer.instances.length, 1);
+    assert.equal(Peer.instances[0]!.closed, false);
+    assert.equal(negotiations, 1);
+    assert.equal(Peer.instances[0]!.transceiver.direction, 'recvonly');
+    const retired = stream(); requests[0]!.resolve(retired.value); await settle();
+    assert.equal(retired.track.stops, 1);
+    assert.equal(client['mic'], null);
+  });
+
+
+  it('starts a fresh permission attempt after rapid stage exit/reentry and ignores the old outcome', async () => {
+    const failures: unknown[] = [];
+    client.on('micerror', event => failures.push(event.detail));
+    await client['receive']({ type: 'room:state', ...state(true, 'same') }); await settle();
+    const off = client['receive']({ type: 'room:state', ...state(false, 'same') });
+    const on = client['receive']({ type: 'room:state', ...state(true, 'same') });
+    await Promise.all([off, on]); await settle();
+    assert.equal(requests.length, 2);
+    assert.equal(client['micFailed'], false);
+    const current = stream(); requests[1]!.resolve(current.value); await settle();
+    requests[0]!.reject(new DOMException('old permission', 'NotAllowedError')); await settle();
+    assert.deepEqual(failures, []);
+    assert.equal(client['mic'], current.value);
+    assert.equal(current.track.stops, 0);
+    assert.equal(Peer.instances.length, 1);
+    assert.equal(Peer.instances[0]!.transceiver.direction, 'sendrecv');
+  });
+
+  it('cancels a device-switch permission wait on stage exit and stops both retired streams correctly', async () => {
+    await client['receive']({ type: 'room:state', ...state(true, 'same') }); await settle();
+    const original = stream(); requests[0]!.resolve(original.value); await settle();
+    const switching = client.setInputDevice('candidate'); await settle();
+    const rejected = assert.rejects(switching, error => error instanceof StageError && error.code === 'disconnected');
+    await client['receive']({ type: 'room:state', ...state(false, 'same') }); await rejected; await settle();
+    assert.equal(original.track.stops, 1);
+    assert.equal(client['mic'], null);
+    assert.equal(Peer.instances[0]!.transceiver.sender.track, null);
+    assert.equal(Peer.instances[0]!.transceiver.direction, 'recvonly');
+    const retired = stream(); requests[1]!.resolve(retired.value); await settle();
+    assert.equal(retired.track.stops, 1);
+    assert.notEqual(client['inputDeviceId'], 'candidate');
+  });
+
+  it('does not cancel an independently owned microphone preview on stage exit', async () => {
+    await client['receive']({ type: 'room:state', ...state(true, 'same') }); await settle();
+    const previewPromise = client.startMicTest();
+    const previewStream = stream(); requests[1]!.resolve(previewStream.value);
+    const preview = await previewPromise;
+    await client['receive']({ type: 'room:state', ...state(false, 'same') }); await settle();
+    assert.equal(previewStream.track.stops, 0);
+    assert.equal(client['micTests'].size, 1);
+    const retired = stream(); requests[0]!.resolve(retired.value); await settle();
+    assert.equal(retired.track.stops, 1);
+    preview.stop(); assert.equal(previewStream.track.stops, 1);
+  });
+
+  it('removes the generation abort listener on success, rejection and stage-exit cancellation', async () => {
+    for (const outcome of ['success', 'reject', 'cancel']) {
+      await client.disconnect();
+      await client['receive']({ type: 'room:state', ...state(true, outcome) }); await settle();
+      const signal = client['mediaAbort'].signal;
+      assert.equal(getEventListeners(signal, 'abort').length, 1);
+      const request = requests.at(-1)!;
+      if (outcome === 'success') request.resolve(stream().value);
+      else if (outcome === 'reject') request.reject(new DOMException('denied', 'NotAllowedError'));
+      else await client['receive']({ type: 'room:state', ...state(false, outcome) });
+      await settle();
+      assert.equal(getEventListeners(signal, 'abort').length, 0);
+      assert.equal(client['micRequest'], undefined);
+      if (outcome === 'reject') assert.equal(client['micFailed'], true, 'real permission failure still reaches normal failure handling');
+      if (outcome === 'cancel') { const late = stream(); request.resolve(late.value); await settle(); assert.equal(late.track.stops, 1); }
+    }
+  });
+
+
+  it('disposes permission success when stage exit/reentry occurs between acquisition and installation', async () => {
+    const acquire = client['acquireMic'].bind(client);
+    let first = true;
+    client['acquireMic'] = async (...args) => {
+      const acquired = await acquire(...args);
+      if (first) {
+        first = false;
+        assert.equal(client['micRequest'], undefined, 'permission listener cleanup has completed');
+        void client['receive']({ type: 'room:state', ...state(false, 'same') });
+        void client['receive']({ type: 'room:state', ...state(true, 'same') });
+      }
+      return acquired;
+    };
+    await client['receive']({ type: 'room:state', ...state(true, 'same') }); await settle();
+    const retired = stream(); requests[0]!.resolve(retired.value); await settle();
+    assert.equal(retired.track.stops, 1);
+    assert.equal(client['mic'], null);
+    assert.equal(requests.length, 2);
+    const current = stream(); requests[1]!.resolve(current.value); await settle();
+    assert.equal(client['mic'], current.value);
+    assert.equal(current.track.stops, 0);
+  });
+
+
+  it('ignores a permission rejection queued just before stage exit/reentry', async () => {
+    const failures: unknown[] = [];
+    client.on('micerror', event => failures.push(event.detail));
+    await client['receive']({ type: 'room:state', ...state(true, 'same') }); await settle();
+    requests[0]!.reject(new DOMException('old denial', 'NotAllowedError'));
+    await Promise.resolve(); await Promise.resolve();
+    void client['receive']({ type: 'room:state', ...state(false, 'same') });
+    void client['receive']({ type: 'room:state', ...state(true, 'same') });
+    await settle();
+    assert.equal(requests.length, 2);
+    assert.equal(client['micFailed'], false);
+    assert.deepEqual(failures, []);
+    const current = stream(); requests[1]!.resolve(current.value); await settle();
+    assert.equal(client['mic'], current.value);
   });
 
 });

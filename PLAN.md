@@ -359,3 +359,5 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 39. **Web Component 請求中的按鈕狀態（2026-10-12）：** 原本 onclick 暫設 disabled，但每秒 cooldown render／任何 state render 都會提早重新啟用按鈕，慢速 ACK 可造成重複提交。以每按鈕 pending set 守護，render 合併 pending 與冷卻／force-muted 政策，操作期間 aria-busy=true；同步 throw 與非同步拒絕都收斂到錯誤呈現與清理。generation 隔離舊房间操作，leave 清空 pending。6 個原生最小 DOM fake 測試涵蓋重繪、重入、失敗、政策、代際隔離及獨立按鈕；不等同瀏覽器版面／鍵盤／真實麥克風驗證。
 
 40. **媒體工作佇列的 PeerConnection 代際隔離（2026-10-12）：** 重現舊 getUserMedia 未回覆時 disconnect／再加入的新 peer 無法協商，因 mediaTask 尾端仍連到舊 permission promise。destroyMedia 取消該代權限等待並建立新佇列；helper 停止遲到串流，setInputDevice 在排隊時捕捉代際，過期工作拒絕而非改動新偏好。保留同一 peer 裝置切換序列與既有跨 await 身分檢查。9 個 fake-media 測試涵蓋新 peer 不等待舊授權、新麥克風不被舊串流清理誤停、遲到拒絕、排隊／執行中裝置切換及 replaceTrack continuation（含舊 peer 遲到錯誤不污染新連線）；不宣稱已解除瀏覽器原生 permission prompt，也不等同真實音訊端到端驗證。
+
+41. **同一 peer 下台取消擷取等待（2026-10-12）：** 重現未回覆的 getUserMedia 阻塞同一 peer 下台後 recvonly 協商。房間擷取新增單一 permission token，連到 peer 代際，並在下台中止；完成／失敗／取消清除連結 listener。captureRevision 防止授權成功與安裝間的快速下台／再上台競態採用舊串流，正常權限拒絕仍走 micerror，獨立 preview 不受影響。同 peer 工作仍序列化；不取消已進瀏覽器的 replaceTrack。增加 7 個 fake-media 測試，包含 listener 清理、快速往返、裝置切換、preview 隔離與 acquisition→installation 競態，以及拒絕先排入 microtask 後才下台／再上台的舊錯誤。

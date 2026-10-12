@@ -175,6 +175,8 @@ export class StageClient extends EventTarget {
   private mediaTask: Promise<void> = Promise.resolve();
   /** Permission waits and queued device changes belong to one PeerConnection generation. */
   private mediaAbort = new AbortController();
+  private micRequest: AbortController | undefined;
+  private captureRevision = 0;
   private negotiationDirty = false;
   private negotiating = false;
   private answerWait: { resolve: () => void; reject: (error: Error) => void } | null = null;
@@ -249,16 +251,18 @@ export class StageClient extends EventTarget {
       const pc = this.pc;
       const transceiver = this.transceiver;
       if (!this.mic || !pc || !transceiver || !this.me?.onStage) { this.inputDeviceId = deviceId; return; }
-      const stream = await abortableMicStream(navigator.mediaDevices.getUserMedia({ audio: this.audioConstraints(deviceId) }), generation.signal);
+      const captureRevision = this.captureRevision;
+      const stream = await this.acquireMic(deviceId, generation);
       let meter: MicTest | null = null;
       try {
+        if (captureRevision !== this.captureRevision) throw new StageError('disconnected', '麥克風要求已取消。');
         if (pc !== this.pc || !this.me?.onStage) return;
         const track = stream.getAudioTracks()[0];
         if (!track) throw new StageError('media_error', '所選裝置沒有音訊軌道。');
         track.enabled = !this.me.muted;
         meter = createMicMeter(stream);
         await transceiver.sender.replaceTrack(track);
-        if (pc !== this.pc || !this.me?.onStage) return;
+        if (pc !== this.pc || !this.me?.onStage || captureRevision !== this.captureRevision) return;
         track.enabled = !this.me.muted;
         this.micMeter?.stop();
         this.mic?.getTracks().forEach((oldTrack) => oldTrack.stop());
@@ -304,6 +308,20 @@ export class StageClient extends EventTarget {
     this.emit('micready', undefined);
     if (signal?.aborted) { test.stop(); throw abortReason(signal); }
     return test;
+  }
+  /** One serialized room-microphone permission wait; preview tests have independent ownership. */
+  private async acquireMic(deviceId: string, generation: AbortController): Promise<MediaStream> {
+    if (generation.signal.aborted) throw abortReason(generation.signal);
+    const request = new AbortController();
+    const abort = () => request.abort(abortReason(generation.signal));
+    generation.signal.addEventListener('abort', abort, { once: true });
+    this.micRequest = request;
+    try {
+      return await abortableMicStream(navigator.mediaDevices.getUserMedia({ audio: this.audioConstraints(deviceId) }), request.signal);
+    } finally {
+      generation.signal.removeEventListener('abort', abort);
+      if (this.micRequest === request) this.micRequest = undefined;
+    }
   }
   private audioConstraints(deviceId: string): MediaTrackConstraints {
     return { channelCount: 1, sampleRate: 48000, echoCancellation: true, noiseSuppression: true, autoGainControl: true, ...this.options.micConstraints, ...(deviceId ? { deviceId: { exact: deviceId } } : {}) };
@@ -622,6 +640,10 @@ export class StageClient extends EventTarget {
     // Wait for the personalised snapshot before choosing the publishing direction.
   }
   private syncMedia(): void {
+    if (!this.me?.onStage) {
+      ++this.captureRevision;
+      this.micRequest?.abort(new StageError('disconnected', '已離開舞台，麥克風要求已取消。'));
+    }
     const generation = this.mediaAbort;
     const revision = ++this.mediaRevision;
     this.mediaTask = this.mediaTask.catch(() => {}).then(async () => {
@@ -630,15 +652,16 @@ export class StageClient extends EventTarget {
       const me = this.me;
       if (!pc || !transceiver || !me || revision !== this.mediaRevision) return;
       if (me.onStage && !this.mic && !this.micFailed) {
+        const captureRevision = this.captureRevision;
         try {
-          const stream = await abortableMicStream(navigator.mediaDevices.getUserMedia({ audio: this.audioConstraints(this.inputDeviceId) }), generation.signal);
-          if (pc !== this.pc || !this.me?.onStage) { stream.getTracks().forEach((track) => track.stop()); return; }
+          const stream = await this.acquireMic(this.inputDeviceId, generation);
+          if (pc !== this.pc || !this.me?.onStage || captureRevision !== this.captureRevision) { stream.getTracks().forEach((track) => track.stop()); return; }
           this.mic = stream;
           try { this.micMeter = createMicMeter(stream); }
           catch (error) { this.mic = null; stream.getTracks().forEach((track) => track.stop()); throw error; }
           this.emit('micready', undefined);
         } catch (error) {
-          if (pc !== this.pc || !this.me?.onStage) return;
+          if (pc !== this.pc || !this.me?.onStage || captureRevision !== this.captureRevision || (error instanceof StageError && error.code === 'disconnected')) return;
           this.micFailed = true;
           const name = error instanceof Error ? error.name : 'UnknownError';
           const message = name === 'NotAllowedError' ? '麥克風權限遭拒，請在瀏覽器網站設定允許麥克風後重新上台。' : name === 'NotFoundError' ? '找不到麥克風，請連接音訊裝置後重新上台。' : '無法啟用麥克風，請確認 HTTPS、裝置及瀏覽器權限後重新上台。';
