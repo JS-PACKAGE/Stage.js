@@ -48,6 +48,7 @@ export function createStageServer(deps: StageServerDeps): StageServer {
   const { config, hub, log } = deps;
   const now = deps.now ?? Date.now;
   let backpressureDisconnects = 0;
+  let metricsInFlight: Promise<string> | undefined;
   const serveStatic = createStaticHandler(config.server.static, deps.baseDir);
 
   const onRequest = (req: IncomingMessage, res: ServerResponse) => {
@@ -63,7 +64,10 @@ export function createStageServer(deps: StageServerDeps): StageServer {
         res.writeHead(401, { 'Content-Type': 'text/plain', 'WWW-Authenticate': 'Bearer' }).end('unauthorized');
         return;
       }
-      deps.metrics().then(
+      // Overlapping scrapes share worker RPCs, but completed samples are never cached.
+      const collect = deps.metrics;
+      metricsInFlight ??= Promise.resolve().then(() => collect.call(deps)).finally(() => { metricsInFlight = undefined; });
+      metricsInFlight.then(
         (text) => res.writeHead(200, { 'Content-Type': 'text/plain; version=0.0.4', 'Cache-Control': 'no-store' }).end(text + renderPrometheus([{ name: 'stage_ws_backpressure_disconnects_total', help: 'WebSocket connections terminated for exceeding the outbound buffer limit.', type: 'counter', value: backpressureDisconnects }])),
         (err) => { log.error('metrics error', { error: String(err) }); res.writeHead(500).end(); },
       );
