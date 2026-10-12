@@ -52,6 +52,8 @@
 
 自動重連的排程與錯誤處理綁定原本 session：若 `status: reconnecting` 或 `error` 監聽器同步斷線並切換房間，舊 timer／遲到的 hello 失敗／resume 拒絕不會再次加入或關閉新房間，也不向新 session 回報過期錯誤。直接 join／createRoom 成功安裝新 session 時也會取消舊重連 timer，新 session 之後斷線仍可正常重連。仍屬於目前 session 的暫時失敗照常退避重試；unauthorized／not_found／room_full 仍停止該 session。
 
+WebSocket 建構失敗、hello 逾時或尚未進房的連線關閉，也會釋放 window 的 pagehide 監聽，不需要另呼叫 disconnect 才解除這個引用。新連線會重新安裝監聽；舊嘗試的遲到失敗不會移除新連線的監聽。尚未進房時，失敗／關閉連線也會移除 SDK 自建的 audio DOM 節點；再次 connect 會掛回同一元素並保留音量／靜音設定。同席自動恢復期間仍保留元素，呼叫端提供的 audioElement 不會被移除。
+
 ## 本機收聽音量
 
 - `playbackVolume: number`／`setPlaybackVolume(volume: number): void`：本機收聽音量 0–1（線性比例）；接受端點 0 與 1，超出範圍、NaN 或 Infinity 同步拋 `RangeError`，保留原音量。

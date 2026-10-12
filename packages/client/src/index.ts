@@ -381,7 +381,15 @@ export class StageClient extends EventTarget {
       };
     });
     this.connecting = promise;
-    void promise.finally(() => { if (this.connecting === promise) this.connecting = null; }).catch(() => {});
+    void promise.finally(() => {
+      if (this.connecting !== promise) return;
+      this.connecting = null;
+      // Constructor failures have no socket close event to release the window's reference.
+      if (this.socket?.readyState !== WebSocket.OPEN) {
+        window.removeEventListener('pagehide', this.onPageHide);
+        if (!this.session && this.ownsAudio) this.audio.remove();
+      }
+    }).catch(() => {});
     return promise;
   }
   /**
@@ -392,12 +400,13 @@ export class StageClient extends EventTarget {
   private socketLost(ws: WebSocket): void {
     if (this.socket !== ws) return;
     this.socket = null;
+    window.removeEventListener('pagehide', this.onPageHide);
     this.stopKeepalive();
     this.rejectPending();
     // An acknowledged offer may still be waiting for its answer; do not let it block resume.
     this.answerWait?.reject(new StageError('disconnected', '音訊協商已中斷。'));
     if (!this.intentional && this.session) this.scheduleReconnect();
-    else { this.destroyMedia(); this.setStatus('disconnected'); }
+    else { this.destroyMedia(); if (this.ownsAudio) this.audio.remove(); this.setStatus('disconnected'); }
   }
   /**
    * Application-level liveness: a half-open TCP connection (network switch, sleep) would otherwise
