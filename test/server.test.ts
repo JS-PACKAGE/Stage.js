@@ -10,10 +10,10 @@ import { silentLogger } from '../src/log.ts';
 import { renderPrometheus } from '../src/metrics.ts';
 import { RoomMixer } from '../src/mixer/RoomMixer.ts';
 import { MockMediaTransport } from '../src/transport/MockMediaTransport.ts';
-import { StageHub } from '../src/ws/hub.ts';
+import { StageHub, type Session } from '../src/ws/hub.ts';
 import { createStageServer, type StageServer } from '../src/ws/server.ts';
 import { parse } from 'yaml';
-import { testConfig } from './helpers.ts';
+import { harness, RECVONLY_OFFER, testConfig } from './helpers.ts';
 
 class Client {
   readonly ws: WebSocket;
@@ -274,5 +274,87 @@ describe('transport security policy', () => {
     const noSecret = raw();
     noSecret.rtc.turn.urls = ['turn:turn.example:3478'];
     assert.throws(() => parseConfig(noSecret), ConfigError);
+  });
+});
+
+describe('outbound buffer configuration', () => {
+  const raw = () => parse(readFileSync(new URL('../config.example.yaml', import.meta.url), 'utf8'));
+  it('supports legacy files and validates an explicit byte limit', () => {
+    const config = raw();
+    delete config.limits.maxSendBufferBytes;
+    assert.equal(parseConfig(config).limits.maxSendBufferBytes, config.limits.maxFrameBytes * 16);
+    for (const invalid of [0, -1, 1023, 1024.5, Infinity, NaN, '1048576']) {
+      config.limits.maxSendBufferBytes = invalid;
+      assert.throws(() => parseConfig(config), /limits.maxSendBufferBytes/);
+    }
+    config.limits.maxSendBufferBytes = 1024;
+    assert.equal(parseConfig(config).limits.maxSendBufferBytes, 1024);
+  });
+});
+
+
+describe('slow reader recovery', () => {
+  it('terminates only the overloaded connection, counts it and permits same-seat resume', async () => {
+    const config = testConfig((c) => { c.server.port = 0; c.limits.maxSendBufferBytes = 4096; });
+    const { hub, transport } = harness(config);
+    const sessions: Session[] = [];
+    const attach = hub.attach.bind(hub);
+    hub.attach = (session) => { sessions.push(session); attach(session); };
+    const server = createStageServer({ config, hub, log: silentLogger, baseDir: tmpdir(), metrics: async () => renderPrometheus(hub.metrics()) });
+    const { port } = await server.listen();
+    const url = `ws://127.0.0.1:${port}${config.server.wsPath}`;
+    try {
+      const host = new Client(url);
+      await host.open();
+      host.send({ type: 'room:create', requestId: 'create', name: 'Host' });
+      await host.reply('create');
+      const state = await host.waitFor((m) => m.type === 'room:state');
+      assert.ok(state.type === 'room:state');
+      const listener = new Client(url);
+      await listener.open();
+      listener.send({ type: 'join', requestId: 'join', roomId: state.roomId, code: state.code, name: 'Listener' });
+      await listener.reply('join');
+      const listenerState = await listener.waitFor((m) => m.type === 'room:state');
+      assert.ok(listenerState.type === 'room:state');
+      listener.send({ type: 'rtc:offer', requestId: 'offer', payload: RECVONLY_OFFER });
+      await listener.reply('offer');
+      const peer = transport.rooms.get(state.roomId)!.peers.get(listenerState.me.participantId);
+      assert.ok(peer);
+      sessions[1]!.send({ type: 'error', code: 'bad_request', message: 'x'.repeat(4096) });
+      assert.equal(await listener.closed, 1006);
+      host.send({ type: 'ping', requestId: 'healthy' });
+      await host.waitFor((m) => m.type === 'pong');
+      assert.equal(transport.rooms.get(state.roomId)!.peers.get(listenerState.me.participantId), peer, 'media survives the abnormal close');
+      const metrics = await (await fetch(`http://127.0.0.1:${port}/metrics`)).text();
+      assert.match(metrics, /stage_ws_backpressure_disconnects_total 1\n/);
+      const back = new Client(url);
+      await back.open();
+      back.send({ type: 'join', requestId: 'resume', roomId: state.roomId, code: state.code, name: 'Listener', resumeToken: listenerState.resumeToken });
+      assert.equal((await back.reply('resume')).type, 'ok');
+      const resumed = await back.waitFor((m) => m.type === 'room:state');
+      assert.ok(resumed.type === 'room:state');
+      assert.equal(resumed.me.participantId, listenerState.me.participantId);
+      assert.equal(resumed.me.onStage, listenerState.me.onStage);
+      assert.equal(transport.rooms.get(state.roomId)!.peers.get(resumed.me.participantId), peer, 'resume reuses the established media peer');
+      host.ws.close();
+      back.ws.close();
+    } finally {
+      await server.close();
+    }
+  });
+});
+
+
+describe('media worker deadline configuration', () => {
+  it('keeps legacy files usable and rejects invalid deadlines', () => {
+    const raw = parse(readFileSync(new URL('../config.example.yaml', import.meta.url), 'utf8'));
+    delete raw.rtc.mediaWorkerTimeoutMs;
+    assert.equal(parseConfig(raw).rtc.mediaWorkerTimeoutMs, 30000);
+    for (const invalid of [0, -1, 1.5, 300001, Infinity, '30000']) {
+      raw.rtc.mediaWorkerTimeoutMs = invalid;
+      assert.throws(() => parseConfig(raw), /rtc.mediaWorkerTimeoutMs/);
+    }
+    raw.rtc.mediaWorkerTimeoutMs = 1000;
+    assert.equal(parseConfig(raw).rtc.mediaWorkerTimeoutMs, 1000);
   });
 });

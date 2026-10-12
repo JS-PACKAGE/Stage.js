@@ -58,6 +58,27 @@ for (const [label, select] of [['麥克風', micSelect], ['揚聲器', speakerSe
 }
 speakerSelect.disabled = !client.outputDeviceSupported;
 if (!client.outputDeviceSupported) settings.append(element('p', 'muted', '此瀏覽器不支援選擇揚聲器，將使用系統預設輸出。'));
+const playbackLabel = element('label', 'field', '收聽音量');
+const playbackVolume = element('input');
+playbackVolume.id = 'playback-volume';
+playbackVolume.type = 'range';
+playbackVolume.min = '0'; playbackVolume.max = '100'; playbackVolume.step = '1';
+playbackVolume.value = String(Math.round(client.playbackVolume * 100));
+const playbackValue = element('output', '', `${playbackVolume.value}%`);
+playbackValue.htmlFor.value = playbackVolume.id;
+playbackVolume.oninput = () => {
+  client.setPlaybackVolume(Number(playbackVolume.value) / 100);
+  playbackValue.value = `${Math.round(client.playbackVolume * 100)}%`;
+};
+playbackLabel.append(playbackVolume, playbackValue);
+const playbackMute = button('靜音收聽', async () => {
+  client.setPlaybackMuted(!client.playbackMuted);
+  playbackMute.textContent = client.playbackMuted ? '恢復收聽' : '靜音收聽';
+  playbackMute.setAttribute('aria-pressed', String(client.playbackMuted));
+});
+playbackMute.id = 'playback-mute';
+playbackMute.setAttribute('aria-pressed', String(client.playbackMuted));
+settings.append(playbackLabel, playbackMute, element('p', 'muted', '僅調整你聽到的聲音，不影響麥克風或其他人。'));
 let micTest: MicTest | null = null;
 let testingBusy = false;
 let selectedInput = '';

@@ -33,6 +33,7 @@ limits:
   maxSpeakersPerRoom: 8        # 裁示定值（主控以外的台上者；主控席位另計）
   maxAudiencePerRoom: 300      # 裁示定值
   maxFrameBytes: 65536         # 可調整（64KB）
+  maxSendBufferBytes: 1048576  # 每條 ws 待送位元組上限，含下一則訊息；慢速讀取端超過即斷線，依正常寬限期回座（可調整）
   controlPerSecond: 20         # 可調整
   handRaiseIntervalMs: 10000   # 可調整
   icePerSecond: 30             # 可調整
@@ -106,6 +107,7 @@ rtc:
   # 大批進場時的 DTLS 握手也會卡住混音時鐘；1 條 worker 一樣會被 300 位聽眾吃滿而延誤上行轉送。
   # 預設 2 對應每房 300 聽眾的裁示上限（與 audio.codecWorkers 合計勿超過核心數；核心少時調低），
   # 用 load-test 驗證。
+  mediaWorkerTimeoutMs: 30000  # media worker RPC 逾時即重生該 worker、釋放待回覆工作；該 worker 的音訊連線需重建（可調整）
   mediaWorkers: 2
   # 短期 TURN 憑證（coturn：use-auth-secret + static-auth-secret）。每次進房以 HMAC 簽發，
   # 帳密逾 ttlSeconds 失效；secret 只放 config.yaml，不入庫、不入日誌。urls 空陣列＝停用。

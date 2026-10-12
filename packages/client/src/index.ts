@@ -180,6 +180,15 @@ export class StageClient extends EventTarget {
   get handCooldownMs(): number { return Math.max(0, this.limits.handRaiseIntervalMs - (Date.now() - this.lastHandAt)); }
   /** Limits the connected server enforces per connection (from `hello`; defaults before connecting). */
   get rateLimits(): RateLimits { return this.limits; }
+  /** Local listening level (0–1); independent of microphone mute and room-wide gain. */
+  get playbackVolume(): number { return this.audio.volume; }
+  /** Local speaker mute; changing volume does not unmute playback. */
+  get playbackMuted(): boolean { return this.audio.muted; }
+  setPlaybackVolume(volume: number): void {
+    if (!Number.isFinite(volume) || volume < 0 || volume > 1) throw new RangeError('收聽音量必須是 0 到 1 之間的有限數值。');
+    this.audio.volume = volume;
+  }
+  setPlaybackMuted(muted: boolean): void { this.audio.muted = muted; }
   get outputDeviceSupported(): boolean { return typeof this.audio.setSinkId === 'function'; }
   /** RMS amplitude in [0, 1]; zero when not publishing or muted. */
   get micLevel(): number { return this.mic?.getAudioTracks()[0]?.enabled ? this.micMeter?.level() ?? 0 : 0; }

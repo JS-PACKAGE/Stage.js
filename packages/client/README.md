@@ -24,6 +24,14 @@
 
 每人一個 PeerConnection，觀眾 recvonly；上台才索取麥克風（mono、48 kHz）、轉 sendrecv。權限失敗仍可收聽；請下台、修正權限後再上台。`getStats()` 回傳 inbound/outbound 的 codec、clockRate、channels、bitrateKbps、packetsLost、jitter、rtt、lossPercent，inbound 另有 `bufferMs`（收到的音訊在瀏覽器 jitter buffer 等待播放的平均毫秒數，網路抖動越大越高）；位元率、inbound 的 lossPercent 與 bufferMs 從兩次呼叫間的差量計算（首次沒有），outbound 的 lossPercent 為伺服器最近一次回報的掉包比例；jitter/rtt 單位秒，瀏覽器未提供的欄位保持 undefined。觀眾可定期呼叫它顯示自己的連線狀態。
 
+## 本機收聽音量
+
+- `playbackVolume: number`／`setPlaybackVolume(volume: number): void`：本機收聽音量 0–1（線性比例）；接受端點 0 與 1，超出範圍、NaN 或 Infinity 同步拋 `RangeError`，保留原音量。
+- `playbackMuted: boolean`／`setPlaybackMuted(muted: boolean): void`：僅將自己的揚聲器靜音，保留原音量；靜音時調整音量不會自動解除靜音。
+- 兩者不傳控制訊息、不改麥克風、其他人音量或主控的 `setGain`。可於連線前使用，斷線回座、`disconnect()` 後重用同一 client 都會保留。
+- 自訂 `audioElement` 的既有 `volume`／`muted` 原樣保留；getters 即時讀取該元件，因此外部變更也會反映。音量支援依瀏覽器而異（部分行動瀏覽器僅能使用系統音量）。不會繞過自動播放政策，仍須處理 `audioblocked`／`unlockAudio()`。
+- 完整範例的「音訊設定」提供收聽音量滑桿與獨立的靜音收聽按鈕。
+
 ## 音訊裝置與麥克風測試
 
 - `listAudioDevices(): Promise<AudioDevices>`：回傳 `{ inputs: MediaDeviceInfo[], outputs: MediaDeviceInfo[] }`，授權前裝置名稱可能為空。取得權限後會觸發 `micready`（detail 為 undefined），可重新整理清單；裝置插拔可監聽 `navigator.mediaDevices` 的 `devicechange`。
@@ -55,3 +63,8 @@
 - 房間代碼及 resume token 僅保存在執行期記憶體，不要記錄到日誌。邀請 URL 含代碼，請當作敏感資訊分享，建議頁面設定 `Referrer-Policy: no-referrer`。
 - 可傳入 `audioElement`、`micConstraints`、`reconnect: {initialDelayMs,maxDelayMs}`。預設隱藏 audio 與 500–15000ms 指數重連；所有人自動帶上 resume token 恢復席位（伺服器 `rooms.participantGraceMs`／`controllerGraceMs` 內有效）。
 - 斷線韌性：ws 中斷時**不拆** PeerConnection——伺服器在寬限期內保留席位與媒體，音訊持續，重連回座後沿用同一條連線；協商中的 answer 遺失時立即解除等待，回座後直接替換尚未完成的 offer，保留其 MID，不以 rollback 產生額外 transceiver。只有身分改變（寬限逾時、被踢、關房、主動 `disconnect()`）才重建。`disconnect()` 以 close code 1000 告知伺服器「主動離開」，立即讓出席位；`pagehide` 以 4002 關閉、保留席位供返回頁面時回座。client 每 15 秒送 `ping`，35 秒沒收到任何訊息即視為斷線並重連（半開 TCP 不會卡住）。WebRTC 進入 `disconnected` 3 秒即 ICE restart，`failed` 則兩端重建。節流與舉手冷卻依伺服器 `hello.limits`（`rateLimits` getter）。
+
+
+## 發佈靜態檔案
+
+根目錄 `npm run build` 會為瀏覽器 ESM 產生 Brotli／gzip 副本，由 Stage.js 靜態伺服器自動協商。直接執行 client workspace 的 build 仍可使用未壓縮原檔；需要副本時再執行 `node scripts/precompress.ts packages/client/dist`。部署請一併保留原檔與副本，第三方嵌入 URL 仍為 `/lib/stage-client.js`，無需改成 `.br` 或 `.gz`。

@@ -1,7 +1,9 @@
 import { createReadStream } from 'node:fs';
-import { stat } from 'node:fs/promises';
+import { lstat, stat } from 'node:fs/promises';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { extname, resolve, sep } from 'node:path';
+import { pipeline } from 'node:stream';
+import { acceptedAssetEncodings, isCompressibleAsset } from './encoding.ts';
 import type { StaticMount } from '../config.ts';
 
 const CONTENT_TYPES: Record<string, string> = {
@@ -45,25 +47,49 @@ export function createStaticHandler(mounts: StaticMount[], baseDir: string) {
     if (rel === '' || rel.endsWith('/')) rel += 'index.html';
     const file = resolve(mount.root, rel);
     if (file !== mount.root && !file.startsWith(mount.root + sep)) return false;
-    let size: number, mtime: Date;
+    let size: number, mtime: Date, modifiedMs: number;
     try {
       const st = await stat(file);
       if (!st.isFile()) return false;
       size = st.size;
       mtime = st.mtime;
+      modifiedMs = st.mtimeMs;
     } catch {
       return false;
     }
+    const encodings = acceptedAssetEncodings(req.headers['accept-encoding']);
+    let selected = file;
+    let encoding: string | undefined;
+    for (const candidate of encodings) {
+      if (candidate === 'identity') { encoding = 'identity'; break; }
+      if (!isCompressibleAsset(file)) continue;
+      const sidecar = `${file}.${candidate === 'gzip' ? 'gz' : 'br'}`;
+      try {
+        const compressed = await lstat(sidecar);
+        // Old sidecars from a partial rebuild must not hide a newer source; don't follow symlinks.
+        if (!compressed.isFile() || compressed.mtimeMs < modifiedMs || compressed.size >= size) continue;
+        selected = sidecar; encoding = candidate; size = compressed.size; mtime = compressed.mtime; modifiedMs = compressed.mtimeMs;
+        break;
+      } catch { /* No usable precompressed representation; try the next accepted encoding. */ }
+    }
+    res.setHeader('Vary', 'Accept-Encoding');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    if (mount.cors) res.setHeader('Access-Control-Allow-Origin', '*');
+    if (encoding === undefined) {
+      res.statusCode = 406;
+      res.setHeader('Cache-Control', 'no-store');
+      res.end();
+      return true;
+    }
+    if (encoding !== 'identity') res.setHeader('Content-Encoding', encoding);
     // Weak validator from size + mtime: enough for built assets, and the client library is fetched
     // by every embedding page, so revalidation must be a 304 rather than a full download.
-    const etag = `W/"${size.toString(16)}-${mtime.getTime().toString(16)}"`;
+    const etag = `W/"${encoding}-${size.toString(16)}-${modifiedMs.toString(16)}"`;
     res.setHeader('ETag', etag);
     res.setHeader('Last-Modified', mtime.toUTCString());
     res.setHeader('Cache-Control', extname(file) === '.html' ? 'no-cache' : 'public, max-age=300');
-    res.setHeader('X-Content-Type-Options', 'nosniff');
-    if (mount.cors) res.setHeader('Access-Control-Allow-Origin', '*');
     const since = req.headers['if-modified-since'];
-    const fresh = req.headers['if-none-match'] === etag
+    const fresh = req.headers['if-none-match']?.split(',').some(tag => tag.trim() === '*' || tag.trim().replace(/^W\//, '') === etag.slice(2))
       || (req.headers['if-none-match'] === undefined && since !== undefined && Math.floor(mtime.getTime() / 1000) <= Math.floor(new Date(since).getTime() / 1000));
     if (fresh) {
       res.statusCode = 304;
@@ -77,7 +103,8 @@ export function createStaticHandler(mounts: StaticMount[], baseDir: string) {
       res.end();
       return true;
     }
-    createReadStream(file).pipe(res);
+    // Missing/replaced assets or clients disconnecting during a stream must not crash the server.
+    pipeline(createReadStream(selected), res, () => {});
     return true;
   };
 }

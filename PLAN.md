@@ -322,6 +322,14 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 22. **狀態與 codec 生命週期**：房間不變量以同一個舉手集合檢查所有參與者，避免每次轉換重複掃描整條佇列；未知／重複舉手、旗標與佇列不一致、觀眾在台及多主控皆 fail-closed。移除 publisher 時依 codec 工作順序釋放 encoder 與 decoder，再上台不得沿用先前上行的解碼預測狀態。
 23. **client／UI 取消安全**：`disconnect()` 使尚未完成的開房／進房失效，清除連線 promise 後可重用；關房／被踢在派發終止事件前完整清除媒體、mic test、待回覆請求及頁面監聽。ws 遺失 answer 時立即拒絕協商等待，回座後替換 pending offer 而非 rollback，避免首次 offer 的 MID 改變讓既有伺服器 peer 多出 transceiver。下台 snapshot 立即清除麥克風權限失敗旗標，再上台可重試；過期授權失敗不得污染新狀態。Web Component 以掛載 generation 忽略舊操作及事件，操作失敗解除 disabled，音訊解鎖成功隱藏按鈕；完整前端同步停止不再適用的 mic test、清除舊權限提示，最小嵌入頁在終止及重連時停用操作。
 
+24. **慢速 WebSocket 讀取端防護**：`limits.maxSendBufferBytes` 限制每條 ws 已排隊資料加上下一則 JSON 的 UTF-8 位元組；超限立即 terminate，避免關閉握手卡在待送佇列。保留既有非主動離開的席位／媒體寬限與回座流程，其他連線不受影響；Prometheus `stage_ws_backpressure_disconnects_total` 計數。範例為 1 MiB，舊設定省略時以 `maxFrameBytes × 16` 相容。
+
+25. **本機收聽控制**：client 提供 `playbackVolume`／`playbackMuted` getters 與 `setPlaybackVolume(0–1)`／`setPlaybackMuted(boolean)`，只操作本機 audio，與麥克風／伺服器混音增益分離、不發控制訊息；音訊元件重用讓偏好保留至回座與同一 client 重用。自訂 audio 的既有音量／靜音不覆寫，非法音量同步拒絕；範例前端附繁中滑桿與獨立切換鈕。
+
+26. **media worker RPC 期限**：`rtc.mediaWorkerTimeoutMs`（預設／舊設定 30000 ms）為 SDP、ICE、統計與關閉的期限。逾時拒絕該 worker 的所有 pending，清除期限、停止舊 worker、重生並通知受影響 peer；舊 worker 回覆／候選／上行等事件以 worker 身分隔離。成功、失敗、postMessage 例外與 exit 都清掉期限及 pending，未送出的協商不占 peer；停機拒絕新工作，close 可重複且被同一期限約束，不重生。其他 worker 不受影響，主執行緒模式不套用；正常協商需預留足夠時間。
+
+27. **靜態資源預壓縮**：根建置以 Node 內建 zlib 產生較小的 Brotli／gzip sidecar（原子替換、不追 symlink、不重複壓縮）；HTTP 依 Accept-Encoding 權重、wildcard、identity 與 q=0 協商，版本獨立 ETag、Vary、HEAD／304 及原 MIME／CORS 一致。舊於原檔或 symlink 的 sidecar 不使用；沒有可接受版本時回 406，其餘退回原檔，不在請求期間壓縮。mtime 比較用 stat 原始精度，避免 Date 的毫秒四捨五入誤判新副本。開發模式不變，部署原檔與 sidecar 一起更新。
+
 ---
 
 開始執行。
