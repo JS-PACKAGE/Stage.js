@@ -254,6 +254,13 @@ function syncRoomActions(): void {
       || (key === 'hand' && !client.me?.handRaised && client.handCooldownMs > 0);
   }
 }
+/** Both entry forms share one request lock, including after the landing view is replaced. */
+function syncLandingActions(): void {
+  for (const node of content.querySelectorAll<HTMLButtonElement>('[data-landing-submit]')) {
+    node.disabled = busy;
+    node.setAttribute('aria-busy', String(busy));
+  }
+}
 function showError(message: string): void { errorBox.textContent = message; errorBox.hidden = false; }
 function field(form: HTMLFormElement, label: string, name: string, value = '', required = true, maxLength = 32): HTMLInputElement {
   const wrapper = element('label', 'field', label);
@@ -287,17 +294,17 @@ function landing(): void {
   const createToken = field(create, '建立權杖（伺服器有設定時才需要）', 'token', '', false, 256);
   createToken.type = 'password';
   const createSubmit = element('button', 'primary', '建立並進入');
-  createSubmit.type = 'submit';
+  createSubmit.type = 'submit'; createSubmit.dataset.landingSubmit = 'true';
   create.append(codeLabel, createSubmit);
   create.onsubmit = (event) => {
     event.preventDefault();
     if (busy) return;
-    busy = true;
+    busy = true; syncLandingActions();
     void run(async () => {
       micNotice = invitation = '';
       createdRoom = await client.createRoom({ name: createName.value.trim(), roomName: roomName.value.trim() || undefined, codeRequired: codeRequired.checked, token: createToken.value || undefined });
       if (client.state) renderRoom(client.state);
-    }, createSubmit).finally(() => { busy = false; });
+    }).finally(() => { busy = false; syncLandingActions(); });
   };
   const join = element('form', 'panel');
   join.append(element('h2', '', '加入房間'));
@@ -305,20 +312,20 @@ function landing(): void {
   const code = field(join, '房間代碼（未設定時可留空）', 'code', params.get('code') ?? '', false, 16);
   const joinName = field(join, '你的名稱', 'name');
   const joinSubmit = element('button', 'primary', '加入收聽');
-  joinSubmit.type = 'submit';
+  joinSubmit.type = 'submit'; joinSubmit.dataset.landingSubmit = 'true';
   join.append(joinSubmit);
   join.onsubmit = (event) => {
     event.preventDefault();
     if (busy) return;
-    busy = true;
+    busy = true; syncLandingActions();
     void run(async () => {
       createdRoom = null; micNotice = invitation = '';
       await client.join({ roomId: roomId.value.trim(), code: code.value.trim() || undefined, name: joinName.value.trim() });
-    }, joinSubmit).finally(() => { busy = false; });
+    }).finally(() => { busy = false; syncLandingActions(); });
   };
   grid.append(create, join);
   content.replaceChildren(intro, grid);
-  renderNotices();
+  syncLandingActions(); renderNotices();
 }
 function renderNotices(): void {
   notices.replaceChildren();

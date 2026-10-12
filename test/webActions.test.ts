@@ -34,6 +34,7 @@ interface Harness {
 }
 function setup(): Harness {
   return runInNewContext(stripTypeScriptTypes(`
+    let busy = false;
     let roomActionIdentity = '', roomActionGeneration = 0, cooldownButton = null, cooldownTimer, invitation = '';
     const pendingRoomActions = new Map(), nodes = [], errors = [];
     const personRows = new Map(); let speakingIds = new Set();
@@ -42,7 +43,7 @@ function setup(): Harness {
     const setTimeout = (fn, delay) => { const id = ++nextTimer; timers.set(id, { fn, at: clock + delay }); return id; };
     const clearTimeout = id => timers.delete(id);
     const client = { status: 'waiting', handCooldownMs: 0, me: { handRaised: false }, speaking: new Set() };
-    const content = { querySelectorAll: () => nodes, querySelector: () => nodes.find(node => node.dataset.returnStage),
+    const content = { querySelectorAll: selector => selector === '[data-room-action]' ? nodes : [], querySelector: () => nodes.find(node => node.dataset.returnStage),
       replaceChildren(...children) {
         nodes.length = 0;
         const visit = node => { if (node.dataset.roomAction) nodes.push(node); for (const child of node.children) visit(child); };
