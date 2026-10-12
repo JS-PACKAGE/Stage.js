@@ -105,9 +105,8 @@ export class Room {
   }
 
   get audienceCount(): number {
-    let n = 0;
-    for (const p of this.participants.values()) if (p.role === 'audience') n++;
-    return n;
+    // Valid rooms contain one controller; every other non-audience member is an on-stage speaker.
+    return this.participants.size - this.speakerCount - 1;
   }
 
   get status(): 'waiting' | 'live' {

@@ -219,6 +219,7 @@ node scripts/bench-ws-backpressure.ts unbounded # 慢速讀取端基準（無上
 node scripts/bench-ws-backpressure.ts bounded   # 同一測試含待送上限；量測 queued bytes／RSS／健康連線 RTT
 node scripts/bench-ws-inbound.ts # gated 工作下的佇列筆數／payload 比較，非 RSS／延遲量測
 node scripts/bench-control-plane.ts --hands # 真實本機 WebSocket＋Mock 媒體，含舉手突發／回座／停機
+node scripts/bench-audience-count.ts # 觀眾計數 getter 的有界比較
 node scripts/bench-mixer.ts      # 混音壓測：3／8 發言者 × 300 訂閱者
 node scripts/load-test.ts        # 全端壓測：3 發言者＋298 werift 觀眾（--speakers/--audience/--seconds/--procs/--url）
 npm audit
@@ -235,6 +236,10 @@ npm audit
 這不是音訊容量驗收：媒體使用 `MockMediaTransport`，混音器不啟動，負載產生器與伺服器共用 Node 程序，所以資源／延遲包含兩者，也不代表跨網路或實際 WebRTC 表現。presence 合併視窗會讓不同次執行的快照數不同；請使用相同環境、多次比較，不把單次小幅差異當成加速證據。完整媒體測試仍使用 `scripts/load-test.ts`。
 
 `node scripts/bench-control-plane.ts --hands` 另驗證 300 位同時舉手、其中一半收回、所有接收端事件順序與最終快照一致，並繼續回座／關機檢查。舉手與收回事件仍立即可靠廣播，發起者仍在 ACK 前取得自身新快照；其他人的完整 `room:state` 合併到下一輪事件迴圈。每房最多一個待送快照計時器，不逐次延後；台位／控制權等變動仍即時送完整狀態，並取代待送快照。觀眾離開或寬限期到期造成的純收回事件也合併快照。這能避免多人同時舉手時反覆傳送日益增長的完整排隊名單，讓正常接收端不因控制面突發流量觸發輸出上限。
+
+### 觀眾計數 microbenchmark
+
+`node scripts/bench-audience-count.ts` 比較舊逐人掃描與目前觀眾計數 getter：以 1／9／301 人的合法房間、主控在台／離台及零／滿額發言者，warm-up 後交錯執行固定次數並核對 checksum。目前計數從 participant／speaker 集合大小取得，不掃描參與者、不新增快取狀態。這只是 getter 的 JIT microbenchmark，不代表整個 snapshot／廣播／請求的延遲；主控名單、invariant 掃描、序列化與 fan-out 仍照常執行。
 
 ## 授權
 
