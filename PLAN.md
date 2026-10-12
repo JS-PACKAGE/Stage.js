@@ -353,3 +353,5 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 開始執行。
 
 37. **300 位觀眾控制面煙霧測試（2026-10-12）：** 新增 local-only `bench-control-plane.ts`，真實 WebSocket 搭配 MockMediaTransport、不送音訊，驗證 300 位進房／SDP、滿房拒絕、10 位原席位與 peer 保留、301 位 shutdown 通知及 1001 關閉碼；可用的 overflow 指標須為零。30 秒硬期限、連線／伺服器清理，輸出同程序 ACK／CPU／RSS／event-loop 數據。初版主線與改善分支各三次均通過；join p95 範圍主線 1.93–3.24 ms、改善分支 1.99–2.46 ms，RSS 高點約 96–100 MiB。因本機共用程序、presence 視窗與排程變異，不宣稱吞吐提升或實際音訊容量。
+
+38. **舉手突發的完整快照合併（2026-10-12）：** 300 位同時舉手的本機控制面探測揭露反覆傳送成長中 hands 陣列：原始主線耗盡約 2 GiB Node heap，已有輸出保護的分支則觸發 301 次 backpressure 斷線。不得提高上限掩蓋。現在保留逐筆 hand 事件與發起者 state-before-ACK，其他完整快照以每房單一 0ms 計時器合併；較慢 presence timer 被取代，後續 hand 不重置期限，即時台位變更／關房取消待送；觀眾正常離開或寬限期到期的純 hand:withdraw 同樣合併，避免另一條群體離場突發路徑。首輪修正探測 300/300 ACK、0 斷線，收到的資料約 385.8 MB → 32.0 MB（失敗舊版未完成所有工作，並非等量完成吞吐比較）；RSS 結束取樣約 618 → 192 MB。以 ordered events／最終狀態／混合收回／回座／關房測試及 `bench-control-plane.ts --hands` 驗證，無實際音訊容量宣稱。

@@ -66,6 +66,7 @@ interface RoomRuntime {
   readonly graceTimers: Map<string, unknown>;
   /** Pending coalesced `room:state` broadcast (see `presenceChanged`). */
   stateTimer: unknown;
+  stateTimerDelay: number | undefined;
   /** Next connection-quality report; scheduled only while someone publishes. */
   qualityTimer: unknown;
   /** Uplink counters at the previous report, so each report covers one interval. */
@@ -226,6 +227,7 @@ export class StageHub {
       graceTimer: undefined,
       graceTimers: new Map(),
       stateTimer: undefined,
+      stateTimerDelay: undefined,
       qualityTimer: undefined,
       uplinkCounts: new Map(),
       lastStatus: room.status,
@@ -355,7 +357,11 @@ export class StageHub {
       default:
         throw new StageError('bad_request', `unroutable ${msg.type}`);
     }
-    this.apply(rt, events);
+    const handOnly = msg.type === 'hand:raise' || msg.type === 'hand:withdraw';
+    this.apply(rt, events, handOnly);
+    // Preserve the requester's state-before-ACK contract without sending N full snapshots
+    // for every hand in a crowd. Other clients receive ordered events, then one fresh snapshot.
+    if (handOnly) session.send({ type: 'room:state', ...room.snapshot(pid) });
     session.send({ type: 'ok', requestId: msg.requestId });
     if (msg.type === 'control:transfer') this.deps.log.info('control transferred', { roomId: room.roomId, fromId: pid, toId: msg.targetId });
   }
@@ -485,7 +491,7 @@ export class StageHub {
     }
     this.dropMedia(rt, pid);
     const events = room.remove(pid);
-    if (events.length) this.apply(rt, events);
+    if (events.length) this.apply(rt, events, events.every(event => event.type === 'hand:withdraw'));
     else this.presenceChanged(rt);
   }
 
@@ -500,7 +506,7 @@ export class StageHub {
     if (rt.closed || !p || p.connected || p.role === 'controller') return;
     this.dropMedia(rt, pid);
     const events = rt.room.remove(pid);
-    if (events.length) this.apply(rt, events);
+    if (events.length) this.apply(rt, events, events.every(event => event.type === 'hand:withdraw'));
     else this.presenceChanged(rt);
   }
 
@@ -523,7 +529,7 @@ export class StageHub {
   // ─────────────────────────────── effects ───────────────────────────────
 
   /** Broadcast transition events, mirror them into the media plane, then push fresh snapshots. */
-  private apply(rt: RoomRuntime, events: RoomEvent[]): void {
+  private apply(rt: RoomRuntime, events: RoomEvent[], deferState = false): void {
     for (const ev of events) {
       if (ev.type === 'stage:left') this.unpublish(rt, ev.participantId);
       if (ev.type === 'mic:muted' || ev.type === 'mic:unmuted') {
@@ -531,7 +537,8 @@ export class StageHub {
       }
       this.broadcast(rt, ev);
     }
-    this.broadcastState(rt);
+    if (deferState) this.scheduleState(rt, 0);
+    else this.broadcastState(rt);
   }
 
   private unpublish(rt: RoomRuntime, pid: string): void {
@@ -605,15 +612,26 @@ export class StageHub {
   private presenceChanged(rt: RoomRuntime): void {
     const delay = this.deps.config.rooms.presenceBroadcastMs;
     if (delay === 0) { this.broadcastState(rt); return; }
-    rt.stateTimer ??= this.setTimer(() => {
+    this.scheduleState(rt, delay);
+  }
+
+  /** One bounded timer per room; urgent hand state supersedes a slower presence window. */
+  private scheduleState(rt: RoomRuntime, delay: number): void {
+    if (rt.stateTimer !== undefined) {
+      if (delay >= rt.stateTimerDelay!) return;
+      this.clearTimer(rt.stateTimer);
+    }
+    rt.stateTimerDelay = delay;
+    rt.stateTimer = this.setTimer(() => {
       rt.stateTimer = undefined;
+      rt.stateTimerDelay = undefined;
       if (!rt.closed) this.broadcastState(rt);
     }, delay);
   }
 
   private broadcastState(rt: RoomRuntime): void {
     // Supersedes a pending coalesced broadcast.
-    if (rt.stateTimer !== undefined) { this.clearTimer(rt.stateTimer); rt.stateTimer = undefined; }
+    if (rt.stateTimer !== undefined) { this.clearTimer(rt.stateTimer); rt.stateTimer = undefined; rt.stateTimerDelay = undefined; }
     // Views shared by all recipients are built and serialized once; only `me` & co. are per session.
     const shared = rt.room.sharedSnapshot();
     const prefix = JSON.stringify({ type: 'room:state', ...shared }).slice(0, -1);

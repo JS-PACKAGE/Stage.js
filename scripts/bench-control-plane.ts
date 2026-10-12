@@ -7,6 +7,7 @@ import { once } from 'node:events';
 import { monitorEventLoopDelay } from 'node:perf_hooks';
 import { setTimeout as sleep } from 'node:timers/promises';
 import { WebSocket } from 'ws';
+import { parseArgs } from 'node:util';
 import type { ServerMessage, RoomStatePayload } from '../shared/protocol.ts';
 import { loadConfig } from '../src/config.ts';
 import { silentLogger } from '../src/log.ts';
@@ -25,6 +26,7 @@ class Client {
   closeCode?: number;
   bytes = 0;
   snapshots = 0;
+  readonly handEvents: string[] = [];
   private next = 0;
   private readonly pending = new Map<string, PromiseWithResolvers<void>>();
   constructor(url: string) {
@@ -41,6 +43,7 @@ class Client {
       const message = JSON.parse(text) as ServerMessage;
       if (message.type === 'room:state') { this.state = message; this.snapshots++; }
       if (message.type === 'room:created') this.created = message.roomId;
+      if (message.type === 'hand:raise' || message.type === 'hand:withdraw') this.handEvents.push(`${message.type}:${message.participantId}`);
       if (message.type === 'rtc:answer') this.answers++;
       if (message.type === 'room:closed' && message.reason === 'shutdown') this.shutdowns++;
       if (message.type === 'ok' || (message.type === 'error' && message.requestId)) {
@@ -60,6 +63,7 @@ class Client {
     finally { clearTimeout(timer); this.pending.delete(id); }
   }
 }
+const { values: args } = parseArgs({ options: { hands: { type: 'boolean', default: false } } });
 const config = loadConfig('config.example.yaml');
 config.server.port = 0; config.server.host = '127.0.0.1'; config.server.static = [];
 config.server.metrics.token = '';
@@ -100,6 +104,36 @@ try {
   assert.equal(host.state?.audience?.length, count);
   for (const client of audience) { assert.equal(client.state?.audienceCount, count); assert.equal(client.answers, 1); assert.equal(client.closeCode, undefined); }
   assert.equal(transport.rooms.get(roomId)?.peers.size, count);
+  let handBurstMs: number | undefined;
+  if (args.hands) {
+    const started = performance.now();
+    await Promise.all(audience.map(async client => {
+      await client.request({ type: 'hand:raise' });
+      assert.equal(client.state?.me.handRaised, true, 'requester state precedes ACK');
+    }));
+    const settled = async (hands: number) => {
+      const until = performance.now() + 5000;
+      while (clients.some(client => client.state?.hands.length !== hands)) {
+        assert.ok(performance.now() < until, 'hand snapshots did not converge');
+        await sleep(5);
+      }
+    };
+    await settled(count);
+    handBurstMs = performance.now() - started;
+    const raisedOrder = host.handEvents.slice();
+    assert.equal(raisedOrder.length, count);
+    for (const client of audience) assert.deepEqual(client.handEvents, raisedOrder);
+    assert.deepEqual(host.state!.hands.map(person => `hand:raise:${person.participantId}`), raisedOrder);
+    const withdrawn = audience.slice(0, Math.floor(count / 2));
+    await Promise.all(withdrawn.map(async client => {
+      await client.request({ type: 'hand:withdraw' });
+      assert.equal(client.state?.me.handRaised, false);
+    }));
+    await settled(count - withdrawn.length);
+    assert.equal(host.handEvents.length, count + withdrawn.length);
+    for (const client of audience) assert.deepEqual(client.handEvents, host.handEvents);
+    for (const client of clients) assert.equal(client.closeCode, undefined);
+  }
   const excess = await connect();
   await assert.rejects(excess.request({ type: 'join', roomId, name: 'Over capacity' }), /room_full/);
   excess.ws.close(1000); await once(excess.ws, 'close');
@@ -137,7 +171,7 @@ try {
   const summary = (values: number[]) => { const sorted = values.toSorted((a, b) => a - b); return { p50: sorted[Math.floor(sorted.length * .5)], p95: sorted[Math.floor(sorted.length * .95)], max: sorted.at(-1) }; };
   const used = process.cpuUsage(cpu);
   console.log(JSON.stringify({ audience: count, resumed: resumed.length, shutdownNotified: live.length,
-    joinAckMs: summary(joinMs), offerAckMs: summary(offerMs), resumeAckMs: summary(resumeMs), shutdownMs,
+    handBurstMs, joinAckMs: summary(joinMs), offerAckMs: summary(offerMs), resumeAckMs: summary(resumeMs), shutdownMs,
     elapsedMs: performance.now() - start, cpuMs: (used.user + used.system) / 1000,
     overflowCounters, initialRss, sampledPeakRss: peakRss, eventLoopP95Ms: delay.percentile(95) / 1e6,
     receivedBytes: clients.reduce((sum, client) => sum + client.bytes, 0), snapshots: clients.reduce((sum, client) => sum + client.snapshots, 0),

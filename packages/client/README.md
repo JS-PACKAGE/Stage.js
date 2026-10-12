@@ -87,3 +87,5 @@
 - `MicTest.stop()` 可重複呼叫；手動停止或取消都移除 abort listener。正常權限失敗仍保留原錯誤，disconnect 的既有清理行為不變。
 
 例如建立 `const controller = new AbortController()`，呼叫 `client.startMicTest({ signal: controller.signal })`，在取消按鈕或視圖卸載時呼叫 `controller.abort()`，並在呼叫端處理取消拒絕。這不會取消已經送到伺服器的房間操作。
+
+舉手／收回的 `hand` 事件保持伺服器順序。`raiseHand()`／`withdrawHand()` 成功時，發起者已收到更新後的自身狀態；其他人的完整 `state` 可在下一輪事件迴圈合併送達，請以 `state` 事件讀取最新完整排隊名單，不假設每個 `hand` 事件各有一份緊接的完整快照。
