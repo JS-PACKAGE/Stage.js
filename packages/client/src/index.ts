@@ -625,14 +625,20 @@ export class StageClient extends EventTarget {
       }
       case 'rtc:config': this.iceServers = message.iceServers; break;
       case 'rtc:answer': {
-        const pc = this.pc;
-        if (!pc || !this.answerWait) break;
+        const pc = this.pc, answerWait = this.answerWait;
+        if (!pc || !answerWait) break;
+        const current = () => pc === this.pc && answerWait === this.answerWait;
         try {
           await pc.setRemoteDescription(message.payload);
           if (pc !== this.pc) break;
-          for (const candidate of this.remoteIce.splice(0)) await pc.addIceCandidate(candidate ?? undefined);
-          this.answerWait?.resolve();
-        } catch (error) { if (pc === this.pc) this.answerWait?.reject(error instanceof Error ? error : new Error('無法套用音訊回應。')); }
+          // Preserve same-peer candidate draining even after a deadline; leaving this shared
+          // buffer for a later answer would move old ICE failures into its negotiation.
+          for (const candidate of this.remoteIce.splice(0)) {
+            await pc.addIceCandidate(candidate ?? undefined);
+            if (pc !== this.pc) return;
+          }
+          if (current()) answerWait.resolve();
+        } catch (error) { if (current()) answerWait.reject(error instanceof Error ? error : new Error('無法套用音訊回應。')); }
         break;
       }
       case 'rtc:ice':

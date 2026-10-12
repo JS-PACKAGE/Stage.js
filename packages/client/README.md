@@ -32,7 +32,7 @@
 
 `new StageClient({ url, requestTimeoutMs: 30000 })` 可調整等待伺服器 hello、請求 ACK 及 SDP answer 的期限。省略時維持 15000 ms；接受 1–300000 的整數毫秒，其他值在建構時拋 `RangeError`，尚未修改／建立 audio。
 
-請求 ACK 期限保留原本的 pacing 等待額度；SDP answer 期限從 offer 實際送出時起算，不會因尚在排程佇列而提早逾時。已替換 peer 的未送出 offer 不再送出，其期限也不影響新 peer。成功、失敗、斷線會清理相關計時器。
+請求 ACK 期限保留原本的 pacing 等待額度；SDP answer 期限從 offer 實際送出時起算，不會因尚在排程佇列而提早逾時。已替換 peer 的未送出 offer 不再送出，其期限也不影響新 peer。成功、失敗、斷線會清理相關計時器。 已開始套用的 answer 與其排隊 ICE 只可完成原本那輪協商；期限過後的遲到 continuation 不會完成或拒絕新一輪 waiter。同一 peer 保留原本候選套用順序，不把已收到的 ICE 留給下一輪 answer；peer 已替換或離房時才停止剩餘批次。這不取消已送入瀏覽器的 SDP／ICE 操作，亦不新增 wire answer 的請求 ID 關聯。
 
 這是 client 等待期限，不會取消已送達伺服器的操作，也不會延長伺服器 `rtc.mediaWorkerTimeoutMs`。keepalive 的靜默判定、ICE restart 與重連退避不受此選項影響；較短期限可能使慢速但仍正常的操作被判為逾時。
 
