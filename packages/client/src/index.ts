@@ -169,6 +169,7 @@ export class StageClient extends EventTarget {
   private inputDeviceId = '';
   private micMeter: MicTest | null = null;
   private micTests = new Set<MicTest>();
+  private readonly micTestRequests = new Set<AbortController>();
   private testRevision = 0;
   private remoteIce: (IceCandidatePayload | null)[] = [];
   private mediaRevision = 0;
@@ -281,12 +282,24 @@ export class StageClient extends EventTarget {
     const signal = options.signal;
     if (signal?.aborted) throw abortReason(signal);
     const revision = this.testRevision;
-    const request = navigator.mediaDevices.getUserMedia({ audio: this.audioConstraints(this.inputDeviceId) });
-    const stream = await (signal ? abortableMicStream(request, signal) : request);
-    let meter: MicTest;
+    const request = new AbortController();
+    const abort = () => request.abort(abortReason(signal!));
+    signal?.addEventListener('abort', abort, { once: true });
+    this.micTestRequests.add(request);
+    let stream: MediaStream;
     try {
+      stream = await abortableMicStream(navigator.mediaDevices.getUserMedia({ audio: this.audioConstraints(this.inputDeviceId) }), request.signal);
+    } finally {
+      signal?.removeEventListener('abort', abort);
+      this.micTestRequests.delete(request);
+    }
+    const checkCancelled = () => {
       if (signal?.aborted) throw abortReason(signal);
       if (revision !== this.testRevision) throw new StageError('disconnected', '麥克風測試已取消。');
+    };
+    let meter: MicTest;
+    try {
+      checkCancelled();
       meter = createMicMeter(stream);
     } catch (error) { stream.getTracks().forEach((track) => track.stop()); throw error; }
     let stopped = false;
@@ -304,10 +317,12 @@ export class StageClient extends EventTarget {
     const stopOnAbort = () => test.stop();
     this.micTests.add(test);
     signal?.addEventListener('abort', stopOnAbort, { once: true });
-    if (signal?.aborted) { test.stop(); throw abortReason(signal); }
-    this.emit('micready', undefined);
-    if (signal?.aborted) { test.stop(); throw abortReason(signal); }
-    return test;
+    try {
+      checkCancelled();
+      this.emit('micready', undefined);
+      checkCancelled();
+      return test;
+    } catch (error) { test.stop(); throw error; }
   }
   /** One serialized room-microphone permission wait; preview tests have independent ownership. */
   private async acquireMic(deviceId: string, generation: AbortController): Promise<MediaStream> {
@@ -459,6 +474,8 @@ export class StageClient extends EventTarget {
     ++this.sessionRevision;
     this.connecting = null;
     ++this.testRevision;
+    for (const request of this.micTestRequests) request.abort(new StageError('disconnected', '麥克風測試已取消。'));
+    this.micTestRequests.clear();
     for (const test of this.micTests) test.stop();
     clearTimeout(this.reconnectTimer);
     this.reconnectTimer = undefined;

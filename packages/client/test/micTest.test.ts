@@ -173,4 +173,59 @@ describe('abortable microphone preview', () => {
     assert.equal(Context.instances[0]!.closed, 1);
     assert.equal(client['micTests'].size, 0);
   });
+  it('promptly rejects every held preview on disconnect and disposes late grants or denials', async () => {
+    const source = stream();
+    const first = client.startMicTest(), second = client.startMicTest();
+    const isDisconnected = (error: unknown) => error instanceof StageError && error.code === 'disconnected';
+    const failures = Promise.all([assert.rejects(first, isDisconnected), assert.rejects(second, isDisconnected)]);
+    assert.equal(client['micTestRequests'].size, 2);
+    await client.disconnect(); await failures;
+    assert.equal(client['micTestRequests'].size, 0);
+    requests[0]!.resolve(source.value); requests[1]!.reject(new Error('late denial')); await flush();
+    assert.equal(source.track.stops, 1); assert.equal(Context.instances.length, 0);
+  });
+
+  it('isolates a new preview from an old permission result after immediate reuse', async () => {
+    const old = client.startMicTest();
+    const failure = assert.rejects(old, error => error instanceof StageError && error.code === 'disconnected');
+    await client.disconnect(); await failure;
+    const pending = client.startMicTest(), current = stream(), retired = stream();
+    requests[1]!.resolve(current.value); const test = await pending;
+    requests[0]!.resolve(retired.value); await flush();
+    assert.equal(retired.track.stops, 1); assert.equal(current.track.stops, 0);
+    assert.equal(test.level(), 0.25); assert.equal(client['micTests'].size, 1);
+  });
+
+  it('removes caller-signal listeners without aborting the caller controller on disconnect', async t => {
+    const controller = new AbortController();
+    const added = t.mock.method(controller.signal, 'addEventListener');
+    const removed = t.mock.method(controller.signal, 'removeEventListener');
+    const pending = client.startMicTest({ signal: controller.signal });
+    const failure = assert.rejects(pending, error => error instanceof StageError && error.code === 'disconnected');
+    await client.disconnect(); await failure;
+    assert.equal(controller.signal.aborted, false);
+    const listener = added.mock.calls[0]!.arguments[1];
+    assert.ok(removed.mock.calls.some(call => call.arguments[1] === listener));
+    const reason = new Error('later caller abort'); controller.abort(reason);
+    const source = stream(); requests[0]!.resolve(source.value); await flush(); assert.equal(source.track.stops, 1);
+  });
+
+  for (const during of ['meter', 'ready']) it(`rejects reentrant disconnect during ${during} without leaking a stopped preview`, async () => {
+    const source = stream(); let ready = 0;
+    client.on('micready', () => { ready++; if (during === 'ready') void client.disconnect(); });
+    if (during === 'meter') Context.onCreate = () => { void client.disconnect(); };
+    const pending = client.startMicTest(); requests[0]!.resolve(source.value);
+    await assert.rejects(pending, error => error instanceof StageError && error.code === 'disconnected');
+    assert.equal(source.track.stops, 1); assert.equal(Context.instances[0]!.closed, 1);
+    assert.equal(ready, during === 'ready' ? 1 : 0);
+    assert.equal(client['micTests'].size, 0); assert.equal(client['micTestRequests'].size, 0);
+  });
+
+  it('cleans acquisition state after a synchronous permission API failure', async () => {
+    const reason = new Error('permission API failed synchronously');
+    Object.defineProperty(navigator.mediaDevices, 'getUserMedia', { value: () => { throw reason; } });
+    await assert.rejects(client.startMicTest(), error => error === reason);
+    assert.equal(client['micTestRequests'].size, 0); assert.equal(Context.instances.length, 0);
+  });
+
 });
