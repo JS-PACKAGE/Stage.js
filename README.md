@@ -126,7 +126,7 @@ RPC（SDP、ICE、統計、關閉）超過 `rtc.mediaWorkerTimeoutMs` 即拒絕�
 
 ### 監控與停機
 
-程序的 unhandled rejection 仍只記錄、不自動停機；uncaught exception 仍啟動失敗退出的清理流程。這兩種診斷與停機／metrics 錯誤一樣，將原始值交給結構化 logger，避免先讀取不可信 stack getter 或做字串轉換而讓回報本身中斷；一般 Error 的 name／message／stack 以結構呈現，敏感欄位沿用既有遮蔽。這不保證任意自訂 logger／輸出裝置失敗時仍能完成清理。
+程序的 unhandled rejection 仍只記錄、不自動停機；uncaught exception 仍啟動失敗退出的清理流程。這兩種診斷與停機／metrics 錯誤一樣，將原始值交給結構化 logger，避免先讀取不可信 stack getter 或做字串轉換而讓回報本身中斷；一般 Error 的 name／message／stack 以結構呈現，敏感欄位沿用既有遮蔽。這不保證任意自訂 logger／輸出裝置失敗時仍能完成清理。SDP／ICE transport 拒絕值也直接交給安全 logger，保留該請求的 generic `bad_request`；無法安全字串化的診斷不會因此升級成整個房間的 internal failure。SDP 失敗仍依最新 offer 的所有權清理該 peer，其他席位不受影響；這不放寬上行權限或改變真正的房間 invariant failure 政策。
 
 `GET /healthz` 回 `ok`（程序存活）；`GET /readyz`／`HEAD /readyz` 表示是否接收新工作，正常回 200，開始停機即回 503／`draining` 且禁止快取，並拒絕新的 WebSocket upgrade（503）。它不是媒體連線健康檢查；存活探針在排空期間仍為 200。停機會先停止既有連線的待處理／新控制工作，再發房間停機通知與關閉握手；已開始的工作不強制取消。房間／WebSocket 清理完成後，HTTP listener 停止接收連線，既有回應最多等待 `server.httpShutdownDrainMs`（預設 1000ms，整數 0–60000，0 表示立即切斷）；逾時會關閉尚未完成的 HTTP socket，避免慢速下載或卡住的 metrics 回應阻止退出。這只限制最後 HTTP 網路排空階段，不是整體停機期限，也不取消底層統計收集 promise。`GET /metrics` 回 Prometheus 文字格式（`Authorization: Bearer <server.metrics.token>`），包含房間／連線／發言者數、上下行封包與補幀數、DTX 省略幀、全房無聲時跳過編碼的幀數（`opus.dtx` 開啟且台上全員靜音、沒有上行或持續全零 PCM 超過 1 秒時，混音不再編碼、直接以 DTX 處理）、low tier 聽眾數、codec backlog 與丟幀、mixer underrun／漂移丟幀／tick 延遲、event loop delay 與記憶體。同一伺服器上重疊的已授權 scrape 共用尚未完成的統計收集，避免重複掃描房間與查詢 worker；收集完成或失敗立即釋放，下一次請求重新取樣，不保留過期快取。CLI 以 `server.metrics.enabled: false` 啟動時不建立 event-loop delay 的背景取樣器；啟用時仍從啟動開始保留 histogram，不延後到第一次 scrape。其他房間／媒體計數器與停機順序不變；這是省去未使用的取樣工作，不代表已量測 CPU、耗電或端到端延遲改善。
 

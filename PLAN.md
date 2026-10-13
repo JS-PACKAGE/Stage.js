@@ -554,3 +554,6 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 
 
 123. **程序錯誤事件安全診斷（2026-10-13）：** exact production handler tail 的 inert VM probe 重現 unhandledRejection 收到 null-prototype value 時，原 String(reason) 在 log 前拋錯；uncaughtException 的 Error.stack getter 拋錯時，原診斷讀取甚至跳過 stop。兩個事件只改成將原始 error value 交給既有安全結構化 logger，沿用 getter／coercion 防護與 nested redaction；一般 Error 由 logger 呈現 name/message/stack。保留 rejection 只記錄、exception 呼叫 stop(...,1)、併發停機只執行一次及非零優先序，不註冊新事件或改全域失敗政策。測試使用 synthetic rejection 與 VM process／真實 logger 的受控 sink，不對真實程序送 signal、exit 或製造未處理 rejection；自訂 logger／sink 自身失敗及永不 settle 的 close 仍不在保證範圍。
+
+
+124. **信令拒絕值不升級為房間失敗（2026-10-13）：** actual StageHub／MockMediaTransport probe 在 negotiate 建立部分 peer 後 reject null-prototype object，原 signal catch 的 String(err) 拋出 TypeError，handle 遂回 internal 並關閉整個房間，違反信令失敗應只影響該請求的契約。只將 SDP 與 remote ICE 兩個預期錯誤 catch 的診斷改為原始值交給安全 logger，仍回既有 generic bad_request；offer 失敗保留 negotiation token／participant／closed guard 的 peer cleanup，ICE 失敗不新增 peer 清理。不改 transport implementation、媒體／角色政策、serial queue 或真正 unexpected invariant failure 關房規則；任意自訂 logger 自身拋錯仍不在保證範圍。回歸以同步 throw／非同步 reject、一般及 hostile synthetic values 測試其他 peer／room survival、部分 peer 清理、後續恢復與舊 offer ownership，不宣稱真實 WebRTC 驗證。

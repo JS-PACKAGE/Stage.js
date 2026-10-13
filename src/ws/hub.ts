@@ -410,7 +410,7 @@ export class StageHub {
         await transport.addRemoteCandidate(roomId, pid, msg.payload);
       } catch (err) {
         // e.g. a candidate before any offer: that client's signaling error, not a room failure.
-        log.debug('remote candidate rejected', { roomId, participantId: pid, error: String(err) });
+        log.debug('remote candidate rejected', { roomId, participantId: pid, error: err });
         throw new StageError('bad_request', 'candidate rejected');
       }
       session.send({ type: 'ok', requestId: msg.requestId });
@@ -437,7 +437,7 @@ export class StageHub {
       answer = await transport.negotiate(roomId, pid, msg.payload, { allowUplink: negotiation.allowUplink });
     } catch (err) {
       // A bad offer is that client's problem, not a reason to tear down the room.
-      log.warn('negotiation failed', { roomId, participantId: pid, error: String(err) });
+      log.warn('negotiation failed', { roomId, participantId: pid, error: err });
       await rt.queue.run(() => {
         // A newer accepted offer owns cleanup even if its replacement socket has since detached.
         if (rt.closed || rt.room.get(pid) !== negotiation.participant ||
