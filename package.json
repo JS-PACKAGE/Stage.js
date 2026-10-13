@@ -18,6 +18,7 @@
     "typecheck": "tsc --noEmit -p tsconfig.json && npm run typecheck -w packages/client && npm run typecheck -w web",
     "test": "node --test --test-timeout=20000 \"test/**/*.test.ts\" && npm run test -w packages/client",
     "start": "node dist/src/index.js",
+    "config:check": "node src/check-config.ts",
     "dev": "node --watch src/index.ts",
     "dev:web": "npm run dev -w web",
     "build:compress": "node scripts/precompress.ts packages/client/dist web/dist"

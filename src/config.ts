@@ -1,5 +1,5 @@
 import { readFileSync } from 'node:fs';
-import { parse } from 'yaml';
+import { LineCounter, parse, YAMLParseError } from 'yaml';
 import type { IceServerConfig } from '../shared/protocol.ts';
 
 export interface StaticMount {
@@ -362,13 +362,21 @@ export function loadConfig(path: string): AppConfig {
   try {
     text = readFileSync(path, 'utf8');
   } catch {
-    throw new ConfigError(`cannot read ${path} (copy config.example.yaml to config.yaml)`);
+    throw new ConfigError('cannot read configuration file (copy config.example.yaml to config.yaml)');
   }
   let raw: unknown;
+  const lineCounter = new LineCounter();
   try {
-    raw = parse(text);
+    // Warning excerpts and parser messages can contain credentials. Error-level logging still
+    // rejects malformed YAML; unlike "silent", it does not discard parser errors.
+    raw = parse(text, { logLevel: 'error', prettyErrors: false, lineCounter });
   } catch (err) {
-    throw new ConfigError(`invalid YAML in ${path}: ${err instanceof Error ? err.message : String(err)}`);
+    let detail = '';
+    if (err instanceof YAMLParseError) {
+      const { line, col } = lineCounter.linePos(err.pos[0]);
+      detail = ` (${err.code}, line ${line}, column ${col})`;
+    }
+    throw new ConfigError(`invalid YAML${detail}`);
   }
   return parseConfig(raw);
 }

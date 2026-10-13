@@ -40,6 +40,7 @@ git clone https://github.com/JS-PACKAGE/Stage.js.git
 cd Stage.js
 npm install
 cp config.example.yaml config.yaml
+npm run config:check
 npm run build
 npm start
 ```
@@ -52,6 +53,16 @@ npm start
 npm run dev        # 伺服器（node --watch src/index.ts）
 npm run dev:web    # Vite 前端開發伺服器，/ws 代理到 127.0.0.1:9728
 ```
+
+### 啟動前檢查設定
+
+```bash
+npm run config:check                     # STAGE_CONFIG 或專案根目錄 config.yaml
+npm run config:check -- config.example.yaml # 指定檔案，覆蓋 STAGE_CONFIG
+node dist/src/check-config.js /path/to/config.yaml # 建置後也可直接執行
+```
+
+只驗證 YAML 與既有欄位／跨欄位規則，不啟動伺服器、worker 或網路連線，也不建立／改寫設定檔；不代表 TLS／靜態檔可讀、連接埠可綁定或 TURN 可達。成功 exit 0、讀取／驗證失敗 exit 1、用法錯誤 exit 2；`-h`／`--help` 顯示用法，`--` 後可指定以 `-` 開頭的檔名。明確路徑優先於 `STAGE_CONFIG`，相對路徑以目前工作目錄解析；未提供兩者時從專案根目錄找 `config.yaml`，不受目前目錄影響。沿用直接啟動的語意：空的 `STAGE_CONFIG` 不等同未設定，會指向目前目錄並讀取失敗。輸出不列出設定內容或 stack trace；共用 loader 的 YAML 診斷只保留錯誤種類與安全的行／列位置，原本僅有 warning 的 YAML 仍可通過既有 schema，但不再印出可能包含憑證的 warning／原文片段。
 
 ### 靜態資源預壓縮
 
