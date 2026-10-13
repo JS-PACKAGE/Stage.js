@@ -101,8 +101,8 @@ export class EmbedSdk {
 }
 export const flush = async (): Promise<void> => { for (let i = 0; i < 16; i++) await Promise.resolve(); };
 
-export function embedApp(options: { libraryLoad?: Promise<void>; source?: string } = {}) {
-  const nodes = new Map(['host', 'room', 'code', 'name', 'status', 'join', 'hand', 'mic', 'stage', 'mic-retry', 'cancel-join', 'leave', 'audio', 'unlock'].map(id => [id, new EmbedNode()]));
+export function embedApp(options: { libraryLoad?: Promise<void> | ((url: string, attempt: number) => Promise<void>); source?: string; search?: string } = {}) {
+  const nodes = new Map(['host', 'ws-path', 'room', 'code', 'name', 'status', 'join', 'hand', 'mic', 'stage', 'mic-retry', 'cancel-join', 'leave', 'audio', 'unlock'].map(id => [id, new EmbedNode()]));
   const node = (id: string): EmbedNode => { const found = nodes.get(id); assert.ok(found, `unmodeled node: ${id}`); return found; };
   const cancel = node('cancel-join'); cancel.hidden = cancel.disabled = true; cancel.textContent = '取消連線';
   const hand = node('hand'), mic = node('mic'), stage = node('stage'), micRetry = node('mic-retry'), leave = node('leave'), form = node('join'), status = node('status');
@@ -170,9 +170,14 @@ export function embedApp(options: { libraryLoad?: Promise<void>; source?: string
   assert.doesNotMatch(executable, /\bimport\s*(?:\(|['"])/, 'the fixture must never import a real external library');
   runInNewContext(executable, {
     document: { querySelector(selector: string) { assert.match(selector, /^#[a-z-]+$/); return node(selector.slice(1)); } },
-    location: { search: '?host=https%3A%2F%2Fstage.example.test%2Fprefix&room=%20same-room%20&code=%20TEST42%20', origin: 'https://embed.example.test' },
+    location: { search: options.search ?? '?host=https%3A%2F%2Fstage.example.test%2Fprefix&room=%20same-room%20&code=%20TEST42%20', origin: 'https://embed.example.test' },
     URL, URLSearchParams, Error, Promise, performance: { now: () => now },
-    loadLibrary: async (url: string) => { moduleUrls.push(url); if (options.libraryLoad) await options.libraryLoad; return library; },
+    loadLibrary: async (url: string) => {
+      moduleUrls.push(url);
+      if (typeof options.libraryLoad === 'function') await options.libraryLoad(url, moduleUrls.length);
+      else if (options.libraryLoad) await options.libraryLoad;
+      return library;
+    },
     setInterval: (callback: () => void, ms: number) => schedule('interval', callback, ms),
     clearInterval: (id: number) => clear('interval', id),
     setTimeout: (callback: () => void, ms: number) => schedule('timeout', callback, ms),

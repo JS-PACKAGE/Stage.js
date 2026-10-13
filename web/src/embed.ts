@@ -17,6 +17,7 @@ const micRetry = document.querySelector<HTMLButtonElement>('#mic-retry')!;
 const audio = document.querySelector<HTMLAudioElement>('#audio')!;
 const params = new URLSearchParams(location.search);
 input('host').value = params.get('host') ?? location.origin;
+input('ws-path').value = params.get('wsPath') ?? '/ws';
 input('room').value = params.get('room') ?? '';
 input('code').value = params.get('code') ?? '';
 let client: Client | null = null;
@@ -108,8 +109,20 @@ function report(error: unknown): void {
   feedbackRevision++;
   status.textContent = error instanceof Error ? error.message : '操作失敗。';
 }
+function signalingUrl(host: URL, value: string): URL {
+  const path = value.trim() || '/ws';
+  if (!path.startsWith('/') || path.startsWith('//') || /[\p{Cc}\\?#]/u.test(value) || /\s/u.test(path)
+    || path.split('/').some(segment => /^\.{1,2}$/.test(segment.replace(/%2e/gi, '.')))) {
+    throw new Error('請輸入有效的同主機 WebSocket 路徑（例如 /ws）。');
+  }
+  const url = new URL(path, host);
+  if (url.origin !== host.origin || url.search || url.hash) throw new Error('WebSocket 路徑必須使用相同主機。');
+  url.protocol = host.protocol === 'https:' ? 'wss:' : 'ws:';
+  return url;
+}
 join.onsubmit = (event) => {
   event.preventDefault();
+  const hostValue = input('host').value, pathValue = input('ws-path').value;
   playbackGeneration++; scheduleHandCooldown(0);
   const generation = ++entryGeneration, feedback = feedbackRevision;
   let progress = true, receivedState = false, cancelledEntry = false;
@@ -141,14 +154,14 @@ join.onsubmit = (event) => {
       hand.disabled = leave.disabled = true;
       await client?.disconnect();
       if (generation !== entryGeneration) return;
-      const host = new URL(input('host').value);
+      const host = new URL(hostValue);
       if (!['https:', 'http:'].includes(host.protocol)) throw new Error('請輸入 HTTP 或 HTTPS 主機網址。');
+      const ws = signalingUrl(host, pathValue);
       const moduleUrl = new URL('/lib/stage-client.js', host).href;
       showProgress('載入舞台元件中…');
       // The host is selected by this page's visitor, not known at build time.
       const library: typeof StageLibrary = await import(/* @vite-ignore */ moduleUrl);
       if (generation !== entryGeneration) return;
-      const ws = new URL('/ws', host); ws.protocol = host.protocol === 'https:' ? 'wss:' : 'ws:';
       // This compact UI has no room-level meter; explicit preview APIs remain available.
       client = new library.StageClient({ url: ws.href, audioElement: audio, enableMicMeter: false });
       const current = client; controlsClient = current; entryClient = current;
