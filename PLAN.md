@@ -509,3 +509,6 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 
 
 108. **最小嵌入範例的加入回報歸屬（2026-10-13）：** whole-module VM＋actual StageClient／fake socket 重現 state-before-ACK 開放 Leave 後，正常 Leave 使 disconnect 拒絕 pending join，舊 catch 覆寫「已離開。」為離線錯誤。新增 entry generation：submit／Leave／目前 client terminal 撤銷先前初次加入的 continuation、catch 與 finally；離開／terminal 立即釋放舊 submit lock，新 attempt 的 pending 不受舊 finally 影響。disconnect／動態 import／connect 每個 await 後檢查 owner，使用 captured client 執行 connect/join；Leave 的完成提示也檢查 generation/client，避免重入新加入後舊提示覆寫。保留目前加入／一般 SDK error 回報、現有表單及播放／舉手政策，不新增 retry/progress UI，不取消已發出的 server 操作。terminal-before-ACK 是防禦性排序測試：目前 Hub 同步發 state 再 ACK，同一 socket 後續 terminal 通常排在 ACK 之後；不宣稱另有已證實的 server terminal 競爭。測試沒有真實瀏覽器、動態遠端模組載入或音訊驗證。
+
+
+109. **release 替換的靜態驗證值（2026-10-13）：** native localhost HTTP＋synthetic release-root swap 重現：不同內容的 identity／gzip 資產具有相同大小與保留 mtime 時，舊 size+mtime ETag 不變，conditional GET 回 304 而 unconditional 已是新檔。改用所選 representation 的同一 stat/lstat snapshot，弱 ETag 納入 dev／ino／size／mtimeNs／ctimeNs，使用 bigint 避免大型 inode／奈秒資料的 Number 精度損失；壓縮 sidecar 比較亦採 bigint，Content-Length 輸出十進位字串。不新增每請求 hash、額外 stat、metadata cache 或跨請求狀態，保留 encoding discriminator、HEAD／ETag precedence 與 Last-Modified 行為。這不是內容等價保證：檔案系統若回報完全相同身分／時間／大小仍可能碰撞，ctime 變動可使相同內容重新驗證為 200；IMS-only 仍不能辨識保留 mtime 的更新。原有不可信 writer／TOCTOU 限制不變，不宣稱跨所有檔案系統的完整內容偵測。

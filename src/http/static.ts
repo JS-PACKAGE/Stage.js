@@ -1,4 +1,5 @@
 import { createReadStream } from 'node:fs';
+import type { BigIntStats } from 'node:fs';
 import { lstat, realpath, stat } from 'node:fs/promises';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { extname, resolve, sep } from 'node:path';
@@ -52,17 +53,15 @@ export function createStaticHandler(mounts: StaticMount[], baseDir: string) {
     const file = resolve(mount.root, rel);
     if (!within(mount.root, file)) return false;
     let canonicalRoot: string, canonicalFile: string;
-    let size: number, mtime: Date, modifiedMs: number;
+    let metadata: BigIntStats;
     try {
       [canonicalRoot, canonicalFile] = await Promise.all([realpath(mount.root), realpath(file)]);
       // Lexical containment alone follows asset/directory symlinks outside the public tree.
       // Resolve per request so release-root symlink swaps and later builds still work.
       if (!within(canonicalRoot, canonicalFile)) return false;
-      const st = await stat(canonicalFile);
+      const st = await stat(canonicalFile, { bigint: true });
       if (!st.isFile()) return false;
-      size = st.size;
-      mtime = st.mtime;
-      modifiedMs = st.mtimeMs;
+      metadata = st;
     } catch {
       return false;
     }
@@ -74,12 +73,12 @@ export function createStaticHandler(mounts: StaticMount[], baseDir: string) {
       if (!isCompressibleAsset(file)) continue;
       const sidecar = `${file}.${candidate === 'gzip' ? 'gz' : 'br'}`;
       try {
-        const compressed = await lstat(sidecar);
+        const compressed = await lstat(sidecar, { bigint: true });
         // Old sidecars from a partial rebuild must not hide a newer source; don't follow symlinks.
-        if (!compressed.isFile() || compressed.mtimeMs < modifiedMs || compressed.size >= size) continue;
+        if (!compressed.isFile() || compressed.mtimeNs < metadata.mtimeNs || compressed.size >= metadata.size) continue;
         const canonicalSidecar = await realpath(sidecar);
         if (!within(canonicalRoot, canonicalSidecar)) continue;
-        selected = canonicalSidecar; encoding = candidate; size = compressed.size; mtime = compressed.mtime; modifiedMs = compressed.mtimeMs;
+        selected = canonicalSidecar; encoding = candidate; metadata = compressed;
         break;
       } catch { /* No usable precompressed representation; try the next accepted encoding. */ }
     }
@@ -93,9 +92,16 @@ export function createStaticHandler(mounts: StaticMount[], baseDir: string) {
       return true;
     }
     if (encoding !== 'identity') res.setHeader('Content-Encoding', encoding);
-    // Weak validator from size + mtime: enough for built assets, and the client library is fetched
-    // by every embedding page, so revalidation must be a 304 rather than a full download.
-    const etag = `W/"${encoding}-${size.toString(16)}-${modifiedMs.toString(16)}"`;
+    // A weak metadata validator, not a content hash. File identity distinguishes release swaps
+    // that preserve size/mtime; bigint fields retain filesystem precision without extra reads.
+    const stamp = [metadata.dev, metadata.ino, metadata.size, metadata.mtimeNs, metadata.ctimeNs]
+      .map(value => value.toString(16)).join('-');
+    const etag = `W/"${encoding}-${stamp}"`;
+    // Match ordinary Stats' millisecond rounding for the existing HTTP date contract.
+    // BigIntStats.mtime truncates instead, which can change the second at a .9995 boundary.
+    const modifiedMs = Number(metadata.mtimeNs / 1_000_000_000n) * 1000
+      + Number(metadata.mtimeNs % 1_000_000_000n) / 1_000_000;
+    const mtime = new Date(Math.round(modifiedMs));
     res.setHeader('ETag', etag);
     res.setHeader('Last-Modified', mtime.toUTCString());
     res.setHeader('Cache-Control', extname(file) === '.html' ? 'no-cache' : 'public, max-age=300');
@@ -109,7 +115,7 @@ export function createStaticHandler(mounts: StaticMount[], baseDir: string) {
     }
     res.statusCode = 200;
     res.setHeader('Content-Type', CONTENT_TYPES[extname(file)] ?? 'application/octet-stream');
-    res.setHeader('Content-Length', size);
+    res.setHeader('Content-Length', metadata.size.toString());
     if (req.method === 'HEAD') {
       res.end();
       return true;

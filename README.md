@@ -68,7 +68,7 @@ node dist/src/check-config.js /path/to/config.yaml # 建置後也可直接執行
 
 `npm run build` 最後以 Node 內建 zlib 為 client／web 的 HTML、JS、CSS、JSON、SVG 與 webmanifest 產生較小的 `.br`／`.gz` 副本；不壓縮圖片、已編碼檔或 symlink，壓縮後較大的副本不保留。也可在兩個 workspace 都完成建置後單獨執行 `npm run build:compress`，或 `node scripts/precompress.ts <建置目錄>`；指令會列出原始／Brotli／gzip 位元組數。
 
-伺服器依 `Accept-Encoding` 的權重與排除規則選擇可用版本（同權重優先 Brotli），附 `Vary: Accept-Encoding`、各版本獨立 ETag 與正確 Content-Length。HEAD 與 304 保持相同的編碼資訊，未預壓縮或副本比來源舊時退回原檔；用戶端明確排除所有可用版本才回 406。不會在請求期間壓縮，也不會重複壓縮 `.br`／`.gz` URL。部署時請將原檔與副本一起更新；Vite 開發模式仍維持原工作流程。
+伺服器依 `Accept-Encoding` 的權重與排除規則選擇可用版本（同權重優先 Brotli），附 `Vary: Accept-Encoding`、各版本獨立 ETag 與正確 Content-Length。HEAD 與 304 保持相同的編碼資訊，未預壓縮或副本比來源舊時退回原檔；用戶端明確排除所有可用版本才回 406。不會在請求期間壓縮，也不會重複壓縮 `.br`／`.gz` URL。ETag 使用所選版本的檔案身分、大小及奈秒修改／變更時間，避免保留大小與 mtime 的 release 檔案替換沿用舊驗證值；它仍是弱 metadata validator，不是內容雜湊。只使用 If-Modified-Since 的用戶端仍受 Last-Modified 秒級精度及保留 mtime 的限制。部署時請將原檔與副本一起更新；Vite 開發模式仍維持原工作流程。
 
 靜態掛載會同時檢查 URL 路徑與解析 symlink 後的實際路徑；原始檔或壓縮 sidecar 不可指向該掛載實際根目錄之外。仍允許根目錄內的來源檔 symlink，以及設定成 release 目錄 symlink 的掛載根；根目錄切換或稍後才完成的 build 不需重啟服務。壓縮 sidecar 本身仍須為一般檔案。這是意外／既有 symlink 越界的防護，不是對具有資產目錄寫入權者的競態安全檔案沙箱；部署時不要讓非信任程序寫入公開資產樹。
 
