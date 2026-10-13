@@ -536,3 +536,6 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 
 
 117. **自訂靜態掛載的 canonical slash（2026-10-13）：** native localhost HTTP＋synthetic HTML 重現 /demo 直接以 200 提供 /demo/ 掛載的 index，導致 ./asset.js 被解析成 /asset.js 而 404；/demo/ 則正確。只對 slashless configured mount root，在原本 realpath containment 與 index isFile 通過後回 308，保留 query 並以 no-cache 避免永久不再驗證；不將不存在／越界 index 重新導向。Location 採 ./ 加原始 URL 最後一段 encoded path 與斜線，避免 Host 衍生絕對網址、// 或 colon 變成外站 reference，保留 encoded slash/backslash 文字；GET/HEAD 無 body，沿用 nosniff 與 mount CORS。後續 canonical 請求仍走原有 encoding／validator 流程，預設 root及一般檔案不變，不新增目錄 listing／SPA fallback／任意 directory redirect。測試只使用本機 HTTP 與 public synthetic 檔案，沒有真實瀏覽器或外部站點請求。
+
+
+118. **metrics provider 的未知拒絕值（2026-10-13）：** exported createStageServer 的 metrics callback 可同步拋出或非同步拒絕任意值；隔離 child＋native localhost HTTP probe 證實 null-prototype 物件或 throwing toString 讓 rejection handler 的 String(err) 自己拋錯，兩個共用 scrape 各產生 unhandled rejection 且未回應，下一次 collection 卻已恢復。只移除 metrics error 欄位的預先字串化，將原始 unknown 值交給既有 safe structured logger；empty 500、auth、singleflight 與失敗後取新樣本語意不變。Error log 欄位成為結構化診斷，nested secret key 沿用 redaction，不把細節放入 response。不宣稱內建 collector 已產生此值、外部攻擊事件或修復任意 custom logger/sink 拋錯；其他 error path 不擴張修改。測試採 synthetic diagnostics／本機 HTTP／明確 deadline，不讀真實秘密或啟動音訊。
