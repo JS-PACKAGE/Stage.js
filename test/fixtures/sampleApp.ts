@@ -5,7 +5,7 @@ import { runInNewContext } from 'node:vm';
 import { MAX_GAIN_DB } from '../../shared/protocol.ts';
 import type { ParticipantView, RoomStatePayload } from '../../shared/protocol.ts';
 
-/** Bounded sample integration double, not browser/CSS/permission or real-SDK interoperability coverage. */
+/** Bounded DOM fixture; browser/CSS/permission behavior is not modeled. */
 export class SampleNode {
   readonly children: SampleNode[] = [];
   parentNode: SampleNode | null = null;
@@ -22,6 +22,7 @@ export class SampleNode {
   private text = '';
   readonly tagName: string;
   constructor(tagName: string) { this.tagName = tagName; }
+  get options(): SampleNode[] { return this.children.filter(child => child.tagName === 'option'); }
   get isConnected(): boolean { return this.tagName === '#document' || (this.parentNode?.isConnected ?? false); }
   get textContent(): string { return this.text + this.children.map(child => child.textContent).join(''); }
   set textContent(value: string) { this.replaceChildren(); this.text = value; }
@@ -62,6 +63,7 @@ export class SampleNode {
     const predicates: Record<string, (node: SampleNode) => boolean> = {
       '#app': node => node.id === 'app',
       '[data-landing-submit]': node => node.dataset.landingSubmit !== undefined,
+      '[data-landing-cancel]': node => node.dataset.landingCancel !== undefined,
       '[data-room-action]': node => node.dataset.roomAction !== undefined,
       '[data-return-stage]': node => node.dataset.returnStage !== undefined,
       '.badge.quality': node => node.classList.contains('badge') && node.classList.contains('quality'),
@@ -156,6 +158,7 @@ export class SampleSdk {
   private cooldownUntil = 0;
   readonly joins: { options: JoinOptions; work: Deferred<void> }[] = [];
   readonly previews: Deferred<SamplePreview>[] = [];
+  readonly previewSignals: (AbortSignal | undefined)[] = [];
   readonly polls: Deferred<Stats>[] = [];
   readonly raises: Deferred<void>[] = [];
   readonly deviceLists: Deferred<SampleAudioDevices>[] = [];
@@ -170,6 +173,7 @@ export class SampleSdk {
   get me(): ParticipantView | null { return this.state?.me ?? null; }
   get micLevel(): number { this.micLevelReads++; return this.micLevelValue; }
   get handCooldownMs(): number { return Math.max(0, this.cooldownUntil - this.clock.now); }
+  set handCooldownMs(value: number) { this.cooldownUntil = this.clock.now + value; }
   on<K extends keyof Events>(type: K, listener: (event: { detail: Events[K] }) => void): () => void {
     const listeners = this.listeners.get(type) ?? [];
     const callback = listener as (event: { detail: unknown }) => void;
@@ -203,8 +207,15 @@ export class SampleSdk {
   async setOutputDevice(id: string): Promise<void> { this.outputDevices.push(id); }
   setPlaybackVolume(value: number): void { assert.ok(value >= 0 && value <= 1); this.playbackVolume = value; }
   setPlaybackMuted(value: boolean): void { this.playbackMuted = value; }
-  startMicTest(): Promise<SamplePreview> {
-    const work = new Deferred<SamplePreview>(); this.previews.push(work); return work.promise;
+  startMicTest(options: { signal?: AbortSignal } = {}): Promise<SamplePreview> {
+    const signal = options.signal;
+    if (signal?.aborted) return Promise.reject(signal.reason);
+    const work = new Deferred<SamplePreview>(); this.previews.push(work); this.previewSignals.push(signal);
+    const abort = () => { if (work.status === 'pending') work.reject(signal!.reason as Error); };
+    signal?.addEventListener('abort', abort, { once: true });
+    const settled = () => signal?.removeEventListener('abort', abort);
+    void work.promise.then(settled, settled);
+    return work.promise;
   }
   grantPreview(work: Deferred<SamplePreview>, preview: SamplePreview): void {
     assert.equal(work.status, 'pending', 'a canceled capture cannot later fulfill');
@@ -246,19 +257,28 @@ export function roomState(me: Partial<ParticipantView> = {}): RoomStatePayload {
 }
 export async function flushSample(): Promise<void> { for (let i = 0; i < 16; i++) await Promise.resolve(); }
 
-export function sampleApp(options: {
+interface SampleAppOptions {
+  source?: string;
   deferAudioDevices?: boolean;
   clipboard?: { writeText(text: string): Promise<void> };
   confirm?: (message: string) => boolean;
-} = {}) {
-  const clock = new SampleClock(), sdk = new SampleSdk(clock, options.deferAudioDevices);
+  localStorage?: { getItem(key: string): string | null; setItem(key: string, value: string): void };
+}
+type SampleClient = { disconnect(): Promise<void> };
+export function sampleApp<Client extends SampleClient>(options: SampleAppOptions & { sdk: Client }): ReturnType<typeof mountSampleApp<Client>>;
+export function sampleApp(options?: SampleAppOptions): ReturnType<typeof mountSampleApp<SampleSdk>>;
+export function sampleApp(options: SampleAppOptions & { sdk?: SampleClient } = {}) { return mountSampleApp(options); }
+
+function mountSampleApp<Client extends SampleClient = SampleSdk>(options: SampleAppOptions & { sdk?: Client }) {
+  const clock = new SampleClock();
+  const sdk = (options.sdk ?? new SampleSdk(clock, options.deferAudioDevices)) as Client;
   const documentRoot = new SampleNode('#document'), documentElement = new SampleNode('html'), body = new SampleNode('body');
   const app = new SampleNode('div'); app.id = 'app';
   documentRoot.append(documentElement); documentElement.append(body); body.append(app);
   const document = { documentElement, createElement: (tag: string) => new SampleNode(tag),
     createTextNode(text: string) { const node = new SampleNode('#text'); node.textContent = text; return node; },
     querySelector: (selector: string) => documentRoot.querySelector(selector) };
-  const source = readFileSync(new URL('../../web/src/main.ts', import.meta.url), 'utf8');
+  const source = options.source ?? readFileSync(new URL('../../web/src/main.ts', import.meta.url), 'utf8');
   const imports = [
     "import { MAX_GAIN_DB, StageClient, decodeName } from '../../packages/client/src/index.ts';",
     "import type { ConnectionQuality, MicTest, ParticipantView, RoomStatePayload } from '../../packages/client/src/index.ts';",
@@ -272,13 +292,14 @@ export function sampleApp(options: {
   let constructions = 0;
   runInNewContext(`'use strict';\n${executable}`, {
     document, location: { protocol: 'https:', host: 'sample.test', search: '', pathname: '/', origin: 'https://sample.test' },
-    localStorage: { getItem: (key: string) => storage.get(key) ?? null, setItem: (key: string, value: string) => storage.set(key, value) },
+    localStorage: options.localStorage ?? { getItem: (key: string) => storage.get(key) ?? null, setItem: (key: string, value: string) => storage.set(key, value) },
     navigator: { clipboard: options.clipboard, mediaDevices: { addEventListener(type: string, listener: () => void) {
       assert.equal(type, 'devicechange'); deviceChangeListeners.push(listener);
     } } },
     window: { confirm: options.confirm ?? (() => { throw new Error('Unexpected confirmation dialog in lifecycle test'); }) },
     StageClient: function (options: { url: string }) { constructions++; assert.equal(options.url, 'wss://sample.test/ws'); return sdk; },
-    decodeName: (value: string) => value, MAX_GAIN_DB, URL, URLSearchParams, Error,
+    decodeName: (value: string) => value, MAX_GAIN_DB, URL, URLSearchParams, Error, AbortController,
+    performance: { now: () => clock.now },
     setTimeout: clock.setTimeout, clearTimeout: clock.clear, setInterval: clock.setInterval, clearInterval: clock.clear,
   }, { timeout: 1000, filename: 'web/src/main.ts', contextCodeGeneration: { strings: false, wasm: false } });
   assert.equal(constructions, 1);
@@ -292,8 +313,11 @@ export function sampleApp(options: {
     button: (text: string) => find(node => node.tagName === 'button' && node.textContent === text),
     async cleanup() {
       await sdk.disconnect();
-      for (const work of [...sdk.joins.map(join => join.work), ...sdk.polls, ...sdk.deviceLists]) if (work.status === 'pending') work.reject(new Error('fixture cleanup'));
-      await flushSample(); clock.jobs.clear(); sdk.assertSettled();
+      if (sdk instanceof SampleSdk) {
+        for (const work of [...sdk.joins.map(join => join.work), ...sdk.polls, ...sdk.deviceLists]) if (work.status === 'pending') work.reject(new Error('fixture cleanup'));
+      }
+      await flushSample(); clock.jobs.clear();
+      if (sdk instanceof SampleSdk) sdk.assertSettled();
     },
   };
 }

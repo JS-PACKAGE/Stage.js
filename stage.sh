@@ -8,6 +8,7 @@ RUN_DIR="$ROOT/.run"
 PID_FILE="$RUN_DIR/stage.pid"
 LOG_FILE="$RUN_DIR/stage.log"
 ENTRY="$ROOT/dist/src/index.js"
+CHECKER="$ROOT/dist/src/check-config.js"
 STOP_TIMEOUT=${STAGE_STOP_TIMEOUT:-15}
 
 cd "$ROOT"
@@ -130,6 +131,24 @@ cmd_stop() {
   printf '已停止（pid %s）\n' "$pid"
 }
 
+cmd_restart() {
+  validate_stop_timeout
+  if running_pid >/dev/null; then
+    :
+  else
+    result=$?
+    [ "$result" -eq 1 ] || return 1
+  fi
+  check_node
+  [ -f "$ENTRY" ] || die "找不到 ${ENTRY}，請先執行 build"
+  [ -f "$CHECKER" ] || die "找不到已建置的設定檢查器，請先執行 build"
+  ensure_config
+  # Use the deployed schema and identical environment/path resolution before TERM.
+  node "$CHECKER"
+  cmd_stop
+  cmd_start
+}
+
 cmd_status() {
   if pid=$(running_pid); then
     printf '執行中（pid %s）\n' "$pid"
@@ -154,7 +173,7 @@ cmd_help() {
   build        建置伺服器、client 函式庫與範例前端
   start        於背景啟動已建置的伺服器（pid／log 位於 .run/）
   stop         優雅停止（SIGTERM，逾時後強制終止）
-  restart      stop 後再 start
+  restart      預檢已建置版本與設定，通過後 stop 再 start
   status       顯示執行狀態（未執行時 exit code 3）
   logs [N|-f]  顯示最後 N 行 log（預設 100），-f 持續追蹤
   run          前景執行（給 systemd／容器等外部監管使用）
@@ -174,7 +193,7 @@ case "$command" in
   build) cmd_build ;;
   start) cmd_start ;;
   stop) cmd_stop ;;
-  restart) cmd_stop; cmd_start ;;
+  restart) cmd_restart ;;
   status) cmd_status ;;
   logs) cmd_logs "$@" ;;
   run) check_node; ensure_config; exec node "$ENTRY" ;;

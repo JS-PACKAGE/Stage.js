@@ -41,8 +41,8 @@ async function until(predicate: () => boolean, label: string): Promise<void> {
   while (!predicate()) { if (performance.now() >= deadline) throw new Error(`timed out: ${label}`); await sleep(5); }
 }
 
-const scenarios: { capacity?: number; reentrant?: 'created' | 'state' }[] = [{}, { capacity: 1 }, { reentrant: 'created' }, { reentrant: 'state' }];
-for (const { capacity: maxPendingControlRequests, reentrant } of scenarios) it(`runs SDK room actions, same-peer resume, kick and shutdown over real WebSockets with ${maxPendingControlRequests ?? 'unlimited'} caller capacity${reentrant ? ` and ${reentrant} create reentry` : ''}`, async () => {
+const scenarios: { capacity?: number; reentrant?: 'created' | 'state'; rotate?: boolean }[] = [{}, { capacity: 1 }, { reentrant: 'created' }, { reentrant: 'state' }, { rotate: true }];
+for (const { capacity: maxPendingControlRequests, reentrant, rotate } of scenarios) it(`runs SDK room actions, same-peer resume, kick and shutdown over real WebSockets with ${maxPendingControlRequests ?? 'unlimited'} caller capacity${reentrant ? ` and ${reentrant} create reentry` : ''}${rotate ? ' and rotated controller code' : ''}`, async () => {
   const child = fork(new URL('../../../test/fixtures/sdkServer.ts', import.meta.url), maxPendingControlRequests === 1 ? ['--hold-first-join-ack'] : [], { stdio: ['ignore', 'ignore', 'pipe', 'ipc'] });
   const exit = once(child, 'exit');
   let stderr = ''; child.stderr?.on('data', data => { stderr += String(data); });
@@ -87,6 +87,7 @@ for (const { capacity: maxPendingControlRequests, reentrant } of scenarios) it(`
       });
     }
     const room = await host.createRoom({ name: 'Host', roomName: 'SDK integration', codeRequired: true });
+    let currentCode = room.code;
     if (reentrant) {
       assert.ok(overlappingCreate);
       await assert.rejects(overlappingCreate, error => error instanceof StageError && error.code === 'already_joined');
@@ -99,7 +100,25 @@ for (const { capacity: maxPendingControlRequests, reentrant } of scenarios) it(`
       assert.equal(host.me!.participantId, hostId); assert.equal(host['pc'], hostPeer);
       assert.equal((await request('inspect')).peers.find(peer => peer.participantId === hostId)!.identity, serverPeer.identity);
     }
-    const joining = guest.join({ ...room, name: 'Guest' });
+    if (rotate) {
+      assert.ok(currentCode);
+      await host.rotateCode();
+      await until(() => typeof host.state?.code === 'string' && host.state.code !== room.code, 'controller receives rotated code');
+      currentCode = host.state!.code;
+      await until(() => host['pc']?.remoteDescription != null && !host['negotiating'], 'rotated controller negotiation settles');
+      const hostId = host.me!.participantId, hostPeer = host['pc'];
+      assert.equal(host.me!.role, 'controller');
+      const serverPeer = (await request('inspect')).peers.find(peer => peer.participantId === hostId); assert.ok(serverPeer);
+      const lost = host['socket'] as unknown as Socket;
+      const statuses: string[] = []; host.on('status', event => statuses.push(event.detail));
+      lost.terminate();
+      await until(() => errors.some(error => error.code === 'unauthorized') || (statuses.includes('reconnecting') && host['socket'] !== null && host['socket'] !== (lost as unknown) && host.status === 'live'), 'rotated controller automatic same-seat resume');
+      assert.deepEqual(errors.map(error => error.code), [], 'rotated controller automatic resume must use the current room code');
+      assert.equal(host.me!.participantId, hostId); assert.equal(host.me!.role, 'controller');
+      assert.equal(host.state!.code, currentCode); assert.equal(host['pc'], hostPeer);
+      assert.equal((await request('inspect')).peers.find(peer => peer.participantId === hostId)!.identity, serverPeer.identity);
+    }
+    const joining = guest.join({ ...room, code: currentCode, name: 'Guest' });
     // The branch below awaits other work before joining, so observe early failures immediately.
     joining.catch(() => {});
     if (maxPendingControlRequests === 1) {
@@ -114,7 +133,7 @@ for (const { capacity: maxPendingControlRequests, reentrant } of scenarios) it(`
     await joining;
     const id = guest.me!.participantId;
     assert.equal(guest.me!.role, 'audience'); assert.equal(guest.state!.code, undefined);
-    assert.equal(host.state!.code, room.code);
+    assert.equal(host.state!.code, currentCode);
     const raising = guest.raiseHand();
     if (maxPendingControlRequests === 1) {
       await assert.rejects(guest.withdrawHand(), error => error instanceof StageError && error.code === 'queue_full');
@@ -135,7 +154,7 @@ for (const { capacity: maxPendingControlRequests, reentrant } of scenarios) it(`
     await assert.rejects(guest.unmute(), (error: unknown) => error instanceof StageError && error.code === 'forbidden');
     await host.forceUnmute(id); await guest.leaveStage();
     await until(() => !guest.me!.onStage && guest['mic'] === null, 'stage leave');
-    await until(() => guest['pc']?.remoteDescription != null && !guest['negotiating'], 'initial negotiation completes');
+    await until(() => guest['transceiver']?.direction === 'recvonly' && guest['transceiver'].sender.track === null && guest['pc']?.remoteDescription != null && !guest['negotiating'], 'stage-leave receive-only negotiation completes');
     const before = await request('inspect');
     const peer = before.peers.find(peer => peer.participantId === id); assert.ok(peer);
     const pc = guest['pc']; const oldSocket = guest['socket'] as unknown as Socket;
@@ -148,7 +167,7 @@ for (const { capacity: maxPendingControlRequests, reentrant } of scenarios) it(`
     assert.equal(guest['lastHandAt'], raisedAt, 'same-seat automatic resume retains local cooldown origin');
     const departingSocketClosed = once(Socket.instances.at(-1)!, 'close', { signal: AbortSignal.timeout(5000) });
     await guest.disconnect(); await departingSocketClosed;
-    await guest.join({ ...room, name: 'Guest reused' });
+    await guest.join({ ...room, code: currentCode, name: 'Guest reused' });
     const freshId = guest.me!.participantId; assert.notEqual(freshId, id);
     assert.equal(guest.handCooldownMs, 0);
     await guest.raiseHand(); assert.equal(guest.me!.handRaised, true);

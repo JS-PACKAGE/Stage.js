@@ -1,6 +1,6 @@
 import assert from 'node:assert/strict';
 import { after, before, describe, it } from 'node:test';
-import { mkdtemp, mkdir, readFile, rm, rename, symlink, utimes, writeFile } from 'node:fs/promises';
+import { mkdtemp, mkdir, readFile, rm, rename, stat, symlink, utimes, writeFile } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { createServer, request, type IncomingHttpHeaders } from 'node:http';
@@ -62,7 +62,7 @@ describe('precompressed static delivery', () => {
     await symlink(pub, join(root, 'mounted-link'));
     await symlink(join(pub, 'cycle.js'), join(pub, 'cycle.js'));
     await symlink(join(root, 'missing-target.js'), join(pub, 'dangling.js'));
-    const serve = createStaticHandler([{ mount: '/late/', dir: join(root, 'late-build'), cors: false }, { mount: '/linked-root/', dir: join(root, 'mounted-link'), cors: false }, { mount: '/', dir: pub, cors: true }], root);
+    const serve = createStaticHandler([{ mount: '/late/', dir: join(root, 'late-build'), cors: false }, { mount: '/cache-release/', dir: join(root, 'cache-release-link'), cors: false }, { mount: '/linked-root/', dir: join(root, 'mounted-link'), cors: false }, { mount: '/', dir: pub, cors: true }], root);
     server = createServer((req, res) => { void serve(req, res).then(found => { if (!found) res.writeHead(404).end(); }).catch(() => res.writeHead(500).end()); });
     await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve));
     port = (server.address() as AddressInfo).port;
@@ -176,6 +176,103 @@ describe('precompressed static delivery', () => {
     const direct = await get('/asset.js.gz', { 'accept-encoding': 'br, gzip' });
     assert.equal(direct.headers['content-encoding'], undefined);
     assert.deepEqual(direct.body, gz);
+  });
+  it('invalidates same-size preserved-mtime release validators for every selected representation', async () => {
+    const releases = [join(root, 'cache-release-one'), join(root, 'cache-release-two')];
+    const bodies = ['ONE', 'TWO'].map(version => Buffer.from(`export const version = "${version}";\n`.repeat(100)));
+    const representations = bodies.map(body => ({ identity: body, gzip: gzipSync(body), br: brotliCompressSync(body) }));
+    for (const [index, release] of releases.entries()) {
+      await mkdir(release);
+      for (const [encoding, bytes] of Object.entries(representations[index]!)) {
+        const file = join(release, `asset.js${encoding === 'identity' ? '' : encoding === 'gzip' ? '.gz' : '.br'}`);
+        await writeFile(file, bytes);
+        await utimes(file, 1740000000, 1740000000);
+      }
+    }
+    await symlink(releases[0]!, join(root, 'cache-release-link'));
+    const before = new Map<string, Awaited<ReturnType<typeof get>>>();
+    for (const encoding of ['identity', 'gzip', 'br'] as const) {
+      assert.equal(representations[0]![encoding].length, representations[1]![encoding].length);
+      const headers = { 'accept-encoding': encoding };
+      const first = await get('/cache-release/asset.js', headers);
+      before.set(encoding, first);
+      assert.equal(first.status, 200);
+      assert.deepEqual(first.body, representations[0]![encoding]);
+      for (const method of ['GET', 'HEAD']) {
+        const unchanged = await get('/cache-release/asset.js', { ...headers, 'if-none-match': first.headers.etag! }, method);
+        assert.equal(unchanged.status, 304, `${encoding}: unchanged ${method}`);
+        assert.equal(unchanged.body.length, 0);
+      }
+    }
+    assert.equal(new Set([...before.values()].map(response => response.headers.etag)).size, 3);
+    await symlink(releases[1]!, join(root, 'cache-release-next'));
+    await rename(join(root, 'cache-release-next'), join(root, 'cache-release-link'));
+    for (const encoding of ['identity', 'gzip', 'br'] as const) {
+      const first = before.get(encoding)!;
+      const headers = { 'accept-encoding': encoding, 'if-none-match': first.headers.etag!, 'if-modified-since': first.headers['last-modified']! };
+      for (const method of ['GET', 'HEAD']) {
+        const changed = await get('/cache-release/asset.js', headers, method);
+        assert.equal(changed.status, 200, `${encoding}: changed ${method} must not reuse the old entity despite a matching date`);
+        assert.notEqual(changed.headers.etag, first.headers.etag);
+        assert.equal(changed.headers['last-modified'], first.headers['last-modified']);
+        assert.equal(changed.headers['content-encoding'], encoding === 'identity' ? undefined : encoding);
+        assert.equal(changed.headers['content-length'], String(representations[1]![encoding].length));
+        assert.equal(changed.headers.vary, 'Accept-Encoding');
+        assert.deepEqual(changed.body, method === 'HEAD' ? Buffer.alloc(0) : representations[1]![encoding]);
+        const unchanged = await get('/cache-release/asset.js', { 'accept-encoding': encoding, 'if-none-match': changed.headers.etag! }, method);
+        assert.equal(unchanged.status, 304, `${encoding}: new ${method} validator revalidates`);
+      }
+      const dateOnly = await get('/cache-release/asset.js', { 'accept-encoding': encoding, 'if-modified-since': first.headers['last-modified']! });
+      assert.equal(dateOnly.status, 304, 'date-only validation cannot detect a deployment that preserves mtime');
+    }
+  });
+  it('invalidates in-place same-size rewrites with restored mtime when change metadata advances', async () => {
+    const file = join(root, 'public', 'rewritten.js');
+    const original = 'export const version = "ONE";\n';
+    const replacement = 'export const version = "TWO";\n';
+    await writeFile(file, original);
+    await utimes(file, 1740000000, 1740000000);
+    const first = await get('/rewritten.js');
+    const initial = await stat(file, { bigint: true });
+    let changed = initial;
+    // Establish the filesystem precondition explicitly instead of assuming clock precision.
+    for (let attempt = 0; attempt < 100; attempt++) {
+      await writeFile(file, replacement);
+      await utimes(file, 1740000000, 1740000000);
+      changed = await stat(file, { bigint: true });
+      if (changed.ctimeNs !== initial.ctimeNs) break;
+      if (attempt < 99) await new Promise<void>(resolve => setTimeout(resolve, 50));
+    }
+    assert.equal(changed.ino, initial.ino);
+    assert.equal(changed.dev, initial.dev);
+    assert.equal(changed.size, initial.size);
+    assert.equal(changed.mtimeNs, initial.mtimeNs);
+    assert.notEqual(changed.ctimeNs, initial.ctimeNs, 'fixture requires an observed metadata change');
+    const response = await get('/rewritten.js', { 'if-none-match': first.headers.etag!, 'if-modified-since': first.headers['last-modified']! });
+    assert.equal(response.status, 200);
+    assert.equal(response.body.toString(), replacement);
+    assert.notEqual(response.headers.etag, first.headers.etag);
+    assert.equal((await get('/rewritten.js', { 'if-none-match': response.headers.etag! })).status, 304);
+  });
+  it('preserves Last-Modified rounding at a fractional-second boundary for every representation', async () => {
+    for (const [extension, bytes] of [['', source], ['.gz', gz], ['.br', br]] as const) {
+      const file = join(root, 'public', `rounded-date.js${extension}`);
+      await writeFile(file, bytes);
+      await utimes(file, 1740000000.99975, 1740000000.99975);
+    }
+    for (const [encoding, extension] of [['identity', ''], ['gzip', '.gz'], ['br', '.br']] as const) {
+      const expected = (await stat(join(root, 'public', `rounded-date.js${extension}`))).mtime.toUTCString();
+      const first = await get('/rounded-date.js', { 'accept-encoding': encoding });
+      assert.equal(first.status, 200);
+      assert.equal(first.headers['content-encoding'], encoding === 'identity' ? undefined : encoding);
+      assert.equal(first.headers['last-modified'], expected, encoding);
+      for (const method of ['GET', 'HEAD']) {
+        const same = await get('/rounded-date.js', { 'accept-encoding': encoding, 'if-modified-since': expected }, method);
+        assert.equal(same.status, 304, `${encoding}: ${method} with the previously emitted date`);
+        assert.equal(same.headers['last-modified'], expected);
+        assert.equal(same.body.length, 0);
+      }
+    }
   });
 });
 

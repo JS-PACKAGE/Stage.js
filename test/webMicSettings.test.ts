@@ -7,7 +7,7 @@ import { it } from 'node:test';
 const source = readFileSync(new URL('../web/src/main.ts', import.meta.url), 'utf8');
 const testButton = source.slice(source.indexOf('const testButton = button('), source.indexOf("testButton.id = 'mic-test'"));
 const inputChange = source.slice(source.indexOf('micSelect.onchange ='), source.indexOf('speakerSelect.onchange ='));
-const meter = source.slice(source.indexOf('function resetMicSettings()'), source.indexOf("client.on('state', syncMeter)"));
+const meter = source.slice(source.indexOf('function cancelPreviewCapture()'), source.indexOf("client.on('state', syncMeter)"));
 const button = source.slice(source.indexOf('function button('), source.indexOf('/** Room controls retain'));
 interface Preview { stops: number; stop(): void; level(): number }
 const preview = (): Preview => ({ stops: 0, stop() { this.stops++; }, level: () => 0 });
@@ -19,12 +19,15 @@ function setup() {
     setInputDevice(id: string) { const request = Promise.withResolvers<void>(); devices.push({ id, request }); return request.promise; },
   };
   const ui = runInNewContext(stripTypeScriptTypes(`
-    let micTest = null, testingBusy = false, selectedInput = '', meterTimer, micSettingsGeneration = 0;
+    let micTest = null, testingBusy = false, selectedInput = '', meterTimer, micSettingsGeneration = 0, previewCapture;
+    const cancelTestButton = { hidden: true, disabled: true };
     const micSelect = { disabled: false, value: '' }, level = { value: 0 }, errors = [];
     const errorBox = { hidden: true }, setInterval = () => 1, clearInterval = () => {};
     function element() { return { disabled: false, isConnected: true, attrs: {}, setAttribute(key, value) { this.attrs[key] = value; } }; }
     function showError(message) { errors.push(message); }
     function updateCooldown() {}
+    // This fragment tests capture ownership; whole-app selection tests exercise actual option reconciliation.
+    function restoreDeviceSelection(select, chosen) { select.value = chosen; }
     ${button}
     ${testButton}
     ${inputChange}
@@ -32,7 +35,7 @@ function setup() {
     ({ toggle() { testButton.onclick(); }, change(id) { micSelect.value = id; micSelect.onchange(); }, refresh: syncMeter, reset: resetMicSettings,
       testDisabled: () => testButton.disabled, inputDisabled: () => micSelect.disabled, text: () => testButton.textContent,
       selected: () => selectedInput, preview: () => micTest, errors });
-  `), { client, Error }) as {
+  `), { client, Error, AbortController }) as {
     toggle(): void; change(id: string): void; refresh(): void; reset(): void;
     testDisabled(): boolean; inputDisabled(): boolean; text(): string;
     selected(): string; preview(): Preview | null; errors: string[];

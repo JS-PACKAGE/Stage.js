@@ -21,6 +21,7 @@ export interface StageClientOptions {
   requestTimeoutMs?: number;
   /** Optional cap on queued/unacknowledged caller controls; RTC and automatic resume are excluded. */
   maxPendingControlRequests?: number;
+  /** Finite delays in 0–2147483647 ms; values are captured when the client is constructed. */
   reconnect?: { initialDelayMs: number; maxDelayMs: number };
   audioElement?: HTMLAudioElement;
   micConstraints?: MediaTrackConstraints;
@@ -154,7 +155,9 @@ export class StageClient extends EventTarget {
   private readonly ownsAudio: boolean;
   private socket: WebSocket | null = null;
   private readonly requestTimeoutMs: number;
+  private readonly reconnectConfig: { initialDelayMs: number; maxDelayMs: number };
   private connecting: Promise<void> | null = null;
+  private helloWait: { cancel: () => void } | null = null;
   private pending = new Map<string, Pending>();
   private pendingControlRequests = 0;
   private readonly maxPendingControlRequests: number;
@@ -173,6 +176,7 @@ export class StageClient extends EventTarget {
   private micFailed = false;
   private inputDeviceId = '';
   private micMeter: MicTest | null = null;
+  private readonly pendingMicReplacements = new Map<MediaStream, () => void>();
   private micTests = new Set<MicTest>();
   private readonly micTestRequests = new Set<AbortController>();
   private testRevision = 0;
@@ -208,6 +212,12 @@ export class StageClient extends EventTarget {
     if (!Number.isInteger(timeout) || timeout < 1 || timeout > 300000) throw new RangeError('請求逾時必須是 1 到 300000 之間的整數毫秒。');
     const capacity = options.maxPendingControlRequests;
     if (capacity !== undefined && (!Number.isSafeInteger(capacity) || capacity < 1)) throw new RangeError('待回覆控制請求上限必須是正安全整數。');
+    const { initialDelayMs, maxDelayMs } = options.reconnect ?? { initialDelayMs: 500, maxDelayMs: 15000 };
+    for (const delay of [initialDelayMs, maxDelayMs]) {
+      if (!Number.isFinite(delay) || delay < 0 || delay > 2147483647) throw new RangeError('重連延遲必須是 0 到 2147483647 之間的有限毫秒數。');
+    }
+    // Retain the validated values, not a caller-owned object that could invalidate future timers.
+    this.reconnectConfig = { initialDelayMs, maxDelayMs };
     this.maxPendingControlRequests = capacity ?? Infinity;
     this.requestTimeoutMs = timeout;
     this.options = options;
@@ -263,6 +273,14 @@ export class StageClient extends EventTarget {
       const captureRevision = this.captureRevision;
       const stream = await this.acquireMic(deviceId, generation);
       let meter: MicTest | null = null;
+      let stopped = false;
+      const dispose = () => {
+        this.pendingMicReplacements.delete(stream);
+        meter?.stop();
+        meter = null;
+        if (!stopped) { stopped = true; stream.getTracks().forEach((track) => { track.enabled = false; track.stop(); }); }
+      };
+      this.pendingMicReplacements.set(stream, dispose);
       try {
         if (captureRevision !== this.captureRevision) throw new StageError('disconnected', '麥克風要求已取消。');
         if (pc !== this.pc || !this.me?.onStage) return;
@@ -270,21 +288,38 @@ export class StageClient extends EventTarget {
         if (!track) throw new StageError('media_error', '所選裝置沒有音訊軌道。');
         track.enabled = !this.me.muted;
         meter = createMicMeter(stream);
+        if (stopped || pc !== this.pc || !this.me?.onStage || captureRevision !== this.captureRevision) return;
         await transceiver.sender.replaceTrack(track);
-        if (pc !== this.pc || !this.me?.onStage || captureRevision !== this.captureRevision) return;
+        if (stopped || pc !== this.pc || !this.me?.onStage || captureRevision !== this.captureRevision) return;
         track.enabled = !this.me.muted;
         this.micMeter?.stop();
         this.mic?.getTracks().forEach((oldTrack) => oldTrack.stop());
         this.mic = stream;
         this.micMeter = meter;
+        // Ownership moved to the installed microphone before application callbacks run.
+        this.pendingMicReplacements.delete(stream);
+        meter = null;
+        stopped = true;
         this.inputDeviceId = deviceId;
         this.emit('micready', undefined);
       } finally {
-        if (this.mic !== stream) { meter?.stop(); stream.getTracks().forEach((track) => track.stop()); }
+        this.pendingMicReplacements.delete(stream);
+        if (this.mic !== stream) dispose();
       }
     });
     this.mediaTask = task.catch(() => {});
     return task;
+  }
+  /** Queue one explicit retry of failed room capture; true means admitted, not recovered audio. */
+  retryMicrophone(): boolean {
+    if (this.currentStatus !== 'live' || this.socket?.readyState !== WebSocket.OPEN
+      || !this.pc || this.pc.connectionState === 'closed' || !this.transceiver
+      || !this.me?.onStage || this.mic || !this.micFailed) return false;
+    // Reserve admission before scheduling so repeated calls cannot queue permission prompts.
+    // syncMedia retains its existing generation/revision cancellation and event-based errors.
+    this.micFailed = false;
+    this.syncMedia();
+    return true;
   }
   async startMicTest(options: MicTestOptions = {}): Promise<MicTest> {
     const signal = options.signal;
@@ -371,21 +406,30 @@ export class StageClient extends EventTarget {
       this.socket = ws;
       let ready = false;
       const timer = setTimeout(() => {
+        clearHello();
         reject(new StageError('timeout', '連線逾時，請稍後再試。'));
         this.abandonSocket(ws);
       }, this.requestTimeoutMs);
+      const wait = { cancel: () => {
+        clearTimeout(timer);
+        clearHello();
+        reject(new StageError('disconnected', '連線已中斷。'));
+      } };
+      const clearHello = () => { if (this.helloWait === wait) this.helloWait = null; };
+      this.helloWait = wait;
       ws.onmessage = (event) => {
         if (this.socket !== ws) return;
         this.lastHeardAt = performance.now();
         try {
           const message = JSON.parse(String(event.data)) as ServerMessage;
-          if (message.type === 'hello') { this.limits = message.limits; ready = true; clearTimeout(timer); this.startKeepalive(ws); resolve(); }
+          if (message.type === 'hello') { this.limits = message.limits; ready = true; clearTimeout(timer); clearHello(); this.startKeepalive(ws); resolve(); }
           void this.receive(message).catch((error: unknown) => this.report(error));
         } catch { this.report(new StageError('bad_request', '收到無法解析的伺服器訊息。')); }
       };
       ws.onerror = () => { if (!ready) reject(new StageError('disconnected', '無法連線至舞台。')); };
       ws.onclose = () => {
         clearTimeout(timer);
+        clearHello();
         if (!ready) reject(new StageError('disconnected', '連線已中斷。'));
         this.socketLost(ws);
       };
@@ -480,12 +524,22 @@ export class StageClient extends EventTarget {
     // An explicit successful join/create may replace a dropped session before its retry fires.
     clearTimeout(this.reconnectTimer);
     this.reconnectTimer = undefined;
+    this.refreshSessionCode(session, this.snapshot);
     this.session = session;
+  }
+  private refreshSessionCode(session: JoinOptions, state: RoomStatePayload | null): void {
+    // Only the controller receives the authoritative private code. Omitted fields must not erase it.
+    if (state?.roomId === session.roomId && state.me.role === 'controller' && state.codeRequired && state.code) {
+      session.code = state.code;
+    }
   }
   raiseHand(): Promise<void> {
     if (this.handCooldownMs > 0) return Promise.reject(new StageError('rate_limited', `每次舉手需間隔 ${Math.ceil(this.limits.handRaiseIntervalMs / 1000)} 秒。`));
     const capacityError = this.controlCapacityError();
     if (capacityError) return Promise.reject(capacityError);
+    // A request rejected before admission must not consume the hand interval.
+    const socket = this.socket;
+    if (!socket || socket.readyState !== WebSocket.OPEN) return Promise.reject(new StageError('disconnected', '尚未連線至舞台。'));
     this.lastHandAt = performance.now();
     return this.request('hand:raise', {});
   }
@@ -515,6 +569,8 @@ export class StageClient extends EventTarget {
     this.intentional = true;
     ++this.sessionRevision;
     this.connecting = null;
+    // An explicit cancellation must not wait for a stalled transport's close handshake.
+    this.helloWait?.cancel();
     ++this.testRevision;
     for (const request of this.micTestRequests) request.abort(new StageError('disconnected', '麥克風測試已取消。'));
     this.micTestRequests.clear();
@@ -607,15 +663,22 @@ export class StageClient extends EventTarget {
         const previousId = this.snapshot?.me.participantId;
         if (previousId !== state.me.participantId) this.lastHandAt = -Infinity;
         this.snapshot = state;
-        if (!state.me.onStage) this.micFailed = false;
-        if (this.session) this.session.resumeToken = state.resumeToken;
+        if (!state.me.onStage) { this.micFailed = false; this.stopRoomMic(); }
+        if (this.session) {
+          this.session.resumeToken = state.resumeToken;
+          this.refreshSessionCode(this.session, state);
+        }
         this.reconnectAttempt = 0;
         this.setStatus(state.status);
         // Application callbacks may disconnect, unmount the widget or install a newer snapshot.
         if (this.snapshot !== state) return;
         this.emit('state', state);
         if (this.snapshot !== state) return;
-        for (const track of this.mic?.getAudioTracks() ?? []) track.enabled = !state.me.muted;
+        const enabled = state.me.onStage && !state.me.muted;
+        for (const track of this.mic?.getAudioTracks() ?? []) track.enabled = enabled;
+        for (const stream of this.pendingMicReplacements.keys()) {
+          for (const track of stream.getAudioTracks()) track.enabled = enabled;
+        }
         // First snapshot of a (new) identity → fresh PeerConnection. A resumed seat keeps the one that
         // survived the ws drop unless the network side died meanwhile.
         const pcState = this.pc?.connectionState;
@@ -674,7 +737,7 @@ export class StageClient extends EventTarget {
     const current = () => !this.intentional && this.session === session && this.sessionRevision === revision;
     this.setStatus('reconnecting');
     if (!current()) return;
-    const config = this.options.reconnect ?? { initialDelayMs: 500, maxDelayMs: 15000 };
+    const config = this.reconnectConfig;
     const delay = Math.min(config.maxDelayMs, config.initialDelayMs * 2 ** Math.min(this.reconnectAttempt++, 20));
     const timer = setTimeout(() => {
       if (this.reconnectTimer !== timer) return;
@@ -741,11 +804,17 @@ export class StageClient extends EventTarget {
     };
     // Wait for the personalised snapshot before choosing the publishing direction.
   }
+  private stopRoomMic(): void {
+    ++this.captureRevision;
+    this.micRequest?.abort(new StageError('disconnected', '麥克風要求已取消。'));
+    this.micMeter?.stop();
+    this.micMeter = null;
+    this.mic?.getTracks().forEach((track) => { track.enabled = false; track.stop(); });
+    this.mic = null;
+    for (const dispose of this.pendingMicReplacements.values()) dispose();
+  }
   private syncMedia(): void {
-    if (!this.me?.onStage) {
-      ++this.captureRevision;
-      this.micRequest?.abort(new StageError('disconnected', '已離開舞台，麥克風要求已取消。'));
-    }
+    if (!this.me?.onStage) this.stopRoomMic();
     const generation = this.mediaAbort;
     const revision = ++this.mediaRevision;
     this.mediaTask = this.mediaTask.catch(() => {}).then(async () => {
@@ -759,8 +828,12 @@ export class StageClient extends EventTarget {
           const stream = await this.acquireMic(this.inputDeviceId, generation);
           if (pc !== this.pc || !this.me?.onStage || captureRevision !== this.captureRevision) { stream.getTracks().forEach((track) => track.stop()); return; }
           this.mic = stream;
-          try { this.micMeter = createMicMeter(stream); }
-          catch (error) { this.mic = null; stream.getTracks().forEach((track) => track.stop()); throw error; }
+          try {
+            const meter = createMicMeter(stream);
+            if (this.mic !== stream || pc !== this.pc || captureRevision !== this.captureRevision) { meter.stop(); return; }
+            this.micMeter = meter;
+          }
+          catch (error) { if (this.mic === stream) { this.mic = null; stream.getTracks().forEach((track) => track.stop()); } throw error; }
           this.emit('micready', undefined);
         } catch (error) {
           if (pc !== this.pc || !this.me?.onStage || captureRevision !== this.captureRevision || (error instanceof StageError && error.code === 'disconnected')) return;
@@ -774,13 +847,13 @@ export class StageClient extends EventTarget {
       if (pc !== this.pc) return;
       const current = this.me;
       if (!current) return;
-      if (!current.onStage) { this.micMeter?.stop(); this.micMeter = null; this.mic?.getTracks().forEach((track) => track.stop()); this.mic = null; }
+      if (!current.onStage) this.stopRoomMic();
       const track = this.mic?.getAudioTracks()[0] ?? null;
       if (track) track.enabled = !current.muted;
       const direction = current.onStage && track ? 'sendrecv' : 'recvonly';
       const changed = transceiver.direction !== direction || transceiver.sender.track !== track;
       await transceiver.sender.replaceTrack(track);
-      if (pc !== this.pc) return;
+      if (pc !== this.pc || revision !== this.mediaRevision) return;
       transceiver.direction = direction;
       if (changed || !pc.localDescription || pc.signalingState !== 'stable') this.negotiate();
     }).catch((error: unknown) => { if (generation === this.mediaAbort) this.report(error); });
@@ -841,10 +914,7 @@ export class StageClient extends EventTarget {
     this.pc = null;
     this.pcParticipantId = null;
     this.transceiver = null;
-    this.micMeter?.stop();
-    this.micMeter = null;
-    this.mic?.getTracks().forEach((track) => track.stop());
-    this.mic = null;
+    this.stopRoomMic();
     this.micFailed = false;
     this.audio.pause();
     this.audio.srcObject = null;

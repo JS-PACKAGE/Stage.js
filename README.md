@@ -40,6 +40,7 @@ git clone https://github.com/JS-PACKAGE/Stage.js.git
 cd Stage.js
 npm install
 cp config.example.yaml config.yaml
+npm run config:check
 npm run build
 npm start
 ```
@@ -53,13 +54,25 @@ npm run dev        # 伺服器（node --watch src/index.ts）
 npm run dev:web    # Vite 前端開發伺服器，/ws 代理到 127.0.0.1:9728
 ```
 
+### 啟動前檢查設定
+
+```bash
+npm run config:check                     # STAGE_CONFIG 或專案根目錄 config.yaml
+npm run config:check -- config.example.yaml # 指定檔案，覆蓋 STAGE_CONFIG
+node dist/src/check-config.js /path/to/config.yaml # 建置後也可直接執行
+```
+
+只驗證 YAML 與既有欄位／跨欄位規則，不啟動伺服器、worker 或網路連線，也不建立／改寫設定檔；不代表 TLS／靜態檔可讀、連接埠可綁定或 TURN 可達。成功 exit 0、讀取／驗證失敗 exit 1、用法錯誤 exit 2；`-h`／`--help` 顯示用法，`--` 後可指定以 `-` 開頭的檔名。明確路徑優先於 `STAGE_CONFIG`，相對路徑以目前工作目錄解析；未提供兩者時從專案根目錄找 `config.yaml`，不受目前目錄影響。沿用直接啟動的語意：空的 `STAGE_CONFIG` 不等同未設定，會指向目前目錄並讀取失敗。輸出不列出設定內容或 stack trace；共用 loader 的 YAML 診斷只保留錯誤種類與安全的行／列位置，原本僅有 warning 的 YAML 仍可通過既有 schema，但不再印出可能包含憑證的 warning／原文片段。
+
 ### 靜態資源預壓縮
 
 `npm run build` 最後以 Node 內建 zlib 為 client／web 的 HTML、JS、CSS、JSON、SVG 與 webmanifest 產生較小的 `.br`／`.gz` 副本；不壓縮圖片、已編碼檔或 symlink，壓縮後較大的副本不保留。也可在兩個 workspace 都完成建置後單獨執行 `npm run build:compress`，或 `node scripts/precompress.ts <建置目錄>`；指令會列出原始／Brotli／gzip 位元組數。
 
-伺服器依 `Accept-Encoding` 的權重與排除規則選擇可用版本（同權重優先 Brotli），附 `Vary: Accept-Encoding`、各版本獨立 ETag 與正確 Content-Length。HEAD 與 304 保持相同的編碼資訊，未預壓縮或副本比來源舊時退回原檔；用戶端明確排除所有可用版本才回 406。不會在請求期間壓縮，也不會重複壓縮 `.br`／`.gz` URL。部署時請將原檔與副本一起更新；Vite 開發模式仍維持原工作流程。
+伺服器依 `Accept-Encoding` 的權重與排除規則選擇可用版本（同權重優先 Brotli），附 `Vary: Accept-Encoding`、各版本獨立 ETag 與正確 Content-Length。HEAD 與 304 保持相同的編碼資訊，未預壓縮或副本比來源舊時退回原檔；用戶端明確排除所有可用版本才回 406。不會在請求期間壓縮，也不會重複壓縮 `.br`／`.gz` URL。ETag 使用所選版本的檔案身分、大小及奈秒修改／變更時間，避免保留大小與 mtime 的 release 檔案替換沿用舊驗證值；它仍是弱 metadata validator，不是內容雜湊。只使用 If-Modified-Since 的用戶端仍受 Last-Modified 秒級精度及保留 mtime 的限制。部署時請將原檔與副本一起更新；Vite 開發模式仍維持原工作流程。
 
 靜態掛載會同時檢查 URL 路徑與解析 symlink 後的實際路徑；原始檔或壓縮 sidecar 不可指向該掛載實際根目錄之外。仍允許根目錄內的來源檔 symlink，以及設定成 release 目錄 symlink 的掛載根；根目錄切換或稍後才完成的 build 不需重啟服務。壓縮 sidecar 本身仍須為一般檔案。這是意外／既有 symlink 越界的防護，不是對具有資產目錄寫入權者的競態安全檔案沙箱；部署時不要讓非信任程序寫入公開資產樹。
+
+自訂 prefix 掛載（例如 `/demo/`）若 `index.html` 存在且解析後是掛載內的一般檔案，請求 `/demo` 會以 308 導向 `/demo/`，保留 query；這讓 HTML 的相對資產網址從正確目錄解析。GET／HEAD 共用此規則，redirect 使用同來源相對 Location 與 `Cache-Control: no-cache`，不依賴傳入 Host 建立絕對網址。預設 `/`、一般檔案與已帶斜線網址不變；缺少或越界的 index 不會產生 redirect。壓縮與 conditional request 在後續的 canonical URL 照常處理。
 
 ### 控制腳本
 
@@ -77,6 +90,8 @@ npm run dev:web    # Vite 前端開發伺服器，/ws 代理到 127.0.0.1:9728
 `stage.sh` 的 `STAGE_STOP_TIMEOUT` 接受 0–2147483647 的非負十進位整數秒數；未設定或空值用 15，0 表示送出 SIGTERM 後不等待，若程序仍在執行即送 SIGKILL。上限採可攜的 signed 32-bit 範圍；無效值讓 `stop`／`restart` 在任何程序探測或訊號前以 exit code 1 結束，不刪除 PID 檔，也不啟動替代程序。其他指令不使用這個期限。
 
 `stage.sh` 只接受 PID 檔中的正十進位整數（1–2147483647，可含前導零與尾端換行；拒絕 NUL 等其他位元組）。內容無效或讀取失敗時，`start`／`status`／`stop`／`restart` 以 exit code 1 結束，保留檔案供檢查，不探測／發送訊號／啟動程序；有效但已不存在的 PID 仍清除，`status` 回 3、`stop` 成功返回。這只防止錯誤格式與 process-group selector，不驗證 PID 是否仍屬於原本的 Stage 程序，也不解決作業系統的 PID 重用。
+
+`stage.sh restart` 在送出 SIGTERM 前先檢查 Node 版本、已建置的 server／設定檢查器與設定語法／schema；檢查失敗時不停止目前程序。請先執行 `build`，舊版建置若沒有 `dist/src/check-config.js` 也會拒絕 restart。檢查器與 server 使用同一份已建置 schema，不改用可能較新的 source schema。原有 timeout／PID 驗證仍優先；設定準備沿用 `start`，因此缺少預設設定時仍可能先由範例建立 `config.yaml`，而 checker 本身不寫入設定。`STAGE_CONFIG` 原值會保留給 checker，relative path 從腳本所在專案目錄解析，空值仍依 server 語意驗證並失敗。通過後仍依序 stop／start，不保證零停機或啟動成功，也不預測 port、TLS／media 資源、相依套件的所有 runtime 路徑或檢查後的檔案變更。其他控制指令與 Windows 腳本維持原本行為。
 
 Windows 用 `.\stage.ps1 <command>`，指令相同；Windows 無法對背景 node 送 SIGTERM，`stop` 為直接終止。
 
@@ -113,6 +128,10 @@ RPC（SDP、ICE、統計、關閉）超過 `rtc.mediaWorkerTimeoutMs` 即拒絕�
 
 `GET /healthz` 回 `ok`（程序存活）；`GET /readyz`／`HEAD /readyz` 表示是否接收新工作，正常回 200，開始停機即回 503／`draining` 且禁止快取，並拒絕新的 WebSocket upgrade（503）。它不是媒體連線健康檢查；存活探針在排空期間仍為 200。停機會先停止既有連線的待處理／新控制工作，再發房間停機通知與關閉握手；已開始的工作不強制取消。房間／WebSocket 清理完成後，HTTP listener 停止接收連線，既有回應最多等待 `server.httpShutdownDrainMs`（預設 1000ms，整數 0–60000，0 表示立即切斷）；逾時會關閉尚未完成的 HTTP socket，避免慢速下載或卡住的 metrics 回應阻止退出。這只限制最後 HTTP 網路排空階段，不是整體停機期限，也不取消底層統計收集 promise。`GET /metrics` 回 Prometheus 文字格式（`Authorization: Bearer <server.metrics.token>`），包含房間／連線／發言者數、上下行封包與補幀數、DTX 省略幀、全房無聲時跳過編碼的幀數（`opus.dtx` 開啟且台上全員靜音、沒有上行或持續全零 PCM 超過 1 秒時，混音不再編碼、直接以 DTX 處理）、low tier 聽眾數、codec backlog 與丟幀、mixer underrun／漂移丟幀／tick 延遲、event loop delay 與記憶體。同一伺服器上重疊的已授權 scrape 共用尚未完成的統計收集，避免重複掃描房間與查詢 worker；收集完成或失敗立即釋放，下一次請求重新取樣，不保留過期快取。
 
+統計收集失敗回空白 500，不把診斷內容傳給 HTTP 呼叫端；provider 拋出或拒絕的值直接交給既有結構化 logger 處理，不先執行其字串轉換，因此 null-prototype 物件或自訂轉換失敗也不會阻斷這個錯誤回應。這不保證任意自訂 logger／sink 本身不會拋錯，也不是統計收集的執行期限。
+
+CLI 停機依序嘗試 server 與 media transport 清理；任何一段同步拋錯或 promise 拒絕，都會記錄該段錯誤並繼續下一段，最後以非零狀態退出。正常 SIGINT／SIGTERM 完成時為 0；停機途中發生 uncaught exception 會升級為 1，後續一般訊號不會降回 0，既有非零退出意圖也不被覆寫。重複通知不重複清理。這不新增整體停機期限，亦不保證未 settle 的底層 close promise 能自行結束。
+
 ### 輸入工作佇列
 
 `limits.maxPendingMessages`（預設 128）與 `limits.maxPendingBytes`（範例 1 MiB；舊設定為 `maxFrameBytes × 16`）限制每條 WebSocket 等待處理的工作，以訊息數與 JSON UTF-8 位元組分別計算。正在執行的一筆不計入等待上限，仍受單幀上限限制。超過任一上限立即終止該連線並清除等待工作，沿用非主動離開的席位寬限；實際 socket 關閉時立即解除既有連線綁定並依房間佇列標記離線，讓卡住的 SDP 不阻擋同席回座。一般斷線也丟棄尚未開始的工作；已開始的工作不強制取消，完成後再次清理可能遲到的 join 綁定，不會移除已回座的新連線。席位寬限從這次離線處理開始，不等待 SDP 完成。Prometheus `stage_ws_inbound_queue_disconnects_total` 記錄超限次數。正常順序與每秒頻率限制不變。`node scripts/bench-ws-inbound.ts` 比較 gated 工作下舊 promise chain 與有界佇列的待處理筆數／payload 位元組及斷線後執行數；這不是 RSS 或延遲 benchmark。
@@ -140,7 +159,7 @@ JSON frame，型別定義在 [`shared/protocol.ts`](shared/protocol.ts)。每個
 | `room:close` | 主控關房 |
 | `participant:kick {targetId}` | 主控把人踢出房間（對方收到 `kicked` 後連線被關閉、不會自動重連）；要防止對方再進來，接著更換代碼 |
 | `mic:gain {targetId, gainDb}` | 主控調整某人在混音中的音量（±20 dB，0＝不調整；疊加在自動音量正規化之上），離開舞台後再上台仍保留；所有人在 `room:state` 的 `gainDb` 看到 |
-| `room:rotate-code` | 主控更換房間代碼（限需代碼的房間）；舊代碼／邀請連結立即失效，已在房內的人不受影響 |
+| `room:rotate-code` | 主控更換房間代碼（限需代碼的房間）；舊代碼／邀請連結立即失效，既有連線保留。重連仍驗證代碼；主控 SDK 更新已收到的新代碼，其他成員未取得新代碼時無法以舊代碼重連 |
 | `rtc:offer`／`rtc:ice {payload}` | WebRTC 信令（一律由 client 發 offer） |
 | `ping` | 回 `pong` |
 
@@ -158,6 +177,8 @@ JSON frame，型別定義在 [`shared/protocol.ts`](shared/protocol.ts)。每個
 | `status` | `waiting`／`live` |
 
 連線品質收集每房間同時最多一輪；完成後再等待 `qualityIntervalMs` 啟動下一輪。個別 publisher 統計失敗只略過該人的本輪資料，其他人的回報照常；全部失敗時不送空報告，但下一輪仍會重試。失敗不會被當作 0% 掉包，恢復後上行差量從上次成功樣本計算。關房或最後一位停止發布後不再排程；離台再發布的舊統計結果會被忽略。
+
+`limits.joinTimeoutMs`、`rooms.controllerGraceMs`、`rooms.participantGraceMs` 的範圍為 0～2147483647 ms；`rooms.heartbeatIntervalMs` 為 1000～2147483647 ms。上限包含 2147483647（約 24.9 天）；更大的值以前會被 Node timer 正規化成約 1 ms，現在啟動與離線 `config:check` 會拒絕該設定。0 的既有語意不變：join deadline 停用、participant 立即移除、controller 立即排程到期。這不限制只做經過時間比較的 `handRaiseIntervalMs`。
 
 範例設定的限制：frame ≤ 64KB，超過以 close code 1009 斷線；控制訊息 ≤ 20/s、`rtc:ice` ≤ 30/s，超過頻率上限以 close code 1008 斷線。房間不存在或代碼錯誤一律回 `unauthorized`。名稱以 HTML 轉義形式傳送。client 以 close code 1000 關閉＝主動離開（立即移出房間）；其他關閉碼或斷線＝保留席位至寬限期結束（主控一律保留 `controllerGraceMs`）。
 
@@ -199,19 +220,27 @@ JSON frame，型別定義在 [`shared/protocol.ts`](shared/protocol.ts)。每個
 
 本機收聽可用 `setPlaybackVolume(0.5)`／`setPlaybackMuted(true)` 調整，`playbackVolume`／`playbackMuted` 即時讀取；不影響麥克風或其他人，重連時保留。範例前端的「音訊設定」也提供音量與靜音收聽控制。
 
+範例會在本機瀏覽器記住你明確調整的收聽音量與收聽靜音，下次載入先套用，再加入房間。只使用同 origin 的 `stage-playback` localStorage 記錄（version 1、音量 0–1、boolean 靜音）；缺少、無效、超過 128 字元或讀取失敗時保留預設音量 100%／未靜音；寫入失敗仍會套用當次調整，只是不保證下次還原。音量 0 與靜音各自獨立；麥克風、裝置、房間與帳號資料不儲存在此記錄，沒有跨分頁同步。清除該網站的儲存資料即可回到預設。
+
+麥克風音量表只在本機測試或台上未靜音時每 50ms 更新；自身／主控靜音後立即歸零並停止輪詢，解除後恢復。收聽靜音不影響麥克風音量表，房間的 2 秒連線統計排程也不變。
+
+範例的「點擊啟用音訊」結果綁定當次房間身分；離房會暫停音訊，尚未完成的播放可能因此拒絕，但舊操作不會把這類錯誤顯示到入口／新房。當前房間的失敗仍可重試；SDK 的 `unlockAudio()` promise 與瀏覽器自動播放政策不變。
+
 範例的邀請連結複製提示只接受最新一次操作，且房間身分與目前連結仍須相符；離房／換碼後的晚到結果不會覆寫新通知。快照重繪未改變連結時，複製失敗會選取目前畫面上的連結供手動複製。這只隔離提示與選取行為，不能取消或還原已交給瀏覽器的剪貼簿寫入。
 
-音訊裝置清單只套用最新一次列舉結果，避免啟動、麥克風就緒與裝置變更的舊回覆蓋掉新清單；列舉失敗時保留已顯示內容，之後成功更新仍可恢復。
+音訊裝置清單只套用最新一次列舉結果，避免啟動、麥克風就緒與裝置變更的舊回覆蓋掉新清單；列舉失敗時保留已顯示內容，之後成功更新仍可恢復。已選擇的麥克風／揚聲器若不在最新清單，選單保留「已選擇的裝置（目前未列出）」提示，不自動切換硬體或假裝使用系統預設；同一裝置再次列出時恢復正常名稱，也可自行選擇其他裝置或系統預設。未列出可能與瀏覽器授權或裝置可見性有關，不代表已確認硬體故障；提示不顯示原始 device ID。
 
 發言中標示依目前渲染的參與者索引更新，只切換有變化的列；同人出現在舉手與觀眾名單時會一併更新，重繪／離房不保留舊列。
 
-範例前端的建立／加入房間表單共用一個等待鎖；任一請求進行中，兩個提交按鈕一起停用並標示 `aria-busy`，鍵盤提交也不會重複送出，完成或失敗後恢復。
+範例前端的建立／加入房間表單共用一個等待鎖；任一請求進行中，兩個提交按鈕一起停用並標示 `aria-busy`，鍵盤提交也不會重複送出，完成或失敗後恢復。 尚未收到房間狀態時可按「取消連線」，透過 SDK `disconnect()` 結束本機等待；這次取消的建立／加入錯誤不顯示，原請求結束後才能重新提交。收到房間狀態後不再提供取消，請使用房內的離開控制；取消不保證回滾伺服器已接受的操作。
 
-範例前端的個人靜音、上下台、舉手與主控管理按鈕，在等待回覆期間保留停用狀態與 `aria-busy`，不會因冷卻 tick 或房間快照重繪而再次送出。離房／切換身分會清除舊 pending 狀態，舊完成事件不會解鎖新房操作；核准／婉拒／移出舞台共用每人的 pending key，強制靜音與解除亦共用；控制權移交在全列表保留單一 pending，換碼與關房也受保護。舊房間換碼完成不會覆寫新房通知。音量 slider 不在這個按鈕保護範圍，仍逐次送出放開時的值；離房後才完成的舊 gain 請求不再顯示錯誤到入口／新房，當前房間的失敗仍正常顯示。 舉手倒數只在畫面可見且尚未歸零時排程下一個顯示秒數邊界；沒有倒數時不執行冷卻輪詢，房內連線統計仍每 2 秒更新；只有目前房間最新一次請求可更新顯示，舊輪詢／離房前的延遲結果不會清空新資訊。
+範例前端的個人靜音、上下台、舉手與主控管理按鈕，在等待回覆期間保留停用狀態與 `aria-busy`，不會因冷卻 tick 或房間快照重繪而再次送出。離房／切換身分會清除舊 pending 狀態，舊完成事件不會解鎖新房操作；核准／婉拒／移出舞台共用每人的 pending key，強制靜音與解除亦共用；控制權移交在全列表保留單一 pending，換碼與關房也受保護。舊房間換碼完成不會覆寫新房通知。主控調整講者的音量 slider 在重連期間停用，恢復房間狀態後重新開放；事件 handler 也拒絕重連中的程式化 change。本機收聽音量與靜音仍可操作。gain 不套用 pending 按鈕鎖，連線正常時仍逐次送出放開時的值；離房後才完成的舊 gain 請求不再顯示錯誤到入口／新房，當前房間的失敗仍正常顯示。 舉手倒數只在畫面可見且尚未歸零時排程下一個顯示秒數邊界；沒有倒數時不執行冷卻輪詢，房內連線統計仍每 2 秒更新；只有目前房間最新一次請求可更新顯示，舊輪詢／離房前的延遲結果不會清空新資訊。
 
-範例的麥克風測試與輸入裝置切換共用操作鎖，避免切換途中重複啟動預覽。離房後的晚到預覽只會停止自己的串流，不會覆寫新預覽或解鎖新的操作；SDK 仍允許呼叫端各自管理獨立預覽。
+範例在台上的麥克風擷取失敗提示旁提供「重試麥克風」；修正權限或裝置後明確點擊才提出重試，不必先放棄台位。已接納的要求顯示等待擷取結果並保持 `aria-busy`／停用，普通快照重畫不會重複要求；失敗後可再次手動重試，信令重連時暫停新的操作。取得麥克風事件只清除擷取提示，不代表協商或聲音傳送成功；下台／離房／換身分清除舊 UI 工作，本機收聽與既有靜音政策不變。
 
-完整 API 見 [`packages/client/README.md`](packages/client/README.md)；`web/embed.html` 是最小嵌入範例。
+範例的麥克風測試與輸入裝置切換共用操作鎖，避免切換途中重複啟動預覽。 等待預覽權限時可按「取消麥克風測試」，原預覽請求結束後即可重試，不需離房且不停止房內麥克風或收聽。此控制也適用於裝置切換後重新擷取預覽，但不取消 `setInputDevice()` 本身；上台或離房會取消尚未完成的預覽。取消無法自動關閉瀏覽器權限提示，稍後允許的串流會由 SDK 停止。離房後的晚到預覽只會停止自己的串流，不會覆寫新預覽或解鎖新的操作；SDK 仍允許呼叫端各自管理獨立預覽。
+
+完整 API 見 [`packages/client/README.md`](packages/client/README.md)；`web/embed.html` 是最小嵌入範例。初次加入會顯示載入元件、連線、加入房間的進度，submit 按鈕以 `aria-busy` 標示等待；房間快照與當前錯誤優先，不必等 ACK 才顯示已進場。初次加入尚未收到 ACK 時若已收到房間狀態並選擇離開，晚到的加入失敗不會覆蓋離開提示；關房／被踢與新一輪加入亦撤銷舊 attempt 的回報及解鎖權限，當前加入失敗仍正常顯示。其舉手／收回按鈕只供台下非主控使用；若自動繼任的主控仍在台下，也不會開放無效的舉手操作，並取消原有倒數。按鈕在待回覆期間保持停用並標示 `aria-busy`，狀態更新或冷卻計時不會提早解鎖；完成後重新套用目前角色、重連與冷卻限制。只有畫面顯示舉手冷卻倒數時才排程下一個整秒邊界，閒置不持續輪詢按鈕。完整範例與 Web Component 也會在同席重連的 `hello.limits` 改變時提前新的冷卻邊界，避免沿用較晚的舊 timer。手動啟用音訊的晚到失敗只回報到原連線生命週期，離房／關房／被踢的提示不會被取消播放的錯誤覆蓋；當前啟用失敗仍可重試。
 
 ## 測試與驗證
 

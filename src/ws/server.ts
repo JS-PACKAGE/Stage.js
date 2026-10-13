@@ -85,7 +85,7 @@ export function createStageServer(deps: StageServerDeps): StageServer {
           { name: 'stage_ws_backpressure_disconnects_total', help: 'WebSocket connections terminated for exceeding the outbound buffer limit.', type: 'counter', value: backpressureDisconnects },
           { name: 'stage_ws_inbound_queue_disconnects_total', help: 'WebSocket connections terminated for exceeding the waiting input backlog.', type: 'counter', value: inboundQueueDisconnects },
         ])),
-        (err) => { log.error('metrics error', { error: String(err) }); res.writeHead(500).end(); },
+        (err) => { log.error('metrics error', { error: err }); res.writeHead(500).end(); },
       );
       return;
     }

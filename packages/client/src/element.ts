@@ -13,6 +13,9 @@ const STYLE = `
 [part=status] { margin: 0; }
 [part=error] { margin: 0; color: var(--stage-error, #dc2626); }
 [part=actions] { display: flex; flex-wrap: wrap; gap: .5rem; }
+[part=playback] { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; }
+[part=playback][hidden] { display: none; }
+input[type=range] { flex: 1; min-width: 5rem; max-width: 12rem; }
 button { font: inherit; padding: .4rem .8rem; border-radius: var(--stage-radius, .5rem); border: 1px solid var(--stage-border, #8884); background: var(--stage-button-bg, #fff1); color: inherit; cursor: pointer; }
 button[hidden] { display: none; }
 button:disabled { opacity: .5; cursor: default; }
@@ -28,7 +31,7 @@ button.primary { background: var(--stage-accent, #2563eb); border-color: transpa
  * offer. `playback-muted` / `.playbackMuted` and `playback-volume` / `.playbackVolume`
  * control local listening without rejoining,
  * and every client event is re-dispatched from the element as `stage-<type>` (bubbling,
- * composed) with the same `detail`. Style through `::part(panel|status|actions)` and the
+ * composed) with the same `detail`. Style through `::part(panel|status|actions|playback)` and the
  * `--stage-*` custom properties.
  */
 export class StageElement extends HTMLElement {
@@ -42,10 +45,19 @@ export class StageElement extends HTMLElement {
   private readonly mic: HTMLButtonElement;
   private readonly leaveStage: HTMLButtonElement;
   private readonly listen: HTMLButtonElement;
+  private readonly playback: HTMLDivElement;
+  private readonly volume: HTMLInputElement;
+  private readonly volumeValue: HTMLSpanElement;
+  private readonly retry: HTMLButtonElement;
+  private readonly cancelJoin: HTMLButtonElement;
+  private cancelInitial: (() => Promise<void> | void) | undefined;
+  private retryAvailable = false;
   private readonly pendingActions = new Set<HTMLButtonElement>();
   private cooldownTimer: ReturnType<typeof setTimeout> | undefined;
+  private cooldownDue = 0;
   /** Bumped on every (re)join, so a superseded join cannot touch the widget. */
   private generation = 0;
+  private joinPhase: 'connecting' | 'joining' | undefined;
 
   constructor() {
     super();
@@ -75,8 +87,27 @@ export class StageElement extends HTMLElement {
     this.leaveStage = this.button('離開舞台', () => this.current?.leaveStage());
     this.listen = this.button('靜音收聽', () => { this.playbackMuted = !this.playbackMuted; });
     this.listen.setAttribute('aria-label', '靜音收聽');
-    actions.append(this.unlock, this.listen, this.hand, this.mic, this.leaveStage);
-    panel.append(this.status, this.error, actions);
+    this.playback = document.createElement('div');
+    this.playback.part.add('playback');
+    const volumeLabel = document.createElement('label');
+    volumeLabel.textContent = '收聽音量';
+    volumeLabel.setAttribute('for', 'playback-volume');
+    this.volume = document.createElement('input');
+    this.volume.id = 'playback-volume'; this.volume.type = 'range';
+    this.volume.min = '0'; this.volume.max = '100'; this.volume.step = '1';
+    this.volumeValue = document.createElement('span');
+    this.volumeValue.setAttribute('aria-hidden', 'true');
+    this.volume.oninput = () => {
+      if (!this.isConnected || !this.current?.me || this.volume.disabled) return;
+      const value = this.volume.value.trim() ? Number(this.volume.value) : NaN;
+      if (Number.isFinite(value) && value >= 0 && value <= 100) this.playbackVolume = value / 100;
+      this.renderVolume();
+    };
+    this.playback.append(volumeLabel, this.volume, this.volumeValue);
+    this.retry = this.button('重試加入', () => { if (this.canRetry()) this.rejoin(); });
+    this.cancelJoin = this.button('取消加入', () => this.cancelInitial?.());
+    actions.append(this.unlock, this.listen, this.hand, this.mic, this.leaveStage, this.retry, this.cancelJoin);
+    panel.append(this.status, this.error, actions, this.playback);
     root.append(style, panel);
     this.render();
   }
@@ -103,7 +134,7 @@ export class StageElement extends HTMLElement {
   disconnectedCallback(): void { ++this.generation; void this.leave(); }
   attributeChangedCallback(name: string, previous: string | null, next: string | null): void {
     if (previous === next) return;
-    if (name === 'playback-volume') { this.current?.setPlaybackVolume(this.playbackVolume); return; }
+    if (name === 'playback-volume') { this.current?.setPlaybackVolume(this.playbackVolume); this.renderVolume(); return; }
     if (name === 'playback-muted') { this.current?.setPlaybackMuted(this.playbackMuted); this.render(); return; }
     if (this.isConnected) this.rejoin();
   }
@@ -146,11 +177,34 @@ export class StageElement extends HTMLElement {
       client.setPlaybackMuted(this.playbackMuted);
       client.setPlaybackVolume(this.playbackVolume);
       this.current = client;
+      this.joinPhase = 'connecting';
+      let receivedState = false;
+      let terminal = false;
+      let cancelled = false;
+      this.cancelInitial = () => {
+        if (generation !== this.generation || this.current !== client || !this.isConnected
+          || !this.joinPhase || receivedState || terminal || client.state || client.status === 'reconnecting') return;
+        cancelled = true;
+        this.hideCancel();
+        this.joinPhase = undefined;
+        this.retryAvailable = true;
+        this.status.textContent = '已取消加入。';
+        this.render();
+        return client.disconnect();
+      };
       for (const type of EVENTS) {
         client.on(type, ({ detail }) => {
           if (generation !== this.generation || this.current !== client) return;
+          // SDK status precedes state; a forwarded status listener may disconnect immediately.
+          if (type === 'state' || client.state) { receivedState = true; this.hideRetry(); this.hideCancel(); }
+          if (type === 'closed' || type === 'kicked') { terminal = true; this.hideRetry(); this.hideCancel(); }
+          if (type === 'state' || type === 'closed' || type === 'kicked'
+            || (type === 'status' && detail === 'disconnected')) this.joinPhase = undefined;
           if (type === 'audioblocked') this.unlock.hidden = false;
-          if (type === 'status' && detail === 'disconnected') this.status.textContent = STATUS_LABELS.disconnected;
+          if (type === 'status' && detail === 'disconnected') {
+            this.hideCancel();
+            this.status.textContent = cancelled && !receivedState && !terminal ? '已取消加入。' : STATUS_LABELS.disconnected;
+          }
           if (type === 'closed') this.status.textContent = (detail as StageEventMap['closed']).reason === 'shutdown'
             ? '伺服器維護或重新啟動，房間已關閉。' : '房間已關閉。';
           if (type === 'kicked') this.status.textContent = '你已被主控移出房間。';
@@ -163,25 +217,68 @@ export class StageElement extends HTMLElement {
       this.render();
       try {
         await client.connect();
-        if (generation !== this.generation || this.current !== client || !this.isConnected) return;
+        if (generation !== this.generation || this.current !== client || !this.isConnected || cancelled) return;
+        if (this.joinPhase === 'connecting') this.joinPhase = 'joining';
+        this.render();
         const code = this.getAttribute('code')?.trim();
         await client.join({ roomId: room, name, ...(code ? { code } : {}) });
       } catch (error) {
-        if (generation === this.generation) this.show(error);
+        if (generation === this.generation && this.current === client && !cancelled) {
+          // A terminal room event or an accepted snapshot must never become a fresh-join prompt.
+          this.retryAvailable = !receivedState && !terminal && !client.state;
+          this.show(error);
+          this.render();
+        }
+      } finally {
+        if (generation === this.generation && this.current === client) this.hideCancel();
+        // A snapshot or terminal event can already have replaced the progress message.
+        if (generation === this.generation && this.current === client && this.joinPhase) {
+          this.joinPhase = undefined;
+          if (!client.state) this.status.textContent = STATUS_LABELS[client.status];
+          this.render();
+        }
       }
     });
   }
 
   private async leave(): Promise<void> {
+    this.joinPhase = undefined;
+    this.hideCancel();
+    this.hideRetry();
     for (const button of this.pendingActions) button.removeAttribute('aria-busy');
     this.pendingActions.clear();
     clearTimeout(this.cooldownTimer);
-    this.cooldownTimer = undefined;
+    this.cooldownTimer = undefined; this.cooldownDue = 0;
     const client = this.current;
     this.current = null;
     this.unlock.hidden = true;
     this.render();
     await client?.disconnect();
+  }
+
+  private hideCancel(): void {
+    this.cancelInitial = undefined;
+    this.cancelJoin.hidden = true;
+    this.cancelJoin.disabled = true;
+  }
+
+  private hideRetry(): void {
+    this.retryAvailable = false;
+    // Revoke native click admission before forwarding events that can synchronously invoke it.
+    this.retry.hidden = true;
+    this.retry.disabled = true;
+  }
+
+  private canRetry(): boolean {
+    return this.isConnected && Boolean(this.current) && this.retryAvailable && !this.joinPhase
+      && !this.current?.state && this.current?.status !== 'reconnecting';
+  }
+
+  private renderVolume(): void {
+    const percent = Math.round(this.playbackVolume * 100);
+    this.volume.value = String(percent);
+    this.volume.setAttribute('aria-valuetext', `${percent}%`);
+    this.volumeValue.textContent = `${percent}%`;
   }
 
   private wsUrl(): string {
@@ -204,14 +301,19 @@ export class StageElement extends HTMLElement {
   private scheduleCooldown(active: boolean, remaining: number): void {
     if (!active) {
       clearTimeout(this.cooldownTimer);
-      this.cooldownTimer = undefined;
-    } else if (this.cooldownTimer === undefined) {
-      // Wake at the next displayed-second boundary (or expiry), never postpone an existing wake.
+      this.cooldownTimer = undefined; this.cooldownDue = 0;
+    } else {
+      // A changed hello limit may move the next boundary earlier; never postpone an existing wake.
       const delay = Math.max(1, Math.ceil(remaining - (Math.ceil(remaining / 1000) - 1) * 1000));
-      this.cooldownTimer = setTimeout(() => {
-        this.cooldownTimer = undefined;
+      const due = performance.now() + delay;
+      if (this.cooldownTimer !== undefined && this.cooldownDue <= due) return;
+      clearTimeout(this.cooldownTimer);
+      const timer = setTimeout(() => {
+        if (this.cooldownTimer !== timer) return;
+        this.cooldownTimer = undefined; this.cooldownDue = 0;
         this.render();
       }, delay);
+      this.cooldownTimer = timer; this.cooldownDue = due;
     }
   }
 
@@ -220,11 +322,22 @@ export class StageElement extends HTMLElement {
     const me = client?.me ?? null;
     const state = client?.state ?? null;
     if (state && me) {
-      const where = me.onStage ? (me.muted ? '台上（已靜音）' : '台上') : me.handRaised ? '已舉手' : '收聽中';
+      const handIndex = !me.onStage && me.role !== 'controller' && me.handRaised
+        ? state.hands.findIndex(person => person.participantId === me.participantId) : -1;
+      const raised = handIndex < 0 ? '已舉手'
+        : `已舉手（${client!.status === 'reconnecting' ? '上次' : ''}佇列第 ${handIndex + 1} 位）`;
+      const where = me.onStage ? (me.muted ? '台上（已靜音）' : '台上') : me.handRaised ? raised : '收聽中';
       this.status.textContent = `${decodeName(state.name)} · ${STATUS_LABELS[client!.status]} · ${where}`;
+    } else if (this.joinPhase) {
+      this.status.textContent = this.joinPhase === 'connecting' ? '連線中…' : '正在加入房間…';
     } else if (!client) {
       this.status.textContent = this.getAttribute('room') && this.getAttribute('name') ? '' : '請設定 room 與 name 屬性。';
     }
+    const reconnecting = client?.status === 'reconnecting';
+    this.cancelJoin.hidden = !this.cancelInitial || !this.joinPhase || Boolean(state) || Boolean(reconnecting);
+    this.cancelJoin.disabled = this.cancelJoin.hidden || this.pendingActions.has(this.cancelJoin);
+    this.retry.hidden = !this.canRetry();
+    this.retry.disabled = this.retry.hidden || this.pendingActions.has(this.retry);
     const audience = Boolean(me && !me.onStage && me.role !== 'controller');
     const remaining = client?.handCooldownMs ?? 0;
     const cooldown = Math.ceil(remaining / 1000);
@@ -234,14 +347,17 @@ export class StageElement extends HTMLElement {
     this.listen.disabled = !client || this.pendingActions.has(this.listen);
     this.listen.textContent = this.playbackMuted ? '恢復收聽' : '靜音收聽';
     this.listen.setAttribute('aria-pressed', String(this.playbackMuted));
+    this.playback.hidden = !me;
+    this.volume.disabled = !client || !me;
+    this.renderVolume();
     this.unlock.disabled = this.pendingActions.has(this.unlock);
-    this.hand.disabled = this.pendingActions.has(this.hand) || !me || (!me.handRaised && cooldown > 0);
+    this.hand.disabled = reconnecting || this.pendingActions.has(this.hand) || !me || (!me.handRaised && cooldown > 0);
     this.hand.textContent = me?.handRaised ? '收回舉手' : cooldown > 0 ? `舉手發言（${cooldown} 秒）` : '舉手發言';
     this.mic.hidden = this.leaveStage.hidden = !me?.onStage;
-    this.mic.disabled = this.pendingActions.has(this.mic) || Boolean(me?.forceMuted);
+    this.mic.disabled = reconnecting || this.pendingActions.has(this.mic) || Boolean(me?.forceMuted);
     this.mic.textContent = me?.muted ? '取消靜音' : '靜音';
     this.mic.setAttribute('aria-pressed', String(Boolean(me?.muted)));
-    this.leaveStage.disabled = this.pendingActions.has(this.leaveStage);
+    this.leaveStage.disabled = reconnecting || this.pendingActions.has(this.leaveStage);
   }
 }
 
