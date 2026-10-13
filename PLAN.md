@@ -506,3 +506,6 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 
 
 107. **主控 gain slider 的重連限制（2026-10-13）：** whole-module sample＋actual SDK／fake socket probe 重現 retained room 在 reconnecting 時 slider 仍可操作：沒有 open socket 會產生離線錯誤，replacement socket OPEN 但 hello 尚未完成時會送出 mic:gain。將 slider 加入既有 data-room-action 同步停用路徑，採獨立 gain:<participantId> key，不建立 pending lock；change handler 同時檢查 disabled 與 reconnecting，避免程式化事件繞過 UI。state/status 重畫沿用現有恢復規則，已送出的請求照常 settle，多人與同人的並行 gain、目前房間錯誤、離房錯誤歸屬不變；本機 playback controls 不受影響。不修改 SDK admission／server policy，不宣稱 native browser、真實網路或音訊驗證。
+
+
+108. **最小嵌入範例的加入回報歸屬（2026-10-13）：** whole-module VM＋actual StageClient／fake socket 重現 state-before-ACK 開放 Leave 後，正常 Leave 使 disconnect 拒絕 pending join，舊 catch 覆寫「已離開。」為離線錯誤。新增 entry generation：submit／Leave／目前 client terminal 撤銷先前初次加入的 continuation、catch 與 finally；離開／terminal 立即釋放舊 submit lock，新 attempt 的 pending 不受舊 finally 影響。disconnect／動態 import／connect 每個 await 後檢查 owner，使用 captured client 執行 connect/join；Leave 的完成提示也檢查 generation/client，避免重入新加入後舊提示覆寫。保留目前加入／一般 SDK error 回報、現有表單及播放／舉手政策，不新增 retry/progress UI，不取消已發出的 server 操作。terminal-before-ACK 是防禦性排序測試：目前 Hub 同步發 state 再 ACK，同一 socket 後續 terminal 通常排在 ACK 之後；不宣稱另有已證實的 server terminal 競爭。測試沒有真實瀏覽器、動態遠端模組載入或音訊驗證。

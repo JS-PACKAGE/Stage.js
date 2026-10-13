@@ -6,6 +6,7 @@ function input(id: string): HTMLInputElement {
 }
 const status = document.querySelector<HTMLParagraphElement>('#status')!;
 const join = document.querySelector<HTMLFormElement>('#join')!;
+const submit = join.querySelector<HTMLButtonElement>('button')!;
 const hand = document.querySelector<HTMLButtonElement>('#hand')!;
 const leave = document.querySelector<HTMLButtonElement>('#leave')!;
 const audio = document.querySelector<HTMLAudioElement>('#audio')!;
@@ -16,6 +17,9 @@ input('code').value = params.get('code') ?? '';
 let client: Client | null = null;
 let pendingHand: { client: Client } | undefined;
 let playbackGeneration = 0;
+let entryGeneration = 0;
+/** Retire initial-join feedback before user or terminal callbacks can start another entry. */
+function retireEntry(): number { submit.disabled = false; return ++entryGeneration; }
 let handTimer: ReturnType<typeof setTimeout> | undefined;
 let handTimerDue = 0;
 function syncHand(): void {
@@ -48,7 +52,7 @@ function report(error: unknown): void { status.textContent = error instanceof Er
 join.onsubmit = (event) => {
   event.preventDefault();
   playbackGeneration++; scheduleHandCooldown(0);
-  const submit = join.querySelector<HTMLButtonElement>('button')!;
+  const generation = ++entryGeneration;
   submit.disabled = true;
   void (async () => {
     try {
@@ -56,11 +60,13 @@ join.onsubmit = (event) => {
       hand.setAttribute('aria-busy', 'false');
       hand.disabled = leave.disabled = true;
       await client?.disconnect();
+      if (generation !== entryGeneration) return;
       const host = new URL(input('host').value);
       if (!['https:', 'http:'].includes(host.protocol)) throw new Error('請輸入 HTTP 或 HTTPS 主機網址。');
       const moduleUrl = new URL('/lib/stage-client.js', host).href;
       // The host is selected by this page's visitor, not known at build time.
       const library: typeof StageLibrary = await import(/* @vite-ignore */ moduleUrl);
+      if (generation !== entryGeneration) return;
       const ws = new URL('/ws', host); ws.protocol = host.protocol === 'https:' ? 'wss:' : 'ws:';
       client = new library.StageClient({ url: ws.href, audioElement: audio });
       const current = client;
@@ -79,12 +85,13 @@ join.onsubmit = (event) => {
       });
       client.on('error', ({ detail }) => report(detail));
       client.on('audioblocked', () => { status.textContent = '請點擊啟用音訊。'; });
-      client.on('closed', () => { if (client !== current) return; playbackGeneration++; pendingHand = undefined; syncHand(); status.textContent = '房間已關閉。'; hand.disabled = leave.disabled = true; });
-      client.on('kicked', () => { if (client !== current) return; playbackGeneration++; pendingHand = undefined; syncHand(); status.textContent = '你已被主控移出房間。'; hand.disabled = leave.disabled = true; });
-      await client.connect();
-      await client.join({ roomId: input('room').value.trim(), code: input('code').value.trim() || undefined, name: input('name').value.trim() });
-    } catch (error) { report(error); }
-    finally { submit.disabled = false; }
+      client.on('closed', () => { if (client !== current) return; retireEntry(); playbackGeneration++; pendingHand = undefined; syncHand(); status.textContent = '房間已關閉。'; hand.disabled = leave.disabled = true; });
+      client.on('kicked', () => { if (client !== current) return; retireEntry(); playbackGeneration++; pendingHand = undefined; syncHand(); status.textContent = '你已被主控移出房間。'; hand.disabled = leave.disabled = true; });
+      await current.connect();
+      if (generation !== entryGeneration) return;
+      await current.join({ roomId: input('room').value.trim(), code: input('code').value.trim() || undefined, name: input('name').value.trim() });
+    } catch (error) { if (generation === entryGeneration) report(error); }
+    finally { if (generation === entryGeneration) submit.disabled = false; }
   })();
 };
 document.querySelector<HTMLButtonElement>('#unlock')!.onclick = () => {
@@ -113,8 +120,12 @@ hand.onclick = () => {
   })();
 };
 leave.onclick = () => {
+  const generation = retireEntry(), current = client;
   playbackGeneration++; scheduleHandCooldown(0);
   pendingHand = undefined; hand.setAttribute('aria-busy', 'false');
-  void client?.disconnect().then(() => { status.textContent = '已離開。'; hand.disabled = leave.disabled = true; });
+  void current?.disconnect().then(() => {
+    if (generation !== entryGeneration || client !== current) return;
+    status.textContent = '已離開。'; hand.disabled = leave.disabled = true;
+  });
 };
 syncHand();
