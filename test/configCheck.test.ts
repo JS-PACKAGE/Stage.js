@@ -219,6 +219,21 @@ describe('offline configuration checker', () => {
         }
       });
 
+      it('rejects nonliteral HTTP WebSocket paths offline without reflecting their values', () => {
+        for (const wsPath of [`/ws?token=${SECRET}`, `/ws#${SECRET}`, `/${SECRET}/../ws`, `/ws\\${SECRET}`]) {
+          const path = writeFixture(fixtureText(config => { config.server.wsPath = wsPath; }));
+          const result = run(layout, [path]);
+          assertInvalid(result, /server\.wsPath:/);
+          assert.equal(result.stderr, 'config error: server.wsPath: must be a literal HTTP URL pathname without query, fragment or normalization\n');
+        }
+      });
+
+      it('preserves unusual but representable WebSocket paths in offline checks', () => {
+        for (const wsPath of ['/', '//other/ws', '///other/ws', '/%2F/%zz/%E8%AA%9E/%20ws']) {
+          assertValid(run(layout, [writeFixture(fixtureText(config => { config.server.wsPath = wsPath; }))]));
+        }
+      });
+
       it('keeps warning-only YAML accepted while suppressing all parser and conversion warnings', () => {
         const text = fixtureText();
         const warnings = [

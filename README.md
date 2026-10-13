@@ -120,6 +120,10 @@ Windows 用 `.\stage.ps1 <command>`，指令相同；Windows 無法對背景 nod
 
 RPC（SDP、ICE、統計、關閉）超過 `rtc.mediaWorkerTimeoutMs` 即拒絕該 worker 全部待回覆請求、停止並重建 worker，通知其音訊連線已失效；其他 worker 不受影響。替換後忽略舊 worker 的延遲回覆／事件，避免舊協商污染新連線。這會讓該 worker 的使用者暫時中斷音訊並依既有流程重建，請將期限設得足以涵蓋正常 ICE／STUN 協商；過小會反覆重生。停機沿用同一期限，但不重生 worker。
 
+### WebSocket 路徑設定
+
+`server.wsPath` 必須以 `/` 開頭，而且原值必須能完整保留為 HTTP／WebSocket URL 的 pathname；含 query／fragment、會被移除的 dot segment、反斜線、原始空白／控制字元或需 URL 編碼的 Unicode 拼法會在啟動與離線設定檢查時失敗，不會默默改成另一條路徑。請自行改成預期的字面 pathname（例如 `/control` 或 `/%E8%88%9E%E5%8F%B0`）。原本已可匹配的百分比序列保持原值，不解碼或重寫；例如 `/a%2Fb` 與 `/a/b` 不同。少見但可由合適 request target 表達的多重前導斜線路徑仍相容；最小 embed 欄位刻意只接受一般單一前導斜線路徑。這會拒絕舊版曾接受、卻不符合 HTTP／WebSocket URL 正規路徑拼法的設定；少數非 HTTP scheme 的特殊 request target 原本可能匹配原始反斜線等值，現在也會被設定檢查拒絕。runtime 的 request target 解析政策不在此修改；錯誤只標示欄位，不輸出設定內容。
+
 ### 慢速讀取端
 
 每條 WebSocket 的待送資料加上下一則 JSON 的 UTF-8 位元組若超過 `limits.maxSendBufferBytes`，伺服器立即中斷該連線以釋放緩衝，不影響其他連線。此為非主動離開，仍依既有斷線寬限保留席位與音訊，client 可自動回座取得最新 snapshot。請將上限設得足以容納最大房間 snapshot；持續無法接收完整 snapshot 的 client 會再次斷線。`stage_ws_backpressure_disconnects_total` 記錄此類中斷次數。

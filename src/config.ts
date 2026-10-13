@@ -208,6 +208,10 @@ export function parseConfig(raw: unknown): AppConfig {
     throw new ConfigError('server.metrics.token: required when metrics are enabled on a non-loopback host');
   }
   if (!server.wsPath.startsWith('/')) throw new ConfigError('server.wsPath: must start with "/"');
+  // Admission compares the parsed pathname literally. Do not silently configure a different route.
+  let pathname: string | undefined;
+  try { pathname = new URL(`http://x${server.wsPath}`).pathname; } catch { /* report only the field, never its value */ }
+  if (pathname !== server.wsPath) throw new ConfigError('server.wsPath: must be a literal HTTP URL pathname without query, fragment or normalization');
   const hasTls = server.tls.certFile !== '' && server.tls.keyFile !== '';
   if (!hasTls && !server.allowInsecure) {
     throw new ConfigError('server.tls: certFile/keyFile required unless server.allowInsecure is true (local dev only)');
