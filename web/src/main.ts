@@ -31,6 +31,8 @@ let busy = false;
 let landingEntry: { cancelled: boolean; entered: boolean } | undefined;
 let audioBlocked = false;
 let micNotice = '';
+let micRetryAvailable = false, micRetryPending = false;
+let micRetryButton: HTMLButtonElement | undefined;
 let invitation = '';
 let createdRoom: { roomId: string; code?: string } | null = null;
 let cooldownButton: HTMLButtonElement | null = null;
@@ -201,7 +203,7 @@ async function refreshDevices(): Promise<void> {
     select.value = chosen;
   }
 }
-client.on('micready', () => { micNotice = ''; renderNotices(); void refreshDevices().catch(() => {}); });
+client.on('micready', () => { micRetryAvailable = micRetryPending = false; micNotice = ''; renderNotices(); void refreshDevices().catch(() => {}); });
 navigator.mediaDevices?.addEventListener('devicechange', () => { void refreshDevices().catch(() => {}); });
 void refreshDevices().catch(() => {});
 /** Muted room microphones have a known zero level; only previews or unmuted stage mics need polling. */
@@ -279,6 +281,7 @@ async function run(action: () => Promise<unknown>, target?: HTMLButtonElement, g
 function resetRoomActions(identity: string): void {
   if (roomActionIdentity === identity) return;
   roomActionIdentity = identity; roomActionGeneration++; pendingRoomActions.clear();
+  micRetryAvailable = micRetryPending = false; micNotice = '';
 }
 function roomButton(key: string, label: string, action: () => Promise<unknown>, className = ''): HTMLButtonElement {
   const node = element('button', className, label);
@@ -410,7 +413,13 @@ function landing(): void {
   content.replaceChildren(intro, grid, cancel);
   syncLandingActions(); renderNotices();
 }
+function syncMicRetry(): void {
+  if (!micRetryButton) return;
+  micRetryButton.disabled = micRetryPending || !client.me?.onStage || client.status !== 'live';
+  micRetryButton.setAttribute('aria-busy', String(micRetryPending));
+}
 function renderNotices(): void {
+  micRetryButton = undefined;
   notices.replaceChildren();
   if (audioBlocked) {
     const generation = roomActionGeneration;
@@ -421,12 +430,41 @@ function renderNotices(): void {
     }, 'primary', generation));
     notices.append(banner);
   }
-  if (micNotice) notices.append(element('p', 'banner', micNotice));
+  if (micNotice) {
+    const banner = element('div', 'banner');
+    banner.append(element('span', '', micNotice));
+    if (client.me?.onStage && (micRetryAvailable || micRetryPending)) {
+      const generation = roomActionGeneration;
+      const retry = element('button', 'primary', '重試麥克風');
+      retry.id = 'mic-retry'; retry.type = 'button'; micRetryButton = retry;
+      retry.onclick = () => {
+        if (!retry.isConnected || retry.disabled || generation !== roomActionGeneration
+          || micRetryPending || !micRetryAvailable || !client.me?.onStage || client.status !== 'live') return;
+        const previous = micNotice;
+        micRetryPending = true; micNotice = '已要求重試麥克風，等待擷取結果。'; renderNotices();
+        try {
+          if (!client.retryMicrophone() && generation === roomActionGeneration) {
+            micRetryPending = false; micNotice = previous; renderNotices();
+          }
+        } catch (error) {
+          if (generation !== roomActionGeneration) return;
+          micRetryPending = false; micNotice = previous; renderNotices();
+          showError(error instanceof Error ? error.message : '無法要求重試麥克風。');
+        }
+      };
+      banner.append(retry); syncMicRetry();
+    }
+    notices.append(banner);
+  }
   if (invitation) notices.append(element('p', 'banner', invitation));
 }
 function renderRoom(state: RoomStatePayload): void {
   personRows.clear(); speakingIds = new Set(client.speaking);
   resetRoomActions(JSON.stringify([state.roomId, state.me.participantId]));
+  if (!state.me.onStage) {
+    if (micRetryPending) micNotice = '';
+    micRetryAvailable = micRetryPending = false;
+  }
   const generation = roomActionGeneration;
   brand.textContent = decodeName(state.name);
   status.textContent = statusLabels[client.status];
@@ -613,7 +651,7 @@ client.on('status', ({ detail }) => {
     quality.clear();
     syncMeter(); landing();
   }
-  updateCooldown();
+  updateCooldown(); syncMicRetry();
 });
 client.on('created', ({ detail }) => { createdRoom = detail; });
 client.on('closed', ({ detail }) => { if (landingEntry) landingEntry.entered = true; createdRoom = null; micNotice = ''; invitation = detail.reason === 'shutdown' ? '伺服器維護或重新啟動，房間已關閉；請稍後重新建立或加入。' : '房間已關閉，歡迎建立或加入其他舞台。'; audioBlocked = false; landing(); });
@@ -624,7 +662,7 @@ client.on('invite', ({ detail }) => {
 client.on('stageleft', ({ detail }) => {
   if (detail.participantId === client.me?.participantId) { invitation = detail.reason === 'removed' ? '主控已將你移出舞台，你仍可收聽。' : ''; renderNotices(); }
 });
-client.on('micerror', ({ detail }) => { micNotice = `${detail.message}（${detail.name}）`; renderNotices(); });
+client.on('micerror', ({ detail }) => { micRetryPending = false; micRetryAvailable = Boolean(client.me?.onStage); micNotice = `${detail.message}（${detail.name}）`; renderNotices(); });
 client.on('audioblocked', () => { audioBlocked = true; renderNotices(); });
 client.on('error', ({ detail }) => showError(detail.message));
 // Toggle in place: a full re-render every few hundred ms would reset focus and scroll.
