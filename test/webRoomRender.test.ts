@@ -8,6 +8,7 @@ import type { SampleNode } from './fixtures/sampleApp.ts';
 
 type App = ReturnType<typeof sampleApp>;
 interface RenderCounts { created: number; replacements: number; rows: number }
+interface RoomReferences { heading?: SampleNode; people: SampleNode[]; gains: SampleNode[]; audience: SampleNode[]; pending: number }
 const source = readFileSync(new URL('../web/src/main.ts', import.meta.url), 'utf8');
 const clone = <T>(value: T): T => JSON.parse(JSON.stringify(value)) as T;
 function replaceExactly(text: string, before: string, after: string): string {
@@ -21,6 +22,9 @@ async function setup(t: TestContext, confirm?: (message: string) => boolean) {
 const app = document.querySelector<HTMLDivElement>('#app')!;
 const renderCounts = { created: 0, replacements: 0, rows: 0 };
 (app as any).__renderCounts = renderCounts;
+(app as any).__roomReferences = () => ({ heading: renderedAudienceHeading,
+  people: [...personRows.values()].flat(), gains: renderedGainInputs.map(({ input }) => input),
+  audience: audienceFilterRows.map(({ row }) => row), pending: pendingRoomActions.size });
 const originalCreateElement = document.createElement.bind(document);
 document.createElement = ((tag: string) => {
   renderCounts.created++;
@@ -30,11 +34,12 @@ document.createElement = ((tag: string) => {
     "  renderCounts.rows++;\n  const row = element('li', 'person');");
   const h = sampleApp({ source: observed, confirm }); t.after(() => h.cleanup()); await flushSample();
   const counts = (h.app as SampleNode & { __renderCounts: RenderCounts }).__renderCounts;
+  const references = (h.app as SampleNode & { __roomReferences(): RoomReferences }).__roomReferences;
   const main = h.find(node => node.tagName === 'main'), replace = main.replaceChildren.bind(main);
   main.replaceChildren = (...nodes) => { counts.replacements++; replace(...nodes); };
   const reset = () => { counts.created = counts.replacements = counts.rows = 0; };
   reset();
-  return { ...h, main, counts, reset };
+  return { ...h, main, counts, reset, references };
 }
 function managementState(handCount = 1, audienceCount = 2, speakerCount = 2): RoomStatePayload {
   const me = roomState({ participantId: 'controller', role: 'controller', onStage: true }).me;
@@ -52,6 +57,7 @@ const action = (h: App, key: string) => h.find(node => node.dataset.roomAction =
 const notices = (h: App) => h.find(node => node.classList.contains('notices'));
 const errorBox = (h: App) => h.find(node => node.attributes.role === 'alert');
 const status = (h: App) => h.find(node => node.parentNode?.tagName === 'header' && node.classList.contains('badge'));
+const audienceHeading = (h: App) => h.find(node => node.tagName === 'h2' && node.textContent.startsWith('觀眾 ·'));
 function sameNodes(actual: SampleNode[], expected: SampleNode[]): void {
   assert.equal(actual.length, expected.length);
   for (const [index, node] of actual.entries()) assert.equal(node, expected[index], `retained node ${index}`);
@@ -136,12 +142,16 @@ const changes: { name: string; change(state: RoomStatePayload): void; check(h: A
   { name: 'room code', change: state => { state.codeRequired = true; state.code = 'NEW123'; }, check: h => assert.match(h.find(node => node.classList.contains('invite-link')).value as string, /code=NEW123/) },
 ];
 for (const change of changes) {
-  it(`whole sample invalidates unchanged-room cache for changed ${change.name}`, async t => {
+  it(`whole sample ${change.name === 'audience count' ? 'retains room controls' : 'invalidates unchanged-room cache'} for changed ${change.name}`, async t => {
     const h = await setup(t), state = managementState(); h.sdk.snapshot(clone(state));
     const old = rows(h); h.reset(); const next = clone(state); change.change(next); h.sdk.snapshot(next);
-    assert.equal(h.counts.replacements, 1); assert.equal(old.every(row => !row.isConnected), true); change.check(h);
+    const replacements = change.name === 'audience count' ? 0 : 1;
+    assert.equal(h.counts.replacements, replacements);
+    if (replacements === 0) sameNodes(rows(h), old);
+    else assert.equal(old.every(row => !row.isConnected), true);
+    change.check(h);
     const current = h.main.descendants(); h.sdk.snapshot(clone(next));
-    assert.equal(h.counts.replacements, 1); sameNodes(h.main.descendants(), current);
+    assert.equal(h.counts.replacements, replacements); sameNodes(h.main.descendants(), current);
   });
 }
 
@@ -475,3 +485,233 @@ it('whole sample retains pending controls, countdown, notices and errors across 
   work.reject(new Error('current overlay rejection')); await flushSample();
   assert.equal(hand.disabled, false); assert.equal(errorBox(h).textContent, 'current overlay rejection');
 });
+
+function countOnlyState(handRaised = false): RoomStatePayload {
+  const state = roomState({ handRaised }); state.status = 'live'; state.audienceCount = 200;
+  state.speakers = Array.from({ length: 9 }, (_, index) => ({ ...state.me,
+    participantId: index === 0 ? 'controller' : `speaker-${index - 1}`,
+    role: index === 0 ? 'controller' : 'speaker', onStage: true, handRaised: false,
+  }));
+  state.hands = Array.from({ length: 20 }, (_, index) => ({ ...state.me,
+    participantId: handRaised && index === 7 ? state.me.participantId : `hand-${index}`, handRaised: true,
+  }));
+  return state;
+}
+
+it('whole sample retains bounded room references for 50 fresh count-only snapshots with 9 speakers and 20 hands', async t => {
+  const h = await setup(t), state = countOnlyState(); h.sdk.snapshot(clone(state));
+  const people = rows(h), heading = audienceHeading(h), content = h.main.descendants(), refs = h.references();
+  assert.equal(state.speakers.length, 9); assert.equal(state.hands.length, 20); assert.equal(people.length, 29);
+  assert.equal(refs.heading, heading); assert.equal(refs.people.length, 29);
+  assert.equal(refs.gains.length, 0); assert.equal(refs.audience.length, 0); assert.equal(refs.pending, 0);
+  const initialTimers = [...h.clock.jobs.keys()]; h.reset(); let correctHeadings = 0;
+  for (let index = 1; index <= 50; index++) {
+    const next = clone(state); next.audienceCount = 200 + index; assert.notEqual(next, h.sdk.state);
+    h.sdk.snapshot(next); assert.equal(audienceHeading(h), heading);
+    assert.equal(heading.textContent, `觀眾 · ${200 + index}/300`); correctHeadings++;
+    sameNodes(rows(h), people); sameNodes(h.main.descendants(), content);
+    const current = h.references(); assert.equal(current.heading, heading); sameNodes(current.people, refs.people);
+    assert.equal(current.gains.length, 0); assert.equal(current.audience.length, 0); assert.equal(current.pending, 0);
+    assert.deepEqual([...h.clock.jobs.keys()], initialTimers);
+  }
+  assert.deepEqual({ ...h.counts }, { created: 0, replacements: 0, rows: 0 });
+  t.diagnostic(`9 speakers + 20 hands / 50 count-only snapshots: ${JSON.stringify(h.counts)}; headings ${correctHeadings}/50; bounded fake-node operations only, not browser CPU/layout/paint or heap measurement`);
+});
+
+it('whole sample updates current count on the same mutable snapshot and uses the current audience limit', async t => {
+  const h = await setup(t), state = managementState(); h.sdk.snapshot(state);
+  const heading = audienceHeading(h), people = rows(h); h.reset();
+  for (const count of [0, 300, 12, 1]) {
+    state.audienceCount = count; h.sdk.snapshot(state);
+    assert.equal(audienceHeading(h), heading); assert.equal(heading.textContent, `觀眾 · ${count}/300`);
+    sameNodes(rows(h), people);
+  }
+  assert.deepEqual({ ...h.counts }, { created: 0, replacements: 0, rows: 0 });
+  state.audienceCount = 5; state.limits.maxAudience = 99; h.sdk.snapshot(state);
+  assert.equal(h.counts.replacements, 1); const current = audienceHeading(h); assert.notEqual(current, heading);
+  assert.equal(current.textContent, '觀眾 · 5/99'); state.audienceCount = 0; h.sdk.snapshot(state);
+  assert.equal(audienceHeading(h), current); assert.equal(current.textContent, '觀眾 · 0/99');
+  assert.equal(h.counts.replacements, 1); assert.equal(heading.textContent, '觀眾 · 1/300');
+});
+
+it('whole sample count changes cannot hide other structural fields, controller roster changes or unknown metadata', async t => {
+  const h = await setup(t), baseline = managementState(2, 3, 2);
+  const extraChanges: { name: string; change(state: RoomStatePayload): void }[] = [
+    { name: 'controller identity', change: state => { state.controllerId = 'speaker-0'; } },
+    { name: 'speaker metadata', change: state => { state.speakers[1]!.joinedAt++; } },
+    { name: 'hand ordering', change: state => { state.hands.reverse(); } },
+    { name: 'audience membership', change: state => { state.audience!.pop(); } },
+    { name: 'audience ordering', change: state => { state.audience!.reverse(); } },
+    { name: 'audience name', change: state => { state.audience![2]!.name = 'Changed audience'; } },
+    { name: 'unknown metadata', change: state => { Object.assign(state, { futureMetadata: { active: true } }); } },
+  ];
+  for (const change of [...changes.filter(change => change.name !== 'audience count'), ...extraChanges]) {
+    h.sdk.snapshot(clone(baseline)); const old = rows(h), oldHeading = audienceHeading(h), next = clone(baseline);
+    change.change(next); next.audienceCount++; h.reset(); h.sdk.snapshot(next);
+    assert.equal(h.counts.replacements, 1, change.name); assert.equal(old.every(row => !row.isConnected), true, change.name);
+    assert.notEqual(audienceHeading(h), oldHeading, change.name);
+    assert.equal(audienceHeading(h).textContent, `觀眾 · ${next.audienceCount}/${next.limits.maxAudience}`);
+    const current = rows(h); h.sdk.snapshot({ ...clone(next), audienceCount: next.audienceCount + 1 });
+    assert.equal(h.counts.replacements, 1, change.name); sameNodes(rows(h), current);
+  }
+  const mutable = Object.assign(clone(baseline), { futureMetadata: { active: true } }); h.sdk.snapshot(mutable); h.reset();
+  mutable.futureMetadata.active = false; mutable.audienceCount++; h.sdk.snapshot(mutable);
+  assert.equal(h.counts.replacements, 1, 'in-place mutation of unknown serializable metadata');
+});
+
+it('whole sample count changes preserve effective fallback code and current SDK status invalidation', async t => {
+  const h = await setup(t), state = managementState(); state.codeRequired = true;
+  h.sdk.emit('created', { roomId: state.roomId, code: 'FIRST1' }); h.sdk.snapshot(clone(state));
+  const old = rows(h); h.reset(); h.sdk.emit('created', { roomId: state.roomId, code: 'SECOND' });
+  state.audienceCount++; h.sdk.snapshot(clone(state));
+  assert.equal(h.counts.replacements, 1); assert.equal(old.every(row => !row.isConnected), true);
+  assert.match(h.find(node => node.classList.contains('invite-link')).value as string, /code=SECOND/);
+  state.code = 'SERVER'; state.audienceCount++; h.sdk.snapshot(clone(state));
+  assert.equal(h.counts.replacements, 2); const current = rows(h);
+  h.sdk.emit('created', { roomId: state.roomId, code: 'THIRD3' }); state.audienceCount++; h.sdk.snapshot(clone(state));
+  assert.equal(h.counts.replacements, 2); sameNodes(rows(h), current);
+  assert.match(h.find(node => node.classList.contains('invite-link')).value as string, /code=SERVER/);
+  h.sdk.status = 'reconnecting'; state.audienceCount++; h.sdk.emit('state', clone(state));
+  assert.equal(h.counts.replacements, 3); assert.equal(gain(h).disabled, true); assert.equal(status(h).textContent, '重新連線中');
+  h.sdk.status = 'live'; state.audienceCount++; h.sdk.emit('state', clone(state));
+  assert.equal(h.counts.replacements, 4); assert.equal(gain(h).disabled, false); assert.equal(status(h).textContent, '直播中');
+});
+
+it('whole sample count-only updates preserve pending hand, cooldown, notices, errors, stats and queue position', async t => {
+  const h = await setup(t), state = countOnlyState(); h.sdk.snapshot(clone(state));
+  const hand = action(h, 'hand'); hand.click(); const pending = h.sdk.raises[0]!, timer = h.clock.timeouts()[0]; assert.ok(timer);
+  emitSpeaking(h, ['speaker-0']);
+  h.sdk.emit('quality', { participants: [{ participantId: 'speaker-0', uplinkLossPercent: 12, rttMs: 40 }] });
+  h.sdk.emit('invite', { participantId: state.me.participantId }); h.sdk.emit('audioblocked', undefined);
+  h.sdk.emit('error', { message: '保留操作錯誤。' });
+  const noticeText = notices(h).textContent, people = rows(h), intervals = [...h.clock.jobs.keys()]; h.reset();
+  state.audienceCount++; h.sdk.snapshot(clone(state)); sameNodes(rows(h), people);
+  assert.equal(action(h, 'hand'), hand); assert.equal(hand.attributes['aria-busy'], 'true'); assert.equal(hand.disabled, true);
+  assert.deepEqual(h.clock.timeouts(), [timer]); assert.deepEqual([...h.clock.jobs.keys()], intervals);
+  assert.equal(notices(h).textContent, noticeText); assert.equal(errorBox(h).textContent, '保留操作錯誤。');
+  assert.equal(audienceHeading(h).textContent, '觀眾 · 201/300'); assertSpeaking(h, ['speaker-0']);
+  assert.equal(people.find(row => row.dataset.participantId === 'speaker-0')!.querySelector('.badge.quality')?.textContent, '連線不穩 12%');
+  assert.equal(h.counts.replacements, 0); assert.equal(h.counts.rows, 0);
+  h.clock.advance(2000); assert.equal(h.sdk.polls.length, 1); assert.equal(hand.disabled, true);
+  h.sdk.polls[0]!.resolve({ inbound: { rtt: 0.02 }, outbound: null });
+  pending.reject(new Error('current count rejection')); await flushSample();
+  assert.equal(hand.disabled, false); assert.equal(errorBox(h).textContent, 'current count rejection');
+  assert.equal(h.clock.timeouts().length, 0); assert.match(h.app.textContent, /延遲 20 ms/);
+  const raised = countOnlyState(true); h.sdk.snapshot(clone(raised));
+  const position = h.find(node => node.classList.contains('own-hand-position')), raisedRows = rows(h); h.reset();
+  assert.equal(position.textContent, '你的舉手位置：佇列第 8 位。');
+  raised.audienceCount++; h.sdk.snapshot(clone(raised)); sameNodes(rows(h), raisedRows);
+  assert.equal(h.find(node => node.classList.contains('own-hand-position')), position);
+  assert.equal(position.textContent, '你的舉手位置：佇列第 8 位。'); assert.equal(h.counts.replacements, 0);
+});
+
+it('whole sample count-only updates preserve controller filter, scalar handlers and bounded management references', async t => {
+  const dialogs: string[] = [], calls: string[] = [];
+  const h = await setup(t, message => { dialogs.push(message); return true; });
+  Object.assign(h.sdk, {
+    async mute() { calls.push('mute'); }, async unmute() { calls.push('unmute'); },
+    async forceMute(id: string) { calls.push(`forceMute:${id}`); }, async forceUnmute(id: string) { calls.push(`forceUnmute:${id}`); },
+    async transferControl(id: string) { calls.push(`transfer:${id}`); }, async kick(id: string) { calls.push(`kick:${id}`); },
+    async setGain(id: string, value: number) { calls.push(`gain:${id}:${value}`); },
+  });
+  const obsolete = managementState(); obsolete.speakers[1]!.name = 'Speaker 0'; h.sdk.snapshot(obsolete);
+  const search = h.id('audience-search'); search.value = 'absent name'; assert.ok(search.oninput); search.oninput();
+  const people = rows(h), hidden = people.filter(row => row.hidden), refs = h.references(), heading = audienceHeading(h);
+  assert.equal(hidden.length, 2); assert.equal(refs.gains.length, 2); assert.equal(refs.audience.length, 2); h.reset();
+  const current = clone(obsolete); current.audienceCount++; h.sdk.snapshot(current);
+  sameNodes(rows(h), people); assert.equal(search.value, 'absent name'); assert.equal(hidden.every(row => row.hidden), true);
+  const after = h.references(); sameNodes(after.people, refs.people); sameNodes(after.gains, refs.gains); sameNodes(after.audience, refs.audience);
+  obsolete.me.muted = true; obsolete.audienceCount = 999;
+  Object.assign(obsolete.speakers[1]!, { participantId: 'obsolete-id', forceMuted: true, name: 'Obsolete name' });
+  action(h, 'mute').click(); action(h, 'force-mute:speaker-0').click(); await flushSample();
+  const row = people.find(row => row.dataset.participantId === 'speaker-0')!;
+  row.descendants().find(node => node.dataset.roomAction === 'transfer')!.click(); action(h, 'kick:speaker-0').click();
+  const slider = gain(h); slider.value = '4'; assert.ok(slider.onchange); slider.onchange(); await flushSample();
+  assert.deepEqual(calls, ['mute', 'forceMute:speaker-0', 'transfer:speaker-0', 'kick:speaker-0', 'gain:speaker-0:4']);
+  assert.deepEqual(dialogs, ['確定將控制權移交給 Speaker 0？', '確定將 Speaker 0 踢出房間？若要防止對方再進來，請接著更換房間代碼。']);
+  assert.equal(audienceHeading(h), heading); assert.equal(heading.textContent, '觀眾 · 3/300'); assert.equal(h.counts.replacements, 0);
+  current.audienceCount++; h.sdk.snapshot(clone(current));
+  assert.equal(h.counts.replacements, 1, 'dirty gain remains an authoritative reset');
+  assert.notEqual(gain(h), slider); assert.equal(gain(h).value, '0'); assert.equal(audienceHeading(h).textContent, '觀眾 · 4/300');
+  assert.equal(search.value, 'absent name'); assert.equal(rows(h).filter(row => row.hidden).length, 2);
+});
+
+for (const overlay of ['speaking', 'quality'] as const) {
+  it(`whole sample count-only update retains applied ${overlay} rows and does not conceal a silent opposite overlay mutation`, async t => {
+    const h = await setup(t), state = managementState();
+    const shared: ConnectionQuality = { participantId: 'audience-0', uplinkLossPercent: 8, rttMs: 10 };
+    h.sdk.emit('quality', { participants: [shared] }); h.sdk.snapshot(clone(state));
+    const people = rows(h); h.reset();
+    if (overlay === 'speaking') emitSpeaking(h, ['speaker-0']);
+    else h.sdk.emit('quality', { participants: [shared] });
+    state.audienceCount++; h.sdk.snapshot(clone(state)); sameNodes(rows(h), people);
+    assert.equal(h.counts.replacements, 0); assert.equal(audienceHeading(h).textContent, '觀眾 · 3/300');
+    if (overlay === 'speaking') { shared.uplinkLossPercent = 15; shared.rttMs = 80; emitSpeaking(h, ['speaker-1']); }
+    else { h.sdk.speaking.add('audience-0'); h.sdk.emit('quality', { participants: [shared] }); }
+    state.audienceCount++; h.sdk.snapshot(clone(state));
+    assert.equal(h.counts.replacements, 1); assert.equal(people.every(row => !row.isConnected), true);
+    assert.equal(audienceHeading(h).textContent, '觀眾 · 4/300');
+    if (overlay === 'speaking') {
+      assertSpeaking(h, ['speaker-1']);
+      const duplicates = rows(h).filter(row => row.dataset.participantId === 'audience-0'); assert.equal(duplicates.length, 2);
+      for (const row of duplicates) {
+        assert.equal(row.querySelector('.badge.quality')?.textContent, '連線不穩 15%');
+        assert.match(row.querySelector('.badge.quality')!.title, /RTT 80 ms/);
+      }
+    } else assertSpeaking(h, ['audience-0']);
+    const current = rows(h); state.audienceCount++; h.sdk.snapshot(clone(state)); sameNodes(rows(h), current);
+    assert.equal(h.counts.replacements, 1);
+  });
+}
+
+it('whole sample count update still misses for speaking event/getter disagreement and dirty gain after applied overlays', async t => {
+  const h = await setup(t), state = managementState(); h.sdk.snapshot(clone(state)); h.reset();
+  h.sdk.emit('speaking', { participantIds: ['speaker-0'] }); assertSpeaking(h, ['speaker-0']);
+  state.audienceCount++; h.sdk.snapshot(clone(state)); assert.equal(h.counts.replacements, 1); assertSpeaking(h, []);
+  const slider = gain(h), oldHeading = audienceHeading(h); slider.value = '7'; emitSpeaking(h, ['speaker-0']);
+  h.sdk.emit('quality', { participants: [{ participantId: 'speaker-0', uplinkLossPercent: 12 }] });
+  state.audienceCount++; h.sdk.snapshot(clone(state));
+  assert.equal(h.counts.replacements, 2); assert.notEqual(gain(h), slider); assert.equal(gain(h).value, '0');
+  assert.notEqual(audienceHeading(h), oldHeading); assert.equal(audienceHeading(h).textContent, '觀眾 · 4/300');
+  assertSpeaking(h, ['speaker-0']); const current = gain(h);
+  emitSpeaking(h, ['speaker-1']); state.audienceCount++; h.sdk.snapshot(clone(state));
+  assert.equal(gain(h), current); assert.equal(h.counts.replacements, 2); assert.equal(audienceHeading(h).textContent, '觀眾 · 5/300');
+});
+
+it('whole sample commits the audience heading only after successful replacement and leaves discarded headings untouched', async t => {
+  const h = await setup(t), state = roomState(); h.sdk.snapshot(clone(state)); const old = audienceHeading(h);
+  const replace = h.main.replaceChildren.bind(h.main); let fail = true; let discarded: SampleNode | undefined;
+  h.main.replaceChildren = (...nodes) => {
+    if (fail) {
+      fail = false; discarded = nodes.flatMap(node => node.descendants()).find(node => node.tagName === 'h2' && node.textContent.startsWith('觀眾 ·'));
+      throw new Error('controlled count replacement failure');
+    }
+    replace(...nodes);
+  };
+  const changed = clone(state); changed.name = 'Changed room'; changed.audienceCount = 2;
+  assert.throws(() => h.sdk.snapshot(changed), /controlled count replacement failure/); assert.ok(discarded);
+  assert.equal(audienceHeading(h), old); assert.equal(h.references().heading, old); assert.equal(discarded.isConnected, false);
+  h.sdk.snapshot({ ...clone(state), audienceCount: 3 });
+  assert.equal(audienceHeading(h), old); assert.equal(old.textContent, '觀眾 · 3/300'); assert.equal(discarded.textContent, '觀眾 · 2/300');
+  h.sdk.snapshot(changed); const current = audienceHeading(h); assert.notEqual(current, old); assert.notEqual(current, discarded);
+  assert.equal(h.references().heading, current); h.sdk.snapshot({ ...clone(changed), audienceCount: 4 });
+  assert.equal(current.textContent, '觀眾 · 4/300'); assert.equal(old.textContent, '觀眾 · 3/300'); assert.equal(discarded.textContent, '觀眾 · 2/300');
+});
+
+for (const transition of ['leave', 'disconnect', 'closed', 'kicked'] as const) {
+  it(`whole sample ${transition} releases the audience heading and isolates count updates after same-identity rejoin`, async t => {
+    const h = await setup(t), state = managementState(); h.sdk.snapshot(clone(state));
+    const old = audienceHeading(h), people = rows(h); h.sdk.snapshot({ ...clone(state), audienceCount: 3 });
+    assert.equal(old.textContent, '觀眾 · 3/300');
+    if (transition === 'leave') { h.button('離開房間').click(); await flushSample(); }
+    else if (transition === 'disconnect') await h.sdk.disconnect();
+    else await h.sdk.terminal(transition, transition === 'closed' ? 'shutdown' : undefined);
+    await flushSample(); assert.equal(h.references().heading, undefined); assert.equal(h.references().people.length, 0);
+    assert.equal(h.references().gains.length, 0); assert.equal(h.references().audience.length, 0);
+    assert.equal(old.isConnected, false); assert.equal(people.every(row => !row.isConnected), true);
+    h.sdk.snapshot({ ...clone(state), audienceCount: 4 }); const current = audienceHeading(h); assert.notEqual(current, old); h.reset();
+    h.sdk.snapshot({ ...clone(state), audienceCount: 5 });
+    assert.equal(audienceHeading(h), current); assert.equal(current.textContent, '觀眾 · 5/300'); assert.equal(old.textContent, '觀眾 · 3/300');
+    assert.equal(h.references().heading, current); assert.equal(h.counts.replacements, 0); assert.equal(h.counts.rows, 0);
+  });
+}

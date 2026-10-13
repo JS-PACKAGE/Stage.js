@@ -53,6 +53,7 @@ let micRetryButton: HTMLButtonElement | undefined;
 let invitation = '';
 let createdRoom: { roomId: string; code?: string } | null = null;
 let renderedRoomSignature: string | undefined;
+let renderedAudienceHeading: HTMLHeadingElement | undefined;
 let renderedSpeakingSignature: string | undefined;
 let renderedQualitySignature: string | undefined;
 const renderedGainInputs: { input: HTMLInputElement; value: string }[] = [];
@@ -422,6 +423,7 @@ function landing(): void {
   ownHandPosition.hidden = true; ownHandPosition.textContent = '';
   resetAudienceFilter();
   renderedRoomSignature = renderedSpeakingSignature = renderedQualitySignature = undefined; renderedGainInputs.length = 0;
+  renderedAudienceHeading = undefined;
   personRows.clear(); speakingIds.clear();
   resetMicSettings();
   resetRoomActions('');
@@ -566,12 +568,15 @@ function renderRoom(state: RoomStatePayload): void {
   }
   const roomCode = state.code ?? (createdRoom?.roomId === state.roomId ? createdRoom.code : undefined);
   // Separate already-applied overlays from structural state; dirty sliders still reset to server state.
-  const signature = JSON.stringify([state, roomCode, client.status]);
+  const { audienceCount, ...roomStructure } = state;
+  const audienceTitle = `觀眾 · ${audienceCount}/${state.limits.maxAudience}`;
+  const signature = JSON.stringify([roomStructure, roomCode, client.status]);
   const speakingSignature = JSON.stringify([...client.speaking]);
   const qualitySignature = JSON.stringify([...quality]);
   if (signature === renderedRoomSignature && speakingSignature === renderedSpeakingSignature
     && qualitySignature === renderedQualitySignature && !renderedGainInputs.some(({ input, value }) => input.value !== value)) {
     status.textContent = statusLabels[client.status];
+    if (renderedAudienceHeading && renderedAudienceHeading.textContent !== audienceTitle) renderedAudienceHeading.textContent = audienceTitle;
     syncAudienceFilter(state); updateCooldown(); renderNotices(); return;
   }
   renderedGainInputs.length = 0; audienceFilterRows.length = 0;
@@ -651,7 +656,8 @@ function renderRoom(state: RoomStatePayload): void {
   const hands = panelList(`舉手佇列 · ${state.hands.length}`, state.hands, controller, 'hand');
   grid.append(speakers, hands);
   const audience = element('section', 'panel');
-  audience.append(element('h2', '', `觀眾 · ${state.audienceCount}/${state.limits.maxAudience}`));
+  const audienceHeading = element('h2', '', audienceTitle);
+  audience.append(audienceHeading);
   if (controller && state.audience) {
     const list = element('ul', 'people');
     for (const person of state.audience) list.append(personRow(person, true, 'audience'));
@@ -661,6 +667,7 @@ function renderRoom(state: RoomStatePayload): void {
   grid.append(audience);
   const top = element('div', 'landing-grid'); top.append(summary, controls);
   content.replaceChildren(top, grid);
+  renderedAudienceHeading = audienceHeading;
   renderedRoomSignature = signature; renderedSpeakingSignature = speakingSignature; renderedQualitySignature = qualitySignature;
   syncAudienceFilter(state); updateCooldown(); renderNotices();
 }

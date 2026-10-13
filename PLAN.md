@@ -650,3 +650,6 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 
 
 155. **SDK create／join 參數的操作快照（2026-10-13）：** 透過 public API 與 fake socket 的測試確認，join 原本保留呼叫端的 options 物件：已送出 A 房間與代碼後，若在 ACK 前把原物件改成 B，狀態仍是 A，但自動 resume 會送出 B 與原本 A 的席位 token；create 也會保存未曾送出的新 name。兩個方法在原有即時 controlCapacityError 檢查通過後、第一個 await 前淺層複製參數，讓 hello 等待、pacing 送出與 ACK 後的 session 安裝使用同一份值。下一次呼叫可取得新值，不凍結或修改呼叫端物件，也不新增儲存或診斷輸出。保留原有容量檢查優先序、revision 取消、重疊 create 的結果所有權、伺服器錯誤與主控權威代碼更新；不新增輸入驗證或跨房授權政策。受控測試檢查各等待階段、實際 SDK 序列化與回座 payload，不代表原生瀏覽器、ICE 或可聽音訊驗收。
+
+
+156. **只改觀眾數的完整範例重用（2026-10-13）：** source audit 確認 audienceCount 除了完整 signature，只用於觀眾標題；非主控收到單純進出房人數更新時，原本仍重建整個房間內容。先以 scratch prototype 驗證後，僅把 audienceCount 從 structural key 分離，保留所有其他 enumerable 狀態欄位、有效房間代碼、連線狀態及既有 speaking／quality key。cache hit 按最新人數與上限更新標題；完整替換成功後才保存新標題參照，landing 清除。保留 dirty gain 強制重建、pending／冷卻／提示／filter 更新和原本 handler scalar captures；正常主控觀眾名單變更仍使 structural key 不同。9 位台上者、20 筆舉手、50 次人數快照的 whole-module 假 DOM 工作量，新增節點 6,800→0、參與者列 1,450→0、內容替換 50→0，兩版標題均正確 50/50。只主張受控操作數；每次仍淺拷貝與序列化其餘狀態，並非零配置或原生瀏覽器 CPU／焦點／延遲驗收。
