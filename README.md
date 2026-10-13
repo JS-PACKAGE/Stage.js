@@ -72,6 +72,8 @@ node dist/src/check-config.js /path/to/config.yaml # 建置後也可直接執行
 
 靜態掛載會同時檢查 URL 路徑與解析 symlink 後的實際路徑；原始檔或壓縮 sidecar 不可指向該掛載實際根目錄之外。仍允許根目錄內的來源檔 symlink，以及設定成 release 目錄 symlink 的掛載根；根目錄切換或稍後才完成的 build 不需重啟服務。壓縮 sidecar 本身仍須為一般檔案。這是意外／既有 symlink 越界的防護，不是對具有資產目錄寫入權者的競態安全檔案沙箱；部署時不要讓非信任程序寫入公開資產樹。
 
+自訂 prefix 掛載（例如 `/demo/`）若 `index.html` 存在且解析後是掛載內的一般檔案，請求 `/demo` 會以 308 導向 `/demo/`，保留 query；這讓 HTML 的相對資產網址從正確目錄解析。GET／HEAD 共用此規則，redirect 使用同來源相對 Location 與 `Cache-Control: no-cache`，不依賴傳入 Host 建立絕對網址。預設 `/`、一般檔案與已帶斜線網址不變；缺少或越界的 index 不會產生 redirect。壓縮與 conditional request 在後續的 canonical URL 照常處理。
+
 ### 控制腳本
 
 根目錄的 `stage.sh`（macOS／Linux）與 `stage.ps1`（Windows）包裝常用操作，背景執行時 pid／log 存放在 `.run/`：

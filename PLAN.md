@@ -533,3 +533,6 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 
 
 116. **未列出之已選擇裝置的顯示（2026-10-13）：** whole-module devicechange probe 證實選定 input/output 後，最新 enumeration 移除該 ID 時仍保存 selectedInput/selectedOutput，但 select options 不再有匹配項；native value setter 因而失去選取顯示，不能反映仍保留的選擇。新增 UI-only reconciliation，在 refresh、device-change finally 與離房 settings reset 復原選擇時，為非空且未列出的 chosen ID 建立停用的「已選擇的裝置（目前未列出）」option；不輸出原始 ID 標籤，不把缺席推論為裝置故障。重新列出即回正常 option，選其他裝置／default 即撤掉舊 placeholder；不主動呼叫 SDK 切換、不改 permission／capture／output promise 語意。測試補充受限 native select clamping 模型及 pending change／refresh 排序，不宣稱實際 browser/device 測試。
+
+
+117. **自訂靜態掛載的 canonical slash（2026-10-13）：** native localhost HTTP＋synthetic HTML 重現 /demo 直接以 200 提供 /demo/ 掛載的 index，導致 ./asset.js 被解析成 /asset.js 而 404；/demo/ 則正確。只對 slashless configured mount root，在原本 realpath containment 與 index isFile 通過後回 308，保留 query 並以 no-cache 避免永久不再驗證；不將不存在／越界 index 重新導向。Location 採 ./ 加原始 URL 最後一段 encoded path 與斜線，避免 Host 衍生絕對網址、// 或 colon 變成外站 reference，保留 encoded slash/backslash 文字；GET/HEAD 無 body，沿用 nosniff 與 mount CORS。後續 canonical 請求仍走原有 encoding／validator 流程，預設 root及一般檔案不變，不新增目錄 listing／SPA fallback／任意 directory redirect。測試只使用本機 HTTP 與 public synthetic 檔案，沒有真實瀏覽器或外部站點請求。

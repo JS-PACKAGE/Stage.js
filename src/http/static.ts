@@ -40,8 +40,10 @@ export function createStaticHandler(mounts: StaticMount[], baseDir: string) {
   return async (req: IncomingMessage, res: ServerResponse): Promise<boolean> => {
     if (req.method !== 'GET' && req.method !== 'HEAD') return false;
     let pathname: string;
+    let url: URL;
     try {
-      pathname = decodeURIComponent(new URL(req.url ?? '/', 'http://x').pathname);
+      url = new URL(req.url ?? '/', 'http://x');
+      pathname = decodeURIComponent(url.pathname);
     } catch {
       return false;
     }
@@ -64,6 +66,17 @@ export function createStaticHandler(mounts: StaticMount[], baseDir: string) {
       metadata = st;
     } catch {
       return false;
+    }
+    if (pathname === mount.mount.slice(0, -1)) {
+      // Preserve the encoded path/query and origin, even for unusual mount names.
+      // The slash makes document-relative assets resolve inside this mount.
+      res.statusCode = 308;
+      res.setHeader('Location', `./${url.pathname.slice(url.pathname.lastIndexOf('/') + 1)}/${url.search}`);
+      res.setHeader('Cache-Control', 'no-cache');
+      res.setHeader('X-Content-Type-Options', 'nosniff');
+      if (mount.cors) res.setHeader('Access-Control-Allow-Origin', '*');
+      res.end();
+      return true;
     }
     const encodings = acceptedAssetEncodings(req.headers['accept-encoding']);
     let selected = canonicalFile;
