@@ -53,7 +53,11 @@ function syncHand(): void {
   const seconds = Math.ceil(remaining / 1000);
   hand.disabled = !audience || client?.status === 'reconnecting' || pending || (!me?.handRaised && seconds > 0);
   hand.setAttribute('aria-busy', String(pending));
-  hand.textContent = me?.handRaised ? '收回舉手' : seconds ? `舉手發言（${seconds} 秒）` : '舉手發言';
+  const position = audience && me?.handRaised
+    ? client?.state?.hands.findIndex(person => person.participantId === me.participantId) ?? -1 : -1;
+  const withdraw = position < 0 ? '收回舉手'
+    : `收回舉手（${client?.status === 'reconnecting' ? '上次' : ''}佇列第 ${position + 1} 位）`;
+  hand.textContent = me?.handRaised ? withdraw : seconds ? `舉手發言（${seconds} 秒）` : '舉手發言';
   scheduleHandCooldown(me && !me.handRaised ? remaining : 0);
 }
 function syncMic(): void {

@@ -575,3 +575,6 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 
 
 130. **最小嵌入範例的初次取消連線（2026-10-13）：** 原本 library import、hello、join ACK 等待時 submit 已 busy、Leave 尚未開放，只能等待逾時或離開頁面。新增 native「取消連線」按鈕，只在初次請求 pending 且未觀察到任何房間快照時可用；status callback 也檢查 SDK 已安裝的 state，避免 state event 前的重入開放取消。以 entry-owned closure 及取消旗標在 disconnect 前同步退休 feedback／controls，立刻開放明確手動重試；舊下載、connect、join、事件或 finally 不能接續舊操作或覆寫新 UI。actual SDK terminal 在 await disconnect 後才 emit closed／kicked，若同步 disconnected listener 已建立新 entry，舊 terminal listener 另以 generation 判斷退休，避免抹掉新等待或取消結果。已收到 state、ACK-only 完成、失敗或 terminal 後隱藏，不新增自動 retry、timer、SDK API 或媒體要求。取消僅結束本機操作意圖，不能保證取消 module 下載／底層 socket 關閉／伺服器已接受動作；cleanup 自身真正失敗仍可在同一取消世代顯示。測試使用 whole module／actual SDK 配合 fake socket、media、DOM，未宣稱原生鍵盤／瀏覽器權限與實際音訊驗收。
+
+
+131. **最小嵌入範例的個人舉手位置（2026-10-13）：** embed 沒有完整參與者／舉手清單，觀眾舉手後原本只有「收回舉手」。只在台下非主控且 handRaised 時，從 SDK 當前 state.hands 依自身 participantId 找第一個位置，附加「佇列第 N 位」；同席重連顯示「上次」，缺席時保留原文字，防禦性重複資料取第一筆。不顯示他人名稱／代碼、推估等待時間或保證核准順序；withdraw 行為、pending／role／reconnect gates、aria-busy、錯誤與 status 區域不變，不新增 timer／API／storage。測試以 authoritative Hub／actual SDK 與 fake DOM 驗證，並非原生鍵盤／輔助科技或硬體音訊驗收。
