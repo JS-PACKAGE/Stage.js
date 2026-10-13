@@ -241,6 +241,7 @@ export class StageElement extends HTMLElement {
     } else if (!client) {
       this.status.textContent = this.getAttribute('room') && this.getAttribute('name') ? '' : '請設定 room 與 name 屬性。';
     }
+    const reconnecting = client?.status === 'reconnecting';
     const audience = Boolean(me && !me.onStage && me.role !== 'controller');
     const remaining = client?.handCooldownMs ?? 0;
     const cooldown = Math.ceil(remaining / 1000);
@@ -251,13 +252,13 @@ export class StageElement extends HTMLElement {
     this.listen.textContent = this.playbackMuted ? '恢復收聽' : '靜音收聽';
     this.listen.setAttribute('aria-pressed', String(this.playbackMuted));
     this.unlock.disabled = this.pendingActions.has(this.unlock);
-    this.hand.disabled = this.pendingActions.has(this.hand) || !me || (!me.handRaised && cooldown > 0);
+    this.hand.disabled = reconnecting || this.pendingActions.has(this.hand) || !me || (!me.handRaised && cooldown > 0);
     this.hand.textContent = me?.handRaised ? '收回舉手' : cooldown > 0 ? `舉手發言（${cooldown} 秒）` : '舉手發言';
     this.mic.hidden = this.leaveStage.hidden = !me?.onStage;
-    this.mic.disabled = this.pendingActions.has(this.mic) || Boolean(me?.forceMuted);
+    this.mic.disabled = reconnecting || this.pendingActions.has(this.mic) || Boolean(me?.forceMuted);
     this.mic.textContent = me?.muted ? '取消靜音' : '靜音';
     this.mic.setAttribute('aria-pressed', String(Boolean(me?.muted)));
-    this.leaveStage.disabled = this.pendingActions.has(this.leaveStage);
+    this.leaveStage.disabled = reconnecting || this.pendingActions.has(this.leaveStage);
   }
 }
 

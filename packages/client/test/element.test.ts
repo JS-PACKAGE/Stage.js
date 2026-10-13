@@ -34,6 +34,7 @@ class Audio extends Node {
   volume = 1;
   muted = false;
   pause(): void {}
+  play(): Promise<void> { return Promise.resolve(); }
 }
 const originals = new Map(['HTMLElement', 'document', 'customElements', 'window'].map(name => [name, Object.getOwnPropertyDescriptor(globalThis, name)]));
 Object.defineProperty(globalThis, 'HTMLElement', { configurable: true, value: Node });
@@ -169,6 +170,274 @@ function socketJoiningWidget(t: TestContext) {
   const hello = async (socket: Socket) => { socket.hello(); await settle(); await tick(0); return joinRequest(socket); };
   return { element, sockets, tick, hello, joinRequest };
 }
+
+async function socketJoinedWidget(t: TestContext, state = roomState()) {
+  const fixture = socketJoiningWidget(t);
+  await settle();
+  const socket = fixture.sockets[0]!;
+  const request = await fixture.hello(socket);
+  socket.deliver({ type: 'room:state', ...state, resumeToken: 'resume-me' });
+  socket.deliver({ type: 'ok', requestId: request.requestId });
+  await settle(); await settle();
+  const client = fixture.element.client;
+  assert.ok(client);
+  assert.equal(client.status, state.status);
+  assert.equal(client['pending'].size, 0);
+  return { ...fixture, socket, client };
+}
+
+const reconnectActions = [
+  { title: 'raise hand', key: 'hand', method: 'raiseHand', type: 'hand:raise', onStage: false, raised: false, muted: false },
+  { title: 'withdraw hand', key: 'hand', method: 'withdrawHand', type: 'hand:withdraw', onStage: false, raised: true, muted: false },
+  { title: 'mute microphone', key: 'mic', method: 'mute', type: 'mic:mute', onStage: true, raised: false, muted: false },
+  { title: 'unmute microphone', key: 'mic', method: 'unmute', type: 'mic:unmute', onStage: true, raised: false, muted: true },
+  { title: 'leave stage', key: 'leaveStage', method: 'leaveStage', type: 'stage:leave', onStage: true, raised: false, muted: false },
+] as const;
+
+describe('widget reconnect control admission', () => {
+  for (const action of reconnectActions) {
+    for (const phase of ['backoff', 'CONNECTING', 'OPEN before hello', 'awaiting resume state'] as const) {
+      it(`suppresses ${action.title} during ${phase} and admits it on resume state before ACK`, async t => {
+        const state = roomState(action.onStage);
+        Object.assign(state.me, { handRaised: action.raised, muted: action.muted });
+        const { element, client, socket, sockets, tick, hello } = await socketJoinedWidget(t, state);
+        const call = t.mock.method(client, action.method);
+        const statuses: unknown[] = [];
+        const events: string[] = [];
+        element.addEventListener('stage-status', event => { statuses.push((event as CustomEvent).detail); });
+        for (const type of ['state', 'hand', 'mic', 'stageleft', 'error']) {
+          element.addEventListener(`stage-${type}`, () => { events.push(type); });
+        }
+        const retained = client.state;
+        socket.close(); await settle();
+        assert.equal(client.status, 'reconnecting');
+        assert.equal(client.state, retained, 'the socket loss preserves the last room snapshot');
+        if (phase !== 'backoff') await tick(500);
+        if (phase === 'OPEN before hello') sockets[1]!.readyState = 1;
+        let resume = phase === 'awaiting resume state' ? await hello(sockets[1]!) : undefined;
+        assert.equal(sockets.length, phase === 'backoff' ? 1 : 2);
+        assert.equal(sockets[1]?.readyState, phase === 'backoff' ? undefined : phase === 'CONNECTING' ? 0 : 1);
+        const before = {
+          frames: sockets.map(current => [...current.sent]), pending: client['pending'].size,
+          control: client['pendingControlRequests'], cooldown: client.handCooldownMs,
+          error: element['error'].textContent, hiddenError: element['error'].hidden,
+        };
+        click(element[action.key]); click(element[action.key]);
+        await tick(0);
+        assert.equal(call.mock.callCount(), 0, 'disabled clicks never enter the SDK action');
+        assert.deepEqual({
+          frames: sockets.map(current => current.sent), pending: client['pending'].size,
+          control: client['pendingControlRequests'], cooldown: client.handCooldownMs,
+          error: element['error'].textContent, hiddenError: element['error'].hidden,
+        }, before, 'suppressed clicks create no request, cooldown or error');
+        assert.equal(element['pendingActions'].size, 0);
+        for (const key of ['hand', 'mic', 'leaveStage'] as const) {
+          assert.equal(element[key].disabled, true, key);
+          assert.equal(element[key].getAttribute('aria-busy'), null, key);
+        }
+        assert.deepEqual(statuses, ['reconnecting']);
+        assert.deepEqual(events, []);
+
+        if (phase === 'backoff') await tick(500);
+        const replacement = sockets[1]!;
+        resume ??= await hello(replacement);
+        assert.equal(resume.resumeToken, 'resume-me');
+        assert.equal(element[action.key].disabled, true, 'hello alone does not restore room controls');
+        replacement.deliver({ type: 'room:state', ...state, resumeToken: 'resume-me' });
+        await settle();
+        assert.equal(client['pending'].has(resume.requestId), true, 'the resume ACK has not arrived');
+        assert.equal(client.status, 'live');
+        assert.equal(element[action.key].hidden, false);
+        assert.equal(element[action.key].disabled, false, 'the authoritative snapshot restores an allowed action');
+        assert.equal(element['hand'].hidden, action.onStage);
+        assert.equal(element['mic'].hidden, !action.onStage);
+        assert.equal(element['leaveStage'].hidden, !action.onStage);
+        assert.equal(element['hand'].textContent, action.raised ? '收回舉手' : '舉手發言');
+        assert.equal(element['mic'].textContent, action.muted ? '取消靜音' : '靜音');
+        assert.deepEqual(statuses, ['reconnecting', 'live']);
+        assert.deepEqual(events, ['state'], 'the widget does not fabricate action or status events');
+        click(element[action.key]);
+        assert.equal(call.mock.callCount(), 1);
+        assert.equal(element[action.key].getAttribute('aria-busy'), 'true');
+        await tick(100);
+        const commands = replacement.sent.filter(message => message.type === action.type);
+        assert.equal(commands.length, 1);
+        const command = commands[0]!;
+        assert.ok('requestId' in command);
+        replacement.deliver({ type: 'ok', requestId: command.requestId });
+        replacement.deliver({ type: 'ok', requestId: resume.requestId });
+        await settle();
+        assert.equal(element['pendingActions'].size, 0);
+        assert.equal(element[action.key].getAttribute('aria-busy'), null);
+        assert.equal(client['pending'].size, 0);
+        assert.equal(element['error'].hidden, true);
+        assert.deepEqual(statuses, ['reconnecting', 'live']);
+        assert.deepEqual(events, ['state']);
+      });
+    }
+  }
+
+  for (const action of reconnectActions.filter(action => action.method !== 'raiseHand' && action.method !== 'unmute')) {
+    for (const outcome of ['rejected by socket loss', 'acknowledged just before socket loss'] as const) {
+      it(`keeps ${action.title} disabled after its old request is ${outcome}`, async t => {
+        const state = roomState(action.onStage);
+        state.me.handRaised = action.raised;
+        const { element, client, socket, sockets, tick, hello } = await socketJoinedWidget(t, state);
+        const call = t.mock.method(client, action.method);
+        click(element[action.key]); await tick(100);
+        const command = socket.sent.find(message => message.type === action.type);
+        assert.ok(command && 'requestId' in command);
+        assert.equal(element[action.key].getAttribute('aria-busy'), 'true');
+        if (outcome === 'acknowledged just before socket loss') socket.deliver({ type: 'ok', requestId: command.requestId });
+        socket.close();
+        assert.equal(client.status, 'reconnecting');
+        assert.equal(element[action.key].disabled, true);
+        assert.equal(element[action.key].getAttribute('aria-busy'), 'true');
+        await settle();
+        assert.equal(element['pendingActions'].size, 0);
+        assert.equal(element[action.key].getAttribute('aria-busy'), null);
+        assert.equal(element[action.key].disabled, true, 'the old action finally block cannot unlock reconnecting controls');
+        assert.equal(element['error'].hidden, outcome !== 'rejected by socket loss');
+        const error = element['error'].textContent;
+        const hiddenError = element['error'].hidden;
+        click(element[action.key]); await settle();
+        assert.equal(call.mock.callCount(), 1);
+        assert.equal(element['error'].textContent, error, 'a suppressed click preserves the settled request error');
+        assert.equal(element['error'].hidden, hiddenError);
+        assert.equal(client['pending'].size, 0);
+        await tick(500);
+        const replacement = sockets[1]!;
+        const resume = await hello(replacement);
+        replacement.deliver({ type: 'room:state', ...state, resumeToken: 'resume-me' });
+        await settle();
+        assert.equal(element[action.key].disabled, false);
+        replacement.deliver({ type: 'ok', requestId: resume.requestId });
+        await settle();
+      });
+    }
+  }
+
+  it('keeps an expired real hand cooldown disabled until the resume snapshot arrives', async t => {
+    const { element, client, socket, sockets, tick, hello } = await socketJoinedWidget(t);
+    click(element['hand']); await tick(100);
+    const raise = socket.sent.find(message => message.type === 'hand:raise');
+    assert.ok(raise && raise.type === 'hand:raise');
+    const raised = roomState(); raised.me.handRaised = true;
+    socket.deliver({ type: 'room:state', ...raised, resumeToken: 'resume-me' });
+    socket.deliver({ type: 'ok', requestId: raise.requestId }); await settle();
+    click(element['hand']); await tick(100);
+    const withdraw = socket.sent.find(message => message.type === 'hand:withdraw');
+    assert.ok(withdraw && withdraw.type === 'hand:withdraw');
+    socket.deliver({ type: 'room:state', ...roomState(), resumeToken: 'resume-me' });
+    socket.deliver({ type: 'ok', requestId: withdraw.requestId }); await settle();
+    assert.equal(client.handCooldownMs, 9800);
+    assert.ok(element['cooldownTimer']);
+    socket.close(); await tick(500);
+    const replacement = sockets[1]!;
+    assert.equal(replacement.readyState, 0);
+    await tick(9300);
+    assert.equal(client.handCooldownMs, 0);
+    assert.equal(element['cooldownTimer'], undefined);
+    assert.equal(element['hand'].textContent, '舉手發言');
+    assert.equal(element['hand'].disabled, true, 'the countdown wake must preserve reconnect admission');
+    click(element['hand']); await settle();
+    assert.equal(client.handCooldownMs, 0);
+    assert.equal(element['pendingActions'].size, 0);
+    assert.equal(element['error'].hidden, true);
+    const resume = await hello(replacement);
+    assert.equal(element['hand'].disabled, true);
+    replacement.deliver({ type: 'room:state', ...roomState(), resumeToken: 'resume-me' }); await settle();
+    assert.equal(element['hand'].disabled, false);
+    assert.equal(client['pending'].has(resume.requestId), true);
+    replacement.deliver({ type: 'ok', requestId: resume.requestId }); await settle();
+  });
+
+  for (const role of ['audience', 'offstage controller', 'force-muted speaker', 'waiting speaker'] as const) {
+    it(`restores ${role} constraints from the resume snapshot`, async t => {
+      const { element, client, socket, sockets, tick, hello } = await socketJoinedWidget(t, roomState(true));
+      socket.close(); await tick(500);
+      const replacement = sockets[1]!;
+      const resume = await hello(replacement);
+      const state = roomState(role === 'force-muted speaker' || role === 'waiting speaker');
+      if (role === 'offstage controller') state.me.role = 'controller';
+      if (role === 'force-muted speaker') Object.assign(state.me, { muted: true, forceMuted: true });
+      if (role === 'waiting speaker') state.status = 'waiting';
+      replacement.deliver({ type: 'room:state', ...state, resumeToken: 'resume-me' }); await settle();
+      assert.equal(client.status, state.status);
+      assert.equal(client['pending'].has(resume.requestId), true);
+      assert.equal(element['hand'].hidden, role !== 'audience');
+      if (role === 'audience') assert.equal(element['hand'].disabled, false);
+      assert.equal(element['mic'].hidden, !state.me.onStage);
+      assert.equal(element['leaveStage'].hidden, !state.me.onStage);
+      assert.equal(element['mic'].disabled, role === 'force-muted speaker');
+      assert.equal(element['leaveStage'].disabled, false);
+      assert.equal(element['listen'].disabled, false);
+      if (role === 'force-muted speaker') {
+        const mute = t.mock.method(client, 'unmute');
+        click(element['mic']); await settle();
+        assert.equal(mute.mock.callCount(), 0);
+        assert.equal(element['mic'].getAttribute('aria-busy'), null);
+      }
+      replacement.deliver({ type: 'ok', requestId: resume.requestId }); await settle();
+    });
+  }
+
+  it('keeps local listening, volume and an already-visible audio unlock usable across reconnect phases', async t => {
+    const { element, client, socket, sockets, tick, hello } = await socketJoinedWidget(t, roomState(true));
+    const plays: ReturnType<typeof deferred>[] = [];
+    t.after(async () => { for (const pending of plays) pending.resolve(); await settle(); });
+    const play = t.mock.method(client['audio'], 'play', () => { const pending = deferred(); plays.push(pending); return pending.promise; });
+    const events: string[] = [];
+    for (const type of ['status', 'state', 'hand', 'mic', 'stageleft', 'error', 'audioblocked']) {
+      element.addEventListener(`stage-${type}`, () => { events.push(type); });
+    }
+    const state = client.state;
+    const generation = element['generation'];
+    socket.close(); await settle();
+    for (let phase = 0; phase < 4; phase++) {
+      if (phase === 1) await tick(500);
+      if (phase === 2) sockets[1]!.readyState = 1;
+      if (phase === 3) await hello(sockets[1]!);
+      const frames = sockets.map(current => [...current.sent]);
+      const pending = client['pending'].size;
+      assert.equal(element['listen'].hidden, false);
+      assert.equal(element['listen'].disabled, false);
+      click(element['listen']); await settle();
+      assert.equal(client.playbackMuted, phase % 2 === 0);
+      assert.equal(element['listen'].getAttribute('aria-pressed'), String(client.playbackMuted));
+      element.playbackVolume = (phase + 1) / 4;
+      assert.equal(client.playbackVolume, (phase + 1) / 4);
+      // Model a previously shown unlock button; its real SDK action only calls the fake audio element.
+      element['unlock'].hidden = false;
+      assert.equal(element['unlock'].disabled, false);
+      click(element['unlock']);
+      assert.equal(play.mock.callCount(), phase + 1);
+      assert.equal(element['unlock'].disabled, true);
+      assert.equal(element['unlock'].getAttribute('aria-busy'), 'true');
+      assert.equal(element['mic'].disabled, true);
+      plays.at(-1)!.resolve(); await settle();
+      assert.equal(element['unlock'].hidden, true);
+      assert.equal(element['unlock'].disabled, false);
+      assert.equal(element['unlock'].getAttribute('aria-busy'), null);
+      assert.equal(element['pendingActions'].size, 0);
+      assert.deepEqual(sockets.map(current => current.sent), frames);
+      assert.equal(client['pending'].size, pending);
+      assert.equal(client.state, state);
+      assert.equal(client.status, 'reconnecting');
+      assert.equal(element.client, client);
+      assert.equal(element['generation'], generation);
+      assert.equal(element['error'].hidden, true);
+      assert.deepEqual(events, ['status'], 'local playback creates no SDK status, state or action events');
+    }
+    const replacement = sockets[1]!;
+    const resume = replacement.sent.find(message => message.type === 'join');
+    assert.ok(resume && resume.type === 'join');
+    replacement.deliver({ type: 'room:state', ...roomState(true), resumeToken: 'resume-me' });
+    replacement.deliver({ type: 'ok', requestId: resume.requestId }); await settle();
+    assert.equal(element['mic'].disabled, false);
+    assert.deepEqual(events, ['status', 'status', 'state']);
+  });
+});
 
 describe('widget initial connection feedback', () => {
   it('shows connect and join progress without changing SDK statuses, events or accessibility state', async t => {
