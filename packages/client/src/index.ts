@@ -155,6 +155,7 @@ export class StageClient extends EventTarget {
   private socket: WebSocket | null = null;
   private readonly requestTimeoutMs: number;
   private connecting: Promise<void> | null = null;
+  private helloWait: { cancel: () => void } | null = null;
   private pending = new Map<string, Pending>();
   private pendingControlRequests = 0;
   private readonly maxPendingControlRequests: number;
@@ -371,21 +372,30 @@ export class StageClient extends EventTarget {
       this.socket = ws;
       let ready = false;
       const timer = setTimeout(() => {
+        clearHello();
         reject(new StageError('timeout', '連線逾時，請稍後再試。'));
         this.abandonSocket(ws);
       }, this.requestTimeoutMs);
+      const wait = { cancel: () => {
+        clearTimeout(timer);
+        clearHello();
+        reject(new StageError('disconnected', '連線已中斷。'));
+      } };
+      const clearHello = () => { if (this.helloWait === wait) this.helloWait = null; };
+      this.helloWait = wait;
       ws.onmessage = (event) => {
         if (this.socket !== ws) return;
         this.lastHeardAt = performance.now();
         try {
           const message = JSON.parse(String(event.data)) as ServerMessage;
-          if (message.type === 'hello') { this.limits = message.limits; ready = true; clearTimeout(timer); this.startKeepalive(ws); resolve(); }
+          if (message.type === 'hello') { this.limits = message.limits; ready = true; clearTimeout(timer); clearHello(); this.startKeepalive(ws); resolve(); }
           void this.receive(message).catch((error: unknown) => this.report(error));
         } catch { this.report(new StageError('bad_request', '收到無法解析的伺服器訊息。')); }
       };
       ws.onerror = () => { if (!ready) reject(new StageError('disconnected', '無法連線至舞台。')); };
       ws.onclose = () => {
         clearTimeout(timer);
+        clearHello();
         if (!ready) reject(new StageError('disconnected', '連線已中斷。'));
         this.socketLost(ws);
       };
@@ -518,6 +528,8 @@ export class StageClient extends EventTarget {
     this.intentional = true;
     ++this.sessionRevision;
     this.connecting = null;
+    // An explicit cancellation must not wait for a stalled transport's close handshake.
+    this.helloWait?.cancel();
     ++this.testRevision;
     for (const request of this.micTestRequests) request.abort(new StageError('disconnected', '麥克風測試已取消。'));
     this.micTestRequests.clear();
