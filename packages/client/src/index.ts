@@ -498,7 +498,14 @@ export class StageClient extends EventTarget {
     // An explicit successful join/create may replace a dropped session before its retry fires.
     clearTimeout(this.reconnectTimer);
     this.reconnectTimer = undefined;
+    this.refreshSessionCode(session, this.snapshot);
     this.session = session;
+  }
+  private refreshSessionCode(session: JoinOptions, state: RoomStatePayload | null): void {
+    // Only the controller receives the authoritative private code. Omitted fields must not erase it.
+    if (state?.roomId === session.roomId && state.me.role === 'controller' && state.codeRequired && state.code) {
+      session.code = state.code;
+    }
   }
   raiseHand(): Promise<void> {
     if (this.handCooldownMs > 0) return Promise.reject(new StageError('rate_limited', `每次舉手需間隔 ${Math.ceil(this.limits.handRaiseIntervalMs / 1000)} 秒。`));
@@ -631,7 +638,10 @@ export class StageClient extends EventTarget {
         if (previousId !== state.me.participantId) this.lastHandAt = -Infinity;
         this.snapshot = state;
         if (!state.me.onStage) this.micFailed = false;
-        if (this.session) this.session.resumeToken = state.resumeToken;
+        if (this.session) {
+          this.session.resumeToken = state.resumeToken;
+          this.refreshSessionCode(this.session, state);
+        }
         this.reconnectAttempt = 0;
         this.setStatus(state.status);
         // Application callbacks may disconnect, unmount the widget or install a newer snapshot.

@@ -485,3 +485,6 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 
 
 100. **完整範例與 widget 的冷卻重排（2026-10-13）：** batch 76 的 retime 發現延伸檢查證實兩個既有 scheduler 同樣只在 timer 空白時安排。實際 SDK＋fake socket/peer：2000ms 間隔下 raise 後，同席自動 resume 的 hello 改為 1200ms，保留 lastHandAt 與 peer；+100ms 剩 1100ms，+200ms 剩 1000ms。兩個 UI 原 timer 仍等到 +1000ms，因而在 +200ms 顯示 2 秒而不是 1 秒。套用 embed 已審查的 performance.now deadline、較早邊界改排、owned callback guard；inactive／fire／widget leave 同步清 deadline。重複／較晚邊界保留既有較早喚醒，較晚 retime 可有一次 harmless extra wake。維持 idle 無 timer、pending/reconnect／角色限制與 SDK rate/pacing 語意；不宣稱目前伺服器提供 live config reload 或真實媒體重連驗證。測試採實際 SDK 搭配 fake transport，以及假 DOM／受控時間。
+
+
+101. **主控換碼後的重連憑證更新（2026-10-13）：** actual SDK＋StageHub 的 bounded probe 與 real localhost WebSocket regression 均證實：rotateCode 的新 state.code 已顯示，但 session.code 仍是初次值，斷線後 resume 帶有效 token 仍被 Hub 的 code-first admission 拒絕。新增 SDK-only helper，只接納 matching-room／controller／codeRequired 的非空 code；incoming state 在 forwarding 前更新 session，installSession 也取最新同房 snapshot，防止 state-before-ACK 被舊 caller／created code 覆蓋。代碼省略、demotion、audience 或 open-room state 保留既有值，retired socket／其他房間不得污染新 session 的代碼。不改 Hub admission 或一般成員 resume policy；換碼後他們的現有連線保留，但未取得新代碼仍不能以舊代碼重連，README 明示此既有限制。測試以真實 localhost signaling＋MockMedia 與 deterministic fake socket 覆蓋，沒有 real ICE／音訊驗證宣稱。

@@ -140,7 +140,7 @@ JSON frame，型別定義在 [`shared/protocol.ts`](shared/protocol.ts)。每個
 | `room:close` | 主控關房 |
 | `participant:kick {targetId}` | 主控把人踢出房間（對方收到 `kicked` 後連線被關閉、不會自動重連）；要防止對方再進來，接著更換代碼 |
 | `mic:gain {targetId, gainDb}` | 主控調整某人在混音中的音量（±20 dB，0＝不調整；疊加在自動音量正規化之上），離開舞台後再上台仍保留；所有人在 `room:state` 的 `gainDb` 看到 |
-| `room:rotate-code` | 主控更換房間代碼（限需代碼的房間）；舊代碼／邀請連結立即失效，已在房內的人不受影響 |
+| `room:rotate-code` | 主控更換房間代碼（限需代碼的房間）；舊代碼／邀請連結立即失效，既有連線保留。重連仍驗證代碼；主控 SDK 更新已收到的新代碼，其他成員未取得新代碼時無法以舊代碼重連 |
 | `rtc:offer`／`rtc:ice {payload}` | WebRTC 信令（一律由 client 發 offer） |
 | `ping` | 回 `pong` |
 
