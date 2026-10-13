@@ -473,3 +473,6 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 
 
 96. **範例待授權預覽的手動取消（2026-10-13）：** 全模組 bounded probe 重現 pending startMicTest 沒有 signal，測試與裝置選擇都鎖定且只能離房取消。新增每次 preview capture 自有 AbortController 與「取消麥克風測試」控制；同步撤銷控制／ownership 後 abort，只吞掉該 capture 已取消的結果，普通失敗仍走原本錯誤顯示。直接測試與 setInputDevice 完成後的 preview restart 共用 helper，setInputDevice 本身不宣稱可取消。原操作 finally 仍負責釋放共享鎖，generation 保護離房／重入的新操作；上台與 reset 主動取消 pending preview，晚到成功結果只停止自身串流。呼叫 startMicTest 仍在使用者動作同步執行，房內 mic／收聽及 meter 政策不變。測試採假 DOM、實際 SDK 與 fake getUserMedia，無權限提示自動關閉或真實裝置驗證宣稱。
+
+
+97. **最小嵌入範例的舉手等待鎖（2026-10-13）：** whole-module bounded VM probe 重現 embed.ts 的 250ms timer 與 state callback 在 withdraw ACK 未回時覆寫 disabled，使三次點擊送出三筆同時等待的請求。新增 current-client operation token 與 shared hand renderer，state、timer 與 settlement 都保留 pending 限制／aria-busy；handler 本身也拒絕重入，同步 throw 與 rejection 在目前 owner 下顯示並解鎖。離房、重加入、disconnected／terminal 撤銷 token，舊 finally／錯誤不得解鎖或污染新 client；會寫入 hand 狀態的事件回呼檢查 client identity。保留 state-before-ACK、角色／reconnect／cooldown 政策與原 250ms 排程，不擴大為 embed join/import 的完整生命週期重構。測試使用全模組假 DOM／SDK／timer，不執行外部動態匯入，不宣稱 native browser 或音訊驗證。
