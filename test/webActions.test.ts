@@ -37,7 +37,8 @@ function setup(): Harness {
     let busy = false;
     let roomActionIdentity = '', roomActionGeneration = 0, cooldownButton = null, cooldownTimer, cooldownDue = 0, invitation = '';
     const pendingRoomActions = new Map(), nodes = [], errors = [];
-    const personRows = new Map(); let speakingIds = new Set();
+    const personRows = new Map(), quality = new Map(); let speakingIds = new Set();
+    let renderedRoomSignature; const renderedGainInputs = [];
     let nextTimer = 0, clock = 0, callbacks = 0;
     const performance = { now: () => clock };
     const timers = new Map();

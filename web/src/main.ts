@@ -35,6 +35,8 @@ let micRetryAvailable = false, micRetryPending = false;
 let micRetryButton: HTMLButtonElement | undefined;
 let invitation = '';
 let createdRoom: { roomId: string; code?: string } | null = null;
+let renderedRoomSignature: string | undefined;
+const renderedGainInputs: { input: HTMLInputElement; value: string }[] = [];
 let cooldownButton: HTMLButtonElement | null = null;
 let cooldownTimer: ReturnType<typeof setTimeout> | undefined;
 let cooldownDue = 0;
@@ -366,6 +368,7 @@ function field(form: HTMLFormElement, label: string, name: string, value = '', r
   return input;
 }
 function landing(): void {
+  renderedRoomSignature = undefined; renderedGainInputs.length = 0;
   personRows.clear(); speakingIds.clear();
   resetMicSettings();
   resetRoomActions('');
@@ -470,12 +473,20 @@ function renderNotices(): void {
   if (invitation) notices.append(element('p', 'banner', invitation));
 }
 function renderRoom(state: RoomStatePayload): void {
-  personRows.clear(); speakingIds = new Set(client.speaking);
   resetRoomActions(JSON.stringify([state.roomId, state.me.participantId]));
   if (!state.me.onStage) {
     if (micRetryPending) micNotice = '';
     micRetryAvailable = micRetryPending = false;
   }
+  const roomCode = state.code ?? (createdRoom?.roomId === state.roomId ? createdRoom.code : undefined);
+  // Keep only this room's latest render key; dirty sliders still reset to authoritative state.
+  const signature = JSON.stringify([state, roomCode, [...client.speaking], [...quality], client.status]);
+  if (signature === renderedRoomSignature && !renderedGainInputs.some(({ input, value }) => input.value !== value)) {
+    status.textContent = statusLabels[client.status];
+    updateCooldown(); renderNotices(); return;
+  }
+  renderedGainInputs.length = 0;
+  personRows.clear(); speakingIds = new Set(client.speaking);
   const generation = roomActionGeneration;
   brand.textContent = decodeName(state.name);
   status.textContent = statusLabels[client.status];
@@ -483,7 +494,6 @@ function renderRoom(state: RoomStatePayload): void {
   const controller = state.me.role === 'controller';
   const summary = element('section', 'panel room-summary');
   summary.append(element('h2', '', '房間資訊'), element('p', '', `房間 ID：${state.roomId}`));
-  const roomCode = state.code ?? (createdRoom?.roomId === state.roomId ? createdRoom.code : undefined);
   if (controller) {
     summary.append(element('p', '', state.codeRequired ? `房間代碼：${roomCode ?? '未提供'}` : '不需要房間代碼'));
     const link = new URL(location.pathname, location.origin);
@@ -517,7 +527,8 @@ function renderRoom(state: RoomStatePayload): void {
   controls.append(element('h2', '', `你好，${decodeName(state.me.name)}`), element('p', '', `${roleLabels[state.me.role]}${state.me.forceMuted ? ' · 主控已鎖定靜音' : ''}`), connectionLine);
   const actions = element('div', 'actions');
   if (state.me.onStage) {
-    const mute = roomButton('mute', state.me.muted ? '取消靜音' : '靜音', () => state.me.muted ? client.unmute() : client.mute());
+    const muted = state.me.muted;
+    const mute = roomButton('mute', muted ? '取消靜音' : '靜音', () => muted ? client.unmute() : client.mute());
     mute.dataset.policyDisabled = String(state.me.forceMuted);
     actions.append(mute, roomButton('stage', '離開舞台', () => client.leaveStage()));
   } else if (controller) {
@@ -559,6 +570,7 @@ function renderRoom(state: RoomStatePayload): void {
   grid.append(audience);
   const top = element('div', 'landing-grid'); top.append(summary, controls);
   content.replaceChildren(top, grid);
+  renderedRoomSignature = signature;
   updateCooldown(); renderNotices();
 }
 function panelList(title: string, people: ParticipantView[], controller: boolean, kind: 'speaker' | 'hand'): HTMLElement {
@@ -586,14 +598,14 @@ function personRow(person: ParticipantView, controller: boolean, kind: 'speaker'
   applyQuality(row);
   // The controller manages others; its own mic/stage use the personal controls above.
   if (controller && person.participantId !== client.me?.participantId) {
-    const id = person.participantId;
+    const id = person.participantId, forceMuted = person.forceMuted, name = decodeName(person.name);
     const actions = element('div', 'actions');
     if (kind === 'hand') actions.append(roomButton(`stage:${id}`, '核准上台', () => client.approve(id), 'primary'), roomButton(`stage:${id}`, '婉拒', () => client.reject(id)));
-    if (kind === 'speaker') actions.append(gainSlider(person), roomButton(`force-mute:${id}`, person.forceMuted ? '解除強制靜音' : '強制靜音', () => person.forceMuted ? client.forceUnmute(id) : client.forceMute(id)), roomButton(`stage:${id}`, '移出舞台', () => client.removeFromStage(id)));
+    if (kind === 'speaker') actions.append(gainSlider(person), roomButton(`force-mute:${id}`, forceMuted ? '解除強制靜音' : '強制靜音', () => forceMuted ? client.forceUnmute(id) : client.forceMute(id)), roomButton(`stage:${id}`, '移出舞台', () => client.removeFromStage(id)));
     actions.append(roomButton('transfer', '移交控制權', async () => {
-      if (window.confirm(`確定將控制權移交給 ${decodeName(person.name)}？`)) await client.transferControl(id);
+      if (window.confirm(`確定將控制權移交給 ${name}？`)) await client.transferControl(id);
     }), roomButton(`kick:${id}`, '踢出房間', async () => {
-      if (window.confirm(`確定將 ${decodeName(person.name)} 踢出房間？若要防止對方再進來，請接著更換房間代碼。`)) await client.kick(id);
+      if (window.confirm(`確定將 ${name} 踢出房間？若要防止對方再進來，請接著更換房間代碼。`)) await client.kick(id);
     }, 'danger'));
     row.append(actions);
   }
@@ -601,16 +613,18 @@ function personRow(person: ParticipantView, controller: boolean, kind: 'speaker'
 }
 /** Controller's per-speaker level trim; sends on release (`change`) so dragging is one request. */
 function gainSlider(person: ParticipantView): HTMLLabelElement {
+  const id = person.participantId;
   const label = element('label', 'gain', '音量');
   const slider = element('input');
   slider.type = 'range';
-  slider.dataset.roomAction = `gain:${person.participantId}`;
+  slider.dataset.roomAction = `gain:${id}`;
   slider.min = String(-MAX_GAIN_DB); slider.max = String(MAX_GAIN_DB); slider.step = '1';
   slider.value = String(person.gainDb);
+  renderedGainInputs.push({ input: slider, value: slider.value });
   slider.title = `${person.gainDb} dB`;
   slider.onchange = () => {
     if (slider.disabled || client.status === 'reconnecting') return;
-    void run(() => client.setGain(person.participantId, Number(slider.value)), undefined, roomActionGeneration);
+    void run(() => client.setGain(id, Number(slider.value)), undefined, roomActionGeneration);
   };
   label.append(slider);
   return label;
