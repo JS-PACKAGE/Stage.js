@@ -300,9 +300,15 @@ function syncMeter(): void {
     testButton.textContent = '測試麥克風'; testButton.setAttribute('aria-pressed', 'false');
   }
   testButton.disabled = testingBusy || Boolean(client.me?.onStage);
-  const metering = Boolean(micTest) || Boolean(client.me?.onStage && !client.me.muted);
+  // Lifecycle cleanup above must still run while the page is hidden.
+  const metering = !document.hidden && (Boolean(micTest) || Boolean(client.me?.onStage && !client.me.muted));
   if (metering && meterTimer === undefined) {
-    meterTimer = setInterval(() => { level.value = client.me?.onStage ? client.micLevel : micTest?.level() ?? 0; }, 50);
+    const timer = setInterval(() => {
+      // A canceled callback may already be queued, including across hide/show.
+      if (meterTimer !== timer || document.hidden) return;
+      level.value = client.me?.onStage ? client.micLevel : micTest?.level() ?? 0;
+    }, 50);
+    meterTimer = timer;
   } else if (!metering && meterTimer !== undefined) {
     clearInterval(meterTimer); meterTimer = undefined; level.value = 0;
   }
@@ -831,11 +837,11 @@ client.on('quality', ({ detail }) => {
   renderedQualitySignature = JSON.stringify([...quality]);
 });
 function refreshConnectionLine(): void {
-  if (!client.state) return;
+  if (!client.state || document.hidden) return;
   const generation = roomActionGeneration, sequence = ++connectionPollSequence;
   void client.getStats().then(({ inbound, outbound }) => {
     // SDK polls can settle out of order; an obsolete empty result must not erase a newer display.
-    if (generation !== roomActionGeneration || sequence !== connectionPollSequence) return;
+    if (!client.state || document.hidden || generation !== roomActionGeneration || sequence !== connectionPollSequence) return;
     const parts: string[] = [];
     if (inbound?.lossPercent !== undefined) parts.push(`收聽掉包 ${inbound.lossPercent.toFixed(1)}%`);
     if (outbound?.lossPercent !== undefined) parts.push(`發言掉包 ${outbound.lossPercent.toFixed(1)}%`);
@@ -846,14 +852,30 @@ function refreshConnectionLine(): void {
     connectionLine.classList.toggle('error', Math.max(inbound?.lossPercent ?? 0, outbound?.lossPercent ?? 0) >= POOR_LOSS_PERCENT);
   }, () => {});
 }
-/** Connection stats matter only inside a room; the separate cooldown timeout runs only while visible. */
+/** Connection stats matter only for visible room diagnostics; cooldown scheduling is independent. */
 let roomTimers: ReturnType<typeof setInterval>[] = [];
 function syncRoomTimers(): void {
-  const inRoom = client.state !== null;
-  if (inRoom && !roomTimers.length) roomTimers = [setInterval(refreshConnectionLine, 2000)];
-  else if (!inRoom && roomTimers.length) { roomTimers.forEach(clearInterval); roomTimers = []; connectionLine.textContent = ''; }
+  const polling = client.state !== null && !document.hidden;
+  if (polling && !roomTimers.length) {
+    const timer = setInterval(() => {
+      if (roomTimers[0] !== timer) return;
+      refreshConnectionLine();
+    }, 2000);
+    roomTimers = [timer];
+  } else if (!polling) {
+    roomTimers.forEach(clearInterval); roomTimers = [];
+    connectionPollSequence++; connectionLine.textContent = '';
+    connectionLine.classList.toggle('error', false);
+  }
 }
 client.on('state', syncRoomTimers);
 client.on('status', syncRoomTimers);
+// Page-lifetime listener, like the client/device listeners; landing previews also use it.
+document.addEventListener('visibilitychange', () => {
+  connectionPollSequence++; // Retire pending UI results without resetting SDK delta baselines.
+  syncMeter(); syncRoomTimers();
+  // A resumed SDK sample can span the hidden interval since the last completed stats sample.
+  if (!document.hidden) refreshConnectionLine();
+});
 landing();
 if (signaling.error) showError(signaling.error);

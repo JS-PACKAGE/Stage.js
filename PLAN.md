@@ -656,3 +656,6 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 
 
 157. **widget 播放解鎖的席位所有權（2026-10-13）：** 以實際 SDK 與受控 socket／RTC／audio 重現：已出現的啟用音訊按鈕在直接 disconnect、關房、被踢及 shutdown 後仍可點擊無來源 audio；pending rejection 也會覆蓋終止畫面。同一 public client 明確斷線後再 join，舊成功可隱藏新提示、舊失敗可污染新席位。只替 widget unlock 設置 client／room／participant 與操作 token，失去 state 時在轉送事件前撤銷；handler 在任何 pending／error 改動前檢查當前所有權，且同步呼叫 unlockAudio 保留使用者手勢。成功、錯誤與 finally 只作用於自己的操作，新 audioblocked 記錄避免舊成功清掉新提示。信令重連仍保留 state／媒體與操作，舞台或麥克風變動不撤銷收聽。SDK promise、媒體擷取與一般控制動作不變；受控遲到結果是生命週期防禦測試，不宣稱原生瀏覽器排序、權限繞過或音訊驗收。
+
+
+158. **隱藏頁面的診斷輪詢暫停（2026-10-13）：** scratch whole-module prototype 證明 document.hidden 時原本仍保有 50ms meter 與 2 秒 getStats timer，10 秒受控工作量為 200 次音量讀取與 5 次統計要求。只在完整範例加入 visibility gate 與單一 page-lifetime listener，隱藏時取消兩個診斷 interval、歸零 meter／清除統計，回到可見時依當前狀態恢復 timer 並要求新統計。timer identity 防止舊 callback 在 hide／show 後重入，既有 poll sequence 與 room generation 防止晚到結果寫入；不取消底層 getStats promise 或重設 SDK delta baseline，恢復第一筆可能涵蓋隱藏時間。mic lifecycle cleanup 在 hidden 時照常執行，visibility 本身不停止預覽、擷取、播放或 session。listener 與既有頁面事件同壽命，不每次 join 註冊；landing 預覽仍需要它，無新增獨立卸載契約。prototype 30 個無 socket 假時鐘案例及既有 focused compatibility 通過，可見工作量不變、隱藏計數為 0／0；只主張操作數，原生瀏覽器已有背景節流，未量測 CPU／電池／音訊效果。

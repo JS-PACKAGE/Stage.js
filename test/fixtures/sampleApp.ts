@@ -259,6 +259,7 @@ export async function flushSample(): Promise<void> { for (let i = 0; i < 16; i++
 
 interface SampleAppOptions {
   source?: string;
+  initialHidden?: boolean;
   location?: URL;
   expectedSdkUrl?: string;
   decodeName?: (value: string) => string;
@@ -278,7 +279,11 @@ function mountSampleApp<Client extends SampleClient = SampleSdk>(options: Sample
   const documentRoot = new SampleNode('#document'), documentElement = new SampleNode('html'), body = new SampleNode('body');
   const app = new SampleNode('div'); app.id = 'app';
   documentRoot.append(documentElement); documentElement.append(body); body.append(app);
-  const document = { documentElement, createElement: (tag: string) => new SampleNode(tag),
+  const visibilityListeners = new Set<() => void>();
+  const document = { hidden: options.initialHidden ?? false, documentElement,
+    addEventListener(type: string, listener: () => void) { assert.equal(type, 'visibilitychange'); visibilityListeners.add(listener); },
+    removeEventListener(type: string, listener: () => void) { assert.equal(type, 'visibilitychange'); visibilityListeners.delete(listener); },
+    createElement: (tag: string) => new SampleNode(tag),
     createTextNode(text: string) { const node = new SampleNode('#text'); node.textContent = text; return node; },
     querySelector: (selector: string) => documentRoot.querySelector(selector) };
   const source = options.source ?? readFileSync(new URL('../../web/src/main.ts', import.meta.url), 'utf8');
@@ -312,7 +317,11 @@ function mountSampleApp<Client extends SampleClient = SampleSdk>(options: Sample
     const matches = app.descendants().filter(predicate); assert.equal(matches.length, 1, 'expected one connected matching DOM node'); return matches[0]!;
   };
   return {
-    app, sdk, clock, find, deviceChangeListeners,
+    app, sdk, clock, find, deviceChangeListeners, visibilityListeners,
+    setHidden(hidden: boolean, dispatch = true) {
+      document.hidden = hidden;
+      if (dispatch) for (const listener of [...visibilityListeners]) listener();
+    },
     dispatchDeviceChange() { for (const listener of [...deviceChangeListeners]) listener(); },
     id: (id: string) => find(node => node.id === id),
     button: (text: string) => find(node => node.tagName === 'button' && node.textContent === text),

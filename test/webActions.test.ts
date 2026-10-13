@@ -214,7 +214,7 @@ it('production room scheduler keeps stats cadence with zero idle cooldown pollin
   const scheduling = source.slice(source.indexOf('function syncRoomTimers()'), source.indexOf("client.on('state', syncRoomTimers)"));
   const jobs: { fn: () => void; ms: number }[] = []; let stats = 0, cooldownCalls = 0;
   runInNewContext(stripTypeScriptTypes(`let roomTimers = []; ${scheduling}; syncRoomTimers();`), {
-    client: { state: {} }, connectionLine: {}, clearInterval() {},
+    client: { state: {} }, document: { hidden: false }, connectionLine: {}, clearInterval() {},
     setInterval(fn: () => void, ms: number) { jobs.push({ fn, ms }); return jobs.length; },
     refreshConnectionLine() { stats++; }, updateCooldown() { cooldownCalls++; },
   });

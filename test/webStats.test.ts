@@ -14,7 +14,7 @@ function setup() {
   const ui = runInNewContext(stripTypeScriptTypes(`
     let roomActionIdentity = '', roomActionGeneration = 0, connectionPollSequence = 0, roomTimers = [];
     const pendingRoomActions = new Map(), POOR_LOSS_PERCENT = 5;
-    const client = { state: null, getStats: collect };
+    const client = { state: null, getStats: collect }, document = { hidden: false };
     const connectionLine = { textContent: '', error: false, classList: { toggle(_name, value) { connectionLine.error = value; } } };
     const setInterval = () => 1, clearInterval = () => {};
     ${reset}
