@@ -644,3 +644,6 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 
 
 153. **Widget 舉手／麥克風控制的同步准入（2026-10-13）：** unchanged element fixture上的actual SDK／fake socket探針確認：stage-state先轉送再render，host listener此時點擊舊enabled控制，升台／轉主控後仍送hand:raise且消耗10秒SDK冷卻，下台／forceMute後仍送mic:mute/unmute；真正socket失聯的status callback雖未送wire，卻先清除舊錯誤、進入pending再以disconnected覆蓋。這不是server權限繞過，模型仍拒絕無效命令。僅為hand/mic加入private button的可選准入predicate，在pending／aria-busy／error變更前重查connected、目前me、舞台／角色、reconnecting、handRaised/cooldown及forceMuted；render共用相同predicate，隱藏控制也disabled。有效操作仍讀當前handRaised/muted，pending與generation處理不改，沒有擴大SDK admission／server政策或本機收聽限制。測試使用同步轉送回呼與actual SDK fake wire，不靠篡改disabled製造主要重現，不宣稱原生browser／assistive technology／media驗收。
+
+
+154. **說話指示 SDK declaration 註解補正（2026-10-13）：** 第129批已同步root/client README與shared protocol說明，但StageEventMap.speaking的JSDoc仍保留「only when it changes」，會出現在產生的公開型別文件。補成成功create／join／resume的state後、ACK前先同步完整集合，其後依變動更新。只改此註解與決策紀錄，runtime／protocol／測試行為不變；驗證declaration帶入新契約、built JS與前版相同，再沿用完整測試／型別／建置驗證。

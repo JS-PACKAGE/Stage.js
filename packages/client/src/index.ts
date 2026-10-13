@@ -129,7 +129,7 @@ export interface StageEventMap {
   micerror: { name: string; message: string };
   micready: undefined;
   audioblocked: { message: string };
-  /** Full set of participants currently audible in the mix; fired only when it changes. */
+  /** Full audible set: seeded after create/join/resume state and before ACK, then updated on changes. */
   speaking: { participantIds: string[] };
   /** Connection quality of everyone publishing (controller and on-stage participants only). */
   quality: ServerMessageMap['quality'];
