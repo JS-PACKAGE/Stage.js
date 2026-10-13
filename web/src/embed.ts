@@ -10,6 +10,7 @@ const submit = join.querySelector<HTMLButtonElement>('button')!;
 submit.setAttribute('aria-busy', 'false');
 const hand = document.querySelector<HTMLButtonElement>('#hand')!;
 const leave = document.querySelector<HTMLButtonElement>('#leave')!;
+const cancelJoin = document.querySelector<HTMLButtonElement>('#cancel-join')!;
 const mic = document.querySelector<HTMLButtonElement>('#mic')!;
 const stage = document.querySelector<HTMLButtonElement>('#stage')!;
 const micRetry = document.querySelector<HTMLButtonElement>('#mic-retry')!;
@@ -28,12 +29,17 @@ let pendingMicRetry: { client: Client } | undefined;
 let playbackGeneration = 0;
 let entryGeneration = 0;
 let feedbackRevision = 0;
+let cancelEntry: (() => void) | undefined;
+function hideCancel(): void {
+  cancelEntry = undefined; cancelJoin.hidden = cancelJoin.disabled = true;
+}
 function retireControls(): void {
   pendingHand = undefined; pendingMic = undefined; pendingStage = undefined;
   controlsClient = undefined; micRetryParticipant = undefined; pendingMicRetry = undefined;
 }
 /** Retire initial-join feedback before user or terminal callbacks can start another entry. */
 function retireEntry(): number {
+  hideCancel();
   submit.disabled = false; submit.setAttribute('aria-busy', 'false');
   return ++entryGeneration;
 }
@@ -102,11 +108,26 @@ join.onsubmit = (event) => {
   event.preventDefault();
   playbackGeneration++; scheduleHandCooldown(0);
   const generation = ++entryGeneration, feedback = feedbackRevision;
-  let progress = true;
+  let progress = true, receivedState = false, cancelledEntry = false;
+  let entryClient: Client | undefined;
   const showProgress = (message: string): void => {
     if (generation === entryGeneration && feedback === feedbackRevision && progress) status.textContent = message;
   };
   submit.disabled = true; submit.setAttribute('aria-busy', 'true');
+  cancelEntry = () => {
+    if (generation !== entryGeneration || receivedState || entryClient?.state) return;
+    cancelledEntry = true;
+    const cancelled = retireEntry();
+    playbackGeneration++; scheduleHandCooldown(0); retireControls();
+    hand.disabled = leave.disabled = true; hand.setAttribute('aria-busy', 'false');
+    syncMic(); syncStage(); syncMicRetry();
+    try {
+      const stopping = entryClient?.disconnect();
+      if (cancelled === entryGeneration) status.textContent = '已取消連線。';
+      void stopping?.catch(error => { if (cancelled === entryGeneration) report(error); });
+    } catch (error) { if (cancelled === entryGeneration) report(error); }
+  };
+  cancelJoin.hidden = cancelJoin.disabled = false;
   void (async () => {
     try {
       retireControls();
@@ -125,36 +146,39 @@ join.onsubmit = (event) => {
       if (generation !== entryGeneration) return;
       const ws = new URL('/ws', host); ws.protocol = host.protocol === 'https:' ? 'wss:' : 'ws:';
       client = new library.StageClient({ url: ws.href, audioElement: audio });
-      const current = client; controlsClient = current;
+      const current = client; controlsClient = current; entryClient = current;
       client.on('state', ({ detail }: CustomEvent<StageEventMap['state']>) => {
-        if (client !== current) return;
+        if (client !== current || cancelledEntry) return;
+        receivedState = true;
+        if (generation === entryGeneration) hideCancel();
         progress = false;
         status.textContent = `${library.decodeName(detail.name)} · ${library.decodeName(detail.me.name)} · ${detail.me.onStage ? '已上台' : '收聽中'}`;
         syncHand(); syncMic(); syncStage(); syncMicRetry();
         leave.disabled = false;
       });
       client.on('micerror', ({ detail }) => {
-        if (client !== current || controlsClient !== current) return;
+        if (client !== current || controlsClient !== current || cancelledEntry) return;
         progress = false; pendingMicRetry = undefined;
         micRetryParticipant = current.me?.onStage ? current.me.participantId : undefined;
         status.textContent = `${detail.message}（${detail.name}）`; syncMicRetry();
       });
       client.on('micready', () => {
-        if (client !== current || controlsClient !== current) return;
+        if (client !== current || controlsClient !== current || cancelledEntry) return;
         const retrying = micRetryParticipant !== undefined;
         micRetryParticipant = undefined; pendingMicRetry = undefined; syncMicRetry();
         if (retrying) { progress = false; status.textContent = '已取得麥克風。'; }
       });
       client.on('status', ({ detail }) => {
-        if (client !== current) return;
+        if (client !== current || cancelledEntry) return;
+        if (current.state) { receivedState = true; if (generation === entryGeneration) hideCancel(); }
         if (detail === 'reconnecting') { progress = false; status.textContent = '重新連線中'; hand.disabled = true; }
         else if (detail === 'disconnected') { progress = false; playbackGeneration++; retireControls(); status.textContent = '未連線'; hand.disabled = leave.disabled = true; }
         syncHand(); syncMic(); syncStage(); syncMicRetry();
       });
-      client.on('error', ({ detail }) => { progress = false; report(detail); });
-      client.on('audioblocked', () => { progress = false; status.textContent = '請點擊啟用音訊。'; });
-      client.on('closed', () => { if (client !== current) return; retireEntry(); playbackGeneration++; retireControls(); syncHand(); syncMic(); syncStage(); syncMicRetry(); status.textContent = '房間已關閉。'; hand.disabled = leave.disabled = true; });
-      client.on('kicked', () => { if (client !== current) return; retireEntry(); playbackGeneration++; retireControls(); syncHand(); syncMic(); syncStage(); syncMicRetry(); status.textContent = '你已被主控移出房間。'; hand.disabled = leave.disabled = true; });
+      client.on('error', ({ detail }) => { if (cancelledEntry) return; progress = false; report(detail); });
+      client.on('audioblocked', () => { if (cancelledEntry) return; progress = false; status.textContent = '請點擊啟用音訊。'; });
+      client.on('closed', () => { if (client !== current || cancelledEntry || generation !== entryGeneration) return; retireEntry(); playbackGeneration++; retireControls(); syncHand(); syncMic(); syncStage(); syncMicRetry(); status.textContent = '房間已關閉。'; hand.disabled = leave.disabled = true; });
+      client.on('kicked', () => { if (client !== current || cancelledEntry || generation !== entryGeneration) return; retireEntry(); playbackGeneration++; retireControls(); syncHand(); syncMic(); syncStage(); syncMicRetry(); status.textContent = '你已被主控移出房間。'; hand.disabled = leave.disabled = true; });
       showProgress('連線中…');
       await current.connect();
       if (generation !== entryGeneration) return;
@@ -163,10 +187,11 @@ join.onsubmit = (event) => {
       showProgress('加入請求已完成，尚未收到房間狀態。');
     } catch (error) { if (generation === entryGeneration) report(error); }
     finally {
-      if (generation === entryGeneration) { submit.disabled = false; submit.setAttribute('aria-busy', 'false'); }
+      if (generation === entryGeneration) { hideCancel(); submit.disabled = false; submit.setAttribute('aria-busy', 'false'); }
     }
   })();
 };
+cancelJoin.onclick = () => cancelEntry?.();
 document.querySelector<HTMLButtonElement>('#unlock')!.onclick = () => {
   const current = client, generation = playbackGeneration;
   // Keep play inside the user gesture; only its later feedback is lifecycle-scoped.

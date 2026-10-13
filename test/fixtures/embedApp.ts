@@ -102,8 +102,9 @@ export class EmbedSdk {
 export const flush = async (): Promise<void> => { for (let i = 0; i < 16; i++) await Promise.resolve(); };
 
 export function embedApp(options: { libraryLoad?: Promise<void>; source?: string } = {}) {
-  const nodes = new Map(['host', 'room', 'code', 'name', 'status', 'join', 'hand', 'mic', 'stage', 'mic-retry', 'leave', 'audio', 'unlock'].map(id => [id, new EmbedNode()]));
+  const nodes = new Map(['host', 'room', 'code', 'name', 'status', 'join', 'hand', 'mic', 'stage', 'mic-retry', 'cancel-join', 'leave', 'audio', 'unlock'].map(id => [id, new EmbedNode()]));
   const node = (id: string): EmbedNode => { const found = nodes.get(id); assert.ok(found, `unmodeled node: ${id}`); return found; };
+  const cancel = node('cancel-join'); cancel.hidden = cancel.disabled = true; cancel.textContent = '取消連線';
   const hand = node('hand'), mic = node('mic'), stage = node('stage'), micRetry = node('mic-retry'), leave = node('leave'), form = node('join'), status = node('status');
   hand.disabled = leave.disabled = true; hand.textContent = '舉手發言'; status.textContent = '尚未加入';
   mic.hidden = mic.disabled = true; mic.textContent = '靜音麥克風';
