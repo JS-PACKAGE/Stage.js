@@ -178,7 +178,7 @@ JSON frame，型別定義在 [`shared/protocol.ts`](shared/protocol.ts)。每個
 | `rtc:answer`、`rtc:ice` | 伺服器端信令 |
 | `status` | `waiting`／`live` |
 
-連線品質收集每房間同時最多一輪；完成後再等待 `qualityIntervalMs` 啟動下一輪。個別 publisher 統計失敗只略過該人的本輪資料，其他人的回報照常；全部失敗時不送空報告，但下一輪仍會重試。失敗不會被當作 0% 掉包，恢復後上行差量從上次成功樣本計算。關房或最後一位停止發布後不再排程；離台再發布的舊統計結果會被忽略。
+連線品質收集每房間同時最多一輪；完成後再等待 `qualityIntervalMs` 啟動下一輪。個別 publisher 統計失敗只略過該人的本輪資料，其他人的回報照常；全部失敗時不送空報告，但下一輪仍會重試。失敗不會被當作 0% 掉包，恢復後上行差量從上次成功樣本計算。關房或最後一位停止發布後不再排程；離台再發布的舊統計結果會被忽略。 個別統計請求的 rejection value 直接交給安全結構化 logger，不先字串化，避免不可轉字串的診斷值阻斷其他 publisher 的本輪資料與差量回報；任意自訂 logger／sink 自身拋錯仍不在此保證範圍。
 
 `limits.joinTimeoutMs`、`rooms.controllerGraceMs`、`rooms.participantGraceMs` 的範圍為 0～2147483647 ms；`rooms.heartbeatIntervalMs` 為 1000～2147483647 ms。上限包含 2147483647（約 24.9 天）；更大的值以前會被 Node timer 正規化成約 1 ms，現在啟動與離線 `config:check` 會拒絕該設定。0 的既有語意不變：join deadline 停用、participant 立即移除、controller 立即排程到期。這不限制只做經過時間比較的 `handRaiseIntervalMs`。
 

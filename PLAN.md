@@ -590,3 +590,6 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 
 
 135. **Web Component 的主控返回舞台（2026-10-13）：** actual Hub 自動繼任／八個保留發言席的快照，經實際 SDK receive 送入 widget 後，台下主控原本沒有舉手、麥克風或舞台操作；既有 SDK returnToStage 卻可合法使用主控額外席位。只重用個人 stage 按鈕，台上呼叫 leaveStage，台下主控呼叫 returnToStage，其他台下觀眾隱藏／停用。action 同步重查目前 client／participant／onStage／role／reconnecting 與掛載狀態，避免轉送事件先於 render 時舊 enabled 按鈕誤送操作；沿用同一 pending lock，state-before-ACK 只改文字不解鎖。強制靜音仍可下台，伺服器權限／容量／錯誤與 SDK capture cleanup／重新擷取不變，未新增管理介面、自動 retry 或權限 API。測試以 actual Hub／SDK 加假 DOM／socket／media 驗證，不宣稱 native keyboard／輔助科技或真實麥克風音訊驗收。
+
+
+136. **品質統計拒絕值的 publisher 隔離（2026-10-13）：** actual Hub／MockMediaTransport／createLogger 的受控 timer probe 證實單一 getStats 拒絕 null-prototype value 時，reportQuality 在 log 前的 String(reason) 拋錯，整輪 healthy publisher 品質訊息被跳過；如果 healthy publisher 排在前面，其 uplink baseline 已前進卻未交付該區間資料。一般 Error／string 拒絕沒有這個問題，poll 仍排下一輪且房間／媒體存活。只把該失敗 publisher 的診斷改成 raw reason 交給既有安全 logger，保留 allSettled、generation guard、差量計算、recipient policy 與每房單一 timer；不擴張 outer catch 或任意自訂 sink 失敗的保證。回歸涵蓋同步／非同步失敗、publisher 順序、當輪 healthy loss／後續恢復、私人回報對象與既有 media identity；使用 mock transport／受控 PCM，不宣稱真實 WebRTC 或硬體音訊驗收。

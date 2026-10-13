@@ -595,7 +595,7 @@ export class StageHub {
       if (rt.publishers.get(participantId) !== generation) return;
       const result = stats[i]!;
       if (result.status === 'rejected') {
-        this.deps.log.warn('publisher quality stats failed', { roomId, participantId, error: String(result.reason) });
+        this.deps.log.warn('publisher quality stats failed', { roomId, participantId, error: result.reason });
         return;
       }
       const s = result.value;
