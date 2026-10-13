@@ -486,6 +486,9 @@ export class StageClient extends EventTarget {
     if (this.handCooldownMs > 0) return Promise.reject(new StageError('rate_limited', `每次舉手需間隔 ${Math.ceil(this.limits.handRaiseIntervalMs / 1000)} 秒。`));
     const capacityError = this.controlCapacityError();
     if (capacityError) return Promise.reject(capacityError);
+    // A request rejected before admission must not consume the hand interval.
+    const socket = this.socket;
+    if (!socket || socket.readyState !== WebSocket.OPEN) return Promise.reject(new StageError('disconnected', '尚未連線至舞台。'));
     this.lastHandAt = performance.now();
     return this.request('hand:raise', {});
   }

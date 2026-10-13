@@ -26,7 +26,7 @@
 
 重疊呼叫 createRoom（包含在 created／state 事件內再次呼叫）不會清空先前呼叫已收到、仍在等待 ACK 的房間結果。伺服器仍決定是否允許操作；同一連線已進房時，後續開房仍回 already_joined，第一個成功呼叫保留自己的結果與自動回座 session。沒有新的 room:created 卻只有 ACK 時仍視為 internal 錯誤，不以先前房間的資訊冒充成功。
 
-舉手冷卻屬於目前參與者：明確 disconnect（包含被踢／關房）或收到不同 participantId 的新身分時清除，同一個 StageClient 可立即在新房間舉手；同席位的自動恢復與一般 state 更新保留原本冷卻。伺服器的速率限制仍會獨立檢查請求。
+舉手冷卻屬於目前參與者：明確 disconnect（包含被踢／關房）或收到不同 participantId 的新身分時清除，同一個 StageClient 可立即在新房間舉手；同席位的自動恢復與一般 state 更新保留原本冷卻。伺服器的速率限制仍會獨立檢查請求。 `raiseHand()` 仍先依序檢查既有冷卻與 `queue_full`；接著若沒有 socket 或 socket 非 OPEN，則以 `disconnected` 拒絕且不新占用冷卻。通過本機准入後，即使後續送出失敗、逾時或伺服器拒絕，冷卻仍保留；這不是一般錯誤 rollback，也不代表 OPEN socket 已完成回座或伺服器必然可用。
 
 ## 請求期限
 
