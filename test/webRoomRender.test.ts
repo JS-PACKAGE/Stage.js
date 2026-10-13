@@ -56,6 +56,16 @@ function sameNodes(actual: SampleNode[], expected: SampleNode[]): void {
   assert.equal(actual.length, expected.length);
   for (const [index, node] of actual.entries()) assert.equal(node, expected[index], `retained node ${index}`);
 }
+function emitSpeaking(h: App, ids: string[]): void {
+  // The SDK publishes its current set before emitting speaking; detail can contain duplicates.
+  h.sdk.speaking = new Set(ids); h.sdk.emit('speaking', { participantIds: ids });
+}
+function assertSpeaking(h: App, ids: string[]): void {
+  const expected = new Set(ids);
+  for (const row of rows(h)) {
+    assert.equal(row.classList.contains('speaking'), expected.has(row.dataset.participantId!), row.dataset.participantId);
+  }
+}
 
 it('whole sample renders ten fresh identical 301-seat snapshots once and retains all room controls', async t => {
   const h = await setup(t), state = managementState(0, 292, 8);
@@ -307,4 +317,161 @@ it('whole sample retained handlers use displayed scalar values after an obsolete
   ]);
   assert.deepEqual(dialogs, ['確定將控制權移交給 Speaker 0？', '確定將 Speaker 0 踢出房間？若要防止對方再進來，請接著更換房間代碼。']);
   assert.equal(action(h, 'mute').textContent, '靜音'); assert.equal(action(h, 'force-mute:speaker-0').textContent, '強制靜音');
+});
+
+for (const overlay of ['speaking', 'quality'] as const) {
+  it(`whole sample retains all room rows after an applied ${overlay} event and identical fresh snapshot`, async t => {
+    const h = await setup(t), state = managementState(); h.sdk.snapshot(clone(state));
+    const people = rows(h), slider = gain(h); h.reset();
+    if (overlay === 'speaking') emitSpeaking(h, ['audience-0', 'audience-0', 'speaker-0']);
+    else h.sdk.emit('quality', { participants: [{ participantId: 'audience-0', uplinkLossPercent: 12, rttMs: 40 }] });
+    const afterEvent = h.main.descendants(), counts = { ...h.counts };
+    h.sdk.snapshot(clone(state));
+    assert.equal(h.counts.replacements, 0); assert.equal(h.counts.rows, 0);
+    assert.deepEqual({ ...h.counts }, counts); sameNodes(rows(h), people); sameNodes(h.main.descendants(), afterEvent);
+    assert.equal(gain(h), slider);
+    if (overlay === 'speaking') assertSpeaking(h, ['audience-0', 'speaker-0']);
+    else for (const row of people.filter(row => row.dataset.participantId === 'audience-0')) {
+      assert.equal(row.querySelector('.badge.quality')?.textContent, '連線不穩 12%');
+      assert.match(row.querySelector('.badge.quality')!.title, /RTT 40 ms/);
+    }
+  });
+}
+
+it('whole sample retains 100 seats through 100 alternating overlay and snapshot iterations with one badge allocation', async t => {
+  const h = await setup(t), state = managementState(0, 91, 8); h.sdk.snapshot(clone(state));
+  const people = rows(h), slider = gain(h); assert.equal(people.length, 100); h.reset();
+  for (let index = 0; index < 100; index++) {
+    const ids = [`speaker-${index % 2}`];
+    const quality = () => h.sdk.emit('quality', { participants: [{ participantId: 'speaker-0', uplinkLossPercent: 10 + index % 2 }] });
+    if (index % 2) { quality(); emitSpeaking(h, ids); }
+    else { emitSpeaking(h, ids); quality(); }
+    h.sdk.snapshot(clone(state)); sameNodes(rows(h), people); assert.equal(gain(h), slider); assertSpeaking(h, ids);
+    assert.equal(people.find(row => row.dataset.participantId === 'speaker-0')!.querySelector('.badge.quality')?.textContent,
+      `連線不穩 ${10 + index % 2}%`);
+  }
+  assert.deepEqual({ ...h.counts }, { created: 1, replacements: 0, rows: 0 });
+  t.diagnostic(`100 seats / 100 alternating speaking+quality+snapshot iterations: ${JSON.stringify(h.counts)}; fake-node operations only, not browser CPU/layout/paint`);
+});
+
+it('whole sample retains hidden duplicate rows through same-count ID changes and partial quality reports, then retires removed rows', async t => {
+  const h = await setup(t), state = managementState(); h.sdk.snapshot(clone(state));
+  const input = h.id('audience-search'); input.value = 'absent name'; assert.ok(input.oninput); input.oninput();
+  const people = rows(h), duplicated = people.filter(row => row.dataset.participantId === 'audience-0');
+  assert.equal(duplicated.length, 2); assert.equal(duplicated.filter(row => row.hidden).length, 1); h.reset();
+  emitSpeaking(h, ['audience-0', 'audience-0', 'missing']);
+  h.sdk.emit('quality', { participants: [
+    { participantId: 'audience-0', uplinkLossPercent: 99 }, { participantId: 'audience-0', uplinkLossPercent: 12 },
+    { participantId: 'speaker-0', downlinkLossPercent: 8 }, { participantId: 'missing', uplinkLossPercent: 50 },
+  ] });
+  h.sdk.snapshot(clone(state)); sameNodes(rows(h), people); assertSpeaking(h, ['audience-0']);
+  assert.equal(duplicated.every(row => row.querySelector('.badge.quality')?.textContent === '連線不穩 12%'), true);
+  emitSpeaking(h, ['audience-1', 'missing']);
+  h.sdk.emit('quality', { participants: [{ participantId: 'speaker-1', uplinkLossPercent: 14 }] });
+  h.sdk.snapshot(clone(state)); sameNodes(rows(h), people); assertSpeaking(h, ['audience-1']);
+  assert.equal(people.filter(row => row.querySelector('.badge.quality')).length, 1, 'omitted IDs lose warnings');
+  assert.equal(h.counts.replacements, 0); assert.equal(input.value, 'absent name');
+  assert.equal(duplicated.filter(row => row.hidden).length, 1);
+  const next = clone(state); next.hands = []; next.audience = next.audience!.slice(1); next.audienceCount = 1;
+  h.sdk.snapshot(next); assert.equal(h.counts.replacements, 1); assert.equal(people.every(row => !row.isConnected), true);
+  const retired = people.map(row => ({ classes: row.className, text: row.textContent })), current = rows(h); h.reset();
+  emitSpeaking(h, ['audience-0']); h.sdk.emit('quality', { participants: [{ participantId: 'audience-0', uplinkLossPercent: 99 }] });
+  h.sdk.snapshot(clone(next)); sameNodes(rows(h), current); assertSpeaking(h, []);
+  assert.equal(current.some(row => row.querySelector('.badge.quality')), false);
+  assert.deepEqual(people.map(row => ({ classes: row.className, text: row.textContent })), retired);
+  assert.deepEqual({ ...h.counts }, { created: 0, replacements: 0, rows: 0 });
+});
+
+it('whole sample misses when speaking detail disagrees with the SDK getter, even when the getter still matches the original render', async t => {
+  const h = await setup(t), state = managementState(); h.sdk.snapshot(clone(state)); h.reset();
+  h.sdk.emit('speaking', { participantIds: ['speaker-0', 'speaker-0'] }); assertSpeaking(h, ['speaker-0']);
+  h.sdk.snapshot(clone(state)); assert.equal(h.counts.replacements, 1); assertSpeaking(h, []);
+  h.sdk.speaking = new Set(['speaker-0']); h.sdk.emit('speaking', { participantIds: ['speaker-1'] });
+  assertSpeaking(h, ['speaker-1']); h.sdk.snapshot(clone(state));
+  assert.equal(h.counts.replacements, 2); assertSpeaking(h, ['speaker-0']);
+  const current = rows(h); h.sdk.snapshot(clone(state)); sameNodes(rows(h), current);
+  assert.equal(h.counts.replacements, 2);
+});
+
+it('whole sample accepts speaking detail applied before its SDK getter catches up by the next snapshot', async t => {
+  const h = await setup(t), state = managementState(); h.sdk.snapshot(clone(state)); const people = rows(h); h.reset();
+  h.sdk.emit('speaking', { participantIds: ['speaker-0', 'speaker-0'] });
+  h.sdk.speaking = new Set(['speaker-0']); h.sdk.snapshot(clone(state));
+  sameNodes(rows(h), people); assertSpeaking(h, ['speaker-0']);
+  assert.deepEqual({ ...h.counts }, { created: 0, replacements: 0, rows: 0 });
+});
+
+it('whole sample speaking events cannot hide a silent mutation of an already applied shared quality entry', async t => {
+  const h = await setup(t), state = managementState();
+  const shared: ConnectionQuality = { participantId: 'speaker-0', uplinkLossPercent: 8, rttMs: 10 };
+  h.sdk.emit('quality', { participants: [shared] }); h.sdk.snapshot(clone(state)); h.reset();
+  shared.uplinkLossPercent = 15; shared.rttMs = 80; emitSpeaking(h, ['speaker-1']);
+  const before = rows(h); assert.equal(before.find(row => row.dataset.participantId === 'speaker-0')!.querySelector('.badge.quality')?.textContent, '連線不穩 8%');
+  h.sdk.snapshot(clone(state)); assert.equal(h.counts.replacements, 1); assert.equal(before.every(row => !row.isConnected), true);
+  const badge = rows(h).find(row => row.dataset.participantId === 'speaker-0')!.querySelector('.badge.quality')!;
+  assert.equal(badge.textContent, '連線不穩 15%'); assert.match(badge.title, /RTT 80 ms/); assertSpeaking(h, ['speaker-1']);
+  h.sdk.snapshot(clone(state)); assert.equal(h.counts.replacements, 1);
+});
+
+it('whole sample quality events cannot hide a silent mutation of the SDK speaking set', async t => {
+  const h = await setup(t), state = managementState(); h.sdk.snapshot(clone(state)); h.reset();
+  h.sdk.speaking.add('audience-0');
+  h.sdk.emit('quality', { participants: [{ participantId: 'speaker-0', uplinkLossPercent: 8 }] });
+  assertSpeaking(h, []); const before = rows(h); h.sdk.snapshot(clone(state));
+  assert.equal(h.counts.replacements, 1); assert.equal(before.every(row => !row.isConnected), true); assertSpeaking(h, ['audience-0']);
+  h.sdk.snapshot(clone(state)); assert.equal(h.counts.replacements, 1);
+});
+
+it('whole sample catches shared quality mutation by a later SDK listener after an event handler finishes', async t => {
+  const h = await setup(t), state = managementState(); h.sdk.snapshot(clone(state)); h.reset();
+  const shared: ConnectionQuality = { participantId: 'speaker-0', uplinkLossPercent: 8 };
+  h.sdk.on('quality', () => { shared.uplinkLossPercent = 19; });
+  h.sdk.emit('quality', { participants: [shared] });
+  assert.equal(rows(h).find(row => row.dataset.participantId === 'speaker-0')!.querySelector('.badge.quality')?.textContent, '連線不穩 8%');
+  h.sdk.snapshot(clone(state)); assert.equal(h.counts.replacements, 1);
+  assert.equal(rows(h).find(row => row.dataset.participantId === 'speaker-0')!.querySelector('.badge.quality')?.textContent, '連線不穩 19%');
+});
+
+for (const first of ['speaking', 'quality'] as const) {
+  it(`whole sample retains rows when a later ${first} listener synchronously emits the other overlay and a snapshot`, async t => {
+    const h = await setup(t), state = managementState(); h.sdk.snapshot(clone(state)); const people = rows(h); h.reset();
+    const report = () => h.sdk.emit('quality', { participants: [{ participantId: 'audience-0', uplinkLossPercent: 8 }] });
+    // A normal SDK listener runs after the sample's handler; no reentry is injected into native DOM methods.
+    h.sdk.on(first, () => {
+      if (first === 'speaking') report(); else emitSpeaking(h, ['audience-0', 'audience-0']);
+      h.sdk.snapshot(clone(state));
+    });
+    if (first === 'speaking') emitSpeaking(h, ['audience-0', 'audience-0']); else report();
+    sameNodes(rows(h), people); assertSpeaking(h, ['audience-0']);
+    assert.equal(people.filter(row => row.querySelector('.badge.quality')?.textContent === '連線不穩 8%').length, 2);
+    assert.deepEqual({ ...h.counts }, { created: 2, replacements: 0, rows: 0 });
+  });
+}
+
+it('whole sample still resets dirty gain after applied overlays and then retains the corrected controls', async t => {
+  const h = await setup(t), state = managementState(); h.sdk.snapshot(clone(state)); const slider = gain(h); h.reset();
+  slider.value = '7'; emitSpeaking(h, ['speaker-0']);
+  h.sdk.emit('quality', { participants: [{ participantId: 'speaker-0', uplinkLossPercent: 12 }] });
+  assert.equal(gain(h), slider); assert.equal(slider.value, '7');
+  h.sdk.snapshot(clone(state)); assert.equal(h.counts.replacements, 1); assert.notEqual(gain(h), slider); assert.equal(gain(h).value, '0');
+  assertSpeaking(h, ['speaker-0']); const current = gain(h);
+  emitSpeaking(h, ['speaker-1']); h.sdk.snapshot(clone(state)); assert.equal(gain(h), current); assert.equal(h.counts.replacements, 1);
+});
+
+it('whole sample retains pending controls, countdown, notices and errors across applied overlays and snapshots', async t => {
+  const h = await setup(t), state = roomState();
+  state.speakers = [{ ...state.me, participantId: 'speaker-0', role: 'speaker', onStage: true }];
+  state.status = 'live'; h.sdk.snapshot(clone(state));
+  const hand = action(h, 'hand'); hand.click(); const work = h.sdk.raises[0]!;
+  const timer = h.clock.timeouts()[0]; assert.ok(timer);
+  h.sdk.emit('audioblocked', undefined); h.sdk.emit('error', { message: '保留操作錯誤。' });
+  const noticeText = notices(h).textContent, people = rows(h); h.reset();
+  emitSpeaking(h, ['speaker-0']);
+  h.sdk.emit('quality', { participants: [{ participantId: 'speaker-0', uplinkLossPercent: 12 }] });
+  h.sdk.snapshot(clone(state)); sameNodes(rows(h), people); assert.equal(action(h, 'hand'), hand);
+  assert.equal(h.counts.replacements, 0); assert.equal(hand.attributes['aria-busy'], 'true'); assert.equal(hand.disabled, true);
+  assert.deepEqual(h.clock.timeouts(), [timer]); assert.equal(notices(h).textContent, noticeText); assert.equal(errorBox(h).textContent, '保留操作錯誤。');
+  h.clock.advance(1500); h.sdk.snapshot(clone(state)); assert.equal(hand.disabled, true); assert.equal(h.clock.timeouts().length, 0);
+  work.reject(new Error('current overlay rejection')); await flushSample();
+  assert.equal(hand.disabled, false); assert.equal(errorBox(h).textContent, 'current overlay rejection');
 });

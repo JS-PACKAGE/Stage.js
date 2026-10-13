@@ -280,7 +280,7 @@ npm audit
 
 範例的品質警示沿用每次 render 的 participant→rows 索引，只更新前次／本次品質報告涉及的人，省去每則事件掃描所有觀眾列；省略的人仍會移除舊警示，同人出現在舉手與觀眾名單時會一併更新。`test/webQuality.test.ts` 以 301 人、593 個顯示列、100 次單人品質報告計數：完整列查詢 100 → 0 次，badge 查詢 59,300 → 100 次。這是 fake DOM 操作數，不是瀏覽器 CPU／延遲量測；房間重繪、品質資料本身的更新頻率與 badge 文案不變。
 
-完整範例收到與目前畫面相同的房間快照時，會重用參與者列與操作按鈕；仍同步 pending、冷卻倒數與提示。快照、連線狀態、邀請代碼或 speaking／quality 輸入改變時照常重建；已拖動但尚未由伺服器確認的 gain slider 仍會按原行為回復 authoritative 值。離房清除快取，同房重加也重新建立節點。受控 fake DOM 的 301 席、10 次相同快照工作量，createElement 次數由 21,630 降為 2,163，主要內容替換由 10 次降為 1 次。每次事件仍需序列化／比較完整狀態，保留一份最新 signature 及目前 gain input 參照，並非零配置或固定時間；這是合成操作數，未量測瀏覽器 CPU、記憶體、焦點或延遲效果。
+完整範例收到與目前畫面相同的房間快照時，會重用參與者列與操作按鈕；仍同步 pending、冷卻倒數與提示。快照、連線狀態、邀請代碼或尚未套用的 speaking／quality 輸入改變時照常重建；已由事件就地更新的 speaking／quality 會同步各自呈現記錄，之後相同房間快照不再因此重建。兩種覆蓋資訊各自比對，漏發事件或共用物件被改動仍可由下一個快照發現；已拖動但尚未由伺服器確認的 gain slider 仍會按原行為回復 authoritative 值。離房清除快取，同房重加也重新建立節點。受控 fake DOM 的 301 席、10 次相同快照工作量，createElement 次數由 21,630 降為 2,163，主要內容替換由 10 次降為 1 次。另一個 100 席、100 次 speaking／quality 事件後接相同快照的受控工作量，主要內容替換由 100 次降為 0 次，新增假 DOM 節點由 75,701 降為 1 個警告 badge。每次房間快照仍序列化／比較完整狀態與覆蓋資訊、檢查 gain input；speaking／quality 事件只各自序列化剛套用的資訊。只保留目前三份 signature 及 gain input 參照，並非零配置或固定時間；以上是合成操作數，未驗證瀏覽器 CPU、記憶體、焦點或延遲改善。
 
 完整範例預設連到同主機 `/ws`；自訂 `server.wsPath` 的部署可開啟 `/?wsPath=%2Fcontrol`。頁面載入時只讀取一次 `wsPath`，缺省／空白沿用 `/ws`，不自動探測設定。驗證沿用最小 embed 的單一 leading slash／same-origin 路徑限制；不允許 authority、反斜線、query／fragment、raw control、內部空白或普通／encoded-dot segment。安全百分比序列不再解碼，Unicode 依 URL 規則序列化；server 設定須匹配序列化 pathname。無效參數會保留表單並顯示固定錯誤，建立／加入在開啟 socket 前中止，需修正網址後重新載入；不會偷偷改連預設路徑。邀請連結只加入已驗證的非預設 `wsPath`、房間 ID 及原有允許的房間代碼，不複製其他 query／fragment；即使頁面 pathname 以 `//` 開頭，邀請仍保留目前 origin。Vite 開發代理預設仍只代理 `/ws`，自訂路徑需另行設定代理。
 

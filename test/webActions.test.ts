@@ -40,7 +40,7 @@ function setup(): Harness {
     let roomActionIdentity = '', roomActionGeneration = 0, cooldownButton = null, cooldownTimer, cooldownDue = 0, invitation = '';
     const pendingRoomActions = new Map(), nodes = [], errors = [];
     const personRows = new Map(), quality = new Map(); let speakingIds = new Set();
-    let renderedRoomSignature; const renderedGainInputs = [];
+    let renderedRoomSignature, renderedSpeakingSignature, renderedQualitySignature; const renderedGainInputs = [];
     let audienceFilterIdentity = ''; const audienceFilterRows = [];
     const audienceFilter = {}, audienceSearch = { value: '' }, audienceFilterClear = {}, audienceFilterCount = {};
     let nextTimer = 0, clock = 0, callbacks = 0;

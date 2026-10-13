@@ -53,6 +53,8 @@ let micRetryButton: HTMLButtonElement | undefined;
 let invitation = '';
 let createdRoom: { roomId: string; code?: string } | null = null;
 let renderedRoomSignature: string | undefined;
+let renderedSpeakingSignature: string | undefined;
+let renderedQualitySignature: string | undefined;
 const renderedGainInputs: { input: HTMLInputElement; value: string }[] = [];
 let cooldownButton: HTMLButtonElement | null = null;
 let cooldownTimer: ReturnType<typeof setTimeout> | undefined;
@@ -416,7 +418,7 @@ function field(form: HTMLFormElement, label: string, name: string, value = '', r
 function landing(): void {
   landingRevision += 1;
   resetAudienceFilter();
-  renderedRoomSignature = undefined; renderedGainInputs.length = 0;
+  renderedRoomSignature = renderedSpeakingSignature = renderedQualitySignature = undefined; renderedGainInputs.length = 0;
   personRows.clear(); speakingIds.clear();
   resetMicSettings();
   resetRoomActions('');
@@ -560,9 +562,12 @@ function renderRoom(state: RoomStatePayload): void {
     micRetryAvailable = micRetryPending = false;
   }
   const roomCode = state.code ?? (createdRoom?.roomId === state.roomId ? createdRoom.code : undefined);
-  // Keep only this room's latest render key; dirty sliders still reset to authoritative state.
-  const signature = JSON.stringify([state, roomCode, [...client.speaking], [...quality], client.status]);
-  if (signature === renderedRoomSignature && !renderedGainInputs.some(({ input, value }) => input.value !== value)) {
+  // Separate already-applied overlays from structural state; dirty sliders still reset to server state.
+  const signature = JSON.stringify([state, roomCode, client.status]);
+  const speakingSignature = JSON.stringify([...client.speaking]);
+  const qualitySignature = JSON.stringify([...quality]);
+  if (signature === renderedRoomSignature && speakingSignature === renderedSpeakingSignature
+    && qualitySignature === renderedQualitySignature && !renderedGainInputs.some(({ input, value }) => input.value !== value)) {
     status.textContent = statusLabels[client.status];
     syncAudienceFilter(state); updateCooldown(); renderNotices(); return;
   }
@@ -653,7 +658,7 @@ function renderRoom(state: RoomStatePayload): void {
   grid.append(audience);
   const top = element('div', 'landing-grid'); top.append(summary, controls);
   content.replaceChildren(top, grid);
-  renderedRoomSignature = signature;
+  renderedRoomSignature = signature; renderedSpeakingSignature = speakingSignature; renderedQualitySignature = qualitySignature;
   syncAudienceFilter(state); updateCooldown(); renderNotices();
 }
 function panelList(title: string, people: ParticipantView[], controller: boolean, kind: 'speaker' | 'hand'): HTMLElement {
@@ -789,6 +794,7 @@ client.on('speaking', ({ detail }) => {
     if (!speakingIds.has(id)) for (const row of personRows.get(id) ?? []) row.classList.toggle('speaking', true);
   }
   speakingIds = ids;
+  renderedSpeakingSignature = JSON.stringify([...ids]);
 });
 client.on('quality', ({ detail }) => {
   const previous = quality;
@@ -797,6 +803,7 @@ client.on('quality', ({ detail }) => {
   for (const id of new Set([...previous.keys(), ...quality.keys()])) {
     for (const row of personRows.get(id) ?? []) applyQuality(row);
   }
+  renderedQualitySignature = JSON.stringify([...quality]);
 });
 function refreshConnectionLine(): void {
   if (!client.state) return;
