@@ -632,3 +632,6 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 
 
 149. **最小嵌入範例的整筆送出快照（2026-10-13）：** whole-module bounded probe在previous disconnect、module import與connect三個等待點修改五欄，原實作仍使用已擷取的舊host/path，卻在join時讀入新room/code/name。把join options與既有host/path在同步submit起點一起擷取；之後current.join只使用該attempt物件，保留原roomId/name/code trim與空白code undefined，不增加localStorage、diagnostic或URL欄位。輸入仍可編輯供下一次明確送出，既有取消／generation／terminal／state-before-ACK流程不變，不自動重試。這延伸原本host/path-only快照契約，修正無意的跨attempt payload混用；所選主機模組本來就在頁面執行且可讀DOM，不能把它宣稱為隔離惡意host的安全邊界。回歸以whole embed及actual SDK fake socket確認送出目的地與payload，只有syntheticcode、不接觸實際憑證或外部主機。
+
+
+150. **完整範例的個人舉手位置提示（2026-10-13）：** whole sample probe中四個同名hands，自己ID排第三時只能看到完整佇列的「我」badge，個人區只有收回按鈕；status-only reconnect也沒有位置的新舊提示。新增單一重用role=status段落，從目前state.hands以me.participantId找第一個相符ID；僅offstage非controller且handRaised顯示（與既有embed/widget防禦性predicate一致），找不到自己只保留等待邀請訊息。updateCooldown同步更新此段落，使state／status-only reconnect／cache hit都使用目前資料；重連明示上次，landing清空，升台／主控／撤手隱藏，無timer或server request。保持原withdraw label／roomAction pending與所有permission policy，不把hand位置當邀請順序保證。實際Room證明hands對所有角色相同、code/audience仍controller-only，主控可越過前兩位先邀第三位；新增UI只顯示自己序位，不複製他人名字或私密欄位。驗證以whole-module fake DOM與模型／Hub快照為界，沒有原生assistive technology／語音驗收聲明。

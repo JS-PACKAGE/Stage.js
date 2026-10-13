@@ -71,6 +71,8 @@ const personRows = new Map<string, HTMLElement[]>();
 let speakingIds = new Set<string>();
 /** Own connection, refreshed from `getStats()`; kept across re-renders of the room view. */
 const connectionLine = element('p', 'muted connection');
+const ownHandPosition = element('p', 'muted own-hand-position');
+ownHandPosition.hidden = true; ownHandPosition.setAttribute('role', 'status');
 let connectionPollSequence = 0;
 const header = element('header', 'topbar');
 const brand = element('h1', '', 'Stage.js 音訊舞台');
@@ -417,6 +419,7 @@ function field(form: HTMLFormElement, label: string, name: string, value = '', r
 }
 function landing(): void {
   landingRevision += 1;
+  ownHandPosition.hidden = true; ownHandPosition.textContent = '';
   resetAudienceFilter();
   renderedRoomSignature = renderedSpeakingSignature = renderedQualitySignature = undefined; renderedGainInputs.length = 0;
   personRows.clear(); speakingIds.clear();
@@ -612,7 +615,7 @@ function renderRoom(state: RoomStatePayload): void {
     }));
   }
   const controls = element('section', 'panel');
-  controls.append(element('h2', '', `你好，${decodeName(state.me.name)}`), element('p', '', `${roleLabels[state.me.role]}${state.me.forceMuted ? ' · 主控已鎖定靜音' : ''}`), connectionLine);
+  controls.append(element('h2', '', `你好，${decodeName(state.me.name)}`), element('p', '', `${roleLabels[state.me.role]}${state.me.forceMuted ? ' · 主控已鎖定靜音' : ''}`), connectionLine, ownHandPosition);
   const actions = element('div', 'actions');
   if (state.me.onStage) {
     const muted = state.me.muted;
@@ -732,6 +735,7 @@ function applyQuality(row: HTMLElement): void {
   badge.title = `上行掉包 ${q.uplinkLossPercent ?? '—'}%、下行掉包 ${q.downlinkLossPercent ?? '—'}%${q.rttMs !== undefined ? `、RTT ${q.rttMs} ms` : ''}`;
 }
 function updateCooldown(): void {
+  syncHandPosition();
   const remainingMs = client.handCooldownMs;
   const remaining = Math.ceil(remainingMs / 1000);
   if (cooldownButton?.isConnected) {
@@ -742,6 +746,20 @@ function updateCooldown(): void {
   if (returnButton) returnButton.disabled = client.status === 'reconnecting';
   syncRoomActions();
   scheduleCooldown(cooldownButton?.isConnected ? remainingMs : 0);
+}
+function syncHandPosition(): void {
+  const state = client.state, me = state?.me;
+  const visible = Boolean(me?.handRaised && !me.onStage && me.role !== 'controller');
+  let text = '';
+  if (visible) {
+    const position = state!.hands.findIndex(person => person.participantId === me!.participantId);
+    const reconnecting = client.status === 'reconnecting';
+    text = position >= 0
+      ? `${reconnecting ? '上次' : '你的'}舉手位置：佇列第 ${position + 1} 位。`
+      : reconnecting ? '上次狀態：已舉手，等待主控邀請。' : '你已舉手，等待主控邀請。';
+  }
+  if (ownHandPosition.hidden !== !visible) ownHandPosition.hidden = !visible;
+  if (ownHandPosition.textContent !== text) ownHandPosition.textContent = text;
 }
 /** Only a visible countdown needs clock-driven updates; state/status/action changes update directly. */
 function scheduleCooldown(remaining: number): void {
