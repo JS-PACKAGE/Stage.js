@@ -84,7 +84,13 @@ export class StageElement extends HTMLElement {
     this.unlock.hidden = true;
     this.hand = this.button('舉手發言', () => (this.current?.me?.handRaised ? this.current.withdrawHand() : this.current?.raiseHand()));
     this.mic = this.button('靜音', () => (this.current?.me?.muted ? this.current.unmute() : this.current?.mute()));
-    this.leaveStage = this.button('離開舞台', () => this.current?.leaveStage());
+    this.leaveStage = this.button('離開舞台', () => {
+      const client = this.current, me = client?.me;
+      // Forwarded events can reenter before render updates the old button's visibility.
+      if (!this.isConnected || !client || !me || client.status === 'reconnecting'
+        || (!me.onStage && me.role !== 'controller')) return;
+      return me.onStage ? client.leaveStage() : client.returnToStage();
+    });
     this.listen = this.button('靜音收聽', () => { this.playbackMuted = !this.playbackMuted; });
     this.listen.setAttribute('aria-label', '靜音收聽');
     this.playback = document.createElement('div');
@@ -353,11 +359,13 @@ export class StageElement extends HTMLElement {
     this.unlock.disabled = this.pendingActions.has(this.unlock);
     this.hand.disabled = reconnecting || this.pendingActions.has(this.hand) || !me || (!me.handRaised && cooldown > 0);
     this.hand.textContent = me?.handRaised ? '收回舉手' : cooldown > 0 ? `舉手發言（${cooldown} 秒）` : '舉手發言';
-    this.mic.hidden = this.leaveStage.hidden = !me?.onStage;
+    this.mic.hidden = !me?.onStage;
+    this.leaveStage.hidden = !me || (!me.onStage && me.role !== 'controller');
     this.mic.disabled = reconnecting || this.pendingActions.has(this.mic) || Boolean(me?.forceMuted);
     this.mic.textContent = me?.muted ? '取消靜音' : '靜音';
     this.mic.setAttribute('aria-pressed', String(Boolean(me?.muted)));
-    this.leaveStage.disabled = reconnecting || this.pendingActions.has(this.leaveStage);
+    this.leaveStage.textContent = me?.onStage ? '離開舞台' : '返回舞台';
+    this.leaveStage.disabled = this.leaveStage.hidden || reconnecting || this.pendingActions.has(this.leaveStage);
   }
 }
 

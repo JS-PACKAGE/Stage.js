@@ -587,3 +587,6 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 
 
 134. **重複麥克風控制的原生連線契約驗證（2026-10-13）：** 決策 129 已用 actual Hub／mock recipients 驗證 requester-only no-op，但仍缺 SDK event 與真正序列化後的 ACK 順序覆蓋。新增 test-only 三個公開 StageClient／native loopback WebSocket 整合，檢查五個 command 的 requester state→ACK→Promise、其他連線無多餘 state、hidden self／force flag 變動仍廣播、私人欄位與 gain 正規化、peer／mixer 身分不變。觀察者負向斷言在 requester ACK 後逐連線使用唯一 ping／pong 屏障，避免 sleep 掩蓋晚到訊息。既有子程序 fixture 的 opt-in 控制 ACK 暫存用來驗證逾時後容量釋放、舊 ACK 不解鎖新請求與正常錯誤恢復；所有等待與 owned-child teardown 有期限。不改 production、SDK／Hub 政策或 media implementation；使用 fake browser media 與 MockMediaTransport，不宣稱真實 ICE、硬體音訊、吞吐或延遲改善。
+
+
+135. **Web Component 的主控返回舞台（2026-10-13）：** actual Hub 自動繼任／八個保留發言席的快照，經實際 SDK receive 送入 widget 後，台下主控原本沒有舉手、麥克風或舞台操作；既有 SDK returnToStage 卻可合法使用主控額外席位。只重用個人 stage 按鈕，台上呼叫 leaveStage，台下主控呼叫 returnToStage，其他台下觀眾隱藏／停用。action 同步重查目前 client／participant／onStage／role／reconnecting 與掛載狀態，避免轉送事件先於 render 時舊 enabled 按鈕誤送操作；沿用同一 pending lock，state-before-ACK 只改文字不解鎖。強制靜音仍可下台，伺服器權限／容量／錯誤與 SDK capture cleanup／重新擷取不變，未新增管理介面、自動 retry 或權限 API。測試以 actual Hub／SDK 加假 DOM／socket／media 驗證，不宣稱 native keyboard／輔助科技或真實麥克風音訊驗收。
