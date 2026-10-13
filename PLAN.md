@@ -548,3 +548,6 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 
 
 121. **最小嵌入範例的麥克風靜音（2026-10-13）：** embed 的觀眾獲准上台後，SDK 依既有流程擷取麥克風，但原頁面只有 audio 本機收聽控制，沒有個人上行靜音操作。新增只對台上者顯示的 native button，沿用 mute／unmute，文字與 aria-pressed 依 authoritative me.muted／forceMuted；固定 aria-label 表達麥克風靜音，pending 以 aria-busy 標示。重連、強制靜音、無當前台位與待回覆均禁止 UI admission，handler 同步重查，不能藉改 disabled 或直接呼叫隱藏按鈕觸發動作。快照早於 ACK 時只更新呈現，不解除 pending；leave／終止／新加入撤銷舊 operation 的 error/finally 權限。保留伺服器拒絕與當前錯誤重試，不樂觀更新 muted，不新增 capture、權限要求、mic retry、計時器或 SDK／Hub 政策。測試範圍為 whole-module 假 DOM／受控 SDK 與既有實際 SDK 假媒體，不宣稱真實硬體或原生鍵盤驗收。
+
+
+122. **停用 metrics 時不啟動程序延遲取樣（2026-10-13）：** CLI 原本無條件呼叫 processSamples，即使 server.metrics.enabled 為 false、HTTP 不使用 provider，仍 enable 10ms resolution 的 native event-loop histogram。以 exact CLI wiring／processSamples source 和 inert server／transport 作有界 probe，300ms 觀察中舊 disabled 路徑有 1 個 histogram／29 筆 samples，條件初始化後為 0／0；enabled 兩版仍為 1／29 且第一次 scrape 前即取樣。只在 CLI 依啟動設定決定是否建立取樣器，保留 enabled since-start 語意、原 provider、HTTP 關閉／授權政策、其他 counters 與正常停機，不改 processSamples 公開介面或新增動態設定。此證據只表示省去停用功能的 native 取樣，不宣稱 CPU、RSS、耗電或音訊效能提升。

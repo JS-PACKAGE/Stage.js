@@ -65,7 +65,7 @@ const stageHub = new StageHub({
 });
 hub = stageHub;
 
-const processMetrics = processSamples();
+const processMetrics = config.server.metrics.enabled ? processSamples() : () => [];
 const server = createStageServer({
   config,
   hub: stageHub,
