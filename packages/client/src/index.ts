@@ -310,6 +310,17 @@ export class StageClient extends EventTarget {
     this.mediaTask = task.catch(() => {});
     return task;
   }
+  /** Queue one explicit retry of failed room capture; true means admitted, not recovered audio. */
+  retryMicrophone(): boolean {
+    if (this.currentStatus !== 'live' || this.socket?.readyState !== WebSocket.OPEN
+      || !this.pc || this.pc.connectionState === 'closed' || !this.transceiver
+      || !this.me?.onStage || this.mic || !this.micFailed) return false;
+    // Reserve admission before scheduling so repeated calls cannot queue permission prompts.
+    // syncMedia retains its existing generation/revision cancellation and event-based errors.
+    this.micFailed = false;
+    this.syncMedia();
+    return true;
+  }
   async startMicTest(options: MicTestOptions = {}): Promise<MicTest> {
     const signal = options.signal;
     if (signal?.aborted) throw abortReason(signal);

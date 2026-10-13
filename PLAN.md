@@ -521,3 +521,6 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 
 
 112. **Web Component 舉手佇列位置（2026-10-13）：** compact widget 原本只有「已舉手」而無完整名單。以既有公開權威 state.hands 的 participantId 查找顯示 1-based 位置，僅 offstage／非主控且 handRaised 時計算；找不到本人則保留「已舉手」，不猜測或露出其他資料。重連保留快照時明示「上次佇列」，新 state 自動重算，withdraw／上台／身分替換沿用現有 UI 判斷。舉手按鈕、pending／cooldown／reconnect／controller gates、既有 status role 與 polite live region 均不改，不新增 SDK API／timer／cache。Room.handQueue 包含 grace 內斷線者，主控可任意核准，因此這是目前名單位置，並非發言保證或預估等待時間。測試使用假 DOM／受控 SDK 事件，不宣稱真實輔助科技朗讀或 browser layout 驗證。
+
+
+113. **SDK 明確重試房間麥克風（2026-10-13）：** actual SDK＋fake socket/media 對 NotAllowedError／NotFoundError／NotReadableError 證實，初次失敗後 setInputDevice 只保存選擇、mute／unmute／普通快照及成功 preview 均不清 room micFailed；原本需重新上台或 peer 替換才恢復。新增 additive retryMicrophone():boolean，僅目前 live／OPEN 信令／有效 current peer／仍在台上／無 mic／micFailed 時接納，先同步清 latch 再沿用 syncMedia 排程，重複／不適用呼叫回 false。true 是 enqueue-only，既有 revision supersession 可取消工作，不能包裝 mediaTask 當作成功 promise，因為背景 path 會吞 capture/install failure 並派事件，也不等待 negotiation。保留選定裝置、mute／force-mute、台位／peer、獨立 preview 與原本 generation/capture ownership；不新增 automatic retry、UI 按鈕或協商流程。micready 是既有共享事件（preview 亦會發出，且早於 sender 安裝），文件不得宣稱它能確定該次重試／聲音傳送成功。驗證使用假授權／音軌／socket，真實 browser／ICE／裝置限制不變。

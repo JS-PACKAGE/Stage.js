@@ -131,11 +131,13 @@ function setup(t: TestContext, options: { holdCapture?: boolean } = {}) {
   Socket.instances = []; Peer.instances = []; Context.instances = [];
   const sources: ReturnType<typeof stream>[] = [];
   const captureRequests: ReturnType<typeof deferred<MediaStream>>[] = [];
+  const captureConstraints: MediaStreamConstraints[] = [];
   const originals = new Map(['window', 'WebSocket', 'RTCPeerConnection', 'AudioContext', 'navigator']
     .map(name => [name, Object.getOwnPropertyDescriptor(globalThis, name)]));
   for (const [name, value] of Object.entries({ window: new EventTarget(), WebSocket: Socket,
     RTCPeerConnection: Peer, AudioContext: Context,
-    navigator: { mediaDevices: { getUserMedia: async () => {
+    navigator: { mediaDevices: { getUserMedia: async (constraints: MediaStreamConstraints) => {
+      captureConstraints.push(constraints);
       if (options.holdCapture) { const request = deferred<MediaStream>(); captureRequests.push(request); return request.promise; }
       const source = stream(); sources.push(source); return source.value;
     } } } })) {
@@ -181,7 +183,7 @@ function setup(t: TestContext, options: { holdCapture?: boolean } = {}) {
     await until(() => peer.transceiver.direction === 'sendrecv' && peer.signalingState === 'stable'
       && peer.transceiver.sender.track !== null && !client['negotiating'], 'speaker capture and negotiation');
   }
-  return { client, sources, captureRequests, errors, micErrors, micReady: () => micReady, tick, until, complete, join, promote };
+  return { client, sources, captureRequests, captureConstraints, errors, micErrors, micReady: () => micReady, tick, until, complete, join, promote };
 }
 
 for (const muted of [false, true]) it(`stops installed and pending replacement capture immediately on stage exit (muted=${muted})`, async t => {
@@ -615,3 +617,313 @@ for (const callback of ['state', 'status'] as const) for (const action of ['newe
     assert.deepEqual(h.errors, []);
   });
 }
+
+async function failInitialMicrophone(h: ReturnType<typeof setup>, socket: Socket, name = 'NotAllowedError') {
+  socket.deliver({ type: 'room:state', ...state(true) });
+  await h.until(() => h.captureRequests.length === 1, 'initial capture request');
+  h.captureRequests[0]!.reject(new DOMException('controlled capture failure', name));
+  await h.until(() => h.micErrors.length === 1, 'initial capture failure');
+  assert.equal(h.client['micFailed'], true);
+  assert.equal(h.client['mic'], null);
+}
+
+for (const name of ['NotAllowedError', 'NotFoundError', 'NotReadableError']) {
+  it(`manual microphone retry recovers ${name} on the same seat and peer using the selected device`, async t => {
+    const h = setup(t, { holdCapture: true }), { socket, peer } = await h.join();
+    await failInitialMicrophone(h, socket, name);
+    await h.complete(h.client.setInputDevice('working-device'), 'device preference after failed capture');
+    assert.equal(h.captureRequests.length, 1, 'saving a choice does not implicitly retry');
+    await h.complete(h.client.mute(), 'mute after failed capture');
+    await h.complete(h.client.unmute(), 'unmute after failed capture');
+    socket.deliver({ type: 'room:state', ...state(true) }); await h.tick();
+    assert.equal(h.captureRequests.length, 1, 'snapshots and mute controls do not retry a latched failure');
+    const controls = socket.sent.filter(message => !message.type.startsWith('rtc:')).length;
+    const admission = h.client.retryMicrophone();
+    assert.equal(admission, true, 'the immediate boolean acknowledges admission, not recovery');
+    assert.equal(h.client.retryMicrophone(), false, 'synchronous duplicate calls are not admitted');
+    assert.equal(h.captureRequests.length, 1, 'capture is queued rather than completed at admission');
+    assert.equal(h.client['mic'], null);
+    await h.until(() => h.captureRequests.length === 2, 'manual capture');
+    assert.equal(h.client.retryMicrophone(), false, 'an admitted permission wait cannot be retried');
+    assert.deepEqual((h.captureConstraints[1]!.audio as MediaTrackConstraints).deviceId, { exact: 'working-device' });
+    const recovered = stream(); h.captureRequests[1]!.resolve(recovered.value);
+    await h.until(() => peer.transceiver.sender.track === (recovered.track as unknown as MediaStreamTrack)
+      && peer.transceiver.direction === 'sendrecv' && !h.client['negotiating'], 'manual capture installation');
+    assert.equal(h.client.me!.participantId, 'guest'); assert.equal(h.client.me!.onStage, true);
+    assert.equal(Peer.instances.length, 1); assert.equal(Socket.instances.length, 1);
+    assert.equal(socket.sent.filter(message => !message.type.startsWith('rtc:')).length, controls);
+    assert.equal(h.client.retryMicrophone(), false, 'a healthy capture is not restarted');
+    assert.equal(recovered.track.enabled, true); assert.equal(recovered.track.stops, 0);
+    assert.equal(h.micReady(), 1); assert.equal(h.micErrors.length, 1); assert.deepEqual(h.errors, []);
+  });
+}
+
+it('manual microphone retry requires another explicit admission after each new capture failure', async t => {
+  const h = setup(t, { holdCapture: true }), { socket, peer } = await h.join();
+  await failInitialMicrophone(h, socket);
+  for (let attempt = 1; attempt <= 2; attempt++) {
+    assert.equal(h.client.retryMicrophone(), true);
+    await h.until(() => h.captureRequests.length === attempt + 1, 'next explicit capture');
+    h.captureRequests[attempt]!.reject(new DOMException('still unavailable', 'NotFoundError'));
+    await h.until(() => h.micErrors.length === attempt + 1, 'repeated failure notification');
+    socket.deliver({ type: 'room:state', ...state(true) }); await h.tick(100);
+    assert.equal(h.captureRequests.length, attempt + 1, 'a failed admitted attempt does not loop');
+    assert.equal(h.client['micFailed'], true); assert.equal(peer.transceiver.sender.track, null);
+  }
+  assert.equal(h.client.retryMicrophone(), true);
+  await h.until(() => h.captureRequests.length === 4, 'final explicit capture');
+  const source = stream(); h.captureRequests[3]!.resolve(source.value);
+  await h.until(() => peer.transceiver.sender.track === (source.track as unknown as MediaStreamTrack), 'final recovery');
+  assert.equal(h.client['micFailed'], false); assert.equal(h.micReady(), 1);
+  assert.deepEqual(h.errors, []);
+});
+
+it('manual microphone retry rejects disconnected, audience and pending initial capture admission', async t => {
+  const h = setup(t, { holdCapture: true });
+  assert.equal(h.client.retryMicrophone(), false);
+  const { socket, peer } = await h.join();
+  assert.equal(h.client.retryMicrophone(), false);
+  socket.deliver({ type: 'room:state', ...state(true) });
+  await h.until(() => h.captureRequests.length === 1, 'pending initial permission');
+  assert.equal(h.client.retryMicrophone(), false); await h.tick();
+  assert.equal(h.captureRequests.length, 1);
+  const source = stream(); h.captureRequests[0]!.resolve(source.value);
+  await h.until(() => peer.transceiver.sender.track === (source.track as unknown as MediaStreamTrack), 'initial installation');
+  assert.equal(h.client.retryMicrophone(), false);
+  await h.client.disconnect(); assert.equal(h.client.retryMicrophone(), false);
+  assert.equal(source.track.stops, 1);
+});
+
+it('manual microphone retry rejects waiting and reconnecting status without consuming failed-capture eligibility', async t => {
+  const h = setup(t, { holdCapture: true }), { socket } = await h.join();
+  await failInitialMicrophone(h, socket);
+  socket.deliver({ type: 'status', state: 'waiting' });
+  assert.equal(h.client.retryMicrophone(), false); assert.equal(h.client['micFailed'], true);
+  socket.deliver({ type: 'status', state: 'live' });
+  socket.close();
+  assert.equal(h.client.status, 'reconnecting'); assert.equal(h.client.me!.onStage, true);
+  assert.equal(h.client.retryMicrophone(), false); assert.equal(h.client['micFailed'], true);
+  await h.tick(); assert.equal(h.captureRequests.length, 1);
+});
+
+it('manual microphone retry defensively rejects non-open signaling and missing or closed peer resources', async t => {
+  const h = setup(t, { holdCapture: true }), { socket, peer } = await h.join();
+  await failInitialMicrophone(h, socket);
+  await h.until(() => !h.client['negotiating'], 'failed capture receive-only synchronization');
+  // These controlled resource gaps check admission guards, not native WebSocket/browser timing.
+  socket.readyState = 0; assert.equal(h.client.retryMicrophone(), false); socket.readyState = Socket.OPEN;
+  const pc = h.client['pc']; h.client['pc'] = null;
+  assert.equal(h.client.retryMicrophone(), false); h.client['pc'] = pc;
+  const transceiver = h.client['transceiver']; h.client['transceiver'] = null;
+  assert.equal(h.client.retryMicrophone(), false); h.client['transceiver'] = transceiver;
+  peer.connectionState = 'closed'; assert.equal(h.client.retryMicrophone(), false); peer.connectionState = 'connected';
+  assert.equal(h.client['micFailed'], true); assert.equal(h.captureRequests.length, 1);
+  assert.equal(h.client.retryMicrophone(), true);
+  await h.until(() => h.captureRequests.length === 2, 'eligible retry after restored resources');
+});
+
+for (const mute of ['self', 'forced'] as const) {
+  it(`manual microphone retry preserves latest ${mute} mute through capture and held sender installation`, async t => {
+    const h = setup(t, { holdCapture: true }), { socket, peer } = await h.join();
+    await failInitialMicrophone(h, socket);
+    await h.until(() => !h.client['negotiating'], 'failed receive-only synchronization');
+    assert.equal(h.client.retryMicrophone(), true);
+    await h.until(() => h.captureRequests.length === 2, 'retry permission wait');
+    if (mute === 'self') await h.complete(h.client.mute(), 'self mute while waiting');
+    else {
+      const latest = state(true, true); latest.me.forceMuted = true;
+      socket.deliver({ type: 'room:state', ...latest });
+    }
+    const gate = peer.holdNextReplacement(true), source = stream();
+    h.captureRequests[1]!.resolve(source.value);
+    await h.until(() => gate.entered, 'retry sender installation entered');
+    assert.equal(source.track.enabled, false); assert.equal(h.client.me!.muted, true);
+    assert.equal(h.client.me!.forceMuted, mute === 'forced');
+    assert.equal(h.client.retryMicrophone(), false); assert.equal(h.micReady(), 1);
+    if (mute === 'self') await h.complete(h.client.unmute(), 'self unmute while installation held');
+    else socket.deliver({ type: 'room:state', ...state(true) });
+    assert.equal(source.track.enabled, true, 'accepted mute policy changes apply before replaceTrack settles');
+    const latest = state(true, true); latest.me.forceMuted = true;
+    socket.deliver({ type: 'room:state', ...latest }); assert.equal(source.track.enabled, false);
+    gate.resolve();
+    await h.until(() => peer.transceiver.direction === 'sendrecv' && !h.client['negotiating'], 'muted retry synchronized');
+    assert.equal(source.track.enabled, false); assert.equal(source.track.stops, 0);
+    assert.equal(h.client.me!.forceMuted, true); assert.equal(h.client.me!.onStage, true);
+    assert.deepEqual(h.errors, []);
+  });
+}
+
+it('manual microphone retry queued behind replaceTrack is superseded by same-peer stage exit and reentry', async t => {
+  const h = setup(t, { holdCapture: true }), { socket, peer } = await h.join();
+  const gate = peer.holdNextReplacement();
+  await failInitialMicrophone(h, socket);
+  await h.until(() => gate.entered, 'failed capture null-track installation held');
+  assert.equal(h.client.retryMicrophone(), true);
+  await h.complete(h.client.leaveStage(), 'leave before queued retry runs');
+  socket.deliver({ type: 'room:state', ...state(true, true) });
+  assert.equal(h.captureRequests.length, 1, 'same-peer work still waits for the browser replacement');
+  gate.resolve();
+  await h.until(() => h.captureRequests.length === 2, 'fresh reentry capture');
+  const source = stream(); h.captureRequests[1]!.resolve(source.value);
+  await h.until(() => peer.transceiver.sender.track === (source.track as unknown as MediaStreamTrack)
+    && peer.transceiver.direction === 'sendrecv' && !h.client['negotiating'], 'current muted reentry installed');
+  assert.equal(h.captureRequests.length, 2, 'superseded retry did not create an extra capture');
+  assert.equal(Peer.instances.length, 1); assert.equal(source.track.enabled, false);
+  assert.equal(h.micReady(), 1); assert.equal(h.micErrors.length, 1); assert.deepEqual(h.errors, []);
+});
+
+it('manual microphone retry uses a queued device choice when an ordinary snapshot supersedes its queued synchronization', async t => {
+  const h = setup(t, { holdCapture: true }), { socket, peer } = await h.join();
+  const gate = peer.holdNextReplacement();
+  await failInitialMicrophone(h, socket);
+  await h.until(() => gate.entered, 'receive-only replacement held');
+  const selected = h.client.setInputDevice('queued-device');
+  assert.equal(h.client.retryMicrophone(), true);
+  socket.deliver({ type: 'room:state', ...state(true, true) });
+  assert.equal(h.client.retryMicrophone(), false); assert.equal(h.captureRequests.length, 1);
+  gate.resolve(); await h.complete(selected, 'queued choice applied');
+  await h.until(() => h.captureRequests.length === 2, 'latest snapshot performs admitted capture');
+  assert.deepEqual((h.captureConstraints[1]!.audio as MediaTrackConstraints).deviceId, { exact: 'queued-device' });
+  const source = stream(); h.captureRequests[1]!.resolve(source.value);
+  await h.until(() => peer.transceiver.sender.track === (source.track as unknown as MediaStreamTrack)
+    && peer.transceiver.direction === 'sendrecv' && !h.client['negotiating'], 'latest snapshot synchronized');
+  assert.equal(h.captureRequests.length, 2, 'superseded synchronization does not acquire twice');
+  assert.equal(source.track.enabled, false); assert.equal(h.micReady(), 1);
+  assert.equal(h.client['inputDeviceId'], 'queued-device'); assert.deepEqual(h.errors, []);
+});
+
+it('manual microphone retry already admitted survives a signaling-only loss while new admissions are rejected', async t => {
+  const h = setup(t, { holdCapture: true }), { socket, peer } = await h.join();
+  await failInitialMicrophone(h, socket);
+  await h.complete(h.client.mute(), 'mute before admission');
+  assert.equal(h.client.retryMicrophone(), true);
+  await h.until(() => h.captureRequests.length === 2, 'admitted permission wait');
+  socket.close();
+  assert.equal(h.client.status, 'reconnecting'); assert.equal(h.client.retryMicrophone(), false);
+  const source = stream(); h.captureRequests[1]!.resolve(source.value);
+  await h.until(() => peer.transceiver.sender.track === (source.track as unknown as MediaStreamTrack)
+    && !h.client['negotiating'], 'surviving peer installs its admitted capture');
+  assert.equal(Peer.instances.length, 1); assert.equal(source.track.stops, 0);
+  assert.equal(source.track.enabled, false); assert.equal(h.client.me!.muted, true);
+  assert.equal(h.micReady(), 1); assert.equal(h.micErrors.length, 1);
+  assert.deepEqual(h.errors, ['disconnected'], 'sending negotiation without signaling retains its existing error event');
+  await h.client.disconnect(); assert.equal(source.track.stops, 1);
+  assert.equal(h.client['mic'], null); assert.equal(h.client.retryMicrophone(), false);
+});
+
+for (const transition of ['stage-exit', 'disconnect', 'kicked', 'room:closed'] as const) {
+  for (const outcome of ['resolve', 'reject'] as const) {
+    it(`manual microphone retry disposes late ${outcome} after ${transition} without touching reentry`, async t => {
+      const h = setup(t, { holdCapture: true }); let { socket, peer } = await h.join();
+      await failInitialMicrophone(h, socket);
+      assert.equal(h.client.retryMicrophone(), true);
+      await h.until(() => h.captureRequests.length === 2, 'retired retry pending');
+      if (transition === 'stage-exit') await h.complete(h.client.leaveStage(), 'leave during manual permission wait');
+      else {
+        if (transition === 'disconnect') await h.client.disconnect();
+        else {
+          socket.deliver(transition === 'kicked' ? { type: 'kicked', roomId: 'room' } : { type: 'room:closed', roomId: 'room' });
+          await h.until(() => h.client.status === 'disconnected', 'terminal cleanup');
+        }
+        ({ socket, peer } = await h.join());
+      }
+      assert.equal(h.client.retryMicrophone(), false);
+      socket.deliver({ type: 'room:state', ...state(true) });
+      await h.until(() => h.captureRequests.length === 3, 'new capture does not wait for retired permission');
+      const current = stream(); h.captureRequests[2]!.resolve(current.value);
+      await h.until(() => peer.transceiver.sender.track === (current.track as unknown as MediaStreamTrack)
+        && !h.client['negotiating'], 'current capture installed');
+      const retired = stream();
+      if (outcome === 'resolve') h.captureRequests[1]!.resolve(retired.value);
+      else h.captureRequests[1]!.reject(new DOMException('retired denial', 'NotAllowedError'));
+      await h.tick();
+      assert.equal(retired.track.stops, outcome === 'resolve' ? 1 : 0);
+      assert.equal(current.track.stops, 0); assert.equal(peer.transceiver.sender.track, current.track);
+      assert.equal(h.client['micFailed'], false); assert.equal(h.micErrors.length, 1);
+      assert.equal(h.micReady(), 1); assert.deepEqual(h.errors, []);
+    });
+  }
+}
+
+it('manual microphone retry queued on a retired peer cannot block or capture for a new peer', async t => {
+  const h = setup(t, { holdCapture: true }), initial = await h.join();
+  const gate = initial.peer.holdNextReplacement();
+  await failInitialMicrophone(h, initial.socket);
+  await h.until(() => gate.entered, 'old receive-only replacement held');
+  assert.equal(h.client.retryMicrophone(), true);
+  await h.client.disconnect();
+  const { socket, peer } = await h.join(); socket.deliver({ type: 'room:state', ...state(true) });
+  await h.until(() => h.captureRequests.length === 2, 'replacement peer acquires without old queue');
+  const source = stream(); h.captureRequests[1]!.resolve(source.value);
+  await h.until(() => peer.transceiver.sender.track === (source.track as unknown as MediaStreamTrack), 'new peer capture');
+  gate.resolve(); await h.tick();
+  assert.equal(h.captureRequests.length, 2); assert.equal(source.track.stops, 0);
+  assert.equal(peer.transceiver.sender.track, source.track); assert.equal(h.micErrors.length, 1);
+  assert.equal(h.micReady(), 1); assert.deepEqual(h.errors, []);
+});
+
+it('manual microphone retry leaves independent preview and shared micready semantics unchanged', async t => {
+  const h = setup(t, { holdCapture: true }), { socket, peer } = await h.join();
+  await failInitialMicrophone(h, socket);
+  const previewPromise = h.client.startMicTest();
+  await h.until(() => h.captureRequests.length === 2, 'independent preview');
+  const previewSource = stream(); h.captureRequests[1]!.resolve(previewSource.value);
+  const preview = await h.complete(previewPromise, 'preview ready');
+  assert.equal(h.micReady(), 1); assert.equal(h.client['mic'], null);
+  assert.equal(h.client['micFailed'], true); assert.equal(peer.transceiver.sender.track, null);
+  assert.equal(h.client.retryMicrophone(), true);
+  await h.until(() => h.captureRequests.length === 3, 'room retry separate from preview');
+  const gate = peer.holdNextReplacement(), roomSource = stream();
+  h.captureRequests[2]!.resolve(roomSource.value);
+  await h.until(() => gate.entered, 'room sender installation held');
+  assert.equal(h.micReady(), 2, 'room micready still precedes replaceTrack completion');
+  assert.equal(peer.transceiver.sender.track, null); assert.equal(peer.transceiver.direction, 'recvonly');
+  preview.stop(); assert.equal(previewSource.track.stops, 1); assert.equal(roomSource.track.stops, 0);
+  gate.resolve();
+  await h.until(() => peer.transceiver.sender.track === (roomSource.track as unknown as MediaStreamTrack)
+    && !h.client['negotiating'], 'room retry installed');
+  assert.equal(roomSource.track.stops, 0); assert.deepEqual(h.errors, []);
+});
+
+it('manual microphone retry admission does not promise sender installation success', async t => {
+  const h = setup(t, { holdCapture: true }), { socket, peer } = await h.join();
+  await failInitialMicrophone(h, socket);
+  assert.equal(h.client.retryMicrophone(), true);
+  await h.until(() => h.captureRequests.length === 2, 'admitted capture');
+  const gate = peer.holdNextReplacement(), source = stream(); h.captureRequests[1]!.resolve(source.value);
+  await h.until(() => gate.entered, 'sender installation');
+  gate.reject(new Error('controlled retry replaceTrack failure'));
+  await h.until(() => h.errors.length === 1, 'sender failure remains an error event');
+  assert.deepEqual(h.errors, ['media_error']); assert.equal(h.micErrors.length, 1);
+  assert.equal(h.micReady(), 1); assert.equal(peer.transceiver.sender.track, null);
+  assert.equal(h.client.retryMicrophone(), false, 'installation failure is outside failed-capture retry eligibility');
+  assert.equal(source.track.stops, 0, 'the existing syncMedia capture ownership is unchanged');
+});
+
+it('manual microphone retry can be admitted by a synchronous micerror listener without duplicate capture', async t => {
+  const h = setup(t, { holdCapture: true }), { socket, peer } = await h.join();
+  const admissions: boolean[] = [];
+  const off = h.client.on('micerror', () => { admissions.push(h.client.retryMicrophone(), h.client.retryMicrophone()); });
+  socket.deliver({ type: 'room:state', ...state(true) });
+  await h.until(() => h.captureRequests.length === 1, 'initial permission');
+  h.captureRequests[0]!.reject(new DOMException('controlled denial', 'NotAllowedError'));
+  await h.until(() => h.captureRequests.length === 2, 'listener-admitted capture'); off();
+  assert.deepEqual(admissions, [true, false]);
+  const source = stream(); h.captureRequests[1]!.resolve(source.value);
+  await h.until(() => peer.transceiver.sender.track === (source.track as unknown as MediaStreamTrack), 'listener retry installed');
+  assert.equal(h.captureRequests.length, 2); assert.equal(h.micReady(), 1); assert.deepEqual(h.errors, []);
+});
+
+it('manual microphone retry respects synchronous micready disconnect before sender installation', async t => {
+  const h = setup(t, { holdCapture: true }), { socket, peer } = await h.join();
+  await failInitialMicrophone(h, socket);
+  h.client.on('micready', () => { void h.client.disconnect(); });
+  assert.equal(h.client.retryMicrophone(), true);
+  await h.until(() => h.captureRequests.length === 2, 'manual capture');
+  const source = stream(); h.captureRequests[1]!.resolve(source.value);
+  await h.until(() => h.client.status === 'disconnected', 'callback disconnect'); await h.tick();
+  assert.equal(source.track.stops, 1); assert.equal(source.track.enabled, false);
+  assert.equal(peer.transceiver.sender.track, null); assert.equal(h.client['mic'], null);
+  assert.equal(h.client.retryMicrophone(), false); assert.equal(h.micErrors.length, 1);
+  assert.deepEqual(h.errors, []);
+});
