@@ -625,20 +625,31 @@ export class StageClient extends EventTarget {
       }
       case 'rtc:config': this.iceServers = message.iceServers; break;
       case 'rtc:answer': {
-        const pc = this.pc;
-        if (!pc || !this.answerWait) break;
+        const pc = this.pc, answerWait = this.answerWait;
+        if (!pc || !answerWait) break;
+        const current = () => pc === this.pc && answerWait === this.answerWait;
         try {
           await pc.setRemoteDescription(message.payload);
           if (pc !== this.pc) break;
-          for (const candidate of this.remoteIce.splice(0)) await pc.addIceCandidate(candidate ?? undefined);
-          this.answerWait?.resolve();
-        } catch (error) { if (pc === this.pc) this.answerWait?.reject(error instanceof Error ? error : new Error('無法套用音訊回應。')); }
+          // Preserve same-peer candidate draining even after a deadline; leaving this shared
+          // buffer for a later answer would move old ICE failures into its negotiation.
+          for (const candidate of this.remoteIce.splice(0)) {
+            await pc.addIceCandidate(candidate ?? undefined);
+            if (pc !== this.pc) return;
+          }
+          if (current()) answerWait.resolve();
+        } catch (error) { if (current()) answerWait.reject(error instanceof Error ? error : new Error('無法套用音訊回應。')); }
         break;
       }
-      case 'rtc:ice':
-        if (!this.pc?.remoteDescription) this.remoteIce.push(message.payload);
-        else await this.pc.addIceCandidate(message.payload ?? undefined);
+      case 'rtc:ice': {
+        const pc = this.pc;
+        if (!pc?.remoteDescription) this.remoteIce.push(message.payload);
+        else {
+          try { await pc.addIceCandidate(message.payload ?? undefined); }
+          catch (error) { if (this.pc === pc) this.report(error); }
+        }
         break;
+      }
       // Either way the seat is gone: forget the session so the socket close does not trigger a rejoin.
       case 'room:closed': case 'kicked':
         await this.disconnect();
@@ -701,12 +712,16 @@ export class StageClient extends EventTarget {
     this.transceiver = pc.addTransceiver('audio', { direction: 'recvonly' });
     pc.onicecandidate = (event) => {
       if (this.pc !== pc) return;
-      void this.request('rtc:ice', { payload: event.candidate?.toJSON() as IceCandidatePayload ?? null }).catch((error: unknown) => this.report(error));
+      void this.request('rtc:ice', { payload: event.candidate?.toJSON() as IceCandidatePayload ?? null }).catch((error: unknown) => {
+        if (this.pc === pc) this.report(error);
+      });
     };
     pc.ontrack = (event) => {
       if (this.pc !== pc) return;
       this.audio.srcObject = event.streams[0] ?? new MediaStream([event.track]);
-      void this.audio.play().catch(() => this.emit('audioblocked', { message: '瀏覽器已阻擋自動播放，請點擊啟用音訊。' }));
+      void this.audio.play().catch(() => {
+        if (this.pc === pc) this.emit('audioblocked', { message: '瀏覽器已阻擋自動播放，請點擊啟用音訊。' });
+      });
     };
     pc.onconnectionstatechange = () => {
       if (this.pc !== pc) return;

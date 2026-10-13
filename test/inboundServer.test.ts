@@ -29,7 +29,7 @@ describe('inbound backlog at the WebSocket boundary', () => {
       c.limits.maxPendingBytes = mode === 'bytes' ? 1024 : 65536;
     });
     const { hub } = harness(config);
-    const gate = Promise.withResolvers<void>(), started = Promise.withResolvers<void>(), detached = Promise.withResolvers<void>();
+    const gate = Promise.withResolvers<void>(), started = Promise.withResolvers<void>(), detached = Promise.withResolvers<void>(), activeFinished = Promise.withResolvers<void>();
     const sessions: WsSession[] = [], handled: string[] = [];
     const originalAttach = hub.attach.bind(hub), originalHandle = hub.handle.bind(hub), originalDetach = hub.detach.bind(hub);
     hub.attach = session => { sessions.push(session as WsSession); originalAttach(session); };
@@ -39,6 +39,7 @@ describe('inbound backlog at the WebSocket boundary', () => {
         if (message.requestId === 'active') { started.resolve(); await gate.promise; }
       }
       await originalHandle(session, message);
+      if (message.type === 'rtc:ice' && message.requestId === 'active') activeFinished.resolve();
     };
     hub.detach = async (session, intentional) => { await originalDetach(session, intentional); if (session === sessions[0]) detached.resolve(); };
     const server = createStageServer({ config, hub, log: silentLogger, baseDir: tmpdir(), metrics: async () => '' });
@@ -70,7 +71,7 @@ describe('inbound backlog at the WebSocket boundary', () => {
       healthy.send(JSON.stringify({ type: 'ping' }));
       await pong;
       assert.deepEqual(handled, ['active']);
-      gate.resolve(); await detached.promise;
+      gate.resolve(); await Promise.all([detached.promise, activeFinished.promise]);
       assert.deepEqual(handled, ['active'], 'discarded requests must never execute after disconnect');
       const metrics = await (await fetch(`http://127.0.0.1:${port}/metrics`)).text();
       assert.match(metrics, new RegExp(`stage_ws_inbound_queue_disconnects_total ${mode === 'count' || mode === 'bytes' ? 1 : 0}\\n`));

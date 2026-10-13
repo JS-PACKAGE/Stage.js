@@ -32,7 +32,7 @@
 
 `new StageClient({ url, requestTimeoutMs: 30000 })` 可調整等待伺服器 hello、請求 ACK 及 SDP answer 的期限。省略時維持 15000 ms；接受 1–300000 的整數毫秒，其他值在建構時拋 `RangeError`，尚未修改／建立 audio。
 
-請求 ACK 期限保留原本的 pacing 等待額度；SDP answer 期限從 offer 實際送出時起算，不會因尚在排程佇列而提早逾時。已替換 peer 的未送出 offer 不再送出，其期限也不影響新 peer。成功、失敗、斷線會清理相關計時器。
+請求 ACK 期限保留原本的 pacing 等待額度；SDP answer 期限從 offer 實際送出時起算，不會因尚在排程佇列而提早逾時。已替換 peer 的未送出 offer 不再送出，其期限也不影響新 peer。成功、失敗、斷線會清理相關計時器。 已開始套用的 answer 與其排隊 ICE 只可完成原本那輪協商；期限過後的遲到 continuation 不會完成或拒絕新一輪 waiter。同一 peer 保留原本候選套用順序，不把已收到的 ICE 留給下一輪 answer；peer 已替換或離房時才停止剩餘批次。這不取消已送入瀏覽器的 SDP／ICE 操作，亦不新增 wire answer 的請求 ID 關聯。
 
 這是 client 等待期限，不會取消已送達伺服器的操作，也不會延長伺服器 `rtc.mediaWorkerTimeoutMs`。keepalive 的靜默判定、ICE restart 與重連退避不受此選項影響；較短期限可能使慢速但仍正常的操作被判為逾時。
 
@@ -82,7 +82,7 @@ WebSocket 建構失敗、hello 逾時或尚未進房的連線關閉，也會釋�
 - `micLevel: number`：目前上台麥克風的 RMS 振幅（0–1，非分貝），未上台或靜音時為 0；可定期讀取以更新音量表。
 - `startMicTest(): Promise<MicTest>`：不需連線或上台，使用所選麥克風，回傳 `{ level(): number, stop(): void }`；`level()` 同樣為 0–1 RMS，不會播放測試音訊。`stop()` 可重複呼叫，停止軌道並關閉 AudioContext；`disconnect()`、關房與被踢也會停止所有測試（包含仍等待授權的測試）。測試期間切換裝置後，請停止並重啟測試。
 
-離開房間或建立替代 PeerConnection 時，舊媒體工作佇列不會阻塞新連線：仍在等待的麥克風授權結果會被忽略並停止遲到的串流，舊代等待授權的 `setInputDevice()` 以 `StageError('disconnected')` 拒絕，已排隊的舊工作在取得執行機會時同樣拒絕。這無法關閉瀏覽器原生授權提示；同一個有效 PeerConnection 內的裝置切換仍依呼叫順序執行。已送入瀏覽器的 `replaceTrack()` 無法由此取消，因此它可能延遲舊佇列內 promise 的完成，但不會阻塞新 peer，其遲到結果也不能取代新連線的麥克風。
+離開房間或建立替代 PeerConnection 時，舊媒體工作佇列不會阻塞新連線：仍在等待的麥克風授權結果會被忽略並停止遲到的串流，舊代等待授權的 `setInputDevice()` 以 `StageError('disconnected')` 拒絕，已排隊的舊工作在取得執行機會時同樣拒絕。這無法關閉瀏覽器原生授權提示；同一個有效 PeerConnection 內的裝置切換仍依呼叫順序執行。 已退場 peer 的本機 ICE 請求或套用遠端候選的遲到失敗不再派發 `error`；同席位重連若沿用 peer，其真正的 ICE 失敗仍會通知。伺服器明確送來的 error 與公開請求的拒絕語意不變，這不是一般錯誤去重機制。已送入瀏覽器的 `replaceTrack()` 無法由此取消，因此它可能延遲舊佇列內 promise 的完成，但不會阻塞新 peer，其遲到結果也不能取代新連線的麥克風。
 
 下台時也會取消尚未完成的房間麥克風授權等待，讓同一 PeerConnection 立即繼續接收音訊的協商，不必等原生提示回覆。快速下台再上台會建立新的擷取嘗試，舊結果不會被安裝；獨立 `startMicTest()` 預覽不受這項取消影響。這仍不能強制關閉瀏覽器權限提示或取消已交給瀏覽器的 `replaceTrack()`。
 
@@ -113,8 +113,10 @@ WebSocket 建構失敗、hello 逾時或尚未進房的連線關閉，也會釋�
 ```
 
 - 屬性：`room`、`name`（兩者都有才進房）、`code`、`url`（ws 位址，預設為載入此模組的伺服器 `/ws`）。進入文件即進房、移除即離開（close 1000，立即讓出席位）；`room`／`name`／`code`／`url` 變更會重新進房。快速移除／重新掛載或更換屬性時，只讓最新一次掛載繼續進房，舊連線的事件不再更新畫面。
-- 內建介面：狀態列（房名．直播狀態．收聽中／已舉手／台上）、錯誤列、`啟用音訊`（自動播放被擋時出現，失敗可重試、成功後隱藏）、觀眾的舉手／收回（含冷卻倒數）、台上的麥克風靜音／離開舞台，以及所有已進房者的「靜音收聽／恢復收聽」。離開、關房與被踢後隱藏失效操作。主控功能請改用 `element.client`（底層 `StageClient`，未進房時為 null）。
+- 內建介面：狀態列（房名．直播狀態．收聽中／已舉手／台上）、錯誤列、`啟用音訊`（自動播放被擋時出現，失敗可重試、成功後隱藏）、觀眾的舉手／收回（含冷卻倒數）、台上的麥克風靜音／離開舞台，以及所有已進房者的「靜音收聽／恢復收聽」。離開、關房與被踢後隱藏失效操作。主控功能請改用 `element.client`（底層 `StageClient`，尚未建立實例或元件已移除時為 null）。
 - 本機收聽靜音：布林屬性 `playback-muted` 與反映它的 `element.playbackMuted` property。加入 `playback-muted` 可初始靜音；移除屬性或設定 property 為 false 恢復收聽。HTML 布林屬性只看是否存在，`playback-muted="false"` 仍表示靜音。變更立即套用於本機 audio，不重新進房、不送控制請求、不改麥克風；更換房間、移除再掛載與 ws 重連保留設定。建議透過此 widget property 控制收聽偏好；直接修改 `element.client` 的 audio 設定不會反映回 widget attribute。按鈕使用原生 button 與 `aria-pressed`，未進房時隱藏。
+- 本機收聽音量：`playback-volume="0.5"` 或 `element.playbackVolume = 0.5`，範圍 0–1（預設 1）。property 反映到 attribute，非有限數值或超出範圍會拋出 RangeError 且不改原設定；attribute 缺省、移除、空白或無效時採 1。初始音量在 connect 前套用，執行中變更不重新進房，換房／移除再掛載／ws 重連保留偏好。音量 0 不會切換 `playback-muted`，調高音量也不會解除靜音；不影響麥克風或其他人，直接改底層 client 不會反映回 widget attribute。
+- 連線結束提示：呼叫 `element.client.disconnect()` 會顯示「未連線」並隱藏房內操作；一般關房、被移出與伺服器維護／重啟各有提示，收聽偏好變更不會清掉提示。換房或重新掛載後清除舊提示，舊 client 的遲到事件不更新或重新派發到新 widget。
 - 事件：所有 client 事件以 `stage-<type>` 從元素派發（`bubbles`、`composed`，`detail` 相同），例如 `stage-state`、`stage-hand`、`stage-kicked`。
 - 樣式：`::part(panel)`、`::part(status)`、`::part(error)`、`::part(actions)`，以及 CSS 變數 `--stage-fg`、`--stage-bg`、`--stage-border`、`--stage-radius`、`--stage-button-bg`、`--stage-accent`、`--stage-accent-fg`、`--stage-error`。
 - 自訂標籤名：`import { defineStageElement } from 'https://host/lib/stage-element.js'` 後呼叫 `defineStageElement('my-stage')`（`stage-client` 已於載入時註冊，多個自訂標籤可並存）。每個自訂標籤使用 `StageElement` 的獨立子類別，因此仍是 `instanceof StageElement`，但 constructor 不與預設／其他標籤相同；重複註冊同名標籤為 no-op，既有其他元件不被覆寫。
@@ -128,6 +130,7 @@ WebSocket 建構失敗、hello 逾時或尚未進房的連線關閉，也會釋�
 - 正式環境須 HTTPS/WSS；CSP `script-src` 允許函式庫來源，`connect-src wss://host`（視 WebRTC 部署增加允許來源），`media-src blob: mediastream:`。若自行傳入音訊元件，仍須允許串流播放。
 - iframe 須上層 Permissions-Policy 允許 `microphone` 給嵌入來源，且 iframe 設 `allow="microphone; autoplay"`。跨站頁也須符合自身的 CSP。
 - `audioblocked` 時顯示按鈕，在使用者點擊事件立即呼叫 `unlockAudio()`；不要在等待網路請求後才解鎖。
+- 已退場 PeerConnection 的 `play()` 遲到失敗不會再發出 `audioblocked`，避免離房或新連線已播放後出現過期提示。目前 peer 的播放失敗仍照常通知；`unlockAudio()` 保留瀏覽器播放 promise 的成功／失敗結果，不繞過自動播放政策。
 - 房間代碼及 resume token 僅保存在執行期記憶體，不要記錄到日誌。邀請 URL 含代碼，請當作敏感資訊分享，建議頁面設定 `Referrer-Policy: no-referrer`。
 
 ## 發佈靜態檔案

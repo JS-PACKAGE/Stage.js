@@ -1,6 +1,8 @@
 import assert from 'node:assert/strict';
 import { after, afterEach, describe, it } from 'node:test';
+import type { TestContext } from 'node:test';
 import { StageClient } from '../src/index.ts';
+import type { RoomStatePayload, ServerMessage } from '../../../shared/protocol.ts';
 
 /** Minimal DOM surface for widget state tests; this does not simulate a browser layout or input system. */
 class Node extends EventTarget {
@@ -15,6 +17,7 @@ class Node extends EventTarget {
   isConnected = true;
   onclick?: () => void;
   append(...nodes: Node[]): void { this.children.push(...nodes); }
+  remove(): void { this.isConnected = false; }
   attachShadow(): Node { const root = new Node(); this.children.push(root); return root; }
   setAttribute(name: string, value: string): void { const previous = this.getAttribute(name); this.attributes.set(name, value); this.changed(name, previous, value); }
   getAttribute(name: string): string | null { return this.attributes.get(name) ?? null; }
@@ -27,9 +30,15 @@ class Node extends EventTarget {
     if (previous !== next && type.observedAttributes?.includes(name)) element.attributeChangedCallback?.(name, previous, next);
   }
 }
-const originals = new Map(['HTMLElement', 'document', 'customElements'].map(name => [name, Object.getOwnPropertyDescriptor(globalThis, name)]));
+class Audio extends Node {
+  volume = 1;
+  muted = false;
+  pause(): void {}
+}
+const originals = new Map(['HTMLElement', 'document', 'customElements', 'window'].map(name => [name, Object.getOwnPropertyDescriptor(globalThis, name)]));
 Object.defineProperty(globalThis, 'HTMLElement', { configurable: true, value: Node });
-Object.defineProperty(globalThis, 'document', { configurable: true, value: { createElement: () => new Node(), body: { append() {} } } });
+Object.defineProperty(globalThis, 'document', { configurable: true, value: { createElement: (tag: string) => tag === 'audio' ? new Audio() : new Node(), body: { append() {} } } });
+Object.defineProperty(globalThis, 'window', { configurable: true, value: new EventTarget() });
 const { StageElement, defineStageElement } = await import('../src/element.ts');
 after(() => { for (const [name, descriptor] of originals) { if (descriptor) Object.defineProperty(globalThis, name, descriptor); else Reflect.deleteProperty(globalThis, name); } });
 
@@ -52,12 +61,188 @@ function widget(onStage = false) {
     state: { name: 'Room' }, status: 'live', handCooldownMs: 0,
     raiseHand: action, withdrawHand: action, mute: action, unmute: action, leaveStage: action,
     disconnect: async () => {}, playbackMuted: false, setPlaybackMuted(muted: boolean) { this.playbackMuted = muted; },
+    playbackVolume: 1, setPlaybackVolume(volume: number) { this.playbackVolume = volume; },
   };
   element['current'] = client as unknown as StageClient;
   element['render']();
   return { element, pending, client, calls: () => calls };
 }
 function click(button: HTMLButtonElement): void { button.onclick?.call(button, {} as PointerEvent); }
+
+function roomState(onStage = false, roomId = 'one'): RoomStatePayload {
+  return {
+    roomId, name: 'Room &amp; Hall', controllerId: 'host', speakers: [], hands: [], audienceCount: 1,
+    codeRequired: false, limits: { maxSpeakers: 8, maxAudience: 300 }, status: 'live',
+    me: { participantId: 'me', name: 'Listener', role: onStage ? 'speaker' : 'audience', onStage,
+      handRaised: false, muted: false, forceMuted: false, gainDb: 0, connected: true, joinedAt: 0 },
+  };
+}
+
+async function subscribedWidget(t: TestContext, onStage = false) {
+  t.mock.method(StageClient.prototype, 'connect', async () => {});
+  t.mock.method(StageClient.prototype, 'join', async () => {});
+  t.mock.method(StageClient.prototype as unknown as { createMedia(): void }, 'createMedia', () => {});
+  const element = new StageElement(); widgets.push(element);
+  Object.assign(element, { isConnected: false });
+  element.setAttribute('room', 'one'); element.setAttribute('name', 'Listener');
+  Object.assign(element, { isConnected: true }); element.connectedCallback(); await settle();
+  const client = element.client;
+  assert.ok(client);
+  await client['receive']({ type: 'room:state', ...roomState(onStage) });
+  return { element, client };
+}
+
+function assertRoomControlsHidden(element: InstanceType<typeof StageElement>): void {
+  for (const key of ['hand', 'mic', 'leaveStage', 'listen'] as const) assert.equal(element[key].hidden, true, key);
+}
+
+const terminalCases = [
+  { title: 'ordinary close', message: { type: 'room:closed', roomId: 'one' }, event: 'closed', text: '房間已關閉。' },
+  { title: 'kick', message: { type: 'kicked', roomId: 'one' }, event: 'kicked', text: '你已被主控移出房間。' },
+  { title: 'shutdown', message: { type: 'room:closed', roomId: 'one', reason: 'shutdown' }, event: 'closed', text: '伺服器維護或重新啟動，房間已關閉。' },
+] as const satisfies readonly { title: string; message: ServerMessage; event: 'closed' | 'kicked'; text: string }[];
+
+describe('widget subscribed connection status', () => {
+  it('shows disconnected and hides room controls after the exposed live client disconnects', async t => {
+    for (const onStage of [false, true]) {
+      const { element, client } = await subscribedWidget(t, onStage);
+      assert.equal(element['status'].textContent, `Room & Hall · 直播中 · ${onStage ? '台上' : '收聽中'}`);
+      assert.equal(element['listen'].hidden, false);
+      assert.equal(element[onStage ? 'mic' : 'hand'].hidden, false);
+      const forwarded: CustomEvent[] = [];
+      const textAtForward: string[] = [];
+      element.addEventListener('stage-status', event => {
+        forwarded.push(event as CustomEvent);
+        textAtForward.push(element['status'].textContent ?? '');
+      });
+      await element.client!.disconnect();
+      assert.equal(element.client, client, 'the exposed client is retained until a rejoin or unmount');
+      assert.equal(client.state, null);
+      assert.equal(client.status, 'disconnected');
+      assertRoomControlsHidden(element);
+      assert.equal(element['status'].textContent, '未連線');
+      assert.deepEqual(textAtForward, ['未連線'], 'the status label is updated before forwarding');
+      assert.deepEqual(forwarded.map(event => event.detail), ['disconnected']);
+      assert.equal(forwarded[0]!.bubbles, true);
+      assert.equal(forwarded[0]!.composed, true);
+      element.playbackMuted = true;
+      assert.equal(element['status'].textContent, '未連線');
+    }
+  });
+
+  it('retains current room state during reconnect and renders subsequent live state', async t => {
+    const { element, client } = await subscribedWidget(t);
+    const previous = client.state;
+    await client['receive']({ type: 'status', state: 'reconnecting' });
+    assert.equal(element.client, client);
+    assert.equal(client.state, previous);
+    assert.equal(element['status'].textContent, 'Room & Hall · 重新連線中 · 收聽中');
+    assert.equal(element['hand'].hidden, false);
+    assert.equal(element['listen'].hidden, false);
+    assert.equal(element['listen'].disabled, false);
+    await client['receive']({ type: 'room:state', ...roomState(true) });
+    assert.equal(element['status'].textContent, 'Room & Hall · 直播中 · 台上');
+    assert.equal(element['mic'].hidden, false);
+    assert.equal(element['leaveStage'].hidden, false);
+    assert.equal(element['hand'].hidden, true);
+  });
+
+  for (const terminal of terminalCases) {
+    it(`preserves the ${terminal.title} notice and forwards the same terminal detail`, async t => {
+      const { element, client } = await subscribedWidget(t, true);
+      let sdkDetail: unknown;
+      const forwarded: CustomEvent[] = [];
+      const textAtForward: string[] = [];
+      client.on(terminal.event, ({ detail }) => { sdkDetail = detail; });
+      element.addEventListener(`stage-${terminal.event}`, event => {
+        forwarded.push(event as CustomEvent);
+        textAtForward.push(element['status'].textContent ?? '');
+      });
+      await client['receive'](terminal.message);
+      assert.equal(client.state, null);
+      assert.equal(client.status, 'disconnected');
+      assertRoomControlsHidden(element);
+      assert.equal(element['status'].textContent, terminal.text);
+      assert.deepEqual(textAtForward, [terminal.text]);
+      assert.equal(forwarded.length, 1);
+      assert.equal(forwarded[0]!.detail, sdkDetail, 'event detail is forwarded without cloning or replacement');
+      const { type: _, ...expectedDetail } = terminal.message;
+      assert.deepEqual(sdkDetail, expectedDetail);
+      assert.equal(forwarded[0]!.bubbles, true);
+      assert.equal(forwarded[0]!.composed, true);
+      element.playbackMuted = true;
+      assert.equal(element['status'].textContent, terminal.text, 'an unrelated preference render keeps the notice');
+      element.playbackMuted = false;
+      assert.equal(element['status'].textContent, terminal.text);
+    });
+  }
+
+  for (const transition of ['room change', 'remount'] as const) {
+    it(`clears terminal notices on ${transition} before receiving a new room state`, async t => {
+      for (const terminal of terminalCases) {
+        const { element, client } = await subscribedWidget(t);
+        await client['receive'](terminal.message);
+        assert.equal(element['status'].textContent, terminal.text);
+        if (transition === 'room change') element.setAttribute('room', 'two');
+        else {
+          Object.assign(element, { isConnected: false }); element.disconnectedCallback(); await settle();
+          assert.equal(element.client, null);
+          Object.assign(element, { isConnected: true }); element.connectedCallback();
+        }
+        assert.equal(element['status'].textContent, '');
+        await settle();
+        const replacement = element.client as StageClient | null;
+        assert.ok(replacement);
+        assert.notEqual(replacement, client);
+        assert.equal(element['status'].textContent, '');
+        assertRoomControlsHidden(element);
+        await replacement['receive']({ type: 'room:state', ...roomState(false, 'two'), name: 'New room' });
+        assert.equal(element['status'].textContent, 'New room · 直播中 · 收聽中');
+      }
+    });
+  }
+
+  it('ignores late status and terminal events from a retired client', async t => {
+    const { element, client } = await subscribedWidget(t);
+    element.setAttribute('room', 'two'); await settle();
+    const replacement = element.client;
+    assert.ok(replacement);
+    assert.notEqual(replacement, client);
+    await replacement['receive']({ type: 'room:state', ...roomState(false, 'two'), name: 'New room' });
+    const forwarded: string[] = [];
+    for (const type of ['status', 'state', 'closed', 'kicked']) element.addEventListener(`stage-${type}`, () => { forwarded.push(type); });
+    await client['receive']({ type: 'status', state: 'reconnecting' });
+    await client['receive']({ type: 'room:state', ...roomState(true), name: 'Old room' });
+    for (const terminal of terminalCases) await client['receive'](terminal.message);
+    assert.deepEqual(forwarded, []);
+    assert.equal(element.client, replacement);
+    assert.equal(element['status'].textContent, 'New room · 直播中 · 收聽中');
+    assert.equal(element['hand'].hidden, false);
+    assert.equal(element['mic'].hidden, true);
+  });
+
+  it('keeps a reentrant replacement clean when a forwarded disconnect starts a new room', async t => {
+    const { element, client } = await subscribedWidget(t, true);
+    const statusAtForward: string[] = [];
+    const terminalEvents: Event[] = [];
+    element.addEventListener('stage-status', event => {
+      if ((event as CustomEvent).detail !== 'disconnected') return;
+      statusAtForward.push(element['status'].textContent ?? '');
+      element.setAttribute('room', 'two');
+    });
+    element.addEventListener('stage-closed', event => { terminalEvents.push(event); });
+    await client['receive']({ type: 'room:closed', roomId: 'one', reason: 'shutdown' });
+    await settle();
+    assert.deepEqual(statusAtForward, ['未連線']);
+    const replacement = element.client;
+    assert.ok(replacement);
+    assert.notEqual(replacement, client);
+    assert.deepEqual(terminalEvents, [], 'the now-retired terminal event is not forwarded');
+    assert.equal(element['status'].textContent, '', 'the old handler cannot restore its disconnect or terminal notice');
+    await replacement['receive']({ type: 'room:state', ...roomState(false, 'two'), name: 'New room' });
+    assert.equal(element['status'].textContent, 'New room · 直播中 · 收聽中');
+  });
+});
 
 describe('widget actions and local playback', () => {
   it('keeps hand, mic and leave-stage actions disabled across renders until their request settles', async () => {
@@ -229,6 +414,205 @@ describe('widget actions and local playback', () => {
 });
 
 
+describe('widget playback volume', () => {
+  it('defaults to full volume and reads finite numeric attributes including zero, one and fractions', () => {
+    const { element, client } = widget();
+    assert.ok(StageElement.observedAttributes.includes('playback-volume'));
+    assert.equal(element.playbackVolume, 1);
+    assert.equal(element.hasAttribute('playback-volume'), false);
+    for (const [attribute, expected] of [['0', 0], ['1', 1], ['0.375', 0.375], [' 0.25 ', 0.25], ['1e-1', 0.1]] as const) {
+      element.setAttribute('playback-volume', attribute);
+      assert.equal(element.playbackVolume, expected, attribute);
+      assert.equal(client.playbackVolume, expected, attribute);
+      assert.equal(element.getAttribute('playback-volume'), attribute, 'reading does not rewrite an attribute');
+    }
+  });
+
+  it('uses full volume for empty, invalid and out-of-range attributes and for attribute removal', () => {
+    const { element, client } = widget();
+    for (const attribute of ['', ' ', '\t\n', 'NaN', 'Infinity', '-Infinity', '1e309', 'invalid', '0.5oops', '-0.01', '1.01']) {
+      element.playbackVolume = 0.4;
+      assert.doesNotThrow(() => element.setAttribute('playback-volume', attribute));
+      assert.equal(element.playbackVolume, 1, JSON.stringify(attribute));
+      assert.equal(client.playbackVolume, 1, JSON.stringify(attribute));
+      assert.equal(element.getAttribute('playback-volume'), attribute);
+    }
+    element.playbackVolume = 0;
+    element.removeAttribute('playback-volume');
+    assert.equal(element.playbackVolume, 1);
+    assert.equal(client.playbackVolume, 1);
+    assert.equal(element.hasAttribute('playback-volume'), false);
+  });
+
+  it('reflects valid property values and derives its preference from the attribute rather than the client', () => {
+    const { element, client } = widget();
+    for (const volume of [0, 0.375, 1]) {
+      element.playbackVolume = volume;
+      assert.equal(element.getAttribute('playback-volume'), String(volume));
+      assert.equal(element.playbackVolume, volume);
+      assert.equal(client.playbackVolume, volume);
+    }
+    element.playbackVolume = 0.4;
+    client.setPlaybackVolume(0.7);
+    assert.equal(element.playbackVolume, 0.4, 'direct SDK changes do not replace the widget preference');
+    element.setAttribute('playback-volume', '0.6');
+    assert.equal(element.playbackVolume, 0.6);
+    assert.equal(client.playbackVolume, 0.6);
+  });
+
+  it('rejects invalid property values with RangeError before mutating the attribute or client', t => {
+    const { element, client } = widget();
+    element.playbackVolume = 0.4;
+    const reflect = t.mock.method(element, 'setAttribute');
+    const apply = t.mock.method(client, 'setPlaybackVolume');
+    const invalid: unknown[] = [NaN, Infinity, -Infinity, -0.01, 1.01, '0.4', '', ' ', null, undefined, true, false, {}, [], 0n];
+    for (const value of invalid) {
+      assert.throws(() => { element.playbackVolume = value as number; }, RangeError);
+      assert.equal(element.getAttribute('playback-volume'), '0.4');
+      assert.equal(element.playbackVolume, 0.4);
+      assert.equal(client.playbackVolume, 0.4);
+    }
+    assert.equal(reflect.mock.callCount(), 0);
+    assert.equal(apply.mock.callCount(), 0);
+  });
+
+  it('applies changes immediately during live and reconnecting states without rejoining or issuing control requests', () => {
+    const { element, client, calls } = widget(true);
+    const current = element.client, generation = element['generation'], before = { ...client.me };
+    for (const status of ['live', 'reconnecting']) {
+      client.status = status;
+      element['render']();
+      element.playbackVolume = 0;
+      assert.equal(client.playbackVolume, 0);
+      element.setAttribute('playback-volume', '0.65');
+      assert.equal(client.playbackVolume, 0.65);
+      element.removeAttribute('playback-volume');
+      assert.equal(client.playbackVolume, 1);
+      assert.equal(element.client, current);
+      assert.equal(element['generation'], generation);
+      assert.equal(client.status, status);
+      assert.equal(calls(), 0);
+      assert.deepEqual(client.me, before);
+    }
+  });
+
+  it('keeps volume independent of listening mute and microphone state, including zero volume', async () => {
+    const { element, client, calls } = widget(true);
+    client.me.muted = true;
+    const before = { ...client.me };
+    for (const muted of [false, true]) {
+      element.playbackMuted = muted;
+      for (const volume of [0, 0.45, 1]) {
+        element.playbackVolume = volume;
+        assert.equal(client.playbackVolume, volume);
+        assert.equal(element.playbackMuted, muted);
+        assert.equal(client.playbackMuted, muted);
+        assert.equal(element.hasAttribute('playback-muted'), muted);
+      }
+    }
+    element.playbackVolume = 0;
+    click(element['listen']); await settle();
+    assert.equal(element.playbackMuted, false);
+    assert.equal(client.playbackMuted, false);
+    assert.equal(element.playbackVolume, 0);
+    assert.equal(client.playbackVolume, 0);
+    element.playbackMuted = true;
+    element.removeAttribute('playback-volume');
+    assert.equal(client.playbackVolume, 1);
+    assert.equal(client.playbackMuted, true);
+    assert.equal(calls(), 0);
+    assert.deepEqual(client.me, before);
+  });
+
+  it('applies the preference before connect and preserves it across room changes and actual remount callbacks', async t => {
+    const initialVolumes: number[] = [];
+    t.mock.method(StageClient.prototype, 'connect', async function (this: StageClient) { initialVolumes.push(this.playbackVolume); });
+    const join = t.mock.method(StageClient.prototype, 'join', async () => {});
+    t.mock.method(StageClient.prototype, 'disconnect', async () => {});
+    const element = new StageElement();
+    try {
+      Object.assign(element, { isConnected: false });
+      element.setAttribute('playback-volume', '0.25');
+      element.setAttribute('room', 'one'); element.setAttribute('name', 'Listener');
+      assert.equal(element.client, null);
+      Object.assign(element, { isConnected: true }); element.connectedCallback(); await settle();
+      const first = element.client as StageClient | null;
+      assert.ok(first);
+      assert.equal(first.playbackVolume, 0.25);
+      element.playbackVolume = 0.625;
+      element.setAttribute('room', 'two'); await settle();
+      const second = element.client as StageClient | null;
+      assert.ok(second);
+      assert.notEqual(second, first);
+      assert.equal(second.playbackVolume, 0.625);
+      Object.assign(element, { isConnected: false }); element.disconnectedCallback(); await settle();
+      assert.equal(element.client, null);
+      assert.equal(element.playbackVolume, 0.625);
+      assert.equal(element.getAttribute('playback-volume'), '0.625');
+      Object.assign(element, { isConnected: true }); element.connectedCallback(); await settle();
+      const remounted = element.client as StageClient | null;
+      assert.ok(remounted);
+      assert.notEqual(remounted, second);
+      assert.equal(remounted.playbackVolume, 0.625);
+      assert.deepEqual(initialVolumes, [0.25, 0.625, 0.625], 'the preference is applied before each connection starts');
+      assert.equal(join.mock.callCount(), 3);
+      const generation = element['generation'];
+      element.removeAttribute('playback-volume');
+      assert.equal(element.playbackVolume, 1);
+      assert.equal(remounted.playbackVolume, 1);
+      assert.equal(element.client, remounted);
+      assert.equal(element['generation'], generation);
+    } finally { element.disconnectedCallback(); await settle(); }
+  });
+
+  it('updates a client while connect is pending and ignores the retired connection after a room change', async t => {
+    const connections: ReturnType<typeof deferred>[] = [];
+    t.mock.method(StageClient.prototype, 'connect', function () {
+      const pending = deferred(); connections.push(pending); return pending.promise;
+    });
+    const join = t.mock.method(StageClient.prototype, 'join', async () => {});
+    t.mock.method(StageClient.prototype, 'disconnect', async () => {});
+    const element = new StageElement();
+    try {
+      element.playbackVolume = 0.2;
+      element.setAttribute('room', 'one'); element.setAttribute('name', 'Listener'); await settle();
+      const first = element.client;
+      assert.ok(first);
+      assert.equal(connections.length, 1);
+      const generation = element['generation'];
+      element.playbackVolume = 0.4;
+      assert.equal(first.playbackVolume, 0.4);
+      element.setAttribute('playback-volume', '0.6');
+      assert.equal(first.playbackVolume, 0.6);
+      assert.equal(element.client, first);
+      assert.equal(element['generation'], generation);
+      assert.equal(connections.length, 1);
+      assert.equal(join.mock.callCount(), 0);
+      element.setAttribute('room', 'two'); await settle();
+      const second = element.client;
+      assert.ok(second);
+      assert.notEqual(second, first);
+      assert.equal(connections.length, 2);
+      assert.equal(second.playbackVolume, 0.6);
+      element.playbackVolume = 0.75;
+      assert.equal(second.playbackVolume, 0.75);
+      assert.equal(first.playbackVolume, 0.6, 'only the current client receives subsequent preference changes');
+      connections[0]!.resolve(); await settle();
+      assert.equal(join.mock.callCount(), 0, 'a superseded connection must not join its old room');
+      assert.equal(element.client, second);
+      assert.equal(second.playbackVolume, 0.75);
+      connections[1]!.resolve(); await settle();
+      assert.equal(join.mock.callCount(), 1);
+      assert.equal(join.mock.calls[0]!.arguments[0]!.roomId, 'two');
+    } finally {
+      element.disconnectedCallback();
+      for (const pending of connections) pending.resolve();
+      await settle();
+    }
+  });
+});
+
+
 /** Enforces registry name/constructor uniqueness; name syntax is only a fixture subset. */
 class Registry {
   readonly definitions = new Map<string, CustomElementConstructor>();
@@ -257,6 +641,13 @@ describe('custom widget tag registration', () => {
     assert.deepEqual((Alias as typeof StageElement).observedAttributes, StageElement.observedAttributes);
     original.playbackMuted = true;
     assert.equal(alias.playbackMuted, false);
+    original.playbackVolume = 0.25;
+    assert.equal(alias.playbackVolume, 1);
+    alias.playbackVolume = 0.75;
+    assert.equal(alias.getAttribute('playback-volume'), '0.75');
+    assert.equal(original.playbackVolume, 0.25);
+    alias.removeAttribute('playback-volume');
+    assert.equal(alias.playbackVolume, 1);
   });
 
   it('supports custom-first registration and makes repeated names a no-op', () => {

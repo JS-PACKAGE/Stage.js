@@ -25,13 +25,14 @@ button.primary { background: var(--stage-accent, #2563eb); border-color: transpa
  * Joins when it is in the document and has `room` and `name`; leaves when removed. Changing
  * `url`, `room`, `code` or `name` rejoins. `url` defaults to `/ws` on the origin the library was
  * loaded from. The underlying client is exposed as `.client` for anything the widget does not
- * offer. `playback-muted` / `.playbackMuted` controls local listening without rejoining,
+ * offer. `playback-muted` / `.playbackMuted` and `playback-volume` / `.playbackVolume`
+ * control local listening without rejoining,
  * and every client event is re-dispatched from the element as `stage-<type>` (bubbling,
  * composed) with the same `detail`. Style through `::part(panel|status|actions)` and the
  * `--stage-*` custom properties.
  */
 export class StageElement extends HTMLElement {
-  static readonly observedAttributes = ['url', 'room', 'code', 'name', 'playback-muted'];
+  static readonly observedAttributes = ['url', 'room', 'code', 'name', 'playback-muted', 'playback-volume'];
   private current: StageClient | null = null;
   private readonly status: HTMLParagraphElement;
   /** Last failure (request rejected, mic denied…); stays until the next action or join. */
@@ -80,17 +81,29 @@ export class StageElement extends HTMLElement {
     this.render();
   }
 
-  /** The StageClient behind the widget; null while not joined. */
+  /** The SDK instance; null before initialization or after element teardown, not a joined-state indicator. */
   get client(): StageClient | null { return this.current; }
 
   /** Local listening preference; reflected as a boolean attribute and retained across rejoins. */
   get playbackMuted(): boolean { return this.hasAttribute('playback-muted'); }
   set playbackMuted(value: boolean) { this.toggleAttribute('playback-muted', Boolean(value)); }
 
+  /** Reflected local volume in [0, 1]; missing or invalid markup uses the default full volume. */
+  get playbackVolume(): number {
+    const raw = this.getAttribute('playback-volume')?.trim();
+    const volume = raw ? Number(raw) : 1;
+    return Number.isFinite(volume) && volume >= 0 && volume <= 1 ? volume : 1;
+  }
+  set playbackVolume(value: number) {
+    if (!Number.isFinite(value) || value < 0 || value > 1) throw new RangeError('收聽音量必須是 0 到 1 之間的有限數值。');
+    this.setAttribute('playback-volume', String(value));
+  }
+
   connectedCallback(): void { this.rejoin(); }
   disconnectedCallback(): void { ++this.generation; void this.leave(); }
   attributeChangedCallback(name: string, previous: string | null, next: string | null): void {
     if (previous === next) return;
+    if (name === 'playback-volume') { this.current?.setPlaybackVolume(this.playbackVolume); return; }
     if (name === 'playback-muted') { this.current?.setPlaybackMuted(this.playbackMuted); this.render(); return; }
     if (this.isConnected) this.rejoin();
   }
@@ -131,12 +144,16 @@ export class StageElement extends HTMLElement {
       if (generation !== this.generation || !this.isConnected || !room || !name) { this.render(); return; }
       const client = new StageClient({ url: this.wsUrl() });
       client.setPlaybackMuted(this.playbackMuted);
+      client.setPlaybackVolume(this.playbackVolume);
       this.current = client;
       for (const type of EVENTS) {
         client.on(type, ({ detail }) => {
           if (generation !== this.generation || this.current !== client) return;
           if (type === 'audioblocked') this.unlock.hidden = false;
-          if (type === 'closed' || type === 'kicked') this.status.textContent = type === 'kicked' ? '你已被主控移出房間。' : '房間已關閉。';
+          if (type === 'status' && detail === 'disconnected') this.status.textContent = STATUS_LABELS.disconnected;
+          if (type === 'closed') this.status.textContent = (detail as StageEventMap['closed']).reason === 'shutdown'
+            ? '伺服器維護或重新啟動，房間已關閉。' : '房間已關閉。';
+          if (type === 'kicked') this.status.textContent = '你已被主控移出房間。';
           if (type === 'error' || type === 'micerror') this.show(detail);
           this.dispatchEvent(new CustomEvent(`stage-${type}`, { detail, bubbles: true, composed: true }));
           if (type === 'state' || type === 'status' || type === 'mic' || type === 'closed' || type === 'kicked') this.render();

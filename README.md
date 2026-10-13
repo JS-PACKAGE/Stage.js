@@ -74,6 +74,10 @@ npm run dev:web    # Vite 前端開發伺服器，/ws 代理到 127.0.0.1:9728
 ./stage.sh help       # 全部指令：install／restart／run／dev／test
 ```
 
+`stage.sh` 的 `STAGE_STOP_TIMEOUT` 接受 0–2147483647 的非負十進位整數秒數；未設定或空值用 15，0 表示送出 SIGTERM 後不等待，若程序仍在執行即送 SIGKILL。上限採可攜的 signed 32-bit 範圍；無效值讓 `stop`／`restart` 在任何程序探測或訊號前以 exit code 1 結束，不刪除 PID 檔，也不啟動替代程序。其他指令不使用這個期限。
+
+`stage.sh` 只接受 PID 檔中的正十進位整數（1–2147483647，可含前導零與尾端換行；拒絕 NUL 等其他位元組）。內容無效或讀取失敗時，`start`／`status`／`stop`／`restart` 以 exit code 1 結束，保留檔案供檢查，不探測／發送訊號／啟動程序；有效但已不存在的 PID 仍清除，`status` 回 3、`stop` 成功返回。這只防止錯誤格式與 process-group selector，不驗證 PID 是否仍屬於原本的 Stage 程序，也不解決作業系統的 PID 重用。
+
 Windows 用 `.\stage.ps1 <command>`，指令相同；Windows 無法對背景 node 送 SIGTERM，`stop` 為直接終止。
 
 ## 設定（`config.yaml`）
@@ -111,7 +115,7 @@ RPC（SDP、ICE、統計、關閉）超過 `rtc.mediaWorkerTimeoutMs` 即拒絕�
 
 ### 輸入工作佇列
 
-`limits.maxPendingMessages`（預設 128）與 `limits.maxPendingBytes`（範例 1 MiB；舊設定為 `maxFrameBytes × 16`）限制每條 WebSocket 等待處理的工作，以訊息數與 JSON UTF-8 位元組分別計算。正在執行的一筆不計入等待上限，仍受單幀上限限制。超過任一上限立即終止該連線並清除等待工作，沿用非主動離開的席位寬限；正在執行的工作結束後才 detach。一般斷線也丟棄尚未開始的工作，不會離開後繼續執行；已開始的工作不強制取消。Prometheus `stage_ws_inbound_queue_disconnects_total` 記錄超限次數。正常順序與每秒頻率限制不變。`node scripts/bench-ws-inbound.ts` 比較 gated 工作下舊 promise chain 與有界佇列的待處理筆數／payload 位元組及斷線後執行數；這不是 RSS 或延遲 benchmark。
+`limits.maxPendingMessages`（預設 128）與 `limits.maxPendingBytes`（範例 1 MiB；舊設定為 `maxFrameBytes × 16`）限制每條 WebSocket 等待處理的工作，以訊息數與 JSON UTF-8 位元組分別計算。正在執行的一筆不計入等待上限，仍受單幀上限限制。超過任一上限立即終止該連線並清除等待工作，沿用非主動離開的席位寬限；實際 socket 關閉時立即解除既有連線綁定並依房間佇列標記離線，讓卡住的 SDP 不阻擋同席回座。一般斷線也丟棄尚未開始的工作；已開始的工作不強制取消，完成後再次清理可能遲到的 join 綁定，不會移除已回座的新連線。席位寬限從這次離線處理開始，不等待 SDP 完成。Prometheus `stage_ws_inbound_queue_disconnects_total` 記錄超限次數。正常順序與每秒頻率限制不變。`node scripts/bench-ws-inbound.ts` 比較 gated 工作下舊 promise chain 與有界佇列的待處理筆數／payload 位元組及斷線後執行數；這不是 RSS 或延遲 benchmark。
 
 伺服器限流以單調經過時間計算，不以牆鐘時間計算，避免系統校時讓正常連線誤觸限流或提早補滿配額；房間時間戳與日誌仍保留正常 UTC／epoch 語意。
 
@@ -193,9 +197,17 @@ JSON frame，型別定義在 [`shared/protocol.ts`](shared/protocol.ts)。每個
 
 連線中取消、關房與被踢會完整停止麥克風／麥克風測試並清除待回覆請求；同一個 client 可在取消後重用。Web Component 快速移除／重掛載時只接受最新一次連線的事件，音訊解鎖失敗可重試，成功後隱藏按鈕。
 
-本機收聽可用 `setPlaybackVolume(0.5)`／`setPlaybackMuted(true)` 調整，`playbackVolume`／`playbackMuted` 即時讀取；不影響麥克風或其他人，重連時保留。範例前端的「音訊設定」也提供音量與靜音收聽控制。音訊裝置清單只套用最新一次列舉結果，避免啟動、麥克風就緒與裝置變更的舊回覆蓋掉新清單；列舉失敗時保留已顯示內容，之後成功更新仍可恢復。
+本機收聽可用 `setPlaybackVolume(0.5)`／`setPlaybackMuted(true)` 調整，`playbackVolume`／`playbackMuted` 即時讀取；不影響麥克風或其他人，重連時保留。範例前端的「音訊設定」也提供音量與靜音收聽控制。
 
-範例前端的個人靜音、上下台、舉手與主控管理按鈕，在等待回覆期間保留停用狀態與 `aria-busy`，不會因冷卻 tick 或房間快照重繪而再次送出。離房／切換身分會清除舊 pending 狀態，舊完成事件不會解鎖新房操作；核准／婉拒／移出舞台共用每人的 pending key，強制靜音與解除亦共用；控制權移交在全列表保留單一 pending，換碼與關房也受保護。舊房間換碼完成不會覆寫新房通知。音量 slider 不在這個按鈕保護範圍。 舉手倒數只在畫面可見且尚未歸零時排程下一個顯示秒數邊界；沒有倒數時不執行冷卻輪詢，房內連線統計仍每 2 秒更新；只有目前房間最新一次請求可更新顯示，舊輪詢／離房前的延遲結果不會清空新資訊。
+範例的邀請連結複製提示只接受最新一次操作，且房間身分與目前連結仍須相符；離房／換碼後的晚到結果不會覆寫新通知。快照重繪未改變連結時，複製失敗會選取目前畫面上的連結供手動複製。這只隔離提示與選取行為，不能取消或還原已交給瀏覽器的剪貼簿寫入。
+
+音訊裝置清單只套用最新一次列舉結果，避免啟動、麥克風就緒與裝置變更的舊回覆蓋掉新清單；列舉失敗時保留已顯示內容，之後成功更新仍可恢復。
+
+發言中標示依目前渲染的參與者索引更新，只切換有變化的列；同人出現在舉手與觀眾名單時會一併更新，重繪／離房不保留舊列。
+
+範例前端的建立／加入房間表單共用一個等待鎖；任一請求進行中，兩個提交按鈕一起停用並標示 `aria-busy`，鍵盤提交也不會重複送出，完成或失敗後恢復。
+
+範例前端的個人靜音、上下台、舉手與主控管理按鈕，在等待回覆期間保留停用狀態與 `aria-busy`，不會因冷卻 tick 或房間快照重繪而再次送出。離房／切換身分會清除舊 pending 狀態，舊完成事件不會解鎖新房操作；核准／婉拒／移出舞台共用每人的 pending key，強制靜音與解除亦共用；控制權移交在全列表保留單一 pending，換碼與關房也受保護。舊房間換碼完成不會覆寫新房通知。音量 slider 不在這個按鈕保護範圍，仍逐次送出放開時的值；離房後才完成的舊 gain 請求不再顯示錯誤到入口／新房，當前房間的失敗仍正常顯示。 舉手倒數只在畫面可見且尚未歸零時排程下一個顯示秒數邊界；沒有倒數時不執行冷卻輪詢，房內連線統計仍每 2 秒更新；只有目前房間最新一次請求可更新顯示，舊輪詢／離房前的延遲結果不會清空新資訊。
 
 範例的麥克風測試與輸入裝置切換共用操作鎖，避免切換途中重複啟動預覽。離房後的晚到預覽只會停止自己的串流，不會覆寫新預覽或解鎖新的操作；SDK 仍允許呼叫端各自管理獨立預覽。
 
@@ -206,18 +218,24 @@ JSON frame，型別定義在 [`shared/protocol.ts`](shared/protocol.ts)。每個
 ```bash
 npm run typecheck                # 伺服器＋client＋web
 npm test                         # 控制面流程 1–4、不變量、斷線寬限與回座、信令與政策競態、ws 邊界（驗證、限流、尺寸、轉義、靜態檔、准入）、混音器與時鐘、下行分級／共用編碼／靜音 DTX、worker 重生
+node --test --test-timeout=20000 test/roomSequences.test.ts # 固定 seed 的房間模型轉換與快照／拒絕原子性檢查
 node scripts/werift-loopback.ts 0 # 真 werift 端到端（主執行緒，含觀眾→發言者重協商、client 端 ICE restart）
 node scripts/werift-loopback.ts 2 # 同一流程驗證 media worker 模式
 node scripts/bench-ws-backpressure.ts unbounded # 慢速讀取端基準（無上限，僅限本機壓測）
 node scripts/bench-ws-backpressure.ts bounded   # 同一測試含待送上限；量測 queued bytes／RSS／健康連線 RTT
 node scripts/bench-ws-inbound.ts # gated 工作下的佇列筆數／payload 比較，非 RSS／延遲量測
 node scripts/bench-control-plane.ts --hands # 真實本機 WebSocket＋Mock 媒體，含舉手突發／回座／停機
+node scripts/bench-audience-count.ts # 觀眾計數 getter 的有界比較
 node scripts/bench-mixer.ts      # 混音壓測：3／8 發言者 × 300 訂閱者
 node scripts/load-test.ts        # 全端壓測：3 發言者＋298 werift 觀眾（--speakers/--audience/--seconds/--procs/--url）
 npm audit
 ```
 
+`test/roomSequences.test.ts` 使用 12 個固定 seed、每個 500 步，混合 17 種模型操作與時鐘前進／回撥／同值。獨立的成功操作 ledger 檢查入場／上台／舉手順序、每位接收者的快照與私人欄位；拒絕操作必須保持完整原狀，固定邊界案例另驗證權限與容量。失敗訊息包含 seed 與 action trace，參與者最多 20 人；這是有界狀態模型覆蓋，不是所有序列的證明或網路／媒體壓測。
+
 完整範例的 `test/webLifecycle.test.ts` 會執行整份 `web/src/main.ts`（只替換 SDK／CSS imports），透過實際註冊的表單、按鈕與 SDK event handlers 驗證離房／重入、預覽取消與晚到完成、統計／冷卻排程、preview→stage meter 切換及關房／kick 通知。fixture 使用可斷開／重掛 DOM、依 SDK 順序派發的 stub events 與有 callback 上限的虛擬時鐘；沒有真實網路、麥克風或新依賴。這補足函式片段測試的初始化／事件串接覆蓋，不替代瀏覽器版面、原生輸入／accessibility、權限提示、CSS 或真實 SDK／WebRTC 整合驗證。
+
+範例的品質警示沿用每次 render 的 participant→rows 索引，只更新前次／本次品質報告涉及的人，省去每則事件掃描所有觀眾列；省略的人仍會移除舊警示，同人出現在舉手與觀眾名單時會一併更新。`test/webQuality.test.ts` 以 301 人、593 個顯示列、100 次單人品質報告計數：完整列查詢 100 → 0 次，badge 查詢 59,300 → 100 次。這是 fake DOM 操作數，不是瀏覽器 CPU／延遲量測；房間重繪、品質資料本身的更新頻率與 badge 文案不變。
 
 ### 本機控制面容量煙霧測試
 
@@ -226,6 +244,10 @@ npm audit
 這不是音訊容量驗收：媒體使用 `MockMediaTransport`，混音器不啟動，負載產生器與伺服器共用 Node 程序，所以資源／延遲包含兩者，也不代表跨網路或實際 WebRTC 表現。presence 合併視窗會讓不同次執行的快照數不同；請使用相同環境、多次比較，不把單次小幅差異當成加速證據。完整媒體測試仍使用 `scripts/load-test.ts`。
 
 `node scripts/bench-control-plane.ts --hands` 另驗證 300 位同時舉手、其中一半收回、所有接收端事件順序與最終快照一致，並繼續回座／關機檢查。舉手與收回事件仍立即可靠廣播，發起者仍在 ACK 前取得自身新快照；其他人的完整 `room:state` 合併到下一輪事件迴圈。每房最多一個待送快照計時器，不逐次延後；台位／控制權等變動仍即時送完整狀態，並取代待送快照。觀眾離開或寬限期到期造成的純收回事件也合併快照。這能避免多人同時舉手時反覆傳送日益增長的完整排隊名單，讓正常接收端不因控制面突發流量觸發輸出上限。
+
+### 觀眾計數 microbenchmark
+
+`node scripts/bench-audience-count.ts` 比較舊逐人掃描與目前觀眾計數 getter：以 1／9／301 人的合法房間、主控在台／離台及零／滿額發言者，warm-up 後交錯執行固定次數並核對 checksum。目前計數從 participant／speaker 集合大小取得，不掃描參與者、不新增快取狀態。這只是 getter 的 JIT microbenchmark，不代表整個 snapshot／廣播／請求的延遲；主控名單、invariant 掃描、序列化與 fan-out 仍照常執行。
 
 ## 授權
 

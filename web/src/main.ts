@@ -16,10 +16,14 @@ let cooldownButton: HTMLButtonElement | null = null;
 let cooldownTimer: ReturnType<typeof setTimeout> | undefined;
 let roomActionIdentity = '';
 let roomActionGeneration = 0;
+let inviteCopySequence = 0;
 const pendingRoomActions = new Map<string, symbol>();
 /** Latest server report per publisher; loss at or above this is flagged in the stage list. */
 const POOR_LOSS_PERCENT = 5;
 let quality = new Map<string, ConnectionQuality>();
+/** Current rendered rows only; one participant can appear in both audience and hand lists. */
+const personRows = new Map<string, HTMLElement[]>();
+let speakingIds = new Set<string>();
 /** Own connection, refreshed from `getStats()`; kept across re-renders of the room view. */
 const connectionLine = element('p', 'muted connection');
 let connectionPollSequence = 0;
@@ -204,11 +208,13 @@ function button(label: string, action: () => Promise<unknown>, className = ''): 
   node.onclick = () => { void run(action, node); };
   return node;
 }
-async function run(action: () => Promise<unknown>, target?: HTMLButtonElement): Promise<void> {
+async function run(action: () => Promise<unknown>, target?: HTMLButtonElement, generation?: number): Promise<void> {
   if (target) target.disabled = true;
   errorBox.hidden = true;
   try { await action(); }
-  catch (error) { showError(error instanceof Error ? error.message : '操作失敗，請稍後再試。'); }
+  catch (error) {
+    if (generation === undefined || generation === roomActionGeneration) showError(error instanceof Error ? error.message : '操作失敗，請稍後再試。');
+  }
   finally { if (target?.isConnected) target.disabled = false; updateCooldown(); syncMeter(); }
 }
 /** Room controls retain their pending state when snapshots replace their DOM nodes. */
@@ -251,6 +257,13 @@ function syncRoomActions(): void {
       || (key === 'hand' && !client.me?.handRaised && client.handCooldownMs > 0);
   }
 }
+/** Both entry forms share one request lock, including after the landing view is replaced. */
+function syncLandingActions(): void {
+  for (const node of content.querySelectorAll<HTMLButtonElement>('[data-landing-submit]')) {
+    node.disabled = busy;
+    node.setAttribute('aria-busy', String(busy));
+  }
+}
 function showError(message: string): void { errorBox.textContent = message; errorBox.hidden = false; }
 function field(form: HTMLFormElement, label: string, name: string, value = '', required = true, maxLength = 32): HTMLInputElement {
   const wrapper = element('label', 'field', label);
@@ -265,6 +278,7 @@ function field(form: HTMLFormElement, label: string, name: string, value = '', r
   return input;
 }
 function landing(): void {
+  personRows.clear(); speakingIds.clear();
   resetMicSettings();
   resetRoomActions('');
   cooldownButton = null; scheduleCooldown(0);
@@ -283,17 +297,17 @@ function landing(): void {
   const createToken = field(create, '建立權杖（伺服器有設定時才需要）', 'token', '', false, 256);
   createToken.type = 'password';
   const createSubmit = element('button', 'primary', '建立並進入');
-  createSubmit.type = 'submit';
+  createSubmit.type = 'submit'; createSubmit.dataset.landingSubmit = 'true';
   create.append(codeLabel, createSubmit);
   create.onsubmit = (event) => {
     event.preventDefault();
     if (busy) return;
-    busy = true;
+    busy = true; syncLandingActions();
     void run(async () => {
       micNotice = invitation = '';
       createdRoom = await client.createRoom({ name: createName.value.trim(), roomName: roomName.value.trim() || undefined, codeRequired: codeRequired.checked, token: createToken.value || undefined });
       if (client.state) renderRoom(client.state);
-    }, createSubmit).finally(() => { busy = false; });
+    }).finally(() => { busy = false; syncLandingActions(); });
   };
   const join = element('form', 'panel');
   join.append(element('h2', '', '加入房間'));
@@ -301,20 +315,20 @@ function landing(): void {
   const code = field(join, '房間代碼（未設定時可留空）', 'code', params.get('code') ?? '', false, 16);
   const joinName = field(join, '你的名稱', 'name');
   const joinSubmit = element('button', 'primary', '加入收聽');
-  joinSubmit.type = 'submit';
+  joinSubmit.type = 'submit'; joinSubmit.dataset.landingSubmit = 'true';
   join.append(joinSubmit);
   join.onsubmit = (event) => {
     event.preventDefault();
     if (busy) return;
-    busy = true;
+    busy = true; syncLandingActions();
     void run(async () => {
       createdRoom = null; micNotice = invitation = '';
       await client.join({ roomId: roomId.value.trim(), code: code.value.trim() || undefined, name: joinName.value.trim() });
-    }, joinSubmit).finally(() => { busy = false; });
+    }).finally(() => { busy = false; syncLandingActions(); });
   };
   grid.append(create, join);
   content.replaceChildren(intro, grid);
-  renderNotices();
+  syncLandingActions(); renderNotices();
 }
 function renderNotices(): void {
   notices.replaceChildren();
@@ -329,6 +343,7 @@ function renderNotices(): void {
   if (invitation) notices.append(element('p', 'banner', invitation));
 }
 function renderRoom(state: RoomStatePayload): void {
+  personRows.clear(); speakingIds = new Set(client.speaking);
   resetRoomActions(JSON.stringify([state.roomId, state.me.participantId]));
   const generation = roomActionGeneration;
   brand.textContent = decodeName(state.name);
@@ -347,8 +362,16 @@ function renderRoom(state: RoomStatePayload): void {
     inviteLink.value = link.href; inviteLink.readOnly = true;
     inviteLink.setAttribute('aria-label', '邀請連結');
     const copy = button('複製邀請連結', async () => {
-      try { await navigator.clipboard.writeText(link.href); invitation = '已複製邀請連結，請只分享給受邀者。'; }
-      catch { inviteLink.focus(); inviteLink.select(); invitation = '請長按或使用複製快捷鍵複製已選取的連結。'; }
+      const sequence = ++inviteCopySequence;
+      let copied = false;
+      try { await navigator.clipboard.writeText(link.href); copied = true; }
+      catch { /* The current link can still be selected for manual copying. */ }
+      // Snapshots can replace this button/input while an earlier write is pending.
+      const currentLink = content.querySelector<HTMLInputElement>('.invite-link');
+      if (generation !== roomActionGeneration || sequence !== inviteCopySequence
+        || !currentLink?.isConnected || currentLink.value !== link.href) return;
+      if (copied) invitation = '已複製邀請連結，請只分享給受邀者。';
+      else { currentLink.focus(); currentLink.select(); invitation = '請長按或使用複製快捷鍵複製已選取的連結。'; }
       renderNotices();
     });
     summary.append(inviteLink, copy);
@@ -417,6 +440,8 @@ function panelList(title: string, people: ParticipantView[], controller: boolean
 function personRow(person: ParticipantView, controller: boolean, kind: 'speaker' | 'hand' | 'audience'): HTMLLIElement {
   const row = element('li', 'person');
   row.dataset.participantId = person.participantId;
+  const rows = personRows.get(person.participantId);
+  if (rows) rows.push(row); else personRows.set(person.participantId, [row]);
   row.classList.toggle('speaking', client.speaking.has(person.participantId));
   const identity = element('div', 'identity');
   identity.append(element('strong', '', decodeName(person.name)), element('span', 'badge', roleLabels[person.role]));
@@ -449,7 +474,7 @@ function gainSlider(person: ParticipantView): HTMLLabelElement {
   slider.min = String(-MAX_GAIN_DB); slider.max = String(MAX_GAIN_DB); slider.step = '1';
   slider.value = String(person.gainDb);
   slider.title = `${person.gainDb} dB`;
-  slider.onchange = () => { void run(() => client.setGain(person.participantId, Number(slider.value))); };
+  slider.onchange = () => { void run(() => client.setGain(person.participantId, Number(slider.value)), undefined, roomActionGeneration); };
   label.append(slider);
   return label;
 }
@@ -513,11 +538,21 @@ client.on('error', ({ detail }) => showError(detail.message));
 // Toggle in place: a full re-render every few hundred ms would reset focus and scroll.
 client.on('speaking', ({ detail }) => {
   const ids = new Set(detail.participantIds);
-  for (const row of content.querySelectorAll<HTMLElement>('.person[data-participant-id]')) row.classList.toggle('speaking', ids.has(row.dataset.participantId!));
+  for (const id of speakingIds) {
+    if (!ids.has(id)) for (const row of personRows.get(id) ?? []) row.classList.toggle('speaking', false);
+  }
+  for (const id of ids) {
+    if (!speakingIds.has(id)) for (const row of personRows.get(id) ?? []) row.classList.toggle('speaking', true);
+  }
+  speakingIds = ids;
 });
 client.on('quality', ({ detail }) => {
+  const previous = quality;
   quality = new Map(detail.participants.map((q) => [q.participantId, q]));
-  for (const row of content.querySelectorAll<HTMLElement>('.person[data-participant-id]')) applyQuality(row);
+  // Omitted IDs still need their old warnings removed, including duplicate rows.
+  for (const id of new Set([...previous.keys(), ...quality.keys()])) {
+    for (const row of personRows.get(id) ?? []) applyQuality(row);
+  }
 });
 function refreshConnectionLine(): void {
   if (!client.state) return;

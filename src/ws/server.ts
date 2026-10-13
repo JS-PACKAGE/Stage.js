@@ -230,7 +230,17 @@ export function createStageServer(deps: StageServerDeps): StageServer {
       if (remaining > 0) perIp.set(ip, remaining); else perIp.delete(ip);
       log.debug('connection closed', { session: session.id, code });
       // 1000 from the client = it chose to leave; anything else (1001 page hide, 1006 drop…) holds the seat.
-      void incoming.stop().then(() => hub.detach(session, code === CLOSE_NORMAL));
+      const drained = incoming.stop();
+      const detach = async (): Promise<void> => {
+        try { await hub.detach(session, code === CLOSE_NORMAL); }
+        catch (error) { log.error('ws detach failed', { session: session.id, error: String(error) }); }
+      };
+      // Release the existing binding now so a stalled offer cannot prevent same-seat resume.
+      void detach();
+      // An already accepted join can bind after close; clean it up once active work settles.
+      void drained.finally(detach).catch(error => {
+        log.error('ws active work cleanup failed', { session: session.id, error: String(error) });
+      });
     });
     ws.on('error', (err) => log.debug('ws error', { session: session.id, error: String(err) }));
   });
