@@ -10,6 +10,7 @@ const submit = join.querySelector<HTMLButtonElement>('button')!;
 submit.setAttribute('aria-busy', 'false');
 const hand = document.querySelector<HTMLButtonElement>('#hand')!;
 const leave = document.querySelector<HTMLButtonElement>('#leave')!;
+const mic = document.querySelector<HTMLButtonElement>('#mic')!;
 const audio = document.querySelector<HTMLAudioElement>('#audio')!;
 const params = new URLSearchParams(location.search);
 input('host').value = params.get('host') ?? location.origin;
@@ -17,6 +18,8 @@ input('room').value = params.get('room') ?? '';
 input('code').value = params.get('code') ?? '';
 let client: Client | null = null;
 let pendingHand: { client: Client } | undefined;
+let pendingMic: { client: Client } | undefined;
+let micClient: Client | undefined;
 let playbackGeneration = 0;
 let entryGeneration = 0;
 let feedbackRevision = 0;
@@ -37,6 +40,15 @@ function syncHand(): void {
   hand.setAttribute('aria-busy', String(pending));
   hand.textContent = me?.handRaised ? '收回舉手' : seconds ? `舉手發言（${seconds} 秒）` : '舉手發言';
   scheduleHandCooldown(me && !me.handRaised ? remaining : 0);
+}
+function syncMic(): void {
+  const me = client === micClient ? client?.me : undefined;
+  const pending = Boolean(pendingMic && pendingMic.client === client);
+  mic.hidden = !me?.onStage;
+  mic.disabled = !me?.onStage || client?.status === 'reconnecting' || Boolean(me?.forceMuted) || pending;
+  mic.setAttribute('aria-busy', String(pending));
+  mic.setAttribute('aria-pressed', String(Boolean(me?.muted)));
+  mic.textContent = me?.forceMuted ? '麥克風已被主控靜音' : me?.muted ? '取消麥克風靜音' : '靜音麥克風';
 }
 /** Only a visible countdown needs a clock; state and action events handle other changes. */
 function scheduleHandCooldown(remaining: number): void {
@@ -69,7 +81,8 @@ join.onsubmit = (event) => {
   submit.disabled = true; submit.setAttribute('aria-busy', 'true');
   void (async () => {
     try {
-      pendingHand = undefined;
+      pendingHand = undefined; pendingMic = undefined; micClient = undefined;
+      mic.hidden = mic.disabled = true; mic.setAttribute('aria-busy', 'false');
       hand.setAttribute('aria-busy', 'false');
       hand.disabled = leave.disabled = true;
       await client?.disconnect();
@@ -83,25 +96,25 @@ join.onsubmit = (event) => {
       if (generation !== entryGeneration) return;
       const ws = new URL('/ws', host); ws.protocol = host.protocol === 'https:' ? 'wss:' : 'ws:';
       client = new library.StageClient({ url: ws.href, audioElement: audio });
-      const current = client;
+      const current = client; micClient = current;
       client.on('state', ({ detail }: CustomEvent<StageEventMap['state']>) => {
         if (client !== current) return;
         progress = false;
         status.textContent = `${library.decodeName(detail.name)} · ${library.decodeName(detail.me.name)} · ${detail.me.onStage ? '已上台' : '收聽中'}`;
-        syncHand();
+        syncHand(); syncMic();
         leave.disabled = false;
       });
       client.on('micerror', ({ detail }) => { progress = false; status.textContent = `${detail.message}（${detail.name}）`; });
       client.on('status', ({ detail }) => {
         if (client !== current) return;
         if (detail === 'reconnecting') { progress = false; status.textContent = '重新連線中'; hand.disabled = true; }
-        else if (detail === 'disconnected') { progress = false; playbackGeneration++; pendingHand = undefined; status.textContent = '未連線'; hand.disabled = leave.disabled = true; }
-        syncHand();
+        else if (detail === 'disconnected') { progress = false; playbackGeneration++; pendingHand = undefined; pendingMic = undefined; micClient = undefined; status.textContent = '未連線'; hand.disabled = leave.disabled = true; }
+        syncHand(); syncMic();
       });
       client.on('error', ({ detail }) => { progress = false; report(detail); });
       client.on('audioblocked', () => { progress = false; status.textContent = '請點擊啟用音訊。'; });
-      client.on('closed', () => { if (client !== current) return; retireEntry(); playbackGeneration++; pendingHand = undefined; syncHand(); status.textContent = '房間已關閉。'; hand.disabled = leave.disabled = true; });
-      client.on('kicked', () => { if (client !== current) return; retireEntry(); playbackGeneration++; pendingHand = undefined; syncHand(); status.textContent = '你已被主控移出房間。'; hand.disabled = leave.disabled = true; });
+      client.on('closed', () => { if (client !== current) return; retireEntry(); playbackGeneration++; pendingHand = undefined; pendingMic = undefined; micClient = undefined; syncHand(); syncMic(); status.textContent = '房間已關閉。'; hand.disabled = leave.disabled = true; });
+      client.on('kicked', () => { if (client !== current) return; retireEntry(); playbackGeneration++; pendingHand = undefined; pendingMic = undefined; micClient = undefined; syncHand(); syncMic(); status.textContent = '你已被主控移出房間。'; hand.disabled = leave.disabled = true; });
       showProgress('連線中…');
       await current.connect();
       if (generation !== entryGeneration) return;
@@ -139,13 +152,26 @@ hand.onclick = () => {
     }
   })();
 };
+mic.onclick = () => {
+  syncMic();
+  if (!client || mic.disabled || mic.hidden) return;
+  const operation = { client };
+  pendingMic = operation; syncMic();
+  void (async () => {
+    try { await (operation.client.me?.muted ? operation.client.unmute() : operation.client.mute()); }
+    catch (error) { if (pendingMic === operation && client === operation.client) report(error); }
+    finally {
+      if (pendingMic === operation && client === operation.client) { pendingMic = undefined; syncMic(); }
+    }
+  })();
+};
 leave.onclick = () => {
   const generation = retireEntry(), current = client;
   playbackGeneration++; scheduleHandCooldown(0);
-  pendingHand = undefined; hand.setAttribute('aria-busy', 'false');
+  pendingHand = undefined; pendingMic = undefined; micClient = undefined; hand.setAttribute('aria-busy', 'false'); syncMic();
   void current?.disconnect().then(() => {
     if (generation !== entryGeneration || client !== current) return;
     status.textContent = '已離開。'; hand.disabled = leave.disabled = true;
   });
 };
-syncHand();
+syncHand(); syncMic();

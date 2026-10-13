@@ -545,3 +545,6 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 
 
 120. **最小嵌入範例的舉手角色限制（2026-10-13）：** actual Hub 自動繼任快照可合法包含台下主控（其他發言席仍保留）；whole embed fixture 證實舊按鈕對此身分開放 raiseHand，Hub 卻以 conflict 拒絕，原有 audience 冷卻 timer 也會繼續跑完再啟用無效操作。只將 syncHand 的 admission／remaining 共用台下非主控 predicate，promotion 當下取消倒數，程式化 onclick 仍先同步 policy 再決定是否呼叫 SDK。保留 audience 收回舉手在 cooldown 中可用、pending／reconnect gates 與原本 promise settlement；角色恢復後依既有 cooldown 重新排程。不新增主控管理／返回舞台 UI，不改 SDK／Hub 政策。驗證結合實際 Hub snapshot 與 fake DOM/library／受控時鐘，不宣稱真實瀏覽器操作或音訊測試。
+
+
+121. **最小嵌入範例的麥克風靜音（2026-10-13）：** embed 的觀眾獲准上台後，SDK 依既有流程擷取麥克風，但原頁面只有 audio 本機收聽控制，沒有個人上行靜音操作。新增只對台上者顯示的 native button，沿用 mute／unmute，文字與 aria-pressed 依 authoritative me.muted／forceMuted；固定 aria-label 表達麥克風靜音，pending 以 aria-busy 標示。重連、強制靜音、無當前台位與待回覆均禁止 UI admission，handler 同步重查，不能藉改 disabled 或直接呼叫隱藏按鈕觸發動作。快照早於 ACK 時只更新呈現，不解除 pending；leave／終止／新加入撤銷舊 operation 的 error/finally 權限。保留伺服器拒絕與當前錯誤重試，不樂觀更新 muted，不新增 capture、權限要求、mic retry、計時器或 SDK／Hub 政策。測試範圍為 whole-module 假 DOM／受控 SDK 與既有實際 SDK 假媒體，不宣稱真實硬體或原生鍵盤驗收。
