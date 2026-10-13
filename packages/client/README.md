@@ -81,7 +81,7 @@ WebSocket 建構失敗、hello 逾時或尚未進房的連線關閉，也會釋�
 每人一個 PeerConnection，觀眾 recvonly；上台才索取麥克風（mono、48 kHz）、轉 sendrecv。權限失敗仍可收聽；請下台、修正權限後再上台。
 
 - `listAudioDevices(): Promise<AudioDevices>`：回傳 `{ inputs: MediaDeviceInfo[], outputs: MediaDeviceInfo[] }`，授權前裝置名稱可能為空。取得權限後會觸發 `micready`（detail 為 undefined），可重新整理清單；裝置插拔可監聽 `navigator.mediaDevices` 的 `devicechange`。
-- `setInputDevice(deviceId: string): Promise<void>`：選擇麥克風，空字串恢復設定的預設裝置。上台時透過 `replaceTrack` 即時切換、不重新協商，保留靜音狀態，停止舊裝置；選擇會保留至重連。選定 ID 優先於 `micConstraints.deviceId`。
+- `setInputDevice(deviceId: string): Promise<void>`：選擇麥克風，空字串恢復設定的預設裝置。上台時透過 `replaceTrack` 即時切換、不重新協商，保留靜音狀態，停止舊裝置；替換 promise 尚未完成時，仍由最新房間狀態同步已安裝與候選音軌的靜音（含主控強制靜音／解除），獨立預覽不受影響；選擇會保留至重連。選定 ID 優先於 `micConstraints.deviceId`。
 - `outputDeviceSupported: boolean`：瀏覽器是否支援輸出選擇。`setOutputDevice(deviceId: string): Promise<void>` 使用 `setSinkId`，不支援時拒絕並拋出 `StageError('media_error', ...)`；空字串使用系統預設。音訊元件於重連重用，因此保留所選輸出。
 - `micLevel: number`：目前上台麥克風的 RMS 振幅（0–1，非分貝），未上台或靜音時為 0；可定期讀取以更新音量表。
 - `startMicTest(): Promise<MicTest>`：不需連線或上台，使用所選麥克風，回傳 `{ level(): number, stop(): void }`；`level()` 同樣為 0–1 RMS，不會播放測試音訊。`stop()` 可重複呼叫，停止軌道並關閉 AudioContext；`disconnect()`、關房與被踢也會停止所有測試（包含仍等待授權的測試）。測試期間切換裝置後，請停止並重啟測試。

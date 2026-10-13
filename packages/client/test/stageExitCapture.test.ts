@@ -26,6 +26,7 @@ class Socket {
   static instances: Socket[] = [];
   readyState = Socket.OPEN;
   onStage = false;
+  private snapshot: RoomStatePayload | null = null;
   readonly sent: ClientMessage[] = [];
   onmessage: ((event: { data: string }) => void) | null = null;
   onclose: (() => void) | null = null;
@@ -35,7 +36,7 @@ class Socket {
       limits: { controlPerSecond: 2000, icePerSecond: 2000, handRaiseIntervalMs: 10000 } }));
   }
   deliver(message: ServerMessage) {
-    if (message.type === 'room:state') this.onStage = message.me.onStage;
+    if (message.type === 'room:state') { this.onStage = message.me.onStage; this.snapshot = message; }
     this.onmessage?.({ data: JSON.stringify(message) });
   }
   send(data: string) {
@@ -44,6 +45,16 @@ class Socket {
     this.sent.push(message);
     queueMicrotask(() => {
       if (message.type === 'join') this.deliver({ type: 'room:state', ...state(false) });
+      if (message.type === 'mic:mute' || message.type === 'mic:unmute') {
+        assert.ok(this.snapshot?.me.onStage);
+        if (message.type === 'mic:unmute' && this.snapshot.me.forceMuted) {
+          this.deliver({ type: 'error', requestId: message.requestId, code: 'forbidden', message: '禁止此操作。' });
+          return;
+        }
+        const muted = message.type === 'mic:mute';
+        this.deliver({ type: muted ? 'mic:muted' : 'mic:unmuted', participantId: 'guest' });
+        this.deliver({ type: 'room:state', ...this.snapshot, me: { ...this.snapshot.me, muted } });
+      }
       if (message.type === 'stage:leave') {
         this.deliver({ type: 'stage:left', participantId: 'guest', role: 'audience', reason: 'leave' });
         // The real room model clears self/forced mute when a participant leaves the stage.
@@ -63,7 +74,7 @@ class Socket {
   close() { this.readyState = 3; this.onclose?.(); }
 }
 
-type ReplacementGate = ReturnType<typeof deferred<void>> & { entered: boolean };
+type ReplacementGate = ReturnType<typeof deferred<void>> & { entered: boolean; attachBeforeSettle: boolean };
 class Peer {
   static instances: Peer[] = [];
   connectionState: RTCPeerConnectionState = 'connected';
@@ -78,12 +89,16 @@ class Peer {
     replaceTrack: async (track: MediaStreamTrack | null) => {
       this.replacements.push(track);
       const gate = this.pendingGates.shift();
-      if (gate) { gate.entered = true; await gate.promise; }
+      if (gate) {
+        // replaceTrack may switch its sender before its promise resolves; this models ordering, not browser timing.
+        if (gate.attachBeforeSettle) this.transceiver.sender.track = track;
+        gate.entered = true; await gate.promise;
+      }
       this.transceiver.sender.track = track;
     } } };
   constructor() { Peer.instances.push(this); }
-  holdNextReplacement(): ReplacementGate {
-    const gate = { ...deferred<void>(), entered: false };
+  holdNextReplacement(attachBeforeSettle = false): ReplacementGate {
+    const gate = { ...deferred<void>(), entered: false, attachBeforeSettle };
     this.gates.push(gate); this.pendingGates.push(gate); return gate;
   }
   addTransceiver() { return this.transceiver; }
@@ -431,3 +446,172 @@ it('uses the latest mute snapshot when a still-current replacement completes', a
   assert.deepEqual(Context.instances.map(context => context.closes), [1, 0]);
   assert.deepEqual(h.errors, []);
 });
+
+for (const attachBeforeSettle of [false, true]) for (const action of ['mute', 'unmute', 'force-mute'] as const) {
+  it(`synchronizes pending candidate on ${action} (attached=${attachBeforeSettle})`, async t => {
+    const h = setup(t), { socket, peer } = await h.join();
+    const initiallyMuted = action === 'unmute';
+    await h.promote(socket, peer, initiallyMuted);
+    const original = h.sources[0]!, gate = peer.holdNextReplacement(attachBeforeSettle), offers = peer.offers.length;
+    let settled = false;
+    const change = h.client.setInputDevice('candidate').finally(() => { settled = true; });
+    await h.until(() => gate.entered, 'candidate replacement entered');
+    const candidate = h.sources[1]!;
+    const observed: boolean[][] = [];
+    const off = h.client.on('state', () => { observed.push([original.track.enabled, candidate.track.enabled]); });
+    if (action === 'force-mute') {
+      const latest = state(true, true); latest.me.forceMuted = true;
+      socket.deliver({ type: 'mic:muted', participantId: 'guest' });
+      socket.deliver({ type: 'room:state', ...latest });
+    } else {
+      await h.complete(h.client[action](), `public ${action} acknowledgement`);
+      assert.equal(socket.sent.at(-1)!.type, `mic:${action}`);
+    }
+    off();
+    assert.deepEqual(observed, [[!initiallyMuted, !initiallyMuted]], 'track policy retains its existing post-state-callback ordering');
+    assert.equal(settled, false, 'mute control must not wait for replaceTrack');
+    assert.equal(h.client.me!.muted, !initiallyMuted);
+    assert.equal(h.client.me!.forceMuted, action === 'force-mute');
+    assert.equal(original.track.enabled, initiallyMuted);
+    assert.equal(candidate.track.enabled, initiallyMuted, 'owned candidate follows the accepted snapshot before replacement settles');
+    assert.equal(peer.transceiver.sender.track === (candidate.track as unknown as MediaStreamTrack), attachBeforeSettle);
+    assert.equal(original.track.readyState, 'live'); assert.equal(candidate.track.readyState, 'live');
+    assert.deepEqual(Context.instances.map(context => context.closes), [0, 0], 'mute does not dispose room capture or meters');
+    gate.resolve(); await h.complete(change, 'candidate installation');
+    assert.equal(candidate.track.enabled, initiallyMuted); assert.equal(candidate.track.stops, 0);
+    assert.equal(original.track.stops, 1); assert.equal(peer.transceiver.sender.track, candidate.track);
+    assert.equal(peer.offers.length, offers, 'device/mute synchronization does not renegotiate');
+    assert.deepEqual(h.errors, []);
+  });
+}
+
+it('applies latest mute to each device replacement only when its queued capture starts', async t => {
+  const h = setup(t), { socket, peer } = await h.join();
+  await h.promote(socket, peer);
+  const firstGate = peer.holdNextReplacement(), secondGate = peer.holdNextReplacement(true);
+  const first = h.client.setInputDevice('first');
+  await h.until(() => firstGate.entered, 'first replacement entered');
+  const firstCandidate = h.sources[1]!;
+  const second = h.client.setInputDevice('second');
+  await h.complete(h.client.mute(), 'mute while second device is queued');
+  assert.equal(h.sources.length, 2, 'a queued device call does not own a captured stream yet');
+  assert.equal(secondGate.entered, false); assert.equal(firstCandidate.track.enabled, false);
+  firstGate.resolve(); await h.complete(first, 'first installation');
+  await h.until(() => secondGate.entered, 'second replacement entered');
+  const secondCandidate = h.sources[2]!;
+  assert.equal(secondCandidate.track.enabled, false, 'new capture starts with the latest accepted mute');
+  await h.complete(h.client.unmute(), 'unmute during second replacement');
+  assert.equal(firstCandidate.track.enabled, true); assert.equal(secondCandidate.track.enabled, true);
+  assert.equal(secondCandidate.track.readyState, 'live'); assert.equal(h.sources[0]!.track.stops, 1);
+  secondGate.resolve(); await h.complete(second, 'second installation');
+  assert.equal(firstCandidate.track.stops, 1); assert.equal(secondCandidate.track.stops, 0);
+  assert.equal(peer.transceiver.sender.track, secondCandidate.track);
+  assert.equal(h.client['inputDeviceId'], 'second'); assert.deepEqual(h.errors, []);
+});
+
+for (const terminal of ['stage:leave', 'kicked', 'room:closed'] as const) {
+  it(`does not re-enable disposed muted candidates after ${terminal} and reentry`, async t => {
+    const h = setup(t), { socket, peer } = await h.join();
+    await h.promote(socket, peer);
+    const original = h.sources[0]!, gate = peer.holdNextReplacement(true);
+    const change = h.client.setInputDevice('retired');
+    await h.until(() => gate.entered, 'candidate replacement entered');
+    const candidate = h.sources[1]!;
+    await h.complete(h.client.mute(), 'mute before retirement');
+    assert.equal(candidate.track.enabled, false);
+    let next = { socket, peer };
+    if (terminal === 'stage:leave') {
+      const off = h.client.on('state', event => {
+        if (event.detail.me.onStage) return;
+        off();
+        assert.equal(original.track.readyState, 'ended'); assert.equal(candidate.track.readyState, 'ended');
+        assert.equal(original.track.enabled, false); assert.equal(candidate.track.enabled, false);
+        // A synchronous injected newer snapshot stresses callback ownership, not native socket scheduling.
+        socket.deliver({ type: 'room:state', ...state(true) });
+      });
+      await h.complete(h.client.leaveStage(), 'leave acknowledgement with callback reentry');
+    } else {
+      socket.deliver(terminal === 'kicked' ? { type: 'kicked', roomId: 'room' } : { type: 'room:closed', roomId: 'room' });
+      assert.equal(h.client.state, null);
+      next = await h.join(); await h.promote(next.socket, next.peer);
+    }
+    assert.equal(original.track.enabled, false); assert.equal(candidate.track.enabled, false);
+    assert.equal(original.track.stops, 1); assert.equal(candidate.track.stops, 1);
+    gate.resolve(); await h.complete(change, 'retired replacement settlement');
+    await h.until(() => h.sources.length === 3 && next.peer.transceiver.sender.track === (h.sources[2]!.track as unknown as MediaStreamTrack)
+      && !h.client['negotiating'], 'fresh microphone after reentry');
+    assert.equal(candidate.track.enabled, false, 'later unmuted snapshots cannot revive a disposed candidate');
+    assert.equal(candidate.track.stops, 1); assert.equal(h.sources[2]!.track.enabled, true);
+    assert.equal(h.sources[2]!.track.stops, 0); assert.notEqual(h.client['inputDeviceId'], 'retired');
+    assert.deepEqual(h.errors, []);
+  });
+}
+
+it('keeps microphone preview independent of pending replacement mute and stage exit', async t => {
+  const h = setup(t), { socket, peer } = await h.join();
+  await h.promote(socket, peer);
+  const preview = await h.client.startMicTest(), previewSource = h.sources[1]!;
+  const gate = peer.holdNextReplacement(true), change = h.client.setInputDevice('candidate');
+  await h.until(() => gate.entered, 'candidate replacement entered');
+  const candidate = h.sources[2]!;
+  for (const muted of [true, false, true]) {
+    await h.complete(muted ? h.client.mute() : h.client.unmute(), 'room microphone mute change');
+    assert.equal(candidate.track.enabled, !muted);
+    assert.equal(previewSource.track.enabled, true); assert.equal(previewSource.track.readyState, 'live');
+    assert.equal(Context.instances[1]!.closes, 0);
+  }
+  await h.complete(h.client.leaveStage(), 'leave with preview running');
+  assert.equal(candidate.track.readyState, 'ended'); assert.equal(candidate.track.enabled, false);
+  assert.equal(previewSource.track.readyState, 'live'); assert.equal(previewSource.track.enabled, true);
+  gate.resolve(); await h.complete(change, 'retired candidate settlement');
+  preview.stop(); assert.equal(previewSource.track.stops, 1);
+  assert.deepEqual(Context.instances.map(context => context.closes), [1, 1, 1]);
+  assert.deepEqual(h.errors, []);
+});
+
+for (const callback of ['state', 'status'] as const) for (const action of ['newer-mute', 'disconnect-rejoin'] as const) {
+  it(`keeps pending mute ownership after ${callback} callback ${action}`, async t => {
+    const h = setup(t), { socket, peer } = await h.join();
+    await h.promote(socket, peer);
+    const original = h.sources[0]!, gate = peer.holdNextReplacement(true);
+    const change = h.client.setInputDevice('candidate');
+    await h.until(() => gate.entered, 'candidate replacement entered');
+    const candidate = h.sources[1]!;
+    let handled = false, joining: Promise<void> | undefined;
+    const seen: boolean[][] = [];
+    const reenter = () => {
+      if (handled) return;
+      handled = true; seen.push([original.track.enabled, candidate.track.enabled]);
+      if (action === 'newer-mute') {
+        const latest = state(true, true); latest.me.forceMuted = true;
+        // Nested delivery is a controlled reentrancy stressor; real WebSocket messages run in separate tasks.
+        socket.deliver({ type: 'room:state', ...latest });
+      } else {
+        void h.client.disconnect();
+        joining = h.client.join({ roomId: 'room', name: 'Guest' }); void joining.catch(() => {});
+      }
+    };
+    const offState = h.client.on('state', event => { if (callback === 'state' && event.detail.status === 'waiting') reenter(); });
+    const offStatus = h.client.on('status', event => { if (callback === 'status' && event.detail === 'waiting') reenter(); });
+    socket.deliver({ type: 'room:state', ...state(true, action === 'disconnect-rejoin'), status: 'waiting' });
+    offState(); offStatus();
+    assert.deepEqual(seen, [[true, true]], 'callbacks keep the existing track-update ordering');
+    assert.equal(candidate.track.enabled, false); assert.equal(original.track.enabled, false);
+    if (action === 'newer-mute') {
+      assert.equal(h.client.me!.forceMuted, true); assert.equal(candidate.track.readyState, 'live');
+      gate.resolve(); await h.complete(change, 'current candidate settlement');
+      assert.equal(candidate.track.enabled, false); assert.equal(candidate.track.stops, 0);
+    } else {
+      assert.equal(candidate.track.stops, 1); assert.equal(original.track.stops, 1);
+      assert.ok(joining); await h.complete(joining, 'callback rejoin');
+      const nextSocket = Socket.instances.at(-1)!, nextPeer = Peer.instances.at(-1)!;
+      await h.until(() => nextPeer.remoteDescription !== null && !h.client['negotiating'], 'rejoined audience');
+      await h.promote(nextSocket, nextPeer);
+      gate.resolve(); await h.complete(change, 'retired candidate settlement');
+      assert.equal(candidate.track.enabled, false); assert.equal(candidate.track.stops, 1);
+      assert.equal(h.sources[2]!.track.enabled, true); assert.equal(h.sources[2]!.track.stops, 0);
+      assert.equal(nextPeer.transceiver.sender.track, h.sources[2]!.track);
+    }
+    assert.deepEqual(h.errors, []);
+  });
+}

@@ -176,7 +176,7 @@ export class StageClient extends EventTarget {
   private micFailed = false;
   private inputDeviceId = '';
   private micMeter: MicTest | null = null;
-  private readonly pendingMicReplacements = new Set<() => void>();
+  private readonly pendingMicReplacements = new Map<MediaStream, () => void>();
   private micTests = new Set<MicTest>();
   private readonly micTestRequests = new Set<AbortController>();
   private testRevision = 0;
@@ -275,12 +275,12 @@ export class StageClient extends EventTarget {
       let meter: MicTest | null = null;
       let stopped = false;
       const dispose = () => {
-        this.pendingMicReplacements.delete(dispose);
+        this.pendingMicReplacements.delete(stream);
         meter?.stop();
         meter = null;
         if (!stopped) { stopped = true; stream.getTracks().forEach((track) => { track.enabled = false; track.stop(); }); }
       };
-      this.pendingMicReplacements.add(dispose);
+      this.pendingMicReplacements.set(stream, dispose);
       try {
         if (captureRevision !== this.captureRevision) throw new StageError('disconnected', '麥克風要求已取消。');
         if (pc !== this.pc || !this.me?.onStage) return;
@@ -297,13 +297,13 @@ export class StageClient extends EventTarget {
         this.mic = stream;
         this.micMeter = meter;
         // Ownership moved to the installed microphone before application callbacks run.
-        this.pendingMicReplacements.delete(dispose);
+        this.pendingMicReplacements.delete(stream);
         meter = null;
         stopped = true;
         this.inputDeviceId = deviceId;
         this.emit('micready', undefined);
       } finally {
-        this.pendingMicReplacements.delete(dispose);
+        this.pendingMicReplacements.delete(stream);
         if (this.mic !== stream) dispose();
       }
     });
@@ -663,7 +663,11 @@ export class StageClient extends EventTarget {
         if (this.snapshot !== state) return;
         this.emit('state', state);
         if (this.snapshot !== state) return;
-        for (const track of this.mic?.getAudioTracks() ?? []) track.enabled = state.me.onStage && !state.me.muted;
+        const enabled = state.me.onStage && !state.me.muted;
+        for (const track of this.mic?.getAudioTracks() ?? []) track.enabled = enabled;
+        for (const stream of this.pendingMicReplacements.keys()) {
+          for (const track of stream.getAudioTracks()) track.enabled = enabled;
+        }
         // First snapshot of a (new) identity → fresh PeerConnection. A resumed seat keeps the one that
         // survived the ws drop unless the network side died meanwhile.
         const pcState = this.pc?.connectionState;
@@ -796,7 +800,7 @@ export class StageClient extends EventTarget {
     this.micMeter = null;
     this.mic?.getTracks().forEach((track) => { track.enabled = false; track.stop(); });
     this.mic = null;
-    for (const dispose of this.pendingMicReplacements) dispose();
+    for (const dispose of this.pendingMicReplacements.values()) dispose();
   }
   private syncMedia(): void {
     if (!this.me?.onStage) this.stopRoomMic();
