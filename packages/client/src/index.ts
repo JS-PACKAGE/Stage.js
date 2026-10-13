@@ -522,6 +522,8 @@ export class StageClient extends EventTarget {
   async createRoom(options: { name: string; roomName?: string; codeRequired?: boolean; token?: string }): Promise<{ roomId: string; code?: string }> {
     const admissionError = this.controlCapacityError();
     if (admissionError) throw admissionError;
+    // Keep the submitted primitive fields consistent through hello, pacing and the final ACK.
+    options = { ...options };
     const revision = this.sessionRevision;
     await this.connect();
     if (revision !== this.sessionRevision) throw new StageError('disconnected', '連線已中斷。');
@@ -539,6 +541,7 @@ export class StageClient extends EventTarget {
   async join(options: { roomId: string; code?: string; name: string }): Promise<void> {
     const admissionError = this.controlCapacityError();
     if (admissionError) throw admissionError;
+    options = { ...options };
     const revision = this.sessionRevision;
     await this.connect();
     if (revision !== this.sessionRevision) throw new StageError('disconnected', '連線已中斷。');

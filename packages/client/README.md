@@ -24,6 +24,8 @@
 
 `createRoom({name, roomName?, codeRequired?, token?})` 回傳 `{roomId, code?}`；伺服器設定 `rooms.createToken` 時須傳入 `token`。加入後用 `raiseHand` / `withdrawHand`，在台用 `mute` / `unmute` / `leaveStage`；主控用 `approve(id)`、`reject(id)`、`returnToStage()`、`transferControl(id)`、`forceMute(id)`、`forceUnmute(id)`、`setGain(id, gainDb)`（調整此人在混音中的音量，±`MAX_GAIN_DB` dB，0 還原；目前值見 `ParticipantView.gainDb`）、`removeFromStage(id)`、`kick(id)`（踢出房間）、`rotateCode()`（更換房間代碼，新代碼見主控的 `state.code`）、`closeRoom()`。`disconnect()` 停止自動重連。請求在伺服器 `ok` 後完成，失敗拋出有 `code` 的 `StageError`；逾時預設為 15 秒（可用 `requestTimeoutMs` 調整；另加本機排程等待）。舉手間隔依伺服器設定（`rateLimits.handRaiseIntervalMs`，預設 10 秒），`handCooldownMs` 可供倒數 UI 使用。
 
+`createRoom`／`join` 在通過即時本機容量檢查後、任何等待前複製該次參數。hello、pacing 或 ACK 等待期間修改原物件，不會改變這次送出的欄位或成功後保存的回座 roomId／code／name；下一次明確呼叫會讀取新的值。支援的參數皆為字串／布林等基本值，採淺層複製，不凍結或修改呼叫端物件，也不更改驗證、修剪或錯誤順序。主控已收到的權威房間代碼仍依下述規則更新。
+
 需代碼房間的主控收到同房非空 `state.code` 後，SDK 會更新自動重連使用的代碼；初次 ACK 到達時，最新 snapshot 若仍含該權威值，也會用它建立重連資料。重連資料建立後，未附代碼的 snapshot（例如移交後）不會清除最後已知值。伺服器仍先驗證最新房間代碼再處理 resume token：換碼不切斷既有連線，但未取得新代碼的其他成員無法以舊代碼重連；本行為不向一般成員公開新代碼。
 
 重疊呼叫 createRoom（包含在 created／state 事件內再次呼叫）不會清空先前呼叫已收到、仍在等待 ACK 的房間結果。伺服器仍決定是否允許操作；同一連線已進房時，後續開房仍回 already_joined，第一個成功呼叫保留自己的結果與自動回座 session。沒有新的 room:created 卻只有 ACK 時仍視為 internal 錯誤，不以先前房間的資訊冒充成功。

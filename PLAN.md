@@ -647,3 +647,6 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 
 
 154. **說話指示 SDK declaration 註解補正（2026-10-13）：** 第129批已同步root/client README與shared protocol說明，但StageEventMap.speaking的JSDoc仍保留「only when it changes」，會出現在產生的公開型別文件。補成成功create／join／resume的state後、ACK前先同步完整集合，其後依變動更新。只改此註解與決策紀錄，runtime／protocol／測試行為不變；驗證declaration帶入新契約、built JS與前版相同，再沿用完整測試／型別／建置驗證。
+
+
+155. **SDK create／join 參數的操作快照（2026-10-13）：** 透過 public API 與 fake socket 的測試確認，join 原本保留呼叫端的 options 物件：已送出 A 房間與代碼後，若在 ACK 前把原物件改成 B，狀態仍是 A，但自動 resume 會送出 B 與原本 A 的席位 token；create 也會保存未曾送出的新 name。兩個方法在原有即時 controlCapacityError 檢查通過後、第一個 await 前淺層複製參數，讓 hello 等待、pacing 送出與 ACK 後的 session 安裝使用同一份值。下一次呼叫可取得新值，不凍結或修改呼叫端物件，也不新增儲存或診斷輸出。保留原有容量檢查優先序、revision 取消、重疊 create 的結果所有權、伺服器錯誤與主控權威代碼更新；不新增輸入驗證或跨房授權政策。受控測試檢查各等待階段、實際 SDK 序列化與回座 payload，不代表原生瀏覽器、ICE 或可聽音訊驗收。
