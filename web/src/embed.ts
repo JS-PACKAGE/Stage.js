@@ -29,10 +29,11 @@ let handTimer: ReturnType<typeof setTimeout> | undefined;
 let handTimerDue = 0;
 function syncHand(): void {
   const me = client?.me;
+  const audience = Boolean(me && !me.onStage && me.role !== 'controller');
   const pending = Boolean(pendingHand && pendingHand.client === client);
-  const remaining = me && !me.onStage ? client!.handCooldownMs : 0;
+  const remaining = audience ? client!.handCooldownMs : 0;
   const seconds = Math.ceil(remaining / 1000);
-  hand.disabled = !me || me.onStage || client?.status === 'reconnecting' || pending || (!me.handRaised && seconds > 0);
+  hand.disabled = !audience || client?.status === 'reconnecting' || pending || (!me?.handRaised && seconds > 0);
   hand.setAttribute('aria-busy', String(pending));
   hand.textContent = me?.handRaised ? '收回舉手' : seconds ? `舉手發言（${seconds} 秒）` : '舉手發言';
   scheduleHandCooldown(me && !me.handRaised ? remaining : 0);

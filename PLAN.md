@@ -542,3 +542,6 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 
 
 119. **Web Component 的本機收聽滑桿（2026-10-13）：** widget 已有 playback-volume property／attribute，但使用者原本只能按收聽靜音。新增有明確 label 的 native range（0–100、step 1）與可見百分比／aria-valuetext，沿用 reflected property 調整本機 volume；已加入者在 reconnect 期間仍可調整，不參與 server control pending lock。無 current participant 或 detached widget 的 input 不接納，非有限／越界的防禦性 input 不改偏好；mute／microphone／server gain 不受影響。外部精細 fraction 保留原 property，UI 只顯示最近整數百分比；property 變更只同步 volume UI，不重畫 status live region 或清除其他 action error。沿用既有 rejoin/remount 偏好，不新增 storage、timer、autoplay 呼叫或權限。新增 part(playback) 讓 host 調整這一列樣式；驗證為假 DOM／SDK 控制事件，不宣稱真實 keyboard、layout 或輔助科技測試。
+
+
+120. **最小嵌入範例的舉手角色限制（2026-10-13）：** actual Hub 自動繼任快照可合法包含台下主控（其他發言席仍保留）；whole embed fixture 證實舊按鈕對此身分開放 raiseHand，Hub 卻以 conflict 拒絕，原有 audience 冷卻 timer 也會繼續跑完再啟用無效操作。只將 syncHand 的 admission／remaining 共用台下非主控 predicate，promotion 當下取消倒數，程式化 onclick 仍先同步 policy 再決定是否呼叫 SDK。保留 audience 收回舉手在 cooldown 中可用、pending／reconnect gates 與原本 promise settlement；角色恢復後依既有 cooldown 重新排程。不新增主控管理／返回舞台 UI，不改 SDK／Hub 政策。驗證結合實際 Hub snapshot 與 fake DOM/library／受控時鐘，不宣稱真實瀏覽器操作或音訊測試。

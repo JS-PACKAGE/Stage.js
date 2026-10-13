@@ -2,9 +2,10 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { stripTypeScriptTypes } from 'node:module';
 import { runInNewContext } from 'node:vm';
+import type { ParticipantView } from '../../shared/protocol.ts';
 
 type Status = 'waiting' | 'live' | 'reconnecting' | 'disconnected';
-interface Me { participantId: string; name: string; onStage: boolean; handRaised: boolean }
+type Me = Pick<ParticipantView, 'participantId' | 'name' | 'role' | 'onStage' | 'handRaised'>;
 interface State { roomId: string; name: string; me: Me }
 interface JoinOptions { roomId: string; code?: string; name: string }
 interface ClientOptions { url: string; audioElement: EmbedNode }
@@ -73,7 +74,7 @@ export class EmbedSdk {
   }
   setStatus(status: Status): void { this.status = status; this.emit('status', status); }
   snapshot(overrides: Partial<Me> = {}): void {
-    this.me = { participantId: 'listener', name: '測試聽眾', onStage: false, handRaised: false, ...this.me, ...overrides };
+    this.me = { participantId: 'listener', name: '測試聽眾', role: 'audience', onStage: false, handRaised: false, ...this.me, ...overrides };
     const state: State = { roomId: 'same-room', name: '測試舞台', me: this.me };
     this.emit('state', state);
   }
