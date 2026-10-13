@@ -83,13 +83,25 @@ log.info('Stage.js listening', {
 });
 
 let stopping = false;
+let exitCode = 0;
 const stop = async (signal: string, code = 0) => {
+  // Fatal intent can arrive while graceful shutdown is already awaiting a close operation.
+  if (exitCode === 0 && code !== 0) exitCode = code;
   if (stopping) return;
   stopping = true;
   log.info('shutting down', { signal });
-  await server.close();
-  await transport.close();
-  process.exit(code);
+  // One failed cleanup phase must not skip the remaining resources or the requested exit.
+  try { await server.close(); }
+  catch (error) {
+    exitCode ||= 1;
+    log.error('server shutdown failed', { error });
+  }
+  try { await transport.close(); }
+  catch (error) {
+    exitCode ||= 1;
+    log.error('transport shutdown failed', { error });
+  }
+  process.exit(exitCode);
 };
 process.on('SIGINT', () => void stop('SIGINT'));
 process.on('SIGTERM', () => void stop('SIGTERM'));

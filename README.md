@@ -113,6 +113,8 @@ RPC（SDP、ICE、統計、關閉）超過 `rtc.mediaWorkerTimeoutMs` 即拒絕�
 
 `GET /healthz` 回 `ok`（程序存活）；`GET /readyz`／`HEAD /readyz` 表示是否接收新工作，正常回 200，開始停機即回 503／`draining` 且禁止快取，並拒絕新的 WebSocket upgrade（503）。它不是媒體連線健康檢查；存活探針在排空期間仍為 200。停機會先停止既有連線的待處理／新控制工作，再發房間停機通知與關閉握手；已開始的工作不強制取消。房間／WebSocket 清理完成後，HTTP listener 停止接收連線，既有回應最多等待 `server.httpShutdownDrainMs`（預設 1000ms，整數 0–60000，0 表示立即切斷）；逾時會關閉尚未完成的 HTTP socket，避免慢速下載或卡住的 metrics 回應阻止退出。這只限制最後 HTTP 網路排空階段，不是整體停機期限，也不取消底層統計收集 promise。`GET /metrics` 回 Prometheus 文字格式（`Authorization: Bearer <server.metrics.token>`），包含房間／連線／發言者數、上下行封包與補幀數、DTX 省略幀、全房無聲時跳過編碼的幀數（`opus.dtx` 開啟且台上全員靜音、沒有上行或持續全零 PCM 超過 1 秒時，混音不再編碼、直接以 DTX 處理）、low tier 聽眾數、codec backlog 與丟幀、mixer underrun／漂移丟幀／tick 延遲、event loop delay 與記憶體。同一伺服器上重疊的已授權 scrape 共用尚未完成的統計收集，避免重複掃描房間與查詢 worker；收集完成或失敗立即釋放，下一次請求重新取樣，不保留過期快取。
 
+CLI 停機依序嘗試 server 與 media transport 清理；任何一段同步拋錯或 promise 拒絕，都會記錄該段錯誤並繼續下一段，最後以非零狀態退出。正常 SIGINT／SIGTERM 完成時為 0；停機途中發生 uncaught exception 會升級為 1，後續一般訊號不會降回 0，既有非零退出意圖也不被覆寫。重複通知不重複清理。這不新增整體停機期限，亦不保證未 settle 的底層 close promise 能自行結束。
+
 ### 輸入工作佇列
 
 `limits.maxPendingMessages`（預設 128）與 `limits.maxPendingBytes`（範例 1 MiB；舊設定為 `maxFrameBytes × 16`）限制每條 WebSocket 等待處理的工作，以訊息數與 JSON UTF-8 位元組分別計算。正在執行的一筆不計入等待上限，仍受單幀上限限制。超過任一上限立即終止該連線並清除等待工作，沿用非主動離開的席位寬限；實際 socket 關閉時立即解除既有連線綁定並依房間佇列標記離線，讓卡住的 SDP 不阻擋同席回座。一般斷線也丟棄尚未開始的工作；已開始的工作不強制取消，完成後再次清理可能遲到的 join 綁定，不會移除已回座的新連線。席位寬限從這次離線處理開始，不等待 SDP 完成。Prometheus `stage_ws_inbound_queue_disconnects_total` 記錄超限次數。正常順序與每秒頻率限制不變。`node scripts/bench-ws-inbound.ts` 比較 gated 工作下舊 promise chain 與有界佇列的待處理筆數／payload 位元組及斷線後執行數；這不是 RSS 或延遲 benchmark。
