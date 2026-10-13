@@ -84,8 +84,10 @@ WebSocket 建構失敗、hello 逾時或尚未進房的連線關閉，也會釋�
 - `setInputDevice(deviceId: string): Promise<void>`：選擇麥克風，空字串恢復設定的預設裝置。上台時透過 `replaceTrack` 即時切換、不重新協商，保留靜音狀態，停止舊裝置；替換 promise 尚未完成時，仍由最新房間狀態同步已安裝與候選音軌的靜音（含主控強制靜音／解除），獨立預覽不受影響；選擇會保留至重連。選定 ID 優先於 `micConstraints.deviceId`。
 - `retryMicrophone(): boolean`：手動要求重試已失敗的房間麥克風擷取，保留台位與目前 PeerConnection。只有目前 live、信令 socket OPEN、仍在台上、沒有已安裝麥克風且前次擷取失敗時才回傳 `true`；健康／尚在等待擷取、已下台、重連中或斷線時回傳 `false`，不送控制請求也不丟出操作錯誤。`true` 只表示已排入既有媒體佇列，不保證已開始提示、完成擷取、安裝、協商或傳送；同一待處理重試的重複呼叫回傳 `false`。使用目前選定裝置並保留自我／強制靜音，不自動解除靜音。不新增自動提示或輪詢；當前失敗仍依既有 `micerror`／`error` 回報，需再一次明確呼叫才重試，原本的重新上台／peer 替換恢復路徑不變。下台、明確 disconnect 或替換 PeerConnection 會沿用 revision 取消／忽略舊工作；只中斷 WebSocket 而保留 peer 的自動回座，不會因此取消已接納的擷取，無法取消已送入瀏覽器的 `replaceTrack()`。`micready` 也用於獨立預覽，而且早於 sender 安裝，因此不能把任意 `micready` 當作此重試成功或可聽見傳送的證明。
 - `outputDeviceSupported: boolean`：瀏覽器是否支援輸出選擇。`setOutputDevice(deviceId: string): Promise<void>` 使用 `setSinkId`，不支援時拒絕並拋出 `StageError('media_error', ...)`；空字串使用系統預設。音訊元件於重連重用，因此保留所選輸出。
-- `micLevel: number`：目前上台麥克風的 RMS 振幅（0–1，非分貝），未上台或靜音時為 0；可定期讀取以更新音量表。
+- `micLevel: number`：目前上台麥克風的 RMS 振幅（0–1，非分貝），未上台、靜音或停用房間音量計時為 0；可定期讀取以更新音量表。
 - `startMicTest(): Promise<MicTest>`：不需連線或上台，使用所選麥克風，回傳 `{ level(): number, stop(): void }`；`level()` 同樣為 0–1 RMS，不會播放測試音訊。`stop()` 可重複呼叫，停止軌道並關閉 AudioContext；`disconnect()`、關房與被踢也會停止所有測試（包含仍等待授權的測試）。測試期間切換裝置後，請停止並重啟測試。
+
+不顯示房間麥克風音量表的整合可使用 `new StageClient({ url, enableMicMeter: false })`。省略或設 `true` 時保留原本建立音量計與相關失敗回報；`false` 則不為房間擷取／裝置替換建立 AudioContext、source、analyser 或取樣陣列，`micLevel` 固定為 0，但麥克風擷取、sender 安裝、靜音與停止串流仍照常。選項只能是 boolean（其他值在建構時拋 TypeError，尚未修改 audio），建構時複製，後續修改原 options 不會切換設定。明確呼叫 `startMicTest()` 仍建立自己的音量計並依原方式回報失敗；此選項不會停用預覽，也不繞過麥克風授權或自動播放政策。最小 embed 沒有音量表，會明確選用 false；完整範例與 Web Component 保留預設。這是省去未使用的圖節點與 buffer，不代表已量測 CPU、耗電或音訊延遲改善。
 
 離開房間或建立替代 PeerConnection 時，舊媒體工作佇列不會阻塞新連線：仍在等待的麥克風授權結果會被忽略並停止遲到的串流，舊代等待授權的 `setInputDevice()` 以 `StageError('disconnected')` 拒絕，已排隊的舊工作在取得執行機會時同樣拒絕。這無法關閉瀏覽器原生授權提示；同一個有效 PeerConnection 內的裝置切換仍依呼叫順序執行。 已退場 peer 的本機 ICE 請求或套用遠端候選的遲到失敗不再派發 `error`；同席位重連若沿用 peer，其真正的 ICE 失敗仍會通知。伺服器明確送來的 error 與公開請求的拒絕語意不變，這不是一般錯誤去重機制。已送入瀏覽器的 `replaceTrack()` 無法由此取消，因此它可能延遲舊佇列內 promise 的完成，但不會阻塞新 peer，其遲到結果也不能取代新連線的麥克風。
 

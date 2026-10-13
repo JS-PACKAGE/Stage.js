@@ -149,7 +149,8 @@ join.onsubmit = (event) => {
       const library: typeof StageLibrary = await import(/* @vite-ignore */ moduleUrl);
       if (generation !== entryGeneration) return;
       const ws = new URL('/ws', host); ws.protocol = host.protocol === 'https:' ? 'wss:' : 'ws:';
-      client = new library.StageClient({ url: ws.href, audioElement: audio });
+      // This compact UI has no room-level meter; explicit preview APIs remain available.
+      client = new library.StageClient({ url: ws.href, audioElement: audio, enableMicMeter: false });
       const current = client; controlsClient = current; entryClient = current;
       client.on('state', ({ detail }: CustomEvent<StageEventMap['state']>) => {
         if (client !== current || cancelledEntry) return;

@@ -578,3 +578,6 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 
 
 131. **最小嵌入範例的個人舉手位置（2026-10-13）：** embed 沒有完整參與者／舉手清單，觀眾舉手後原本只有「收回舉手」。只在台下非主控且 handRaised 時，從 SDK 當前 state.hands 依自身 participantId 找第一個位置，附加「佇列第 N 位」；同席重連顯示「上次」，缺席時保留原文字，防禦性重複資料取第一筆。不顯示他人名稱／代碼、推估等待時間或保證核准順序；withdraw 行為、pending／role／reconnect gates、aria-busy、錯誤與 status 區域不變，不新增 timer／API／storage。測試以 authoritative Hub／actual SDK 與 fake DOM 驗證，並非原生鍵盤／輔助科技或硬體音訊驗收。
+
+
+132. **可選停用房間麥克風音量計（2026-10-13）：** actual SDK fake-media probe 證實未讀 micLevel 的 room capture／device replacement 仍各建立並 resume AudioContext、source、analyser 與 2048 個 float sample（8192 bytes），清理正常、並非 leak。直接改 lazy 會改變既有 capture 失敗／activation 時機，因此新增明確 opt-out enableMicMeter:boolean，預設 true 完整保留舊行為；建構前驗證型別並複製，不提供動態切換。false 略過兩個 room meter 建立點，初次擷取另在原 cleanup/catch 內拒絕沒有 audio track 的串流（裝置替換已有此檢查），避免移除 meter 連帶移除有效擷取檢查；預設模式的 meter failure timing 不變。micLevel 回 0，既有 capture、micready、sender／mute／revision／candidate disposal 流程不變；明確 startMicTest 仍 eager 建立獨立 meter／回報失敗。最小 embed 明確使用 false（沒有音量表），完整範例／widget 不變。測試 pin 預設 failure timing 並檢查 opt-out capture／replacement／retry／rejoin 不配置 graph、preview 獨立及串流所有權。資源避免以受控 constructor／node counts 證明，不宣稱 native CPU／電力／音訊延遲或硬體驗收。

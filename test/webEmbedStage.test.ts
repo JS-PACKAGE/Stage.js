@@ -212,7 +212,7 @@ it('whole embed actual SDK stage actions release capture before ACK, retain rece
   assert.equal(first.stopped, false, 'the command alone does not fabricate an offstage state');
   socket.deliver({ type: 'room:state', ...actualState() });
   assert.equal(first.stopped, true, 'snapshot synchronously retires room capture before UI sees offstage');
-  assert.equal(StageContext.instances[0]!.closes, 1); assertStage(h.stage, { busy: true, disabled: true, returning: true });
+  assert.equal(StageContext.instances.length, 0, 'the compact embed explicitly disables unused room metering'); assertStage(h.stage, { busy: true, disabled: true, returning: true });
   assert.equal(h.mic.hidden, true); assert.equal(socket.readyState, StageSocket.OPEN); assert.equal(peer.connectionState, 'connected');
   const requests = socket.sent.filter(message => message.type === 'stage:approve').length; forceInvoke(h.stage); await h.tick();
   assert.equal(socket.sent.filter(message => message.type === 'stage:approve').length, requests);

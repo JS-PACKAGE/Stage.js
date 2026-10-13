@@ -25,6 +25,8 @@ export interface StageClientOptions {
   reconnect?: { initialDelayMs: number; maxDelayMs: number };
   audioElement?: HTMLAudioElement;
   micConstraints?: MediaTrackConstraints;
+  /** Automatic room microphone RMS meter; default true. False makes micLevel zero; previews are independent. */
+  enableMicMeter?: boolean;
 }
 export type ClientStatus = 'waiting' | 'live' | 'reconnecting' | 'disconnected';
 export interface AudioStats {
@@ -176,6 +178,7 @@ export class StageClient extends EventTarget {
   private micFailed = false;
   private inputDeviceId = '';
   private micMeter: MicTest | null = null;
+  private readonly roomMicMeterEnabled: boolean;
   private readonly pendingMicReplacements = new Map<MediaStream, () => void>();
   private micTests = new Set<MicTest>();
   private readonly micTestRequests = new Set<AbortController>();
@@ -216,6 +219,9 @@ export class StageClient extends EventTarget {
     for (const delay of [initialDelayMs, maxDelayMs]) {
       if (!Number.isFinite(delay) || delay < 0 || delay > 2147483647) throw new RangeError('重連延遲必須是 0 到 2147483647 之間的有限毫秒數。');
     }
+    const enableMicMeter = options.enableMicMeter;
+    if (enableMicMeter !== undefined && typeof enableMicMeter !== 'boolean') throw new TypeError('enableMicMeter 必須是布林值。');
+    this.roomMicMeterEnabled = enableMicMeter ?? true;
     // Retain the validated values, not a caller-owned object that could invalidate future timers.
     this.reconnectConfig = { initialDelayMs, maxDelayMs };
     this.maxPendingControlRequests = capacity ?? Infinity;
@@ -252,7 +258,7 @@ export class StageClient extends EventTarget {
   }
   setPlaybackMuted(muted: boolean): void { this.audio.muted = muted; }
   get outputDeviceSupported(): boolean { return typeof this.audio.setSinkId === 'function'; }
-  /** RMS amplitude in [0, 1]; zero when not publishing or muted. */
+  /** RMS amplitude in [0, 1]; zero when not publishing, muted, or enableMicMeter is false. */
   get micLevel(): number { return this.mic?.getAudioTracks()[0]?.enabled ? this.micMeter?.level() ?? 0 : 0; }
   async listAudioDevices(): Promise<AudioDevices> {
     const devices = await navigator.mediaDevices.enumerateDevices();
@@ -287,7 +293,7 @@ export class StageClient extends EventTarget {
         const track = stream.getAudioTracks()[0];
         if (!track) throw new StageError('media_error', '所選裝置沒有音訊軌道。');
         track.enabled = !this.me.muted;
-        meter = createMicMeter(stream);
+        meter = this.roomMicMeterEnabled ? createMicMeter(stream) : null;
         if (stopped || pc !== this.pc || !this.me?.onStage || captureRevision !== this.captureRevision) return;
         await transceiver.sender.replaceTrack(track);
         if (stopped || pc !== this.pc || !this.me?.onStage || captureRevision !== this.captureRevision) return;
@@ -829,8 +835,9 @@ export class StageClient extends EventTarget {
           if (pc !== this.pc || !this.me?.onStage || captureRevision !== this.captureRevision) { stream.getTracks().forEach((track) => track.stop()); return; }
           this.mic = stream;
           try {
-            const meter = createMicMeter(stream);
-            if (this.mic !== stream || pc !== this.pc || captureRevision !== this.captureRevision) { meter.stop(); return; }
+            if (!this.roomMicMeterEnabled && !stream.getAudioTracks()[0]) throw new StageError('media_error', '麥克風沒有音訊軌道。');
+            const meter = this.roomMicMeterEnabled ? createMicMeter(stream) : null;
+            if (this.mic !== stream || pc !== this.pc || captureRevision !== this.captureRevision) { meter?.stop(); return; }
             this.micMeter = meter;
           }
           catch (error) { if (this.mic === stream) { this.mic = null; stream.getTracks().forEach((track) => track.stop()); } throw error; }
