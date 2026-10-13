@@ -146,6 +146,8 @@ logger 會遞迴遮蔽物件／陣列中的 `code`、`resumeToken`、`token`、`
 
 ## WebSocket 協定摘要
 
+無法解析的 WebSocket upgrade request target 會收到固定、空內容的 HTTP 400 並關閉該 socket，不建立 session，也不把原始 target 或 parser error 寫入診斷／回應。合法 URL 仍沿用既有 path、連線容量與握手檢查；停機中的 upgrade 仍優先回 503。這是輸入邊界的解析失敗隔離，不新增 Origin／認證政策或遠端服務驗證。
+
 JSON frame，型別定義在 [`shared/protocol.ts`](shared/protocol.ts)。每個請求帶 `requestId`，成功回 `ok {requestId}`，失敗回 `error {requestId, code, message}`（固定 generic 訊息）。
 
 | Client → Server | 說明 |

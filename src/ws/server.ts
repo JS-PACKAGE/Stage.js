@@ -160,7 +160,13 @@ export function createStageServer(deps: StageServerDeps): StageServer {
       socket.end('HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\nContent-Length: 0\r\nRetry-After: 1\r\n\r\n', () => socket.destroy());
       return;
     }
-    const path = new URL(req.url ?? '/', 'http://x').pathname;
+    let path: string;
+    try { path = new URL(req.url ?? '/', 'http://x').pathname; }
+    catch {
+      socket.once('error', () => socket.destroy());
+      socket.end('HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 0\r\n\r\n', () => socket.destroy());
+      return;
+    }
     const ip = clientAddress(req);
     const perIpCap = config.limits.maxConnectionsPerIp;
     if (path !== config.server.wsPath || sessions.size >= config.limits.maxConnections || (perIpCap > 0 && (perIp.get(ip) ?? 0) >= perIpCap)) {
