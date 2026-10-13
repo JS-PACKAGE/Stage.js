@@ -90,8 +90,8 @@ export class StageElement extends HTMLElement {
       if (this.current === client) this.unlock.hidden = true;
     }, 'primary');
     this.unlock.hidden = true;
-    this.hand = this.button('舉手發言', () => (this.current?.me?.handRaised ? this.current.withdrawHand() : this.current?.raiseHand()));
-    this.mic = this.button('靜音', () => (this.current?.me?.muted ? this.current.unmute() : this.current?.mute()));
+    this.hand = this.button('舉手發言', () => (this.current?.me?.handRaised ? this.current.withdrawHand() : this.current?.raiseHand()), '', () => this.canUseHand());
+    this.mic = this.button('靜音', () => (this.current?.me?.muted ? this.current.unmute() : this.current?.mute()), '', () => this.canUseMic());
     // Capture admission is synchronous; its completion belongs to later mic events.
     this.micRetry = document.createElement('button');
     this.micRetry.type = 'button';
@@ -161,13 +161,14 @@ export class StageElement extends HTMLElement {
     if (this.isConnected) { if (this.leftRoom) this.render(); else this.rejoin(); }
   }
 
-  private button(label: string, action: () => Promise<unknown> | void, className = ''): HTMLButtonElement {
+  private button(label: string, action: () => Promise<unknown> | void, className = '', allowed?: () => boolean): HTMLButtonElement {
     const b = document.createElement('button');
     b.type = 'button';
     b.textContent = label;
     if (className) b.className = className;
     b.onclick = () => {
-      if (b.disabled || this.pendingActions.has(b)) return;
+      // Forwarded SDK events may run host callbacks before the old controls are repainted.
+      if (b.disabled || this.pendingActions.has(b) || (allowed && !allowed())) return;
       const generation = this.generation;
       this.pendingActions.add(b);
       b.disabled = true;
@@ -373,6 +374,17 @@ export class StageElement extends HTMLElement {
     this.volumeValue.textContent = `${percent}%`;
   }
 
+  private canUseHand(): boolean {
+    const client = this.current, me = client?.me;
+    return this.isConnected && Boolean(me && !me.onStage && me.role !== 'controller'
+      && client!.status !== 'reconnecting' && (me.handRaised || client!.handCooldownMs <= 0));
+  }
+
+  private canUseMic(): boolean {
+    const client = this.current, me = client?.me;
+    return this.isConnected && Boolean(me?.onStage && !me.forceMuted && client!.status !== 'reconnecting');
+  }
+
   private wsUrl(): string {
     const explicit = this.getAttribute('url');
     if (explicit) return explicit;
@@ -451,11 +463,11 @@ export class StageElement extends HTMLElement {
     this.volume.disabled = !client || !me;
     this.renderVolume();
     this.unlock.disabled = this.pendingActions.has(this.unlock);
-    this.hand.disabled = reconnecting || this.pendingActions.has(this.hand) || !me || (!me.handRaised && cooldown > 0);
+    this.hand.disabled = !this.canUseHand() || this.pendingActions.has(this.hand);
     this.hand.textContent = me?.handRaised ? '收回舉手' : cooldown > 0 ? `舉手發言（${cooldown} 秒）` : '舉手發言';
     this.mic.hidden = !me?.onStage;
     this.leaveStage.hidden = !me || (!me.onStage && me.role !== 'controller');
-    this.mic.disabled = reconnecting || this.pendingActions.has(this.mic) || Boolean(me?.forceMuted);
+    this.mic.disabled = !this.canUseMic() || this.pendingActions.has(this.mic);
     this.mic.textContent = me?.muted ? '取消靜音' : '靜音';
     this.mic.setAttribute('aria-pressed', String(Boolean(me?.muted)));
     this.leaveStage.textContent = me?.onStage ? '離開舞台' : '返回舞台';

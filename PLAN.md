@@ -641,3 +641,6 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 
 
 152. **新加入／恢復信令連線的說話指示基準（2026-10-13）：** actual Hub、RoomMixer 與 public SDK 的 bounded in-memory socket probe 顯示：新觀眾在持續說話期間加入，25 個 active PCM tick 仍收不到 speaking；原觀眾斷線時漏掉釋放至空集合，恢復同一身分後25個silent tick仍保留舊指示。Hub 每房只保留一份獨立複製的最新 mixer full set，在原變動廣播前更新；成功create／join／resume於room state之後、ACK之前針對該session送出目前集合，空集合也送，既有觀眾不因加入而額外收到speaking。送出時以目前participant、onStage、self/force mute與publisher身分過濾，保留grace期間仍publish的disconnected席位，不把connected誤當media可用性；每次snapshot獨立陣列，closed callback不再更新，關房清空。沒有新增timer、週期廣播、protocol欄位或SDK／mixer／transport行為。驗證以受控PCM、真實model/mixer/SDK與mock transport為界，不代表native browser、ICE、麥克風或實際可聽音訊驗收。
+
+
+153. **Widget 舉手／麥克風控制的同步准入（2026-10-13）：** unchanged element fixture上的actual SDK／fake socket探針確認：stage-state先轉送再render，host listener此時點擊舊enabled控制，升台／轉主控後仍送hand:raise且消耗10秒SDK冷卻，下台／forceMute後仍送mic:mute/unmute；真正socket失聯的status callback雖未送wire，卻先清除舊錯誤、進入pending再以disconnected覆蓋。這不是server權限繞過，模型仍拒絕無效命令。僅為hand/mic加入private button的可選准入predicate，在pending／aria-busy／error變更前重查connected、目前me、舞台／角色、reconnecting、handRaised/cooldown及forceMuted；render共用相同predicate，隱藏控制也disabled。有效操作仍讀當前handRaised/muted，pending與generation處理不改，沒有擴大SDK admission／server政策或本機收聽限制。測試使用同步轉送回呼與actual SDK fake wire，不靠篡改disabled製造主要重現，不宣稱原生browser／assistive technology／media驗收。

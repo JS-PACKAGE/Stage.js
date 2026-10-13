@@ -133,6 +133,7 @@ WebSocket 建構失敗、hello 逾時或尚未進房的連線關閉，也會釋�
 - 初次握手／加入仍在等待且從未收到房間狀態時，提供「取消加入」。按下會立即停止本機等待、顯示「已取消加入。」並提供手動「重試加入」，保留屬性與收聽偏好；取消自己的等待不顯示成加入錯誤，其他當前錯誤照常顯示。快照到達（包括 ACK 前）、關房／被踢、換房或移除後會撤銷取消操作，自動重連不提供此按鈕。取消不保證撤銷伺服器已接受的加入，也不保證底層 socket 立即關閉。
 - 初次連線／加入失敗且從未收到房間狀態時，顯示「重試加入」。按下會先清理舊 client，再使用目前 url／room／code／name 與收聽偏好重新加入；等待中隱藏並停用，避免重複送出。這是手動重試，不會自動重試錯誤；已收到房間狀態、正在自動回座、關房／維護或被踢後不顯示。若房間不存在或代碼錯誤，重試仍由伺服器判定，嵌入端需修正相應屬性。
 - 信令重連時，舉手／收回、麥克風靜音／解除與離開／返回舞台按鈕暫停操作，直到回座狀態恢復；既有 pending、舉手冷卻與強制靜音限制仍適用。本機收聽靜音、音量與啟用音訊仍可操作。這只限制 widget 按鈕，不改 SDK 請求的送出／重試語意，也不自動改變麥克風狀態。
+- 舉手／收回與麥克風靜音按鈕在接納 click 前重查目前席位、重連、冷卻與強制靜音限制。即使主頁的 `stage-state`／`stage-status` listener 在畫面重繪前同步點擊舊的 enabled 按鈕，已失效操作也不進入 pending、不清除目前錯誤、不送請求或占用 SDK 舉手冷卻；隱藏的這兩種控制同時停用。有效操作仍沿用目前快照選擇 raise／withdraw 或 mute／unmute，並保留各自等待 ACK 與錯誤處理。
 - 連線結束提示：呼叫 `element.client.disconnect()` 會顯示「未連線」並隱藏房內操作；一般關房、被移出與伺服器維護／重啟各有提示，收聽偏好變更不會清掉提示。換房或重新掛載後清除舊提示，舊 client 的遲到事件不更新或重新派發到新 widget。
 - 事件：所有 client 事件以 `stage-<type>` 從元素派發（`bubbles`、`composed`，`detail` 相同），例如 `stage-state`、`stage-hand`、`stage-kicked`。
 - 樣式：`::part(panel)`、`::part(status)`、`::part(error)`、`::part(actions)`、`::part(playback)`，以及 CSS 變數 `--stage-fg`、`--stage-bg`、`--stage-border`、`--stage-radius`、`--stage-button-bg`、`--stage-accent`、`--stage-accent-fg`、`--stage-error`。
