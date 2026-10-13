@@ -58,6 +58,7 @@ function setup(): Harness {
     const brand = {}, status = {}, connectionLine = { dataset: {}, children: [] };
     const statusLabels = {}, roleLabels = {}, createdRoom = null;
     const location = { pathname: '/', origin: 'https://example.test' };
+    const signaling = { path: '/ws' };
     const decodeName = value => value;
     const button = () => element(), field = () => element(), gainSlider = () => element();
     const window = { confirm: () => true };

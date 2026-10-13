@@ -3,7 +3,24 @@ import type { ConnectionQuality, MicTest, ParticipantView, RoomStatePayload } fr
 import './styles.css';
 
 const app = document.querySelector<HTMLDivElement>('#app')!;
-const client = new StageClient({ url: `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws` });
+const params = new URLSearchParams(location.search);
+function signalingSettings(value: string): { url: string; path: string; error?: string } {
+  const fallback = `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws`;
+  try {
+    const path = value.trim() || '/ws';
+    if (!path.startsWith('/') || path.startsWith('//') || /[\p{Cc}\\?#]/u.test(value) || /\s/u.test(path)
+      || path.split('/').some(segment => /^\.{1,2}$/.test(segment.replace(/%2e/gi, '.')))) throw new Error();
+    const url = new URL(path, location.origin);
+    if (url.origin !== location.origin || url.search || url.hash) throw new Error();
+    url.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    return { url: url.href, path: url.pathname };
+  } catch {
+    // Keep the page usable, but block entry below; this safe placeholder is never a fallback connection.
+    return { url: fallback, path: '/ws', error: 'WebSocket 路徑無效，請修正網址中的 wsPath（例如 /ws）後重新載入。' };
+  }
+}
+const signaling = signalingSettings(params.get('wsPath') ?? '/ws');
+const client = new StageClient({ url: signaling.url });
 const PLAYBACK_STORAGE_KEY = 'stage-playback';
 function restorePlaybackPreferences(): void {
   try {
@@ -26,7 +43,6 @@ function savePlaybackPreferences(): void {
 restorePlaybackPreferences();
 const statusLabels = { waiting: '等待發言', live: '直播中', reconnecting: '重新連線中', disconnected: '未連線' };
 const roleLabels = { controller: '主控', speaker: '發言者', audience: '觀眾' };
-const params = new URLSearchParams(location.search);
 let busy = false;
 let landingEntry: { cancelled: boolean; entered: boolean } | undefined;
 let landingRevision = 0;
@@ -367,6 +383,7 @@ function canCancelLanding(): boolean {
 }
 function runLanding(operation: 'create' | 'join', action: (isCancelled: () => boolean) => Promise<unknown>): void {
   if (busy) return;
+  if (signaling.error) { showError(signaling.error); return; }
   const entry = { cancelled: false, entered: false };
   const revision = landingRevision;
   landingEntry = entry; busy = true; syncLandingActions();
@@ -560,8 +577,10 @@ function renderRoom(state: RoomStatePayload): void {
   summary.append(element('h2', '', '房間資訊'), element('p', '', `房間 ID：${state.roomId}`));
   if (controller) {
     summary.append(element('p', '', state.codeRequired ? `房間代碼：${roomCode ?? '未提供'}` : '不需要房間代碼'));
-    const link = new URL(location.pathname, location.origin);
+    const link = new URL(location.origin);
+    link.pathname = location.pathname;
     link.searchParams.set('room', state.roomId);
+    if (signaling.path !== '/ws') link.searchParams.set('wsPath', signaling.path);
     if (state.codeRequired && roomCode) link.searchParams.set('code', roomCode);
     const inviteLink = element('input', 'invite-link');
     inviteLink.value = link.href; inviteLink.readOnly = true;
@@ -805,3 +824,4 @@ function syncRoomTimers(): void {
 client.on('state', syncRoomTimers);
 client.on('status', syncRoomTimers);
 landing();
+if (signaling.error) showError(signaling.error);

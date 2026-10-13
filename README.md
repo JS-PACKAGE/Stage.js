@@ -122,7 +122,7 @@ RPC（SDP、ICE、統計、關閉）超過 `rtc.mediaWorkerTimeoutMs` 即拒絕�
 
 ### WebSocket 路徑設定
 
-`server.wsPath` 必須以 `/` 開頭，而且原值必須能完整保留為 HTTP／WebSocket URL 的 pathname；含 query／fragment、會被移除的 dot segment、反斜線、原始空白／控制字元或需 URL 編碼的 Unicode 拼法會在啟動與離線設定檢查時失敗，不會默默改成另一條路徑。請自行改成預期的字面 pathname（例如 `/control` 或 `/%E8%88%9E%E5%8F%B0`）。原本已可匹配的百分比序列保持原值，不解碼或重寫；例如 `/a%2Fb` 與 `/a/b` 不同。少見但可由合適 request target 表達的多重前導斜線路徑仍相容；最小 embed 欄位刻意只接受一般單一前導斜線路徑。這會拒絕舊版曾接受、卻不符合 HTTP／WebSocket URL 正規路徑拼法的設定；少數非 HTTP scheme 的特殊 request target 原本可能匹配原始反斜線等值，現在也會被設定檢查拒絕。runtime 的 request target 解析政策不在此修改；錯誤只標示欄位，不輸出設定內容。
+`server.wsPath` 必須以 `/` 開頭，而且原值必須能完整保留為 HTTP／WebSocket URL 的 pathname；含 query／fragment、會被移除的 dot segment、反斜線、原始空白／控制字元或需 URL 編碼的 Unicode 拼法會在啟動與離線設定檢查時失敗，不會默默改成另一條路徑。請自行改成預期的字面 pathname（例如 `/control` 或 `/%E8%88%9E%E5%8F%B0`）。原本已可匹配的百分比序列保持原值，不解碼或重寫；例如 `/a%2Fb` 與 `/a/b` 不同。少見但可由合適 request target 表達的多重前導斜線路徑仍相容；完整範例與最小 embed 的路徑選項刻意只接受一般單一前導斜線路徑。這會拒絕舊版曾接受、卻不符合 HTTP／WebSocket URL 正規路徑拼法的設定；少數非 HTTP scheme 的特殊 request target 原本可能匹配原始反斜線等值，現在也會被設定檢查拒絕。runtime 的 request target 解析政策不在此修改；錯誤只標示欄位，不輸出設定內容。
 
 ### 慢速讀取端
 
@@ -281,6 +281,8 @@ npm audit
 範例的品質警示沿用每次 render 的 participant→rows 索引，只更新前次／本次品質報告涉及的人，省去每則事件掃描所有觀眾列；省略的人仍會移除舊警示，同人出現在舉手與觀眾名單時會一併更新。`test/webQuality.test.ts` 以 301 人、593 個顯示列、100 次單人品質報告計數：完整列查詢 100 → 0 次，badge 查詢 59,300 → 100 次。這是 fake DOM 操作數，不是瀏覽器 CPU／延遲量測；房間重繪、品質資料本身的更新頻率與 badge 文案不變。
 
 完整範例收到與目前畫面相同的房間快照時，會重用參與者列與操作按鈕；仍同步 pending、冷卻倒數與提示。快照、連線狀態、邀請代碼或 speaking／quality 輸入改變時照常重建；已拖動但尚未由伺服器確認的 gain slider 仍會按原行為回復 authoritative 值。離房清除快取，同房重加也重新建立節點。受控 fake DOM 的 301 席、10 次相同快照工作量，createElement 次數由 21,630 降為 2,163，主要內容替換由 10 次降為 1 次。每次事件仍需序列化／比較完整狀態，保留一份最新 signature 及目前 gain input 參照，並非零配置或固定時間；這是合成操作數，未量測瀏覽器 CPU、記憶體、焦點或延遲效果。
+
+完整範例預設連到同主機 `/ws`；自訂 `server.wsPath` 的部署可開啟 `/?wsPath=%2Fcontrol`。頁面載入時只讀取一次 `wsPath`，缺省／空白沿用 `/ws`，不自動探測設定。驗證沿用最小 embed 的單一 leading slash／same-origin 路徑限制；不允許 authority、反斜線、query／fragment、raw control、內部空白或普通／encoded-dot segment。安全百分比序列不再解碼，Unicode 依 URL 規則序列化；server 設定須匹配序列化 pathname。無效參數會保留表單並顯示固定錯誤，建立／加入在開啟 socket 前中止，需修正網址後重新載入；不會偷偷改連預設路徑。邀請連結只加入已驗證的非預設 `wsPath`、房間 ID 及原有允許的房間代碼，不複製其他 query／fragment；即使頁面 pathname 以 `//` 開頭，邀請仍保留目前 origin。Vite 開發代理預設仍只代理 `/ws`，自訂路徑需另行設定代理。
 
 完整範例的建立／加入表單尚未收到房間狀態、且仍屬於同一個進房畫面時，若收到該次請求的 `bad_request`，保留原始錯誤訊息與代碼，並補充檢查名稱、房間資料是否符合伺服器規則的中文指引。這不判定是哪一欄失敗，也不假設名稱長度上限：`limits.nameMaxLength` 可由部署端自訂，目前 hello 不公布此值。輸入保持可編輯，其他錯誤及獨立媒體／RTC 錯誤仍按原本訊息顯示；已取消或主動離房的舊建立／加入回覆不重新顯示指引；已收到房間狀態、終止或重建進房畫面的舊請求只保留原有一般錯誤處理。沒有更動輸入 maxlength、驗證或 SDK 錯誤物件。
 

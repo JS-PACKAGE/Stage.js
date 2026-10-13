@@ -259,6 +259,8 @@ export async function flushSample(): Promise<void> { for (let i = 0; i < 16; i++
 
 interface SampleAppOptions {
   source?: string;
+  location?: URL;
+  expectedSdkUrl?: string;
   decodeName?: (value: string) => string;
   deferAudioDevices?: boolean;
   clipboard?: { writeText(text: string): Promise<void> };
@@ -292,13 +294,15 @@ function mountSampleApp<Client extends SampleClient = SampleSdk>(options: Sample
   const deviceChangeListeners: (() => void)[] = [];
   let constructions = 0;
   runInNewContext(`'use strict';\n${executable}`, {
-    document, location: { protocol: 'https:', host: 'sample.test', search: '', pathname: '/', origin: 'https://sample.test' },
+    document, location: options.location ?? { protocol: 'https:', host: 'sample.test', search: '', pathname: '/', origin: 'https://sample.test' },
     localStorage: options.localStorage ?? { getItem: (key: string) => storage.get(key) ?? null, setItem: (key: string, value: string) => storage.set(key, value) },
     navigator: { clipboard: options.clipboard, mediaDevices: { addEventListener(type: string, listener: () => void) {
       assert.equal(type, 'devicechange'); deviceChangeListeners.push(listener);
     } } },
     window: { confirm: options.confirm ?? (() => { throw new Error('Unexpected confirmation dialog in lifecycle test'); }) },
-    StageClient: function (options: { url: string }) { constructions++; assert.equal(options.url, 'wss://sample.test/ws'); return sdk; },
+    StageClient: function (clientOptions: { url: string }) {
+      constructions++; assert.equal(clientOptions.url, options.expectedSdkUrl ?? 'wss://sample.test/ws'); return sdk;
+    },
     decodeName: options.decodeName ?? ((value: string) => value), MAX_GAIN_DB, URL, URLSearchParams, Error, AbortController,
     performance: { now: () => clock.now },
     setTimeout: clock.setTimeout, clearTimeout: clock.clear, setInterval: clock.setInterval, clearInterval: clock.clear,
