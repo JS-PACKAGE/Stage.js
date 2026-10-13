@@ -157,6 +157,7 @@ export class SampleSdk {
   private cooldownUntil = 0;
   readonly joins: { options: JoinOptions; work: Deferred<void> }[] = [];
   readonly previews: Deferred<SamplePreview>[] = [];
+  readonly previewSignals: (AbortSignal | undefined)[] = [];
   readonly polls: Deferred<Stats>[] = [];
   readonly raises: Deferred<void>[] = [];
   readonly deviceLists: Deferred<SampleAudioDevices>[] = [];
@@ -204,8 +205,15 @@ export class SampleSdk {
   async setOutputDevice(id: string): Promise<void> { this.outputDevices.push(id); }
   setPlaybackVolume(value: number): void { assert.ok(value >= 0 && value <= 1); this.playbackVolume = value; }
   setPlaybackMuted(value: boolean): void { this.playbackMuted = value; }
-  startMicTest(): Promise<SamplePreview> {
-    const work = new Deferred<SamplePreview>(); this.previews.push(work); return work.promise;
+  startMicTest(options: { signal?: AbortSignal } = {}): Promise<SamplePreview> {
+    const signal = options.signal;
+    if (signal?.aborted) return Promise.reject(signal.reason);
+    const work = new Deferred<SamplePreview>(); this.previews.push(work); this.previewSignals.push(signal);
+    const abort = () => { if (work.status === 'pending') work.reject(signal!.reason as Error); };
+    signal?.addEventListener('abort', abort, { once: true });
+    const settled = () => signal?.removeEventListener('abort', abort);
+    void work.promise.then(settled, settled);
+    return work.promise;
   }
   grantPreview(work: Deferred<SamplePreview>, preview: SamplePreview): void {
     assert.equal(work.status, 'pending', 'a canceled capture cannot later fulfill');
@@ -288,7 +296,7 @@ function mountSampleApp<Client extends SampleClient = SampleSdk>(options: Sample
     } } },
     window: { confirm: options.confirm ?? (() => { throw new Error('Unexpected confirmation dialog in lifecycle test'); }) },
     StageClient: function (options: { url: string }) { constructions++; assert.equal(options.url, 'wss://sample.test/ws'); return sdk; },
-    decodeName: (value: string) => value, MAX_GAIN_DB, URL, URLSearchParams, Error,
+    decodeName: (value: string) => value, MAX_GAIN_DB, URL, URLSearchParams, Error, AbortController,
     setTimeout: clock.setTimeout, clearTimeout: clock.clear, setInterval: clock.setInterval, clearInterval: clock.clear,
   }, { timeout: 1000, filename: 'web/src/main.ts', contextCodeGeneration: { strings: false, wasm: false } });
   assert.equal(constructions, 1);

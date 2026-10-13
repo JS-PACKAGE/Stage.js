@@ -115,6 +115,7 @@ settings.append(playbackLabel, playbackMute, element('p', 'muted', '僅調整你
 let micTest: MicTest | null = null;
 let testingBusy = false;
 let micSettingsGeneration = 0;
+let previewCapture: AbortController | undefined;
 let selectedInput = '';
 let selectedOutput = '';
 let deviceRefreshSequence = 0;
@@ -126,7 +127,8 @@ const testButton = button('測試麥克風', async () => {
   try {
     if (micTest) { micTest.stop(); micTest = null; }
     else {
-      const preview = await client.startMicTest();
+      const preview = await capturePreview();
+      if (!preview) return;
       if (generation !== micSettingsGeneration) { preview.stop(); return; }
       micTest = preview;
     }
@@ -137,12 +139,18 @@ const testButton = button('測試麥克風', async () => {
 });
 testButton.id = 'mic-test';
 testButton.setAttribute('aria-pressed', 'false');
+const cancelTestButton = element('button', '', '取消麥克風測試');
+cancelTestButton.id = 'mic-test-cancel'; cancelTestButton.type = 'button';
+cancelTestButton.onclick = () => {
+  if (!previewCapture || client.me?.onStage) return;
+  cancelPreviewCapture(); syncMeter();
+};
 const levelLabel = element('label', 'mic-level-label', '麥克風音量');
 const level = element('meter', 'mic-level');
 level.id = 'mic-level';
 level.min = 0; level.max = 1; level.value = 0;
 levelLabel.append(level);
-settings.append(testButton, levelLabel);
+settings.append(testButton, cancelTestButton, levelLabel);
 app.append(settings);
 micSelect.onchange = () => {
   if (testingBusy) return;
@@ -158,7 +166,8 @@ micSelect.onchange = () => {
       if (micTest) {
         micTest.stop(); micTest = null;
         testButton.textContent = '測試麥克風'; testButton.setAttribute('aria-pressed', 'false');
-        const preview = await client.startMicTest();
+        const preview = await capturePreview();
+        if (!preview) return;
         if (generation !== micSettingsGeneration) { preview.stop(); return; }
         micTest = preview;
         testButton.textContent = '停止測試'; testButton.setAttribute('aria-pressed', 'true');
@@ -196,15 +205,39 @@ navigator.mediaDevices?.addEventListener('devicechange', () => { void refreshDev
 void refreshDevices().catch(() => {});
 /** Muted room microphones have a known zero level; only previews or unmuted stage mics need polling. */
 let meterTimer: ReturnType<typeof setInterval> | undefined;
+/** Only preview capture is abortable here, never setInputDevice or the room microphone. */
+function cancelPreviewCapture(): void {
+  const capture = previewCapture;
+  previewCapture = undefined;
+  cancelTestButton.hidden = cancelTestButton.disabled = true;
+  capture?.abort();
+}
+async function capturePreview(): Promise<MicTest | null> {
+  const capture = new AbortController();
+  previewCapture = capture; syncMeter();
+  try {
+    const preview = await client.startMicTest({ signal: capture.signal });
+    if (capture.signal.aborted) { preview.stop(); return null; }
+    return preview;
+  } catch (error) {
+    if (!capture.signal.aborted) throw error;
+    return null;
+  } finally {
+    if (previewCapture === capture) { previewCapture = undefined; syncMeter(); }
+  }
+}
 /** Leave/rejoin releases the UI immediately; late previews still dispose only their own stream. */
 function resetMicSettings(): void {
   micSettingsGeneration++;
+  cancelPreviewCapture();
   micTest?.stop(); micTest = null; testingBusy = false;
   micSelect.disabled = false; micSelect.value = selectedInput;
   testButton.textContent = '測試麥克風'; testButton.setAttribute('aria-pressed', 'false');
   syncMeter();
 }
 function syncMeter(): void {
+  if (client.me?.onStage && previewCapture) cancelPreviewCapture();
+  cancelTestButton.hidden = cancelTestButton.disabled = !previewCapture;
   if (client.me?.onStage && micTest) {
     micTest.stop(); micTest = null;
     testButton.textContent = '測試麥克風'; testButton.setAttribute('aria-pressed', 'false');

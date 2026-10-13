@@ -470,3 +470,6 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 
 
 95. **範例初次連線的手動取消（2026-10-13）：** landing 建立／加入等待時兩表單皆鎖定，原本只能等 hello／request deadline 或重載。新增僅在 pending 且尚未觀察到房間狀態的「取消連線」按鈕，使用既有 SDK disconnect；操作 token 在同步斷線回呼前標為 cancelled，僅該次 entry 的錯誤在 UI sink 被抑制，其他操作錯誤照常顯示。共享鎖仍由原 entry settlement 釋放，不提前開放重試；取消後延遲完成的 create 結果不得重寫房間資料。state-before-ACK／帶 state 的 status／terminal event 永久撤銷該 entry 的取消資格，retired DOM callback 也須通過 connected 與現況檢查。這是本機等待取消，不新增伺服器取消協定或 rollback 保證。全模組假 DOM 與實際 SDK 測試不代表 native browser／真實音訊驗證。
+
+
+96. **範例待授權預覽的手動取消（2026-10-13）：** 全模組 bounded probe 重現 pending startMicTest 沒有 signal，測試與裝置選擇都鎖定且只能離房取消。新增每次 preview capture 自有 AbortController 與「取消麥克風測試」控制；同步撤銷控制／ownership 後 abort，只吞掉該 capture 已取消的結果，普通失敗仍走原本錯誤顯示。直接測試與 setInputDevice 完成後的 preview restart 共用 helper，setInputDevice 本身不宣稱可取消。原操作 finally 仍負責釋放共享鎖，generation 保護離房／重入的新操作；上台與 reset 主動取消 pending preview，晚到成功結果只停止自身串流。呼叫 startMicTest 仍在使用者動作同步執行，房內 mic／收聽及 meter 政策不變。測試採假 DOM、實際 SDK 與 fake getUserMedia，無權限提示自動關閉或真實裝置驗證宣稱。
