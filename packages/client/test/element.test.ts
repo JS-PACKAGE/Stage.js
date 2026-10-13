@@ -3094,3 +3094,514 @@ describe('widget personal stage control', () => {
     await client.disconnect(); assert.equal(tracks[1]!.stops, 1); assert.equal(peer.closed, true);
   });
 });
+
+describe('widget explicit microphone retry', () => {
+  type Widget = InstanceType<typeof StageElement>;
+  type Track = EventTarget & { enabled: boolean; readyState: string; stops: number; stop(): void; end(): void };
+  function captureRequest() {
+    let resolve!: (stream: MediaStream) => void, reject!: (error: unknown) => void;
+    const promise = new Promise<MediaStream>((yes, no) => { resolve = yes; reject = no; });
+    return { promise, resolve, reject };
+  }
+  function fakeCapture(t: TestContext, denyInitial = true) {
+    const originals = new Map(['navigator', 'RTCPeerConnection', 'AudioContext'].map(name => [name, Object.getOwnPropertyDescriptor(globalThis, name)]));
+    const requests: ReturnType<typeof captureRequest>[] = [], tracks: Track[] = [];
+    let holdCapture = false, holdInstall = false;
+    function source(): MediaStream {
+      const track = Object.assign(new EventTarget(), { enabled: true, readyState: 'live', stops: 0,
+        stop() { this.stops++; this.readyState = 'ended'; },
+        end(this: Track) { this.readyState = 'ended'; this.dispatchEvent(new Event('ended')); },
+      });
+      tracks.push(track);
+      return { getTracks: () => [track], getAudioTracks: () => [track] } as unknown as MediaStream;
+    }
+    class Peer {
+      static instances: Peer[] = [];
+      connectionState = 'connected'; signalingState = 'stable'; localDescription = null; closed = false;
+      readonly installs: ReturnType<typeof deferred>[] = [];
+      readonly transceiver = { direction: 'recvonly', sender: { track: null as unknown,
+        replaceTrack: async (track: unknown) => {
+          if (holdInstall && track) { const pending = deferred(); this.installs.push(pending); await pending.promise; }
+          this.transceiver.sender.track = track;
+        },
+      } };
+      constructor() { Peer.instances.push(this); }
+      addTransceiver() { return this.transceiver; }
+      close(): void { this.closed = true; }
+    }
+    class Context {
+      createMediaStreamSource() { return { connect() {}, disconnect() {} }; }
+      createAnalyser() { return { fftSize: 2048, disconnect() {}, getFloatTimeDomainData() {} }; }
+      async resume() {} async close() {}
+    }
+    Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { mediaDevices: { getUserMedia: () => {
+      const request = captureRequest(); requests.push(request);
+      if (requests.length === 1 && denyInitial) request.reject(new DOMException('controlled denial', 'NotAllowedError'));
+      else if (!holdCapture) request.resolve(source());
+      return request.promise;
+    } } } });
+    Object.defineProperty(globalThis, 'RTCPeerConnection', { configurable: true, value: Peer });
+    Object.defineProperty(globalThis, 'AudioContext', { configurable: true, value: Context });
+    // Exercises real capture ownership and sender installation, not browser SDP or audible delivery.
+    t.mock.method(StageClient.prototype as unknown as { negotiate(): void }, 'negotiate', () => {});
+    t.after(() => { for (const [name, descriptor] of originals) { if (descriptor) Object.defineProperty(globalThis, name, descriptor); else Reflect.deleteProperty(globalThis, name); } });
+    return { requests, tracks, Peer, source,
+      hold(capture = true, install = false) { holdCapture = capture; holdInstall = install; },
+    };
+  }
+  async function until(predicate: () => boolean, label: string): Promise<void> {
+    for (let attempt = 0; attempt < 40; attempt++) { if (predicate()) return; await settle(); }
+    assert.fail(label);
+  }
+  function microphoneError(client: StageClient, message = 'controlled microphone failure'): void {
+    client.dispatchEvent(new CustomEvent('micerror', { detail: { name: 'NotReadableError', message } }));
+  }
+  function microphoneReady(client: StageClient): void {
+    client.dispatchEvent(new CustomEvent('micready', { detail: undefined }));
+  }
+  function assertRetry(element: Widget, { hidden = false, disabled = hidden, busy = false }: { hidden?: boolean; disabled?: boolean; busy?: boolean } = {}): void {
+    const button = element['micRetry'];
+    assert.equal(button.textContent, busy ? '正在要求麥克風…' : '重試麥克風');
+    assert.equal(button.getAttribute('aria-label'), '重試麥克風');
+    assert.equal(button.type, 'button');
+    assert.equal(button.hidden, hidden, 'microphone retry visibility');
+    assert.equal(button.disabled, disabled, 'microphone retry admission');
+    assert.equal(button.getAttribute('aria-busy'), String(busy), 'microphone retry event-owned pending');
+  }
+  function forceRetry(element: Widget): void {
+    element['micRetry'].disabled = false;
+    click(element['micRetry']);
+  }
+  async function failedWidget(t: TestContext) {
+    const fixture = await subscribedWidget(t, true);
+    microphoneError(fixture.client);
+    assertRetry(fixture.element);
+    return fixture;
+  }
+
+  for (const cause of ['initial denial', 'natural end'] as const) {
+    it(`offers ${cause} recovery only on an explicit click and retains one peer and participant`, async t => {
+      const media = fakeCapture(t, cause === 'initial denial');
+      const { element, client, socket, sockets } = await socketJoinedWidget(t, roomState(true), true);
+      await client['mediaTask'];
+      const peer = media.Peer.instances[0]!;
+      if (cause === 'natural end') {
+        assertRetry(element, { hidden: true });
+        assert.equal(peer.transceiver.sender.track, media.tracks[0]);
+        media.tracks[0]!.end();
+        assert.equal(client['mic'], null); assert.equal(client['micFailed'], true);
+        assertRetry(element);
+        await client['mediaTask'];
+      }
+      assertRetry(element); assert.equal(element['error'].hidden, false);
+      assert.equal(element['retry'].hidden, true, 'capture failure does not offer fresh room join');
+      assert.equal(peer.transceiver.sender.track, null); assert.equal(peer.transceiver.direction, 'recvonly');
+      const captures = media.requests.length, frames = [...socket.sent];
+      socket.deliver({ type: 'room:state', ...roomState(true) }); await client['mediaTask'];
+      assert.equal(media.requests.length, captures, 'ordinary snapshots never reacquire failed capture');
+      media.hold(true, true);
+      const retry = t.mock.method(client, 'retryMicrophone');
+      click(element['micRetry']);
+      assertRetry(element, { disabled: true, busy: true });
+      assert.equal(element['error'].hidden, true, 'admission clears the unchanged prior capture alert');
+      await until(() => media.requests.length === captures + 1, 'the admitted capture starts');
+      await settle(); await settle();
+      assertRetry(element, { disabled: true, busy: true });
+      click(element['micRetry']); forceRetry(element);
+      assert.equal(retry.mock.callCount(), 1, 'even a forced duplicate handler cannot prompt twice');
+      assert.equal(media.requests.length, captures + 1);
+      let ready = 0;
+      element.addEventListener('stage-micready', event => {
+        ready++;
+        assert.equal((event as CustomEvent).detail, new CustomEvent('micready', { detail: undefined }).detail);
+        assert.equal(event.bubbles, true); assert.equal(event.composed, true);
+        assertRetry(element, { hidden: true });
+        assert.equal(peer.transceiver.sender.track, null, 'capture-ready precedes sender attachment');
+        assert.equal(peer.transceiver.direction, 'recvonly');
+        forceRetry(element);
+      }, { once: true });
+      media.requests.at(-1)!.resolve(media.source());
+      await until(() => peer.installs.length === 1, 'sender installation reaches its controlled gate');
+      assert.equal(ready, 1); assertRetry(element, { hidden: true });
+      assert.equal(retry.mock.callCount(), 1); assert.equal(client['micFailed'], false);
+      assert.equal(peer.transceiver.sender.track, null, 'the widget does not wait for or claim installed audio');
+      peer.installs[0]!.resolve(); await client['mediaTask'];
+      assert.equal(peer.transceiver.sender.track, media.tracks.at(-1)); assert.equal(peer.transceiver.direction, 'sendrecv');
+      assert.equal(element.client, client); assert.equal(client.me!.participantId, 'me'); assert.equal(client.me!.onStage, true);
+      assert.equal(sockets.length, 1); assert.equal(media.Peer.instances.length, 1); assert.equal(peer.closed, false);
+      assert.deepEqual(socket.sent, frames, 'no room control traffic; only SDP negotiation is stubbed');
+    });
+  }
+
+  it('restores explicit retry on a subsequent real capture error without another automatic prompt', async t => {
+    const media = fakeCapture(t);
+    const { element, client, socket } = await socketJoinedWidget(t, roomState(true), true);
+    await client['mediaTask']; media.hold();
+    click(element['micRetry']); await until(() => media.requests.length === 2, 'retry requests capture');
+    media.requests[1]!.reject(new DOMException('controlled missing device', 'NotFoundError'));
+    await client['mediaTask'];
+    assertRetry(element); assert.equal(element['error'].hidden, false);
+    assert.match(element['error'].textContent ?? '', /找不到麥克風/);
+    socket.deliver({ type: 'room:state', ...roomState(true) }); await client['mediaTask'];
+    assert.equal(media.requests.length, 2);
+    click(element['micRetry']); await until(() => media.requests.length === 3, 'a later click retries once');
+    media.requests[2]!.resolve(media.source()); await client['mediaTask'];
+    assertRetry(element, { hidden: true }); assert.equal(element['error'].hidden, true);
+  });
+
+  for (const policy of ['muted', 'force-muted'] as const) {
+    it(`recaptures a ${policy} microphone without issuing unmute or overriding mute policy`, async t => {
+      const media = fakeCapture(t);
+      const state = roomState(true); state.me.muted = true; state.me.forceMuted = policy === 'force-muted';
+      const { element, client, socket } = await socketJoinedWidget(t, state, true);
+      await client['mediaTask']; assertRetry(element);
+      assert.equal(element['mic'].disabled, state.me.forceMuted);
+      const frames = [...socket.sent];
+      const mute = t.mock.method(client, 'mute'), unmute = t.mock.method(client, 'unmute');
+      click(element['micRetry']); await client['mediaTask'];
+      assertRetry(element, { hidden: true });
+      assert.equal(media.requests.length, 2); assert.equal(media.tracks.at(-1)!.enabled, false);
+      assert.equal(client.me!.muted, true); assert.equal(client.me!.forceMuted, state.me.forceMuted);
+      assert.equal(mute.mock.callCount(), 0); assert.equal(unmute.mock.callCount(), 0); assert.deepEqual(socket.sent, frames);
+    });
+  }
+
+  it('surfaces generic sender-install rejection after capture-ready without claiming audio recovery or reopening capture retry', async t => {
+    const media = fakeCapture(t);
+    const { element, client } = await socketJoinedWidget(t, roomState(true), true);
+    await client['mediaTask']; media.hold(true, true);
+    click(element['micRetry']); await until(() => media.requests.length === 2, 'retry requests capture');
+    media.requests[1]!.resolve(media.source());
+    const peer = media.Peer.instances[0]!;
+    await until(() => peer.installs.length === 1, 'capture-ready precedes gated installation');
+    assertRetry(element, { hidden: true }); assert.equal(element['error'].hidden, true);
+    peer.installs[0]!.reject(new Error('controlled sender install rejection')); await client['mediaTask'];
+    assertRetry(element, { hidden: true }); assert.equal(element['error'].hidden, false);
+    assert.equal(element['error'].textContent, 'controlled sender install rejection');
+    assert.equal(peer.transceiver.sender.track, null); assert.equal(client['micFailed'], false);
+    assert.equal(client.retryMicrophone(), false); assert.equal(media.requests.length, 2);
+    assert.doesNotMatch(element['status'].textContent ?? '', /麥克風已恢復|音訊已恢復/);
+  });
+
+  it('honestly treats preview-shared micready as capture-ready even while room capture still awaits permission', async t => {
+    const media = fakeCapture(t);
+    const { element, client } = await socketJoinedWidget(t, roomState(true), true);
+    await client['mediaTask']; media.hold();
+    click(element['micRetry']); await until(() => media.requests.length === 2, 'room retry awaits permission');
+    const previewPromise = client.startMicTest();
+    assert.equal(media.requests.length, 3);
+    media.requests[2]!.resolve(media.source()); const preview = await previewPromise;
+    assertRetry(element, { hidden: true });
+    assert.equal(client['mic'], null); assert.equal(media.Peer.instances[0]!.transceiver.sender.track, null);
+    assert.equal(client.retryMicrophone(), false, 'preview readiness does not create another room admission');
+    assert.equal(media.requests.length, 3);
+    media.requests[1]!.reject(new DOMException('room capture still denied', 'NotAllowedError'));
+    await client['mediaTask']; assertRetry(element); assert.equal(element['error'].hidden, false);
+    preview.stop(); assert.equal(media.tracks[0]!.stops, 1);
+  });
+
+  it('does not offer capture retry for healthy room state, generic errors, audience, or an offstage controller', async t => {
+    const { element, client } = await subscribedWidget(t, true);
+    const retry = t.mock.method(client, 'retryMicrophone', () => true);
+    assertRetry(element, { hidden: true }); forceRetry(element); assert.equal(retry.mock.callCount(), 0);
+    await client['receive']({ type: 'error', code: 'forbidden', message: 'generic audio problem' });
+    assertRetry(element, { hidden: true });
+    microphoneReady(client); assertRetry(element, { hidden: true });
+    for (const role of ['audience', 'controller'] as const) {
+      const state = roomState(); state.me.role = role;
+      await client['receive']({ type: 'room:state', ...state }); microphoneError(client);
+      assertRetry(element, { hidden: true }); forceRetry(element); assert.equal(retry.mock.callCount(), 0);
+    }
+  });
+
+  for (const outcome of ['false', 'throw'] as const) {
+    it(`restores failed-capture admission after a synchronous ${outcome} result`, async t => {
+      const { element, client } = await failedWidget(t);
+      const retry = t.mock.method(client, 'retryMicrophone', () => {
+        assertRetry(element, { disabled: true, busy: true });
+        if (outcome === 'throw') throw new Error('controlled retry exception');
+        return false;
+      });
+      click(element['micRetry']); await settle();
+      assertRetry(element); assert.equal(retry.mock.callCount(), 1); assert.equal(element['error'].hidden, false);
+      assert.equal(element['error'].textContent, outcome === 'throw' ? 'controlled retry exception' : 'controlled microphone failure');
+      click(element['micRetry']); assert.equal(retry.mock.callCount(), 2); assertRetry(element);
+    });
+  }
+
+  for (const outcome of ['true', 'false', 'throw'] as const) {
+    for (const event of ['micerror', 'error'] as const) {
+      it(`preserves a newer synchronous ${event} alert when admission returns ${outcome}`, async t => {
+        const { element, client } = await failedWidget(t);
+        t.mock.method(client, 'retryMicrophone', () => {
+          if (event === 'micerror') microphoneError(client, 'new capture failure');
+          else client.dispatchEvent(new CustomEvent('error', { detail: new Error('new generic failure') }));
+          if (outcome === 'throw') throw new Error('older admission exception');
+          return outcome === 'true';
+        });
+        click(element['micRetry']); await settle();
+        assert.equal(element['error'].hidden, false);
+        assert.equal(element['error'].textContent, event === 'micerror' ? 'new capture failure' : 'new generic failure');
+        const pending = outcome === 'true' && event === 'error';
+        assertRetry(element, { disabled: pending, busy: pending });
+      });
+    }
+  }
+
+  it('admits a retry from a forwarded micerror listener without the outer event undoing pending state', async t => {
+    const { element, client } = await subscribedWidget(t, true);
+    const retry = t.mock.method(client, 'retryMicrophone', () => true);
+    const detail = { name: 'NotReadableError', message: 'reentrant capture failure' };
+    let forwarded = 0;
+    element.addEventListener('stage-micerror', event => {
+      forwarded++; assert.equal((event as CustomEvent).detail, detail);
+      assert.equal(event.bubbles, true); assert.equal(event.composed, true);
+      assertRetry(element); click(element['micRetry']);
+      assertRetry(element, { disabled: true, busy: true });
+    }, { once: true });
+    client.dispatchEvent(new CustomEvent('micerror', { detail })); await settle();
+    assert.equal(forwarded, 1); assert.equal(retry.mock.callCount(), 1);
+    assertRetry(element, { disabled: true, busy: true }); assert.equal(element['error'].hidden, true);
+    microphoneReady(client); assertRetry(element, { hidden: true });
+  });
+
+  for (const outcome of ['true', 'false', 'throw'] as const) {
+    for (const newerError of [false, true]) {
+      it(`does not roll back synchronous micready after admission ${outcome}${newerError ? ' with a newer forwarded-listener error' : ''}`, async t => {
+        const { element, client } = await failedWidget(t);
+        const retry = t.mock.method(client, 'retryMicrophone', () => {
+          microphoneReady(client);
+          if (outcome === 'throw') throw new Error('obsolete admission exception');
+          return outcome === 'true';
+        });
+        element.addEventListener('stage-micready', () => {
+          assertRetry(element, { hidden: true }); forceRetry(element);
+          if (newerError) client.dispatchEvent(new CustomEvent('error', { detail: new Error('new ready-listener error') }));
+        }, { once: true });
+        click(element['micRetry']); await settle();
+        assertRetry(element, { hidden: true }); assert.equal(retry.mock.callCount(), 1);
+        assert.equal(element['error'].hidden, !newerError);
+        if (newerError) assert.equal(element['error'].textContent, 'new ready-listener error');
+      });
+    }
+  }
+
+  it('does not restore an old failure when false follows synchronous disconnect and a new participant capture failure', async t => {
+    const { element, client } = await failedWidget(t);
+    const retry = t.mock.method(client, 'retryMicrophone', () => {
+      void client.disconnect();
+      const replacement = roomState(true, 'replacement'); replacement.me.participantId = 'new-participant';
+      void client['receive']({ type: 'room:state', ...replacement });
+      microphoneError(client, 'new participant capture failure');
+      return false;
+    });
+    click(element['micRetry']); await settle();
+    assertRetry(element); assert.equal(retry.mock.callCount(), 1);
+    assert.equal(client.me!.participantId, 'new-participant'); assert.equal(client.state!.roomId, 'replacement');
+    assert.equal(element['error'].hidden, false); assert.equal(element['error'].textContent, 'new participant capture failure');
+    microphoneReady(client); assertRetry(element, { hidden: true }); assert.equal(element['error'].hidden, true);
+  });
+
+  it('does not restore old admission after false starts a widget rejoin and the replacement later fails capture', async t => {
+    const { element, client } = await failedWidget(t);
+    const retry = t.mock.method(client, 'retryMicrophone', () => {
+      element.setAttribute('name', 'replacement'); return false;
+    });
+    click(element['micRetry']); assertRetry(element, { hidden: true });
+    await settle();
+    const replacement = element.client; assert.ok(replacement); assert.notEqual(replacement, client);
+    await replacement['receive']({ type: 'room:state', ...roomState(true, 'replacement') });
+    microphoneError(replacement, 'replacement capture failure'); assertRetry(element);
+    microphoneReady(client); microphoneError(client, 'retired capture failure');
+    assertRetry(element); assert.equal(retry.mock.callCount(), 1);
+    assert.equal(element['error'].hidden, false); assert.equal(element['error'].textContent, 'replacement capture failure');
+  });
+
+  it('keeps a newer failure raised inside a forwarded micready listener eligible', async t => {
+    const { element, client } = await failedWidget(t);
+    t.mock.method(client, 'retryMicrophone', () => true);
+    click(element['micRetry']);
+    element.addEventListener('stage-micready', () => { microphoneError(client, 'ended during ready callback'); }, { once: true });
+    microphoneReady(client);
+    assertRetry(element); assert.equal(element['error'].hidden, false);
+    assert.equal(element['error'].textContent, 'ended during ready callback');
+  });
+
+  it('preserves an unrelated newer error when pending capture becomes ready', async t => {
+    const { element, client } = await failedWidget(t);
+    t.mock.method(client, 'retryMicrophone', () => true);
+    click(element['micRetry']);
+    await client['receive']({ type: 'error', code: 'forbidden', message: 'new control error' });
+    microphoneReady(client);
+    assertRetry(element, { hidden: true }); assert.equal(element['error'].hidden, false);
+    assert.equal(element['error'].textContent, 'new control error');
+  });
+
+  it('does not clear an unrelated alert already present before the explicit retry', async t => {
+    const { element, client } = await failedWidget(t);
+    t.mock.method(client, 'retryMicrophone', () => true);
+    await client['receive']({ type: 'error', code: 'forbidden', message: 'existing control error' });
+    click(element['micRetry']); assertRetry(element, { disabled: true, busy: true });
+    assert.equal(element['error'].hidden, false); assert.equal(element['error'].textContent, 'existing control error');
+    microphoneReady(client); assertRetry(element, { hidden: true });
+    assert.equal(element['error'].hidden, false); assert.equal(element['error'].textContent, 'existing control error');
+  });
+
+  for (const newerError of [false, true]) {
+    it(`retires a capture notice on direct SDK micready ${newerError ? 'without hiding a newer alert' : 'without requiring a widget click'}`, async t => {
+      const { element, client } = await failedWidget(t);
+      const retry = t.mock.method(client, 'retryMicrophone', () => true);
+      if (newerError) await client['receive']({ type: 'error', code: 'forbidden', message: 'newer room error' });
+      microphoneReady(client); assertRetry(element, { hidden: true });
+      assert.equal(element['error'].hidden, !newerError);
+      if (newerError) assert.equal(element['error'].textContent, 'newer room error');
+      assert.equal(retry.mock.callCount(), 0);
+    });
+  }
+
+  for (const transition of ['reconnecting', 'offstage', 'disconnect', 'replacement', 'unmount'] as const) {
+    it(`does not restore stale admission after synchronous ${transition} inside retryMicrophone`, async t => {
+      const { element, client } = await failedWidget(t);
+      const retry = t.mock.method(client, 'retryMicrophone', () => {
+        if (transition === 'reconnecting') void client['receive']({ type: 'status', state: 'reconnecting' });
+        else if (transition === 'offstage') void client['receive']({ type: 'room:state', ...roomState() });
+        else if (transition === 'disconnect') void client.disconnect();
+        else if (transition === 'replacement') element.setAttribute('name', 'replacement');
+        else { Object.assign(element, { isConnected: false }); element.disconnectedCallback(); }
+        return true;
+      });
+      click(element['micRetry']); await settle();
+      assert.equal(retry.mock.callCount(), 1);
+      if (transition === 'reconnecting') {
+        assertRetry(element, { disabled: true, busy: true });
+        await client['receive']({ type: 'status', state: 'live' });
+        assertRetry(element, { disabled: true, busy: true });
+        microphoneError(client, 'retry ended after reconnect'); assertRetry(element);
+      } else assertRetry(element, { hidden: true });
+    });
+  }
+
+  for (const pending of [false, true]) {
+    it(`retains ${pending ? 'pending capture' : 'failed capture'} across an ordinary socket reconnect and disables backoff/hello/resume`, async t => {
+      const media = fakeCapture(t);
+      const { element, client, socket, sockets, tick, hello } = await socketJoinedWidget(t, roomState(true), true);
+      await client['mediaTask']; media.hold();
+      const retry = t.mock.method(client, 'retryMicrophone');
+      if (pending) { click(element['micRetry']); await until(() => media.requests.length === 2, 'pending retry starts'); }
+      const captures = media.requests.length;
+      socket.close(); assert.equal(client.status, 'reconnecting');
+      assertRetry(element, { disabled: true, busy: pending }); forceRetry(element);
+      assert.equal(retry.mock.callCount(), pending ? 1 : 0);
+      await tick(500); assertRetry(element, { disabled: true, busy: pending });
+      const replacement = sockets[1]!; const resume = await hello(replacement);
+      assertRetry(element, { disabled: true, busy: pending }); forceRetry(element);
+      assert.equal(retry.mock.callCount(), pending ? 1 : 0); assert.equal(media.requests.length, captures);
+      replacement.deliver({ type: 'room:state', ...roomState(true) }); await settle();
+      assertRetry(element, { disabled: pending, busy: pending });
+      replacement.deliver({ type: 'ok', requestId: resume.requestId }); await settle();
+      assertRetry(element, { disabled: pending, busy: pending });
+      assert.equal(media.requests.length, captures); assert.equal(media.Peer.instances.length, 1);
+      if (pending) {
+        media.requests[1]!.resolve(media.source()); await client['mediaTask'];
+        assertRetry(element, { hidden: true });
+      } else {
+        click(element['micRetry']); await until(() => media.requests.length === 2, 'explicit retry after resume');
+        media.requests[1]!.resolve(media.source()); await client['mediaTask']; assertRetry(element, { hidden: true });
+      }
+    });
+  }
+
+  for (const transition of ['waiting', 'reconnecting', 'offstage', 'identity', 'room', 'disconnect', 'detached'] as const) {
+    it(`rechecks ${transition} before a forwarded callback can invoke an old eligible button`, async t => {
+      const { element, client } = await failedWidget(t);
+      const retry = t.mock.method(client, 'retryMicrophone', () => true);
+      const statusTransition = transition === 'waiting' || transition === 'reconnecting' || transition === 'disconnect';
+      let callbacks = 0;
+      element.addEventListener(statusTransition ? 'stage-status' : 'stage-state', () => {
+        callbacks++;
+        if (transition === 'detached') Object.assign(element, { isConnected: false });
+        forceRetry(element);
+      }, { once: true });
+      if (transition === 'disconnect') await client.disconnect();
+      else if (statusTransition) await client['receive']({ type: 'status', state: transition as 'waiting' | 'reconnecting' });
+      else {
+        const state = roomState(transition !== 'offstage', transition === 'room' ? 'two' : 'one');
+        if (transition === 'identity') state.me.participantId = 'replacement';
+        await client['receive']({ type: 'room:state', ...state });
+      }
+      await settle(); assert.equal(callbacks, 1); assert.equal(retry.mock.callCount(), 0);
+      if (transition === 'waiting' || transition === 'reconnecting') {
+        assertRetry(element, { disabled: true });
+        await client['receive']({ type: 'status', state: 'live' }); assertRetry(element);
+      } else assertRetry(element, transition === 'detached' ? { disabled: true } : { hidden: true });
+    });
+  }
+
+  it('preserves failure across onstage role changes and retires it on leaving the stage', async t => {
+    const { element, client } = await failedWidget(t);
+    const retry = t.mock.method(client, 'retryMicrophone', () => true);
+    const controller = roomState(true); controller.me.role = 'controller';
+    await client['receive']({ type: 'room:state', ...controller }); assertRetry(element);
+    await client['receive']({ type: 'role:update', participantId: 'me', role: 'speaker', reason: 'transferred' });
+    assertRetry(element);
+    await client['receive']({ type: 'room:state', ...roomState() }); assertRetry(element, { hidden: true });
+    await client['receive']({ type: 'room:state', ...roomState(true) }); assertRetry(element, { hidden: true });
+    forceRetry(element); assert.equal(retry.mock.callCount(), 0);
+    microphoneError(client, 'new stage capture failure'); assertRetry(element);
+  });
+
+  for (const terminal of [null, ...terminalCases]) {
+    it(`retires pending capture retry after ${terminal?.title ?? 'exposed-client disconnect'}`, async t => {
+      const { element, client } = await failedWidget(t);
+      const retry = t.mock.method(client, 'retryMicrophone', () => true);
+      click(element['micRetry']); assertRetry(element, { disabled: true, busy: true });
+      if (terminal) await client['receive'](terminal.message); else await client.disconnect();
+      assertRetry(element, { hidden: true }); forceRetry(element); assert.equal(retry.mock.callCount(), 1);
+      microphoneReady(client); microphoneError(client, 'late retired failure');
+      assertRetry(element, { hidden: true });
+      assert.equal(element['status'].textContent, terminal?.text ?? '未連線');
+    });
+  }
+
+  for (const transition of ['room', 'name', 'code', 'url', 'unmount'] as const) {
+    it(`isolates old mic events after ${transition} replacement from a new pending capture and alert`, async t => {
+      const { element, client } = await failedWidget(t);
+      t.mock.method(client, 'retryMicrophone', () => true);
+      click(element['micRetry']);
+      if (transition === 'unmount') {
+        Object.assign(element, { isConnected: false }); element.disconnectedCallback(); await settle();
+        assertRetry(element, { hidden: true });
+        Object.assign(element, { isConnected: true }); element.connectedCallback();
+      } else element.setAttribute(transition, transition === 'url' ? 'wss://replacement.invalid/ws' : 'replacement');
+      await settle();
+      const replacement = element.client; assert.ok(replacement); assert.notEqual(replacement, client);
+      await replacement['receive']({ type: 'room:state', ...roomState(true, 'replacement') });
+      assertRetry(element, { hidden: true }); microphoneError(replacement, 'replacement capture failure');
+      const retry = t.mock.method(replacement, 'retryMicrophone', () => true);
+      click(element['micRetry']);
+      await replacement['receive']({ type: 'error', code: 'forbidden', message: 'replacement control error' });
+      microphoneReady(client); microphoneError(client, 'retired capture error'); await settle();
+      assert.equal(element.client, replacement); assertRetry(element, { disabled: true, busy: true });
+      assert.equal(element['error'].hidden, false); assert.equal(element['error'].textContent, 'replacement control error');
+      assert.equal(retry.mock.callCount(), 1);
+      microphoneReady(replacement); assertRetry(element, { hidden: true });
+      assert.equal(element['error'].textContent, 'replacement control error');
+    });
+  }
+
+  for (const transition of ['offstage', 'disconnect', 'unmount'] as const) {
+    it(`cancels real deferred capture on ${transition} and disposes late permission success`, async t => {
+      const media = fakeCapture(t);
+      const { element, client, socket } = await socketJoinedWidget(t, roomState(true), true);
+      await client['mediaTask']; media.hold();
+      click(element['micRetry']); await until(() => media.requests.length === 2, 'retry permission is pending');
+      if (transition === 'offstage') socket.deliver({ type: 'room:state', ...roomState() });
+      else if (transition === 'disconnect') await client.disconnect();
+      else { Object.assign(element, { isConnected: false }); element.disconnectedCallback(); }
+      await settle(); assertRetry(element, { hidden: true });
+      const late = media.source(); media.requests[1]!.resolve(late); await settle(); await client['mediaTask'];
+      assert.equal(media.tracks.at(-1)!.stops, 1); assert.equal(client['mic'], null);
+      assertRetry(element, { hidden: true }); assert.equal(media.requests.length, 2);
+    });
+  }
+});

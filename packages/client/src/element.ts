@@ -43,6 +43,9 @@ export class StageElement extends HTMLElement {
   private readonly unlock: HTMLButtonElement;
   private readonly hand: HTMLButtonElement;
   private readonly mic: HTMLButtonElement;
+  private readonly micRetry: HTMLButtonElement;
+  private micFailure: { client: StageClient; roomId: string; participantId: string; errorRevision: number; pending: boolean } | undefined;
+  private errorRevision = 0;
   private readonly leaveStage: HTMLButtonElement;
   private readonly listen: HTMLButtonElement;
   private readonly playback: HTMLDivElement;
@@ -84,6 +87,11 @@ export class StageElement extends HTMLElement {
     this.unlock.hidden = true;
     this.hand = this.button('舉手發言', () => (this.current?.me?.handRaised ? this.current.withdrawHand() : this.current?.raiseHand()));
     this.mic = this.button('靜音', () => (this.current?.me?.muted ? this.current.unmute() : this.current?.mute()));
+    // Capture admission is synchronous; its completion belongs to later mic events.
+    this.micRetry = document.createElement('button');
+    this.micRetry.type = 'button';
+    this.micRetry.setAttribute('aria-label', '重試麥克風');
+    this.micRetry.onclick = () => this.retryMic();
     this.leaveStage = this.button('離開舞台', () => {
       const client = this.current, me = client?.me;
       // Forwarded events can reenter before render updates the old button's visibility.
@@ -112,7 +120,7 @@ export class StageElement extends HTMLElement {
     this.playback.append(volumeLabel, this.volume, this.volumeValue);
     this.retry = this.button('重試加入', () => { if (this.canRetry()) this.rejoin(); });
     this.cancelJoin = this.button('取消加入', () => this.cancelInitial?.());
-    actions.append(this.unlock, this.listen, this.hand, this.mic, this.leaveStage, this.retry, this.cancelJoin);
+    actions.append(this.unlock, this.listen, this.hand, this.mic, this.micRetry, this.leaveStage, this.retry, this.cancelJoin);
     panel.append(this.status, this.error, actions, this.playback);
     root.append(style, panel);
     this.render();
@@ -201,9 +209,12 @@ export class StageElement extends HTMLElement {
       for (const type of EVENTS) {
         client.on(type, ({ detail }) => {
           if (generation !== this.generation || this.current !== client) return;
+          const micLifecycle = type === 'state' || type === 'status' || type === 'micerror' || type === 'micready'
+            || type === 'closed' || type === 'kicked';
+          if (micLifecycle) this.syncMicRetry();
           // SDK status precedes state; a forwarded status listener may disconnect immediately.
           if (type === 'state' || client.state) { receivedState = true; this.hideRetry(); this.hideCancel(); }
-          if (type === 'closed' || type === 'kicked') { terminal = true; this.hideRetry(); this.hideCancel(); }
+          if (type === 'closed' || type === 'kicked') { terminal = true; this.micFailure = undefined; this.hideRetry(); this.hideCancel(); }
           if (type === 'state' || type === 'closed' || type === 'kicked'
             || (type === 'status' && detail === 'disconnected')) this.joinPhase = undefined;
           if (type === 'audioblocked') this.unlock.hidden = false;
@@ -215,6 +226,17 @@ export class StageElement extends HTMLElement {
             ? '伺服器維護或重新啟動，房間已關閉。' : '房間已關閉。';
           if (type === 'kicked') this.status.textContent = '你已被主控移出房間。';
           if (type === 'error' || type === 'micerror') this.show(detail);
+          if (type === 'micerror' && client.state && client.me?.onStage) {
+            this.micFailure = { client, roomId: client.state.roomId, participantId: client.me.participantId,
+              errorRevision: this.errorRevision, pending: false };
+          }
+          if (type === 'micready' && this.micFailure?.client === client) {
+            // micready is shared with preview and precedes sender installation.
+            if (this.micFailure.errorRevision === this.errorRevision) this.error.hidden = true;
+            this.micFailure = undefined;
+          }
+          // Revoke stale action admission before application event listeners can reenter.
+          if (micLifecycle) this.syncMicRetry();
           this.dispatchEvent(new CustomEvent(`stage-${type}`, { detail, bubbles: true, composed: true }));
           if (type === 'state' || type === 'status' || type === 'mic' || type === 'closed' || type === 'kicked') this.render();
         });
@@ -249,6 +271,7 @@ export class StageElement extends HTMLElement {
 
   private async leave(): Promise<void> {
     this.joinPhase = undefined;
+    this.micFailure = undefined;
     this.hideCancel();
     this.hideRetry();
     for (const button of this.pendingActions) button.removeAttribute('aria-busy');
@@ -280,6 +303,40 @@ export class StageElement extends HTMLElement {
       && !this.current?.state && this.current?.status !== 'reconnecting';
   }
 
+  private syncMicRetry(): void {
+    const failure = this.micFailure, client = this.current, me = client?.me;
+    if (failure && (failure.client !== client || failure.roomId !== client?.state?.roomId
+      || failure.participantId !== me?.participantId || !me?.onStage)) this.micFailure = undefined;
+    const current = this.micFailure;
+    this.micRetry.hidden = !current;
+    this.micRetry.disabled = !this.isConnected || !current || current.pending || client?.status !== 'live';
+    this.micRetry.setAttribute('aria-busy', String(Boolean(current?.pending)));
+    this.micRetry.textContent = current?.pending ? '正在要求麥克風…' : '重試麥克風';
+  }
+
+  private retryMic(): void {
+    this.syncMicRetry();
+    const failure = this.micFailure;
+    if (this.micRetry.disabled || !failure) return;
+    const errorRevision = this.errorRevision;
+    const attempt = { ...failure, pending: true };
+    this.micFailure = attempt; this.syncMicRetry();
+    try {
+      const admitted = failure.client.retryMicrophone();
+      if (this.micFailure !== attempt) return;
+      if (!admitted) this.micFailure = failure;
+      else if (failure.errorRevision === this.errorRevision) this.error.hidden = true;
+    } catch (error) {
+      if (this.micFailure === attempt) {
+        this.micFailure = failure;
+        if (errorRevision === this.errorRevision) {
+          this.show(error);
+          this.micFailure = { ...failure, errorRevision: this.errorRevision };
+        }
+      }
+    } finally { this.syncMicRetry(); }
+  }
+
   private renderVolume(): void {
     const percent = Math.round(this.playbackVolume * 100);
     this.volume.value = String(percent);
@@ -297,6 +354,7 @@ export class StageElement extends HTMLElement {
   }
 
   private show(error: unknown): void {
+    this.errorRevision++;
     // StageError / Error, or a `micerror` detail ({name, message}).
     const message = typeof error === 'object' && error !== null && 'message' in error && typeof error.message === 'string' ? error.message : '操作失敗。';
     this.error.textContent = message;
@@ -324,6 +382,7 @@ export class StageElement extends HTMLElement {
   }
 
   private render(): void {
+    this.syncMicRetry();
     const client = this.current;
     const me = client?.me ?? null;
     const state = client?.state ?? null;
