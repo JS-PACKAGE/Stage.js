@@ -202,10 +202,10 @@ function element<K extends keyof HTMLElementTagNameMap>(tag: K, className = '', 
   if (text !== undefined) node.textContent = text;
   return node;
 }
-function button(label: string, action: () => Promise<unknown>, className = ''): HTMLButtonElement {
+function button(label: string, action: () => Promise<unknown>, className = '', generation?: number): HTMLButtonElement {
   const node = element('button', className, label);
   node.type = 'button';
-  node.onclick = () => { void run(action, node); };
+  node.onclick = () => { void run(action, node, generation); };
   return node;
 }
 async function run(action: () => Promise<unknown>, target?: HTMLButtonElement, generation?: number): Promise<void> {
@@ -333,10 +333,12 @@ function landing(): void {
 function renderNotices(): void {
   notices.replaceChildren();
   if (audioBlocked) {
+    const generation = roomActionGeneration;
     const banner = element('div', 'banner');
     banner.append(element('span', '', '自動播放遭阻擋。'), button('點擊啟用音訊', async () => {
-      await client.unlockAudio(); audioBlocked = false; renderNotices();
-    }, 'primary'));
+      await client.unlockAudio();
+      if (generation === roomActionGeneration) { audioBlocked = false; renderNotices(); }
+    }, 'primary', generation));
     notices.append(banner);
   }
   if (micNotice) notices.append(element('p', 'banner', micNotice));
