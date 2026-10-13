@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { it } from 'node:test';
 import type { TestContext } from 'node:test';
 import type { ParticipantView, RoomStatePayload } from '../shared/protocol.ts';
+import { sanitizeName } from '../src/ws/validate.ts';
 import { Deferred, flushSample, roomState, sampleApp } from './fixtures/sampleApp.ts';
 import type { SampleNode } from './fixtures/sampleApp.ts';
 
@@ -24,6 +25,15 @@ function controllerState(audienceCount = 5, speakerCount = 1, handCount = 1): Ro
     role: 'audience', onStage: false, handRaised: index < handCount,
   }));
   return { ...roomState(me), speakers, hands: audience.slice(0, handCount), audience, audienceCount, status: 'live' };
+}
+
+function namedAudience(rawNames: string[]): RoomStatePayload {
+  const state = controllerState(rawNames.length, 0, 0);
+  for (const [index, raw] of rawNames.entries()) {
+    const name = sanitizeName(raw, 32); assert.ok(name);
+    state.audience![index]!.name = name;
+  }
+  return state;
 }
 
 /** Whole-module fixture: node identity and operation counts, not browser focus, paint, CSS or hardware. */
@@ -145,6 +155,60 @@ it('whole sample trims case-insensitive substrings, supports Chinese, and search
     assert.deepEqual(visibleIds(h), expected.map(index => `audience-${index}`), JSON.stringify(query));
     assertCount(h, expected.length, 5);
   }
+});
+
+it('whole sample aligns canonical queries with real sanitized and decoded Latin, Hangul and reordered marks', async t => {
+  // Stripping controls after server NFC can leave decomposed output, exercising the cached name key too.
+  const state = namedAudience(['Cafe\u0301 & <茶>', 'Café & <茶>', 'Cafe\u0000\u0301 & <茶>',
+    '한글', '\u1112\u1161\u11ab\u1100\u1173\u11af', '\u1112\u0000\u1161\u11ab글', 'a\u0315\u0300', '張小明']);
+  const displays = ['Café & <茶>', 'Café & <茶>', 'Cafe\u0301 & <茶>', '한글', '한글',
+    '\u1112\u1161\u11ab글', 'à\u0315', '張小明'];
+  assert.equal(state.audience![0]!.name, 'Café &amp; &lt;茶&gt;');
+  assert.deepEqual(state.audience!.map(person => decodeName(person.name)), displays);
+  const h = await setup(t); h.sdk.snapshot(state);
+  assert.deepEqual(audienceRows(h).map(row => row.descendants().find(node => node.tagName === 'strong')!.textContent), displays);
+  const input = search(h), nodes = h.main.descendants(), before = h.effects(); h.reset();
+  for (const [query, expected] of [
+    [' CAFÉ & <茶> ', [0, 1, 2]], [' CAFE\u0301 & <茶> ', [0, 1, 2]], ['é', [0, 1, 2]],
+    ['한글', [3, 4, 5]], ['\u1112\u1161\u11ab\u1100\u1173\u11af', [3, 4, 5]],
+    ['a\u0300\u0315', [6]], ['a\u0315\u0300', [6]], ['À\u0315', [6]], [' 小明 ', [7]],
+    ['cafe', []], ['&amp;', []], [' \t ', [0, 1, 2, 3, 4, 5, 6, 7]],
+  ] as const) {
+    type(h, query); assert.equal(search(h), input); assert.equal(input.value, query);
+    assert.deepEqual(visibleIds(h), expected.map(index => `audience-${index}`), JSON.stringify(query));
+    assertCount(h, expected.length, displays.length); sameNodes(h.main.descendants(), nodes);
+  }
+  assert.deepEqual({ ...h.counts }, { created: 0, replacements: 0 });
+  assert.deepEqual(h.effects(), before);
+});
+
+it('whole sample preserves accents and compatibility distinctions instead of folding with NFKC', async t => {
+  const h = await setup(t); h.sdk.snapshot(namedAudience(['Café', 'Cafe', 'office', 'ｏｆｆｉｃｅ', 'oﬃce', '①', '1']));
+  for (const [query, expected] of [
+    ['cafe', [1]], ['cafe\u0301', [0]], ['OFFICE', [2]], ['ＯＦＦＩＣＥ', [3]], ['oﬃce', [4]], ['①', [5]], ['1', [6]],
+  ] as const) {
+    type(h, query);
+    assert.deepEqual(visibleIds(h), expected.map(index => `audience-${index}`), JSON.stringify(query));
+    assertCount(h, expected.length, 7);
+  }
+});
+
+it('whole sample retains the raw canonical query across authoritative rename and rebuild, then resets on rejoin', async t => {
+  const h = await setup(t), state = namedAudience(['Cafe\u0301 & 茶', 'Other']); h.sdk.snapshot(clone(state));
+  const input = search(h), query = ' CAFE\u0301 & 茶 '; type(h, query);
+  assert.deepEqual(visibleIds(h), ['audience-0']);
+  const renamed = namedAudience(['Other', 'Cafe\u0000\u0301 & 茶']);
+  for (const next of [renamed, { ...clone(renamed), name: 'Changed room title' }]) {
+    const old = audienceRows(h); h.reset(); h.sdk.snapshot(clone(next));
+    assert.equal(h.counts.replacements, 1); assert.equal(old.every(row => !row.isConnected), true);
+    assert.equal(search(h), input); assert.equal(input.value, query);
+    assert.deepEqual(visibleIds(h), ['audience-1']); assertCount(h, 1, 2);
+    const nodes = h.main.descendants(); h.sdk.snapshot(clone(next));
+    assert.equal(input.value, query); assert.equal(h.counts.replacements, 1); sameNodes(h.main.descendants(), nodes);
+  }
+  await h.sdk.disconnect(); await flushSample(); assert.equal(input.value, ''); assert.equal(toolbar(h).hidden, true);
+  h.sdk.snapshot(clone(renamed)); assert.equal(search(h), input); assert.equal(input.value, '');
+  assert.deepEqual(visibleIds(h), ['audience-0', 'audience-1']); assertCount(h, 2, 2);
 });
 
 it('whole sample decodes display names exactly once and keeps HTML-looking names inert text', async t => {

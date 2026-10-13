@@ -605,3 +605,6 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 
 
 140. **主控的本機觀眾名稱篩選（2026-10-13）：** actual Room／whole sample fixture 在 301 席有 292 個觀眾列、584 個移交／踢人按鈕，原頁面無名單縮小控制。新增主內容之外的固定 native search toolbar，只在 controller 且 snapshot 確實帶 audience 時顯示；query 留在 input／記憶體，trim＋toLowerCase 後 literal includes 已 decodeName 的顯示名稱，保留順序／重名，不搜尋 ID 或私人欄位。輸入只 toggle 已渲染 audience rows.hidden；保留 personRows 索引，因此被篩掉的副本仍接收 speaking／quality，hand／speaker 列不受影響。清除不經 run，不抹掉其他錯誤。每次快照在 cache hit／重建後同步權限與篩選，同室同人保留query；身份／room 改變、角色或 audience 欄位失去、landing 時清空query與舊列參照。既有全域 hidden CSS 足夠，無新增timer／server／SDK／storage。觀眾移交／踢人增加窄的 roomButton admission callback，要求列仍 connected／可見、目前 controller 且目標仍在目前授權 audience，confirm 返回後再驗；pending map／reconnect gate與其他kind操作保持原流程。這是本機呈現篩選，不代表伺服器 permission policy 或聲音容量變化；固定toolbar避免主內容重建時移動搜尋input，fake DOM identity／操作數仍不等於native focus、IME、accessibility、CPU或延遲驗收。
+
+
+141. **觀眾篩選的 Unicode 正規等價（2026-10-13）：** actual sanitizeName 會把分解形式 Cafe\u0301 存成 NFC Café，但完整範例原 query 只 trim／toLowerCase，使用者輸入原本同一名稱卻找不到。只在 query 與 decodeName 後的觀眾名稱 key 加 NFC，再沿用原 lowercase／literal includes；不改 input 原文字、快照、顯示名稱、伺服器驗證或名單順序。NFC 只處理正規等價，不新增 NFKC、重音移除或語言特定大小寫折疊，重音／全形等非正規等價差異仍保留。回歸以實際 sanitizer／decoder 與 whole-module 假 DOM 驗證 Latin／Hangul、組合順序、原有中文／大小寫／空白及生命週期；既有權限、hidden-row admission、cache 與記憶體 query 政策不變，不宣稱原生 IME／鍵盤／輔助科技驗收。

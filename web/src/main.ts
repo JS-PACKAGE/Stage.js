@@ -504,7 +504,7 @@ function canFilterAudience(): boolean {
     && audienceFilterIdentity === JSON.stringify([state.roomId, state.me.participantId]));
 }
 function applyAudienceFilter(): void {
-  const query = audienceSearch.value.trim().toLowerCase();
+  const query = audienceSearch.value.trim().normalize('NFC').toLowerCase();
   let visible = 0;
   for (const { row, name } of audienceFilterRows) {
     const matches = name.includes(query);
@@ -638,7 +638,7 @@ function panelList(title: string, people: ParticipantView[], controller: boolean
 function personRow(person: ParticipantView, controller: boolean, kind: 'speaker' | 'hand' | 'audience'): HTMLLIElement {
   const row = element('li', 'person');
   row.dataset.participantId = person.participantId;
-  if (kind === 'audience') audienceFilterRows.push({ row, name: decodeName(person.name).toLowerCase() });
+  if (kind === 'audience') audienceFilterRows.push({ row, name: decodeName(person.name).normalize('NFC').toLowerCase() });
   const rows = personRows.get(person.participantId);
   if (rows) rows.push(row); else personRows.set(person.participantId, [row]);
   row.classList.toggle('speaking', client.speaking.has(person.participantId));
