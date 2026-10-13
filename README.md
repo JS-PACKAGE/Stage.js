@@ -172,6 +172,8 @@ JSON frame，型別定義在 [`shared/protocol.ts`](shared/protocol.ts)。每個
 
 連線品質收集每房間同時最多一輪；完成後再等待 `qualityIntervalMs` 啟動下一輪。個別 publisher 統計失敗只略過該人的本輪資料，其他人的回報照常；全部失敗時不送空報告，但下一輪仍會重試。失敗不會被當作 0% 掉包，恢復後上行差量從上次成功樣本計算。關房或最後一位停止發布後不再排程；離台再發布的舊統計結果會被忽略。
 
+`limits.joinTimeoutMs`、`rooms.controllerGraceMs`、`rooms.participantGraceMs` 的範圍為 0～2147483647 ms；`rooms.heartbeatIntervalMs` 為 1000～2147483647 ms。上限包含 2147483647（約 24.9 天）；更大的值以前會被 Node timer 正規化成約 1 ms，現在啟動與離線 `config:check` 會拒絕該設定。0 的既有語意不變：join deadline 停用、participant 立即移除、controller 立即排程到期。這不限制只做經過時間比較的 `handRaiseIntervalMs`。
+
 範例設定的限制：frame ≤ 64KB，超過以 close code 1009 斷線；控制訊息 ≤ 20/s、`rtc:ice` ≤ 30/s，超過頻率上限以 close code 1008 斷線。房間不存在或代碼錯誤一律回 `unauthorized`。名稱以 HTML 轉義形式傳送。client 以 close code 1000 關閉＝主動離開（立即移出房間）；其他關閉碼或斷線＝保留席位至寬限期結束（主控一律保留 `controllerGraceMs`）。
 
 同席回座後，若新連線已送出通過權限檢查的 offer，舊 offer 遲到的失敗不會再由 hub 清掉新一輪的 peer／訂閱／發布。只有最新通過檢查的 offer 失敗才清理媒體；單純斷線或回座但未送新 offer 時，原協商失敗仍會清理，讓後續 offer 能重新建立 peer。這是 hub 清理的 ownership 保護，不會取消底層已執行中的 WebRTC 工作。

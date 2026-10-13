@@ -176,6 +176,8 @@ function iceServers(v: unknown, path: string): IceServerConfig[] {
   });
 }
 
+// Node timer delays above this value normalize to 1ms instead of a longer wait.
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
 const LOOPBACK: Record<string, true> = { '127.0.0.1': true, '::1': true, localhost: true };
 
 export function parseConfig(raw: unknown): AppConfig {
@@ -235,16 +237,16 @@ export function parseConfig(raw: unknown): AppConfig {
     nameMaxLength: int(l, 'nameMaxLength', 'limits', 1),
     codeMaxLength: int(l, 'codeMaxLength', 'limits', 1),
     sdpMaxLength: int(l, 'sdpMaxLength', 'limits', 256),
-    joinTimeoutMs: int(l, 'joinTimeoutMs', 'limits', 0),
+    joinTimeoutMs: int(l, 'joinTimeoutMs', 'limits', 0, MAX_TIMER_DELAY_MS),
     maxConnectionsPerIp: int(l, 'maxConnectionsPerIp', 'limits', 0),
   };
 
   const r = obj(root.rooms, 'rooms');
   const rooms: AppConfig['rooms'] = {
     codeLength: int(r, 'codeLength', 'rooms', 4),
-    controllerGraceMs: int(r, 'controllerGraceMs', 'rooms', 0),
-    participantGraceMs: int(r, 'participantGraceMs', 'rooms', 0),
-    heartbeatIntervalMs: int(r, 'heartbeatIntervalMs', 'rooms', 1000),
+    controllerGraceMs: int(r, 'controllerGraceMs', 'rooms', 0, MAX_TIMER_DELAY_MS),
+    participantGraceMs: int(r, 'participantGraceMs', 'rooms', 0, MAX_TIMER_DELAY_MS),
+    heartbeatIntervalMs: int(r, 'heartbeatIntervalMs', 'rooms', 1000, MAX_TIMER_DELAY_MS),
     presenceBroadcastMs: int(r, 'presenceBroadcastMs', 'rooms', 0, 10000),
     qualityIntervalMs: int(r, 'qualityIntervalMs', 'rooms', 0, 60000),
     createToken: str(r, 'createToken', 'rooms'),

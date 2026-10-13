@@ -512,3 +512,6 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 
 
 109. **release 替換的靜態驗證值（2026-10-13）：** native localhost HTTP＋synthetic release-root swap 重現：不同內容的 identity／gzip 資產具有相同大小與保留 mtime 時，舊 size+mtime ETag 不變，conditional GET 回 304 而 unconditional 已是新檔。改用所選 representation 的同一 stat/lstat snapshot，弱 ETag 納入 dev／ino／size／mtimeNs／ctimeNs，使用 bigint 避免大型 inode／奈秒資料的 Number 精度損失；壓縮 sidecar 比較亦採 bigint，Content-Length 輸出十進位字串。不新增每請求 hash、額外 stat、metadata cache 或跨請求狀態，保留 encoding discriminator、HEAD／ETag precedence 與 Last-Modified 行為。這不是內容等價保證：檔案系統若回報完全相同身分／時間／大小仍可能碰撞，ctime 變動可使相同內容重新驗證為 200；IMS-only 仍不能辨識保留 mtime 的更新。原有不可信 writer／TOCTOU 限制不變，不宣稱跨所有檔案系統的完整內容偵測。
+
+
+110. **伺服器計時設定的有效上限（2026-10-13）：** native Node 24 timer handle inspection（立即 clear）證實 2147483647 保留原值，而 2147483648／MAX_SAFE_INTEGER 對 timeout/interval 均正規化成 1ms 並產生 warning；parseConfig 原本接受四個直接計時欄位的超大值。actual Hub/server 搭配 captured callbacks 的 bounded probe 依序重現 join 1008、主控移交／無繼任者關房、participant 席位與 peer 移除、兩次 heartbeat tick 後 terminate，沒有啟動 listener 或等待長 timer。只將 limits.joinTimeoutMs、rooms.controllerGraceMs／participantGraceMs／heartbeatIntervalMs 的 schema 上限設為 inclusive 2147483647，保留前三項 0 及 heartbeat 1000 的下限／預設，讓啟動與同 schema 的離線 checker 提早拒絕之前被接受但無法如意執行的值。elapsed-only handRaiseIntervalMs、TURN expiry timestamp 及已有更小 bounds 的其他 timer 不變；不新增分段長 timer 或改動服務執行順序。

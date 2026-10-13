@@ -202,6 +202,23 @@ describe('offline configuration checker', () => {
         for (const [change, diagnostic] of cases) assertInvalid(run(layout, [writeFixture(fixtureText(change))]), diagnostic);
       });
 
+      it('rejects oversized server timer delays with safe field diagnostics', () => {
+        const fields = [
+          ['limits', 'joinTimeoutMs', 0],
+          ['rooms', 'controllerGraceMs', 0],
+          ['rooms', 'participantGraceMs', 0],
+          ['rooms', 'heartbeatIntervalMs', 1000],
+        ] as const;
+        for (const [section, key, min] of fields) {
+          for (const invalid of [2147483648, SECRET]) {
+            const path = writeFixture(fixtureText(config => { Reflect.set(config[section], key, invalid); }));
+            const result = run(layout, [path]);
+            assertInvalid(result, /expected integer/);
+            assert.equal(result.stderr, `config error: ${section}.${key}: expected integer in [${min}, 2147483647]\n`);
+          }
+        }
+      });
+
       it('keeps warning-only YAML accepted while suppressing all parser and conversion warnings', () => {
         const text = fixtureText();
         const warnings = [
