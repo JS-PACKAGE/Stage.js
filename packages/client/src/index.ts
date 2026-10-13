@@ -176,6 +176,7 @@ export class StageClient extends EventTarget {
   private transceiver: RTCRtpTransceiver | null = null;
   private mic: MediaStream | null = null;
   private micFailed = false;
+  private removeMicEndedListener: (() => void) | undefined;
   private inputDeviceId = '';
   private micMeter: MicTest | null = null;
   private readonly roomMicMeterEnabled: boolean;
@@ -283,6 +284,7 @@ export class StageClient extends EventTarget {
       const stream = await this.acquireMic(deviceId, generation);
       let meter: MicTest | null = null;
       let stopped = false;
+      let replacing = false;
       const dispose = () => {
         this.pendingMicReplacements.delete(stream);
         meter?.stop();
@@ -295,12 +297,18 @@ export class StageClient extends EventTarget {
         if (pc !== this.pc || !this.me?.onStage) return;
         const track = stream.getAudioTracks()[0];
         if (!track) throw new StageError('media_error', '所選裝置沒有音訊軌道。');
+        const ended = () => track.readyState === 'ended';
+        if (ended()) throw new StageError('media_error', '所選麥克風已中斷。');
         track.enabled = !this.me.muted;
         meter = this.roomMicMeterEnabled ? createMicMeter(stream) : null;
         if (stopped || pc !== this.pc || !this.me?.onStage || captureRevision !== this.captureRevision) return;
+        if (ended()) throw new StageError('media_error', '所選麥克風已中斷。');
+        replacing = true;
         await transceiver.sender.replaceTrack(track);
         if (stopped || pc !== this.pc || !this.me?.onStage || captureRevision !== this.captureRevision) return;
+        if (ended()) throw new StageError('media_error', '所選麥克風已中斷。');
         track.enabled = !this.me.muted;
+        this.unwatchRoomMic();
         this.micMeter?.stop();
         this.mic?.getTracks().forEach((oldTrack) => oldTrack.stop());
         this.mic = stream;
@@ -310,7 +318,16 @@ export class StageClient extends EventTarget {
         meter = null;
         stopped = true;
         this.inputDeviceId = deviceId;
+        this.micFailed = false;
+        this.watchRoomMic(stream, pc);
+        if (this.mic !== stream || pc !== this.pc) return;
         this.emit('micready', undefined);
+      } catch (error) {
+        // A browser may already have attached the candidate before replaceTrack settles.
+        // Restore the latest surviving room track only after this transaction has settled.
+        if (replacing && stream.getAudioTracks()[0]?.readyState === 'ended'
+          && pc === this.pc && this.me?.onStage && captureRevision === this.captureRevision) this.syncMedia();
+        throw error;
       } finally {
         this.pendingMicReplacements.delete(stream);
         if (this.mic !== stream) dispose();
@@ -319,7 +336,7 @@ export class StageClient extends EventTarget {
     this.mediaTask = task.catch(() => {});
     return task;
   }
-  /** Queue one explicit retry of failed room capture; true means admitted, not recovered audio. */
+  /** Queue one explicit retry of failed or ended room capture; true means admitted, not recovered audio. */
   retryMicrophone(): boolean {
     if (this.currentStatus !== 'live' || this.socket?.readyState !== WebSocket.OPEN
       || !this.pc || this.pc.connectionState === 'closed' || !this.transceiver
@@ -813,7 +830,33 @@ export class StageClient extends EventTarget {
     };
     // Wait for the personalised snapshot before choosing the publishing direction.
   }
+  private unwatchRoomMic(): void {
+    this.removeMicEndedListener?.();
+    this.removeMicEndedListener = undefined;
+  }
+  private watchRoomMic(stream: MediaStream, pc: RTCPeerConnection): void {
+    this.unwatchRoomMic();
+    const track = stream.getAudioTracks()[0];
+    if (!track) return;
+    const revision = this.captureRevision;
+    const ended = () => {
+      if (this.mic !== stream || this.pc !== pc || this.captureRevision !== revision || !this.me?.onStage) return;
+      this.unwatchRoomMic();
+      const meter = this.micMeter;
+      this.mic = null; this.micMeter = null; this.micFailed = true;
+      // Natural loss retires only this stream, not an explicit replacement already in flight.
+      stream.getTracks().forEach(current => { current.enabled = false; current.stop(); });
+      meter?.stop();
+      if (this.pc !== pc || this.captureRevision !== revision || !this.me?.onStage || this.mic) return;
+      this.syncMedia();
+      this.emit('micerror', { name: 'NotReadableError', message: '麥克風已中斷，請確認裝置與權限，必要時選擇其他麥克風，再手動重試。' });
+    };
+    track.addEventListener('ended', ended);
+    this.removeMicEndedListener = () => track.removeEventListener('ended', ended);
+    if (track.readyState === 'ended') ended();
+  }
   private stopRoomMic(): void {
+    this.unwatchRoomMic();
     ++this.captureRevision;
     this.micRequest?.abort(new StageError('disconnected', '麥克風要求已取消。'));
     this.micMeter?.stop();
@@ -838,12 +881,15 @@ export class StageClient extends EventTarget {
           if (pc !== this.pc || !this.me?.onStage || captureRevision !== this.captureRevision) { stream.getTracks().forEach((track) => track.stop()); return; }
           this.mic = stream;
           try {
+            if (stream.getAudioTracks()[0]?.readyState === 'ended') throw new StageError('media_error', '麥克風已中斷。');
             if (!this.roomMicMeterEnabled && !stream.getAudioTracks()[0]) throw new StageError('media_error', '麥克風沒有音訊軌道。');
             const meter = this.roomMicMeterEnabled ? createMicMeter(stream) : null;
             if (this.mic !== stream || pc !== this.pc || captureRevision !== this.captureRevision) { meter?.stop(); return; }
             this.micMeter = meter;
           }
           catch (error) { if (this.mic === stream) { this.mic = null; stream.getTracks().forEach((track) => track.stop()); } throw error; }
+          this.watchRoomMic(stream, pc);
+          if (this.mic !== stream || pc !== this.pc) return;
           this.emit('micready', undefined);
         } catch (error) {
           if (pc !== this.pc || !this.me?.onStage || captureRevision !== this.captureRevision || (error instanceof StageError && error.code === 'disconnected')) return;

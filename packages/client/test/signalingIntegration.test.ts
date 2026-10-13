@@ -71,7 +71,7 @@ for (const { capacity: maxPendingControlRequests, reentrant, rotate } of scenari
     Object.defineProperty(globalThis, 'RTCPeerConnection', { configurable: true, value: Peer });
     Object.defineProperty(globalThis, 'AudioContext', { configurable: true, value: Context });
     Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { mediaDevices: { getUserMedia: async () => {
-      const track = { enabled: true, stop() {} }; return { getTracks: () => [track], getAudioTracks: () => [track] };
+      const track = Object.assign(new EventTarget(), { enabled: true, readyState: 'live', stop() { this.readyState = 'ended'; } }); return { getTracks: () => [track], getAudioTracks: () => [track] };
     } } } });
     function make() {
       const audio = { volume: 1, muted: false, pause() {}, srcObject: null } as unknown as HTMLAudioElement;

@@ -10,8 +10,8 @@ function deferred<T>() {
 }
 const flush = async () => { for (let n = 0; n < 48; n++) await Promise.resolve(); };
 function stream() {
-  const track = { enabled: true, readyState: 'live', stops: 0,
-    stop() { this.stops++; this.readyState = 'ended'; } };
+  const track = Object.assign(new EventTarget(), { enabled: true, readyState: 'live', stops: 0,
+    stop() { this.stops++; this.readyState = 'ended'; } });
   return { track, value: { getTracks: () => [track], getAudioTracks: () => [track] } as unknown as MediaStream };
 }
 function state(onStage: boolean, muted = false): RoomStatePayload {

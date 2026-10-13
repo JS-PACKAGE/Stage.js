@@ -220,7 +220,8 @@ async function actualApp(t: TestContext) {
   const tracks: { enabled: boolean; stopped: boolean; stop(): void }[] = [];
   const globals = { window: new EventTarget(), WebSocket: MicSocket, RTCPeerConnection: MicPeer, AudioContext: MicContext,
     navigator: { mediaDevices: { async getUserMedia() {
-      const track = { enabled: true, stopped: false, stop() { this.stopped = true; } }; tracks.push(track);
+      const track = Object.assign(new EventTarget(), { enabled: true, readyState: 'live', stopped: false,
+        stop() { this.stopped = true; this.readyState = 'ended'; } }); tracks.push(track);
       return { getTracks: () => [track], getAudioTracks: () => [track] };
     } } } };
   const originals = new Map(Object.keys(globals).map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));

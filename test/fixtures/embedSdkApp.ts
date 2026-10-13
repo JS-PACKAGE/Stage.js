@@ -83,8 +83,8 @@ export async function actualApp(t: TestContext, options: { deferCapture?: boolea
   StageSocket.instances = []; StagePeer.instances = []; StageContext.instances = [];
   const tracks: StageTrack[] = [];
   const makeStream = (): { track: StageTrack; stream: StageStream } => {
-    const track = { enabled: true, stopped: false, readyState: 'live', stops: 0,
-      stop() { this.stopped = true; this.readyState = 'ended'; this.stops++; } };
+    const track = Object.assign(new EventTarget(), { enabled: true, stopped: false, readyState: 'live', stops: 0,
+      stop() { this.stopped = true; this.readyState = 'ended'; this.stops++; } });
     tracks.push(track); return { track, stream: { getTracks: () => [track], getAudioTracks: () => [track] } };
   };
   const captures: { constraints: unknown; settled: boolean; resolve(): StageTrack; reject(error: unknown): void }[] = [];

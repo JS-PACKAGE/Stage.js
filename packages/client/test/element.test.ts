@@ -3058,7 +3058,8 @@ describe('widget personal stage control', () => {
       async resume() {} async close() {}
     }
     Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { mediaDevices: { getUserMedia: async () => {
-      const track = { enabled: true, stops: 0, stop() { this.stops++; } }; tracks.push(track);
+      const track = Object.assign(new EventTarget(), { enabled: true, readyState: 'live', stops: 0,
+    stop() { this.stops++; this.readyState = 'ended'; } }); tracks.push(track);
       return { getTracks: () => [track], getAudioTracks: () => [track] } as unknown as MediaStream;
     } } } });
     Object.defineProperty(globalThis, 'RTCPeerConnection', { configurable: true, value: Peer });
