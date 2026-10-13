@@ -7,6 +7,7 @@ function input(id: string): HTMLInputElement {
 const status = document.querySelector<HTMLParagraphElement>('#status')!;
 const join = document.querySelector<HTMLFormElement>('#join')!;
 const submit = join.querySelector<HTMLButtonElement>('button')!;
+submit.setAttribute('aria-busy', 'false');
 const hand = document.querySelector<HTMLButtonElement>('#hand')!;
 const leave = document.querySelector<HTMLButtonElement>('#leave')!;
 const audio = document.querySelector<HTMLAudioElement>('#audio')!;
@@ -18,8 +19,12 @@ let client: Client | null = null;
 let pendingHand: { client: Client } | undefined;
 let playbackGeneration = 0;
 let entryGeneration = 0;
+let feedbackRevision = 0;
 /** Retire initial-join feedback before user or terminal callbacks can start another entry. */
-function retireEntry(): number { submit.disabled = false; return ++entryGeneration; }
+function retireEntry(): number {
+  submit.disabled = false; submit.setAttribute('aria-busy', 'false');
+  return ++entryGeneration;
+}
 let handTimer: ReturnType<typeof setTimeout> | undefined;
 let handTimerDue = 0;
 function syncHand(): void {
@@ -48,12 +53,19 @@ function scheduleHandCooldown(remaining: number): void {
     handTimer = timer; handTimerDue = due;
   }
 }
-function report(error: unknown): void { status.textContent = error instanceof Error ? error.message : '操作失敗。'; }
+function report(error: unknown): void {
+  feedbackRevision++;
+  status.textContent = error instanceof Error ? error.message : '操作失敗。';
+}
 join.onsubmit = (event) => {
   event.preventDefault();
   playbackGeneration++; scheduleHandCooldown(0);
-  const generation = ++entryGeneration;
-  submit.disabled = true;
+  const generation = ++entryGeneration, feedback = feedbackRevision;
+  let progress = true;
+  const showProgress = (message: string): void => {
+    if (generation === entryGeneration && feedback === feedbackRevision && progress) status.textContent = message;
+  };
+  submit.disabled = true; submit.setAttribute('aria-busy', 'true');
   void (async () => {
     try {
       pendingHand = undefined;
@@ -64,6 +76,7 @@ join.onsubmit = (event) => {
       const host = new URL(input('host').value);
       if (!['https:', 'http:'].includes(host.protocol)) throw new Error('請輸入 HTTP 或 HTTPS 主機網址。');
       const moduleUrl = new URL('/lib/stage-client.js', host).href;
+      showProgress('載入舞台元件中…');
       // The host is selected by this page's visitor, not known at build time.
       const library: typeof StageLibrary = await import(/* @vite-ignore */ moduleUrl);
       if (generation !== entryGeneration) return;
@@ -72,26 +85,32 @@ join.onsubmit = (event) => {
       const current = client;
       client.on('state', ({ detail }: CustomEvent<StageEventMap['state']>) => {
         if (client !== current) return;
+        progress = false;
         status.textContent = `${library.decodeName(detail.name)} · ${library.decodeName(detail.me.name)} · ${detail.me.onStage ? '已上台' : '收聽中'}`;
         syncHand();
         leave.disabled = false;
       });
-      client.on('micerror', ({ detail }) => { status.textContent = `${detail.message}（${detail.name}）`; });
+      client.on('micerror', ({ detail }) => { progress = false; status.textContent = `${detail.message}（${detail.name}）`; });
       client.on('status', ({ detail }) => {
         if (client !== current) return;
-        if (detail === 'reconnecting') { status.textContent = '重新連線中'; hand.disabled = true; }
-        else if (detail === 'disconnected') { playbackGeneration++; pendingHand = undefined; status.textContent = '未連線'; hand.disabled = leave.disabled = true; }
+        if (detail === 'reconnecting') { progress = false; status.textContent = '重新連線中'; hand.disabled = true; }
+        else if (detail === 'disconnected') { progress = false; playbackGeneration++; pendingHand = undefined; status.textContent = '未連線'; hand.disabled = leave.disabled = true; }
         syncHand();
       });
-      client.on('error', ({ detail }) => report(detail));
-      client.on('audioblocked', () => { status.textContent = '請點擊啟用音訊。'; });
+      client.on('error', ({ detail }) => { progress = false; report(detail); });
+      client.on('audioblocked', () => { progress = false; status.textContent = '請點擊啟用音訊。'; });
       client.on('closed', () => { if (client !== current) return; retireEntry(); playbackGeneration++; pendingHand = undefined; syncHand(); status.textContent = '房間已關閉。'; hand.disabled = leave.disabled = true; });
       client.on('kicked', () => { if (client !== current) return; retireEntry(); playbackGeneration++; pendingHand = undefined; syncHand(); status.textContent = '你已被主控移出房間。'; hand.disabled = leave.disabled = true; });
+      showProgress('連線中…');
       await current.connect();
       if (generation !== entryGeneration) return;
+      showProgress('加入房間中…');
       await current.join({ roomId: input('room').value.trim(), code: input('code').value.trim() || undefined, name: input('name').value.trim() });
+      showProgress('加入請求已完成，尚未收到房間狀態。');
     } catch (error) { if (generation === entryGeneration) report(error); }
-    finally { if (generation === entryGeneration) submit.disabled = false; }
+    finally {
+      if (generation === entryGeneration) { submit.disabled = false; submit.setAttribute('aria-busy', 'false'); }
+    }
   })();
 };
 document.querySelector<HTMLButtonElement>('#unlock')!.onclick = () => {

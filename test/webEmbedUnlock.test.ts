@@ -114,7 +114,7 @@ it('whole embed join start retires no-client playback before the host library be
   const play = h.play(); h.form.submit(); await flush();
   assert.equal(h.clients.length, 0); assert.equal(h.submit.disabled, true);
   play.reject(blockedMessage); await flush();
-  assert.equal(h.status.textContent, '尚未加入', 'the pending new join must not inherit a fallback playback error');
+  assert.equal(h.status.textContent, '載入舞台元件中…', 'the pending new join must not inherit a fallback playback error');
   library.resolve(); await flush(); const sdk = h.clients[0]!; sdk.snapshot();
   assert.equal(h.submit.disabled, false); assert.equal(h.status.textContent, '測試舞台 · 測試聽眾 · 收聽中');
 });
