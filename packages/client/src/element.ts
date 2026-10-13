@@ -43,6 +43,8 @@ export class StageElement extends HTMLElement {
   private readonly leaveStage: HTMLButtonElement;
   private readonly listen: HTMLButtonElement;
   private readonly retry: HTMLButtonElement;
+  private readonly cancelJoin: HTMLButtonElement;
+  private cancelInitial: (() => Promise<void> | void) | undefined;
   private retryAvailable = false;
   private readonly pendingActions = new Set<HTMLButtonElement>();
   private cooldownTimer: ReturnType<typeof setTimeout> | undefined;
@@ -80,7 +82,8 @@ export class StageElement extends HTMLElement {
     this.listen = this.button('靜音收聽', () => { this.playbackMuted = !this.playbackMuted; });
     this.listen.setAttribute('aria-label', '靜音收聽');
     this.retry = this.button('重試加入', () => { if (this.canRetry()) this.rejoin(); });
-    actions.append(this.unlock, this.listen, this.hand, this.mic, this.leaveStage, this.retry);
+    this.cancelJoin = this.button('取消加入', () => this.cancelInitial?.());
+    actions.append(this.unlock, this.listen, this.hand, this.mic, this.leaveStage, this.retry, this.cancelJoin);
     panel.append(this.status, this.error, actions);
     root.append(style, panel);
     this.render();
@@ -154,16 +157,31 @@ export class StageElement extends HTMLElement {
       this.joinPhase = 'connecting';
       let receivedState = false;
       let terminal = false;
+      let cancelled = false;
+      this.cancelInitial = () => {
+        if (generation !== this.generation || this.current !== client || !this.isConnected
+          || !this.joinPhase || receivedState || terminal || client.state || client.status === 'reconnecting') return;
+        cancelled = true;
+        this.hideCancel();
+        this.joinPhase = undefined;
+        this.retryAvailable = true;
+        this.status.textContent = '已取消加入。';
+        this.render();
+        return client.disconnect();
+      };
       for (const type of EVENTS) {
         client.on(type, ({ detail }) => {
           if (generation !== this.generation || this.current !== client) return;
           // SDK status precedes state; a forwarded status listener may disconnect immediately.
-          if (type === 'state' || client.state) { receivedState = true; this.hideRetry(); }
-          if (type === 'closed' || type === 'kicked') { terminal = true; this.hideRetry(); }
+          if (type === 'state' || client.state) { receivedState = true; this.hideRetry(); this.hideCancel(); }
+          if (type === 'closed' || type === 'kicked') { terminal = true; this.hideRetry(); this.hideCancel(); }
           if (type === 'state' || type === 'closed' || type === 'kicked'
             || (type === 'status' && detail === 'disconnected')) this.joinPhase = undefined;
           if (type === 'audioblocked') this.unlock.hidden = false;
-          if (type === 'status' && detail === 'disconnected') this.status.textContent = STATUS_LABELS.disconnected;
+          if (type === 'status' && detail === 'disconnected') {
+            this.hideCancel();
+            this.status.textContent = cancelled && !receivedState && !terminal ? '已取消加入。' : STATUS_LABELS.disconnected;
+          }
           if (type === 'closed') this.status.textContent = (detail as StageEventMap['closed']).reason === 'shutdown'
             ? '伺服器維護或重新啟動，房間已關閉。' : '房間已關閉。';
           if (type === 'kicked') this.status.textContent = '你已被主控移出房間。';
@@ -176,19 +194,20 @@ export class StageElement extends HTMLElement {
       this.render();
       try {
         await client.connect();
-        if (generation !== this.generation || this.current !== client || !this.isConnected) return;
+        if (generation !== this.generation || this.current !== client || !this.isConnected || cancelled) return;
         if (this.joinPhase === 'connecting') this.joinPhase = 'joining';
         this.render();
         const code = this.getAttribute('code')?.trim();
         await client.join({ roomId: room, name, ...(code ? { code } : {}) });
       } catch (error) {
-        if (generation === this.generation && this.current === client) {
+        if (generation === this.generation && this.current === client && !cancelled) {
           // A terminal room event or an accepted snapshot must never become a fresh-join prompt.
           this.retryAvailable = !receivedState && !terminal && !client.state;
           this.show(error);
           this.render();
         }
       } finally {
+        if (generation === this.generation && this.current === client) this.hideCancel();
         // A snapshot or terminal event can already have replaced the progress message.
         if (generation === this.generation && this.current === client && this.joinPhase) {
           this.joinPhase = undefined;
@@ -201,6 +220,7 @@ export class StageElement extends HTMLElement {
 
   private async leave(): Promise<void> {
     this.joinPhase = undefined;
+    this.hideCancel();
     this.hideRetry();
     for (const button of this.pendingActions) button.removeAttribute('aria-busy');
     this.pendingActions.clear();
@@ -211,6 +231,12 @@ export class StageElement extends HTMLElement {
     this.unlock.hidden = true;
     this.render();
     await client?.disconnect();
+  }
+
+  private hideCancel(): void {
+    this.cancelInitial = undefined;
+    this.cancelJoin.hidden = true;
+    this.cancelJoin.disabled = true;
   }
 
   private hideRetry(): void {
@@ -274,6 +300,8 @@ export class StageElement extends HTMLElement {
       this.status.textContent = this.getAttribute('room') && this.getAttribute('name') ? '' : '請設定 room 與 name 屬性。';
     }
     const reconnecting = client?.status === 'reconnecting';
+    this.cancelJoin.hidden = !this.cancelInitial || !this.joinPhase || Boolean(state) || Boolean(reconnecting);
+    this.cancelJoin.disabled = this.cancelJoin.hidden || this.pendingActions.has(this.cancelJoin);
     this.retry.hidden = !this.canRetry();
     this.retry.disabled = this.retry.hidden || this.pendingActions.has(this.retry);
     const audience = Boolean(me && !me.onStage && me.role !== 'controller');

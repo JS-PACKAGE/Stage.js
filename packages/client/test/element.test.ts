@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { getEventListeners } from 'node:events';
 import { after, afterEach, describe, it } from 'node:test';
 import type { TestContext } from 'node:test';
 import { StageClient } from '../src/index.ts';
@@ -692,6 +693,373 @@ function assertRetry(element: InstanceType<typeof StageElement>, available: bool
   assert.equal(retry.hidden, !available, 'retry visibility follows the current initial attempt');
   assert.equal(retry.disabled, !available, 'a hidden retry cannot enter a fresh join');
 }
+
+function assertCancelJoin(element: InstanceType<typeof StageElement>, available: boolean): void {
+  const cancel = element['cancelJoin'];
+  assert.equal(cancel.tagName, 'BUTTON');
+  assert.equal(cancel.type, 'button');
+  assert.equal(cancel.textContent, '取消加入');
+  assert.equal(cancel.hidden, !available, 'cancel visibility belongs to the pending initial attempt');
+  assert.equal(cancel.disabled, !available, 'hidden cancellation cannot enter an action');
+}
+
+describe('widget manual initial join cancellation', () => {
+  it('keeps cancellation hidden and inert before an initial attempt', async () => {
+    const element = new StageElement(); widgets.push(element);
+    assertCancelJoin(element, false); assertRetry(element, false);
+    click(element['cancelJoin']); await settle();
+    assert.equal(element.client, null);
+    assert.equal(element['status'].textContent, '請設定 room 與 name 屬性。');
+    assert.equal(element['error'].hidden, true);
+    assert.equal(element['cancelJoin'].getAttribute('aria-busy'), null);
+  });
+
+  for (const phase of ['hello', 'queued join', 'join ACK'] as const) {
+    for (const closeMode of ['stalled', 'throwing'] as const) {
+      it(`cancels actual ${phase} waiting despite ${closeMode} close and releases the owned SDK resources`, async t => {
+        const { element, sockets, hello, tick } = socketJoiningWidget(t);
+        const scheduled = t.mock.method(globalThis, 'setTimeout');
+        const cleared = t.mock.method(globalThis, 'clearTimeout');
+        const statuses: unknown[] = [], errors: unknown[] = [];
+        element.addEventListener('stage-status', event => statuses.push((event as CustomEvent).detail));
+        element.addEventListener('stage-error', event => errors.push((event as CustomEvent).detail));
+        await settle();
+        const client = element.client!, socket = sockets[0]!;
+        assertCancelJoin(element, true); assertRetry(element, false);
+        if (phase === 'join ACK') await hello(socket);
+        else if (phase === 'queued join') { socket.hello(); await settle(); assert.equal(socket.sent.length, 0); }
+        else socket.readyState = 1;
+        const timers = phase === 'hello' ? [scheduled.mock.calls[0]!.result]
+          : [...client['pending'].values()].flatMap(pending => [pending.timer, pending.sendTimer].filter(value => value !== undefined));
+        assert.ok(timers.length > 0);
+        const close = t.mock.method(socket, 'close', () => {
+          if (closeMode === 'throwing') throw new Error('stalled transport close failed');
+          socket.readyState = 2;
+        });
+        const cancel = element['cancelInitial']; assert.ok(cancel);
+        const generation = element['generation'];
+        click(element['cancelJoin']);
+        assertCancelJoin(element, false); assertRetry(element, true);
+        assert.equal(element['status'].textContent, '已取消加入。');
+        click(element['cancelJoin']); await cancel(); await settle(); await settle();
+        assert.equal(close.mock.callCount(), 1);
+        assert.equal(element.client, client, 'cancellation retains the exposed client and its event forwarding');
+        assert.equal(element['generation'], generation);
+        assert.equal(client.status, 'disconnected'); assert.equal(client.state, null);
+        assert.equal(client['socket'], null); assert.equal(client['connecting'], null); assert.equal(client['helloWait'], null);
+        assert.equal(client['session'], null); assert.equal(client['pending'].size, 0); assert.equal(client['pendingControlRequests'], 0);
+        assert.equal(client['keepaliveTimer'], undefined); assert.equal(client['reconnectTimer'], undefined);
+        assert.equal(client['audio'].isConnected, false); assert.equal(getEventListeners(window, 'pagehide').length, 0);
+        for (const timer of timers) assert.ok(cleared.mock.calls.some(call => call.arguments[0] === timer), 'owned deadline and unsent pacing work are cleared');
+        assert.equal(element['error'].hidden, true); assertRoomControlsHidden(element);
+        assert.equal(element['cancelJoin'].getAttribute('aria-busy'), null); assert.equal(element['pendingActions'].size, 0);
+        await tick(30000);
+        assert.equal(sockets.length, 1, 'cancellation never starts automatic retry');
+        assert.equal(close.mock.callCount(), 1, 'a retired deadline cannot close the transport again');
+        assert.equal(socket.sent.length, phase === 'join ACK' ? 1 : 0);
+        assert.equal(element['status'].textContent, '已取消加入。');
+        assert.deepEqual(statuses, [], 'initial SDK status is already disconnected; widget cancellation must render explicitly');
+        assert.deepEqual(errors, []);
+        await client['receive']({ type: 'error', code: 'bad_request', message: 'current exposed client error' });
+        assert.equal(element['error'].textContent, 'current exposed client error');
+        assert.deepEqual(errors.map(error => (error as Error).message), ['current exposed client error']);
+      });
+    }
+  }
+
+  it('does not enter join when hello resolved just before the cancellation click', async t => {
+    const { element, sockets, tick } = socketJoiningWidget(t); await settle();
+    const client = element.client!, socket = sockets[0]!;
+    const join = t.mock.method(client, 'join');
+    socket.hello();
+    click(element['cancelJoin']);
+    await settle(); await tick(0);
+    assert.equal(join.mock.callCount(), 0, 'the fulfilled connect continuation must check its cancellation token');
+    assert.equal(sockets.length, 1); assert.equal(socket.sent.length, 0);
+    assert.equal(client['socket'], null); assert.equal(client['session'], null);
+    assertCancelJoin(element, false); assertRetry(element, true);
+    assert.equal(element['status'].textContent, '已取消加入。'); assert.equal(element['error'].hidden, true);
+  });
+
+  it('allows repeated cancellation and manual retry with one new client per click and current preferences', async t => {
+    const { element, sockets, hello } = socketJoiningWidget(t, {
+      url: 'wss://stage.example.test/ws', room: ' one ', name: ' Listener ', code: ' SECRET ',
+      'playback-muted': '', 'playback-volume': '0.375',
+    });
+    await settle();
+    const retired: StageClient[] = [];
+    for (let attempt = 0; attempt < 3; attempt++) {
+      const client = element.client!; retired.push(client);
+      assertCancelJoin(element, true); assertRetry(element, false);
+      if (attempt !== 0) {
+        const request = await hello(sockets[attempt]!);
+        assert.deepEqual({ roomId: request.roomId, name: request.name, code: request.code }, { roomId: 'one', name: 'Listener', code: 'SECRET' });
+        assert.equal(request.resumeToken, undefined);
+      }
+      click(element['cancelJoin']); assertCancelJoin(element, false); assertRetry(element, true);
+      element.playbackVolume = 0.25; element.playbackMuted = false;
+      const generation = element['generation'];
+      click(element['retry']); click(element['retry']); await settle(); await settle();
+      assert.equal(element['generation'], generation + 1);
+      assert.equal(sockets.length, attempt + 2); assert.notEqual(element.client, client);
+      assert.equal(element.client?.playbackMuted, false); assert.equal(element.client?.playbackVolume, 0.25);
+      assert.equal(element.client!['options'].url, 'wss://stage.example.test/ws');
+      assert.equal(element['status'].textContent, '連線中…'); assert.equal(element['error'].hidden, true);
+      assertCancelJoin(element, true); assertRetry(element, false);
+      assert.equal(element['cancelJoin'].getAttribute('aria-busy'), null); assert.equal(element['pendingActions'].size, 0);
+      assert.equal(client['socket'], null); assert.equal(client['audio'].isConnected, false);
+    }
+    const socket = sockets[3]!, request = await hello(socket);
+    socket.deliver({ type: 'room:state', ...roomState() });
+    socket.deliver({ type: 'ok', requestId: request.requestId }); await settle();
+    assertCancelJoin(element, false); assertRetry(element, false);
+    assert.equal(element['status'].textContent, 'Room & Hall · 直播中 · 收聽中');
+    assert.equal(retired.every(client => client['session'] === null && client['pending'].size === 0), true);
+  });
+
+  it('allows a synchronous cancelled-status listener to retry without the old continuation clearing the new control', async t => {
+    const { element, sockets, hello } = socketJoiningWidget(t); await settle();
+    const retired = element.client!;
+    await retired['receive']({ type: 'status', state: 'waiting' });
+    const cancel = element['cancelInitial']; assert.ok(cancel);
+    const forwarded: string[] = [];
+    element.addEventListener('stage-status', event => {
+      if ((event as CustomEvent).detail !== 'disconnected') return;
+      forwarded.push(element['status'].textContent ?? '');
+      assertCancelJoin(element, false); assertRetry(element, true);
+      click(element['cancelJoin']); click(element['retry']); click(element['retry']);
+    });
+    click(element['cancelJoin']); await settle(); await settle();
+    assert.deepEqual(forwarded, ['已取消加入。']);
+    assert.equal(sockets.length, 2); assert.notEqual(element.client, retired);
+    assertCancelJoin(element, true); assertRetry(element, false);
+    await cancel(); await settle();
+    assert.equal(sockets.length, 2); assertCancelJoin(element, true);
+    const request = await hello(sockets[1]!);
+    sockets[1]!.deliver({ type: 'ok', requestId: request.requestId }); await settle();
+    assertCancelJoin(element, false); assertRetry(element, false);
+  });
+
+  for (const outcome of ['resolve', 'reject'] as const) {
+    it(`isolates delayed cancellation cleanup ${outcome} from a new cancellation pending on the reused button`, async t => {
+      const { element, sockets } = socketJoiningWidget(t); await settle();
+      const retired = element.client!, oldCleanup = deferred(), newCleanup = deferred();
+      t.after(() => { oldCleanup.resolve(); newCleanup.resolve(); });
+      const disconnect = retired.disconnect.bind(retired);
+      let calls = 0;
+      t.mock.method(retired, 'disconnect', () => {
+        void disconnect();
+        return ++calls === 1 ? oldCleanup.promise : Promise.resolve();
+      });
+      click(element['cancelJoin']);
+      assert.equal(element['cancelJoin'].getAttribute('aria-busy'), 'true'); assertRetry(element, true);
+      click(element['retry']); await settle(); await settle();
+      const current = element.client!; assert.notEqual(current, retired); assert.equal(sockets.length, 2);
+      const disconnectCurrent = current.disconnect.bind(current);
+      t.mock.method(current, 'disconnect', () => { void disconnectCurrent(); return newCleanup.promise; });
+      click(element['cancelJoin']); await settle();
+      assert.equal(element['cancelJoin'].getAttribute('aria-busy'), 'true');
+      assert.equal(element['pendingActions'].has(element['cancelJoin']), true);
+      if (outcome === 'resolve') oldCleanup.resolve(); else oldCleanup.reject(new Error('retired cleanup failure'));
+      await settle(); await settle();
+      assert.equal(element.client, current); assert.equal(element['status'].textContent, '已取消加入。');
+      assert.equal(element['error'].hidden, true); assertRetry(element, true); assertCancelJoin(element, false);
+      assert.equal(element['cancelJoin'].getAttribute('aria-busy'), 'true', 'retired finally cannot unlock the new button action');
+      assert.equal(element['pendingActions'].has(element['cancelJoin']), true);
+      newCleanup.resolve(); await settle();
+      assert.equal(element['cancelJoin'].getAttribute('aria-busy'), null); assert.equal(element['pendingActions'].size, 0);
+    });
+  }
+
+  it('keeps the cancelled exposed client usable and forwards its later public join and ordinary disconnect', async t => {
+    const { element, sockets, hello } = socketJoiningWidget(t); await settle();
+    const client = element.client!, cancel = element['cancelInitial']; assert.ok(cancel);
+    click(element['cancelJoin']); await settle();
+    const events: { type: string; detail: unknown }[] = [];
+    for (const type of ['status', 'state']) element.addEventListener(`stage-${type}`, event => events.push({ type, detail: (event as CustomEvent).detail }));
+    const joining = client.join({ roomId: 'public-room', name: 'Public caller' });
+    const socket = sockets[1]!, request = await hello(socket);
+    assert.equal(request.roomId, 'public-room');
+    socket.deliver({ type: 'room:state', ...roomState(false, 'public-room') });
+    socket.deliver({ type: 'ok', requestId: request.requestId }); await joining; await settle();
+    assert.equal(element.client, client); assertCancelJoin(element, false); assertRetry(element, false);
+    assert.equal(element['status'].textContent, 'Room & Hall · 直播中 · 收聽中');
+    assert.equal(element['hand'].hidden, false); assert.deepEqual(events.map(event => event.type), ['status', 'state']);
+    await cancel(); assert.equal(client['socket'], socket);
+    await client.disconnect(); await settle();
+    assert.equal(element.client, client); assert.equal(element['status'].textContent, '未連線');
+    assertCancelJoin(element, false); assertRetry(element, false); assertRoomControlsHidden(element);
+    assert.deepEqual(events.filter(event => event.type === 'status').map(event => event.detail), ['live', 'disconnected']);
+    assert.equal(element['error'].hidden, true);
+  });
+
+  for (const outcome of ['resolve', 'reject'] as const) {
+    for (const phase of ['connect', 'join'] as const) {
+      it(`isolates cancelled ${phase} late ${outcome} while a manual retry owns the same widget`, async t => {
+        const { element, connections, joins } = deferredJoiningWidget(t); await settle();
+        if (phase === 'join') { connections[0]!.pending.resolve(); await settle(); }
+        const old = (phase === 'connect' ? connections : joins)[0]!;
+        const cancel = element['cancelInitial']; assert.ok(cancel);
+        click(element['cancelJoin']); assertRetry(element, true);
+        click(element['retry']); await settle();
+        const current = element.client!; assert.notEqual(current, old.client);
+        assertCancelJoin(element, true);
+        if (outcome === 'resolve') old.pending.resolve(); else old.pending.reject(new Error('cancelled old failure'));
+        await cancel(); await settle(); await settle();
+        assert.equal(element.client, current); assertCancelJoin(element, true); assertRetry(element, false);
+        assert.equal(element['status'].textContent, '連線中…'); assert.equal(element['error'].hidden, true);
+        assert.equal(element['pendingActions'].size, 0); assert.equal(element['cancelJoin'].getAttribute('aria-busy'), null);
+        assert.equal(joins.length, phase === 'join' ? 1 : 0, 'a late cancelled connect must not start join');
+        click(element['cancelJoin']); await settle();
+        assert.equal(element['status'].textContent, '已取消加入。'); assertRetry(element, true);
+      });
+    }
+  }
+
+  for (const phase of ['connect', 'join'] as const) {
+    it(`suppresses only the manually cancelled ${phase} rejection and preserves a later current error`, async t => {
+      const { element, connections, joins } = deferredJoiningWidget(t); await settle();
+      if (phase === 'join') { connections[0]!.pending.resolve(); await settle(); }
+      const pending = (phase === 'connect' ? connections : joins)[0]!.pending;
+      click(element['cancelJoin']); await settle();
+      await element.client!['receive']({ type: 'error', code: 'bad_request', message: 'independent current error' });
+      pending.reject(new Error('manually cancelled failure')); await settle();
+      assert.equal(element['error'].hidden, false); assert.equal(element['error'].textContent, 'independent current error');
+      assert.equal(element['status'].textContent, '已取消加入。'); assertCancelJoin(element, false); assertRetry(element, true);
+      element.playbackMuted = true; assert.equal(element['status'].textContent, '已取消加入。');
+    });
+  }
+
+  for (const mode of ['reject', 'throw'] as const) {
+    it(`shows a ${mode} from cancellation cleanup without replacing it with the cancelled connect error`, async t => {
+      const { element, sockets } = socketJoiningWidget(t); await settle();
+      const client = element.client!, disconnect = client.disconnect.bind(client);
+      const cancel = t.mock.method(client, 'disconnect', () => {
+        void disconnect();
+        if (mode === 'throw') throw new Error('cancel cleanup failed');
+        return Promise.reject(new Error('cancel cleanup failed'));
+      });
+      t.after(() => cancel.mock.restore());
+      click(element['cancelJoin']); await settle(); await settle();
+      assert.equal(cancel.mock.callCount(), 1); assert.equal(client['socket'], null);
+      assert.equal(element['error'].hidden, false); assert.equal(element['error'].textContent, 'cancel cleanup failed');
+      assert.equal(element['status'].textContent, '已取消加入。'); assertCancelJoin(element, false); assertRetry(element, true);
+      cancel.mock.restore(); click(element['retry']); await settle();
+      assert.equal(sockets.length, 2); assert.equal(element['error'].hidden, true); assertCancelJoin(element, true);
+    });
+  }
+
+  it('revokes cancellation before forwarding live status and never restores it after a state-before-ACK disconnect', async t => {
+    const { element, sockets, hello } = socketJoiningWidget(t); await settle();
+    const client = element.client!, socket = sockets[0]!, request = await hello(socket);
+    const cancel = element['cancelInitial']; assert.ok(cancel);
+    const disconnect = t.mock.method(client, 'disconnect');
+    let live = 0;
+    element.addEventListener('stage-status', event => {
+      if ((event as CustomEvent).detail !== 'live') return;
+      live++; assert.ok(client.state); assertCancelJoin(element, false); assertRetry(element, false);
+      click(element['cancelJoin']); void cancel();
+      assert.equal(disconnect.mock.callCount(), 0, 'state ownership is visible before the later state event');
+      void client.disconnect();
+    });
+    socket.deliver({ type: 'room:state', ...roomState() }); await settle(); await settle();
+    assert.equal(live, 1); assert.equal(disconnect.mock.callCount(), 1);
+    assert.equal(client.state, null); assert.equal(client['pending'].has(request.requestId), false);
+    assertCancelJoin(element, false); assertRetry(element, false);
+    click(element['cancelJoin']); await cancel(); await settle();
+    assert.equal(disconnect.mock.callCount(), 1); assert.equal(sockets.length, 1);
+    assert.equal(element['status'].textContent, '未連線');
+  });
+
+  it('does not offer cancellation or retry after a successful ACK without state, or during an established reconnect', async t => {
+    const { element, sockets, hello, tick } = socketJoiningWidget(t); await settle();
+    const client = element.client!, socket = sockets[0]!, request = await hello(socket);
+    const cancel = element['cancelInitial']; assert.ok(cancel);
+    socket.deliver({ type: 'ok', requestId: request.requestId }); await settle();
+    assertCancelJoin(element, false); assertRetry(element, false);
+    await cancel(); assert.equal(client['socket'], socket);
+    socket.deliver({ type: 'room:state', ...roomState(), resumeToken: 'resume-me' }); await settle();
+    socket.close(); await settle(); assert.equal(client.status, 'reconnecting');
+    assertCancelJoin(element, false); assertRetry(element, false);
+    click(element['cancelJoin']); await cancel(); await tick(500);
+    assert.equal(sockets.length, 2); assert.equal(element.client, client);
+    assertCancelJoin(element, false); assertRetry(element, false);
+  });
+
+  for (const terminal of terminalCases) {
+    for (const phase of ['connect', 'join', 'cancelled'] as const) {
+      it(`preserves ${terminal.title} precedence over ${phase} cancellation and retired callbacks`, async t => {
+        const { element, connections, joins } = deferredJoiningWidget(t); await settle();
+        if (phase === 'join') { connections[0]!.pending.resolve(); await settle(); }
+        const client = element.client!, cancel = element['cancelInitial']; assert.ok(cancel);
+        if (phase === 'cancelled') { click(element['cancelJoin']); await settle(); assertRetry(element, true); }
+        const generation = element['generation'];
+        element.addEventListener(`stage-${terminal.event}`, () => {
+          assertCancelJoin(element, false); assertRetry(element, false);
+          click(element['cancelJoin']); click(element['retry']); void cancel();
+        });
+        await client['receive'](terminal.message); await settle();
+        assert.equal(element['status'].textContent, terminal.text); assertCancelJoin(element, false); assertRetry(element, false);
+        (phase === 'join' ? joins[0]! : connections[0]!).pending.reject(new Error('retired initial failure')); await settle();
+        element.playbackMuted = true; await cancel(); await settle();
+        assert.equal(element.client, client); assert.equal(element['generation'], generation);
+        assert.equal(element['status'].textContent, terminal.text); assertCancelJoin(element, false); assertRetry(element, false);
+        assertRoomControlsHidden(element);
+      });
+    }
+  }
+
+  for (const transition of ['attributes', 'remount'] as const) {
+    it(`retires cancelled SDK callbacks and its closure on ${transition} without touching the replacement`, async t => {
+      const { element, sockets, hello } = socketJoiningWidget(t, { 'playback-muted': '', 'playback-volume': '0.25' }); await settle();
+      const retired = element.client!, socket = sockets[0]!, request = await hello(socket);
+      const cancel = element['cancelInitial']; assert.ok(cancel);
+      const message = socket.onmessage, close = socket.onclose;
+      click(element['cancelJoin']);
+      if (transition === 'attributes') {
+        element.setAttribute('room', 'two'); element.setAttribute('name', 'Replacement'); element.setAttribute('code', 'NEW');
+      } else {
+        Object.assign(element, { isConnected: false }); element.disconnectedCallback();
+        assertCancelJoin(element, false); assertRetry(element, false);
+        Object.assign(element, { isConnected: true }); element.connectedCallback();
+      }
+      await settle(); await settle();
+      const current = element.client!; assert.notEqual(current, retired); assert.equal(sockets.length, 2);
+      const forwarded: string[] = [];
+      for (const type of ['status', 'state', 'error', 'closed', 'kicked']) element.addEventListener(`stage-${type}`, () => forwarded.push(type));
+      for (const value of [
+        { type: 'ok', requestId: request.requestId },
+        { type: 'room:state', ...roomState(true), name: 'Retired room' },
+        { type: 'error', code: 'bad_request', message: 'retired cancellation failure' },
+        ...terminalCases.map(item => item.message),
+      ] satisfies ServerMessage[]) {
+        message?.({ data: JSON.stringify(value) }); await retired['receive'](value); await settle();
+      }
+      close?.(); await cancel(); await settle();
+      assert.equal(element.client, current); assertCancelJoin(element, true); assertRetry(element, false);
+      assert.equal(element['status'].textContent, '連線中…'); assert.equal(element['error'].hidden, true); assert.deepEqual(forwarded, []);
+      assert.equal(current.playbackMuted, true); assert.equal(current.playbackVolume, 0.25);
+      assert.equal(element['cancelJoin'].getAttribute('aria-busy'), null); assert.equal(element['pendingActions'].size, 0);
+      const next = await hello(sockets[1]!);
+      assert.equal(next.roomId, transition === 'attributes' ? 'two' : 'one');
+      assert.equal(next.name, transition === 'attributes' ? 'Replacement' : 'Listener');
+      assert.equal(next.code, transition === 'attributes' ? 'NEW' : undefined);
+      click(element['cancelJoin']); await settle();
+      assert.equal(current['socket'], null); assert.equal(element['status'].textContent, '已取消加入。'); assertRetry(element, true);
+    });
+  }
+
+  it('keeps an ordinary disconnected initial failure visible and never calls it manual cancellation', async t => {
+    const { element, sockets } = socketJoiningWidget(t); await settle();
+    const cancel = element['cancelInitial']; assert.ok(cancel);
+    sockets[0]!.close(); await settle(); await settle();
+    assertCancelJoin(element, false); assertRetry(element, true);
+    assert.equal(element['status'].textContent, '未連線');
+    assert.equal(element['error'].hidden, false); assert.equal(element['error'].textContent, '連線已中斷。');
+    await cancel(); click(element['cancelJoin']); await settle();
+    assert.equal(element['status'].textContent, '未連線'); assert.equal(element['error'].hidden, false);
+  });
+});
 
 describe('widget manual initial join retry', () => {
   it('uses a native button and stays unavailable before failure, including unrelated SDK errors', async t => {
