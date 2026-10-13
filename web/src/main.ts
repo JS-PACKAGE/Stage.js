@@ -35,6 +35,7 @@ let invitation = '';
 let createdRoom: { roomId: string; code?: string } | null = null;
 let cooldownButton: HTMLButtonElement | null = null;
 let cooldownTimer: ReturnType<typeof setTimeout> | undefined;
+let cooldownDue = 0;
 let roomActionIdentity = '';
 let roomActionGeneration = 0;
 let inviteCopySequence = 0;
@@ -584,12 +585,17 @@ function updateCooldown(): void {
 /** Only a visible countdown needs clock-driven updates; state/status/action changes update directly. */
 function scheduleCooldown(remaining: number): void {
   if (remaining <= 0) {
-    clearTimeout(cooldownTimer); cooldownTimer = undefined;
-  } else if (cooldownTimer === undefined) {
+    clearTimeout(cooldownTimer); cooldownTimer = undefined; cooldownDue = 0;
+  } else {
     const delay = Math.max(1, Math.ceil(remaining - (Math.ceil(remaining / 1000) - 1) * 1000));
-    cooldownTimer = setTimeout(() => {
-      cooldownTimer = undefined; updateCooldown();
+    const due = performance.now() + delay;
+    if (cooldownTimer !== undefined && cooldownDue <= due) return;
+    clearTimeout(cooldownTimer);
+    const timer = setTimeout(() => {
+      if (cooldownTimer !== timer) return;
+      cooldownTimer = undefined; cooldownDue = 0; updateCooldown();
     }, delay);
+    cooldownTimer = timer; cooldownDue = due;
   }
 }
 client.on('state', ({ detail }) => { if (landingEntry) landingEntry.entered = true; renderRoom(detail); });

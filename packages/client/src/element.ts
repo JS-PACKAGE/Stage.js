@@ -46,6 +46,7 @@ export class StageElement extends HTMLElement {
   private retryAvailable = false;
   private readonly pendingActions = new Set<HTMLButtonElement>();
   private cooldownTimer: ReturnType<typeof setTimeout> | undefined;
+  private cooldownDue = 0;
   /** Bumped on every (re)join, so a superseded join cannot touch the widget. */
   private generation = 0;
   private joinPhase: 'connecting' | 'joining' | undefined;
@@ -204,7 +205,7 @@ export class StageElement extends HTMLElement {
     for (const button of this.pendingActions) button.removeAttribute('aria-busy');
     this.pendingActions.clear();
     clearTimeout(this.cooldownTimer);
-    this.cooldownTimer = undefined;
+    this.cooldownTimer = undefined; this.cooldownDue = 0;
     const client = this.current;
     this.current = null;
     this.unlock.hidden = true;
@@ -244,14 +245,19 @@ export class StageElement extends HTMLElement {
   private scheduleCooldown(active: boolean, remaining: number): void {
     if (!active) {
       clearTimeout(this.cooldownTimer);
-      this.cooldownTimer = undefined;
-    } else if (this.cooldownTimer === undefined) {
-      // Wake at the next displayed-second boundary (or expiry), never postpone an existing wake.
+      this.cooldownTimer = undefined; this.cooldownDue = 0;
+    } else {
+      // A changed hello limit may move the next boundary earlier; never postpone an existing wake.
       const delay = Math.max(1, Math.ceil(remaining - (Math.ceil(remaining / 1000) - 1) * 1000));
-      this.cooldownTimer = setTimeout(() => {
-        this.cooldownTimer = undefined;
+      const due = performance.now() + delay;
+      if (this.cooldownTimer !== undefined && this.cooldownDue <= due) return;
+      clearTimeout(this.cooldownTimer);
+      const timer = setTimeout(() => {
+        if (this.cooldownTimer !== timer) return;
+        this.cooldownTimer = undefined; this.cooldownDue = 0;
         this.render();
       }, delay);
+      this.cooldownTimer = timer; this.cooldownDue = due;
     }
   }
 

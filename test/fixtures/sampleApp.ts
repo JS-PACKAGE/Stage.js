@@ -172,6 +172,7 @@ export class SampleSdk {
   get me(): ParticipantView | null { return this.state?.me ?? null; }
   get micLevel(): number { this.micLevelReads++; return this.micLevelValue; }
   get handCooldownMs(): number { return Math.max(0, this.cooldownUntil - this.clock.now); }
+  set handCooldownMs(value: number) { this.cooldownUntil = this.clock.now + value; }
   on<K extends keyof Events>(type: K, listener: (event: { detail: Events[K] }) => void): () => void {
     const listeners = this.listeners.get(type) ?? [];
     const callback = listener as (event: { detail: unknown }) => void;
@@ -297,6 +298,7 @@ function mountSampleApp<Client extends SampleClient = SampleSdk>(options: Sample
     window: { confirm: options.confirm ?? (() => { throw new Error('Unexpected confirmation dialog in lifecycle test'); }) },
     StageClient: function (options: { url: string }) { constructions++; assert.equal(options.url, 'wss://sample.test/ws'); return sdk; },
     decodeName: (value: string) => value, MAX_GAIN_DB, URL, URLSearchParams, Error, AbortController,
+    performance: { now: () => clock.now },
     setTimeout: clock.setTimeout, clearTimeout: clock.clear, setInterval: clock.setInterval, clearInterval: clock.clear,
   }, { timeout: 1000, filename: 'web/src/main.ts', contextCodeGeneration: { strings: false, wasm: false } });
   assert.equal(constructions, 1);

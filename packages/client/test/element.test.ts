@@ -1691,3 +1691,134 @@ describe('widget countdown scheduling', () => {
     pending.resolve(); await settle(); assert.equal(element['hand'].disabled, false);
   });
 });
+
+function retimingWidget(t: TestContext) {
+  t.mock.timers.enable({ apis: ['setTimeout'] });
+  let now = 1000, expires = now;
+  t.mock.method(performance, 'now', () => now);
+  const schedule = t.mock.method(globalThis, 'setTimeout');
+  const clear = t.mock.method(globalThis, 'clearTimeout');
+  const fixture = widget();
+  const { element, client } = fixture;
+  Object.defineProperty(client, 'handCooldownMs', { get: () => Math.max(0, expires - now) });
+  const render = t.mock.method(element as unknown as { render(): void }, 'render');
+  const active = () => {
+    const handle = element['cooldownTimer']; assert.notEqual(handle, undefined);
+    const call = schedule.mock.calls.find(call => call.result === handle); assert.ok(call);
+    return { handle, delay: call.arguments[1], callback: call.arguments[0] as () => void };
+  };
+  const retime = (remaining: number) => { expires = now + remaining; element['render'](); };
+  const advance = (ms: number) => { now += ms; t.mock.timers.tick(ms); };
+  const label = (seconds: number, pending = false, reconnecting = false) => {
+    assert.equal(element['hand'].textContent, seconds ? `舉手發言（${seconds} 秒）` : '舉手發言');
+    assert.equal(element['hand'].disabled, seconds > 0 || pending || reconnecting);
+    assert.equal(element['hand'].getAttribute('aria-busy'), pending ? 'true' : null);
+  };
+  return { ...fixture, active, retime, advance, label, render, schedule, clear };
+}
+
+describe('widget cooldown retiming', () => {
+  it('retains its exact handle across repeated snapshots with an unchanged monotonic deadline', t => {
+    const h = retimingWidget(t); h.retime(2500); const first = h.active(); h.advance(250);
+    for (let i = 0; i < 20; i++) h.element['render']();
+    assert.equal(h.active().handle, first.handle); assert.equal(h.schedule.mock.callCount(), 1);
+    assert.equal(h.clear.mock.calls.filter(call => call.arguments[0] !== undefined).length, 0);
+    h.advance(249); h.label(3); h.advance(1); h.label(2);
+    assert.notEqual(h.active().handle, first.handle); assert.equal(h.active().delay, 1000);
+  });
+
+  it('replaces an earlier same-label boundary and rejects the replaced callback', t => {
+    const h = retimingWidget(t); h.retime(2000); const old = h.active(); assert.equal(old.delay, 1000);
+    h.advance(100); h.retime(1100); const next = h.active(); h.label(2);
+    assert.notEqual(next.handle, old.handle); assert.equal(next.delay, 100);
+    assert.equal(h.clear.mock.calls.filter(call => call.arguments[0] === old.handle).length, 1);
+    const renders = h.render.mock.callCount(); old.callback();
+    assert.equal(h.render.mock.callCount(), renders); assert.equal(h.active().handle, next.handle);
+    h.advance(99); h.label(2); h.advance(1); h.label(1);
+    h.advance(999); h.label(1); h.advance(1); h.label(0);
+    assert.equal(h.element['cooldownTimer'], undefined);
+  });
+
+  it('keeps one earlier wake for an extended deadline and then follows the later boundaries', t => {
+    const h = retimingWidget(t); h.retime(1100); const first = h.active(); h.advance(50);
+    h.retime(1950); assert.equal(h.active().handle, first.handle); h.label(2);
+    assert.equal(h.schedule.mock.callCount(), 1);
+    h.advance(50); h.label(2); assert.equal(h.active().delay, 900);
+    h.advance(900); h.label(1); assert.equal(h.active().delay, 1000);
+    h.advance(100); h.label(1); h.advance(900); h.label(0);
+    assert.equal(h.element['cooldownTimer'], undefined);
+    assert.equal(h.schedule.mock.callCount(), 3, 'only the already-owned early wake is additional');
+  });
+
+  for (const remaining of [0.25, 1000.25, 2500.25]) {
+    it(`rounds an earlier retimed ${remaining} ms boundary upward without early expiry`, t => {
+      const h = retimingWidget(t); h.retime(4000); const old = h.active(); h.advance(100); h.retime(remaining);
+      const first = h.active(); const delay = Math.ceil(remaining % 1000);
+      assert.notEqual(first.handle, old.handle); assert.equal(first.delay, delay);
+      const renders = h.render.mock.callCount(); h.advance(delay - 0.5);
+      assert.equal(h.render.mock.callCount(), renders); h.label(Math.ceil(remaining / 1000));
+      h.advance(0.5); h.label(Math.ceil(Math.max(0, remaining - delay) / 1000));
+      for (let i = 1; i < Math.ceil(remaining / 1000); i++) h.advance(1000);
+      h.label(0); assert.equal(h.element['cooldownTimer'], undefined);
+      const settled = h.render.mock.callCount(); h.advance(10000); assert.equal(h.render.mock.callCount(), settled);
+    });
+  }
+
+  it('immediate expiry clears ownership and a retired callback cannot erase a fresh countdown', t => {
+    const h = retimingWidget(t); h.retime(2500); const old = h.active(); h.advance(100); h.retime(0);
+    h.label(0); assert.equal(h.element['cooldownTimer'], undefined);
+    let renders = h.render.mock.callCount(); old.callback(); assert.equal(h.render.mock.callCount(), renders);
+    h.retime(1200); const fresh = h.active(); assert.equal(fresh.delay, 200); renders = h.render.mock.callCount();
+    old.callback(); assert.equal(h.render.mock.callCount(), renders); assert.equal(h.active().handle, fresh.handle);
+    h.advance(200); h.label(1); h.advance(1000); h.label(0);
+  });
+
+  it('an already-fired callback cannot clear or duplicate the next boundary timer', t => {
+    const h = retimingWidget(t); h.retime(2500); const first = h.active(); h.advance(500);
+    const next = h.active(); const renders = h.render.mock.callCount(); first.callback();
+    assert.equal(h.active().handle, next.handle); assert.equal(h.render.mock.callCount(), renders);
+    assert.equal(h.schedule.mock.callCount(), 2); h.advance(1000); h.label(1);
+  });
+
+  it('retimed expiry cannot release a still-pending withdrawal', async t => {
+    const h = retimingWidget(t); h.client.me.handRaised = true; h.retime(2000);
+    assert.equal(h.element['cooldownTimer'], undefined); click(h.element['hand']); assert.equal(h.calls(), 1);
+    h.client.me.handRaised = false; h.element['render'](); const old = h.active();
+    h.advance(100); h.retime(50); assert.notEqual(h.active().handle, old.handle); h.label(1, true);
+    h.advance(50); h.label(0, true); assert.equal(h.element['cooldownTimer'], undefined);
+    click(h.element['hand']); assert.equal(h.calls(), 1);
+    h.pending.resolve(); await settle(); h.label(0);
+  });
+
+  it('retimed expiry preserves reconnect admission until status recovery', t => {
+    const h = retimingWidget(t); h.retime(2000); const old = h.active(); h.advance(100);
+    h.client.status = 'reconnecting'; h.retime(50); assert.notEqual(h.active().handle, old.handle);
+    h.label(1, false, true); h.advance(50); h.label(0, false, true);
+    assert.equal(h.element['cooldownTimer'], undefined); click(h.element['hand']); assert.equal(h.calls(), 0);
+    h.client.status = 'live'; h.element['render'](); h.label(0);
+  });
+
+  for (const policy of ['raised', 'stage', 'controller'] as const) {
+    it(`${policy} retires a hidden countdown and rejects its callback after visibility returns`, t => {
+      const h = retimingWidget(t); h.retime(2500); const old = h.active();
+      if (policy === 'raised') h.client.me.handRaised = true;
+      if (policy === 'stage') h.client.me.onStage = true;
+      if (policy === 'controller') h.client.me.role = 'controller';
+      h.element['render'](); assert.equal(h.element['cooldownTimer'], undefined);
+      const renders = h.render.mock.callCount(); old.callback(); assert.equal(h.render.mock.callCount(), renders);
+      h.advance(100); Object.assign(h.client.me, { handRaised: false, onStage: false, role: 'audience' });
+      h.element['render'](); const next = h.active(); assert.equal(next.delay, 400);
+      old.callback(); assert.equal(h.active().handle, next.handle); h.advance(400); h.label(2);
+    });
+  }
+
+  it('unmount rejects its retired callback before and after a replacement client countdown', async t => {
+    const h = retimingWidget(t); h.retime(2500); const old = h.active(); h.element.disconnectedCallback(); await settle();
+    assert.equal(h.element['cooldownTimer'], undefined);
+    let renders = h.render.mock.callCount(); old.callback(); assert.equal(h.render.mock.callCount(), renders);
+    const replacement = { ...h.client, handCooldownMs: 4500 };
+    h.element['current'] = replacement as unknown as StageClient; h.element['render'](); const active = h.active();
+    renders = h.render.mock.callCount(); old.callback();
+    assert.equal(h.active().handle, active.handle); assert.equal(h.render.mock.callCount(), renders); h.label(5);
+  });
+});

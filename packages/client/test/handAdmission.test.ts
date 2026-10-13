@@ -63,10 +63,10 @@ function assertError(error: unknown, code: StageError['code'], message?: string)
   assert.equal(error.code, code);
   if (message !== undefined) assert.equal(error.message, message);
 }
-function hello(socket: Socket): void {
+function hello(socket: Socket, handRaiseIntervalMs = 10000): void {
   socket.readyState = Socket.OPEN;
   socket.deliver({ type: 'hello', protocol: 1, serverVersion: 'test',
-    limits: { controlPerSecond: 20, icePerSecond: 30, handRaiseIntervalMs: 10000 } });
+    limits: { controlPerSecond: 20, icePerSecond: 30, handRaiseIntervalMs } });
 }
 function accounting(client: StageClient) {
   return { pacing: [client['nextControlAt'], client['nextIceAt'], client['lastSendAt']],
@@ -109,10 +109,10 @@ function setup(t: TestContext, options: Partial<StageClientOptions> = {}) {
     const ready = client.connect(), socket = Socket.instances.at(-1)!;
     hello(socket); await ready; return socket;
   }
-  async function join() {
+  async function join(handRaiseIntervalMs = 10000) {
     const joining = settle(client.join({ roomId: state.roomId, name: state.me.name }));
     const socket = Socket.instances.at(-1)!;
-    hello(socket); await flush(); await tick(0);
+    hello(socket, handRaiseIntervalMs); await flush(); await tick(0);
     const request = socket.sent.at(-1)!; assert.equal(request.type, 'join');
     socket.deliver({ type: 'room:state', ...state });
     socket.deliver({ type: 'ok', requestId: request.requestId });
@@ -123,8 +123,8 @@ function setup(t: TestContext, options: Partial<StageClientOptions> = {}) {
     assert.equal(client['pending'].size, 0);
     return socket;
   }
-  async function resume(socket: Socket) {
-    hello(socket); await flush(); await tick(0);
+  async function resume(socket: Socket, handRaiseIntervalMs = 10000) {
+    hello(socket, handRaiseIntervalMs); await flush(); await tick(0);
     const request = socket.sent.at(-1)!;
     assert.equal(request.type, 'join');
     if (request.type !== 'join') throw new Error('expected resume join');
@@ -179,6 +179,36 @@ for (const phase of ['backoff', 'CONNECTING'] as const) {
     assert.equal(client.handCooldownMs, 9900);
   });
 }
+
+it('retimes an admitted hand cooldown to the new hello limit after automatic same-seat resume', async t => {
+  const { client, join, resume, tick } = setup(t, { reconnect: { initialDelayMs: 100, maxDelayMs: 100 } });
+  const old = await join(2000);
+  const peer = Peer.instances[0]!;
+  const participantId = client.me?.participantId;
+  // Let the initial media offer release control pacing before admitting the hand.
+  await tick(100);
+  const raised = settle(client.raiseHand()); await tick(0);
+  const request = old.sent.at(-1)!; assert.equal(request.type, 'hand:raise');
+  old.deliver({ type: 'ok', requestId: request.requestId });
+  assert.equal(await raised, undefined);
+  assert.equal(client.handCooldownMs, 2000);
+
+  old.close();
+  assert.equal(client.status, 'reconnecting');
+  await tick(100);
+  const replacement = Socket.instances.at(-1)!;
+  assert.notEqual(replacement, old);
+  await resume(replacement, 1200);
+  assert.equal(client.me?.participantId, participantId);
+  assert.equal(Peer.instances[0], peer);
+  assert.notEqual(peer.connectionState, 'closed');
+  assert.equal(client.rateLimits.handRaiseIntervalMs, 1200);
+  assert.equal(client.handCooldownMs, 1100, 'the new interval retains the original hand admission time');
+  assertError(await settle(client.raiseHand()), 'rate_limited');
+  await tick(100);
+  assert.equal(client.handCooldownMs, 1000);
+  assert.equal(replacement.sent.filter(message => message.type === 'hand:raise').length, 0);
+});
 
 it('preserves cooldown priority over both a full control queue and a non-OPEN socket', async t => {
   const { client, connect } = setup(t, { maxPendingControlRequests: 1 });

@@ -482,3 +482,6 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 
 
 99. **最小嵌入範例的按需冷卻更新（2026-10-13）：** bounded whole-module fake clock 在 idle audience 的 10 秒測得 40 次 timer callback、120 次內容不變的 hand DOM 寫入；10 秒倒數也只有 10 次必要文字變化。改成 offstage／未舉手且 cooldown>0 才持有一個 timeout，Math.ceil 對齊下一次顯示秒數邊界；以 performance.now 記錄 deadline，重複 state 不延後既有 timer；same-seat reconnect 的 hello 更新舉手間隔時，若下一個邊界變早則改排較早 timer，變晚可保留一次較早的 harmless wake。late wake 讀取當前剩餘時間，不重播漏掉的秒。raiseHand 同步保留冷卻後立即 sync，無需等待 ACK；status-only recovery 也同步刷新政策。join／Leave／terminal／倒數消失清除 handle，callback 檢查自己仍持有 slot，舊 timer 不得清掉新 timer。pending／角色／reconnect gating 與 SDK pacing 不改；不改其他模組 timer。量化只限 fake clock callbacks／DOM 寫入，不宣稱 browser CPU、電量或音訊改善。
+
+
+100. **完整範例與 widget 的冷卻重排（2026-10-13）：** batch 76 的 retime 發現延伸檢查證實兩個既有 scheduler 同樣只在 timer 空白時安排。實際 SDK＋fake socket/peer：2000ms 間隔下 raise 後，同席自動 resume 的 hello 改為 1200ms，保留 lastHandAt 與 peer；+100ms 剩 1100ms，+200ms 剩 1000ms。兩個 UI 原 timer 仍等到 +1000ms，因而在 +200ms 顯示 2 秒而不是 1 秒。套用 embed 已審查的 performance.now deadline、較早邊界改排、owned callback guard；inactive／fire／widget leave 同步清 deadline。重複／較晚邊界保留既有較早喚醒，較晚 retime 可有一次 harmless extra wake。維持 idle 無 timer、pending/reconnect／角色限制與 SDK rate/pacing 語意；不宣稱目前伺服器提供 live config reload 或真實媒體重連驗證。測試採實際 SDK 搭配 fake transport，以及假 DOM／受控時間。
