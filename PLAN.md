@@ -539,3 +539,6 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 
 
 118. **metrics provider 的未知拒絕值（2026-10-13）：** exported createStageServer 的 metrics callback 可同步拋出或非同步拒絕任意值；隔離 child＋native localhost HTTP probe 證實 null-prototype 物件或 throwing toString 讓 rejection handler 的 String(err) 自己拋錯，兩個共用 scrape 各產生 unhandled rejection 且未回應，下一次 collection 卻已恢復。只移除 metrics error 欄位的預先字串化，將原始 unknown 值交給既有 safe structured logger；empty 500、auth、singleflight 與失敗後取新樣本語意不變。Error log 欄位成為結構化診斷，nested secret key 沿用 redaction，不把細節放入 response。不宣稱內建 collector 已產生此值、外部攻擊事件或修復任意 custom logger/sink 拋錯；其他 error path 不擴張修改。測試採 synthetic diagnostics／本機 HTTP／明確 deadline，不讀真實秘密或啟動音訊。
+
+
+119. **Web Component 的本機收聽滑桿（2026-10-13）：** widget 已有 playback-volume property／attribute，但使用者原本只能按收聽靜音。新增有明確 label 的 native range（0–100、step 1）與可見百分比／aria-valuetext，沿用 reflected property 調整本機 volume；已加入者在 reconnect 期間仍可調整，不參與 server control pending lock。無 current participant 或 detached widget 的 input 不接納，非有限／越界的防禦性 input 不改偏好；mute／microphone／server gain 不受影響。外部精細 fraction 保留原 property，UI 只顯示最近整數百分比；property 變更只同步 volume UI，不重畫 status live region 或清除其他 action error。沿用既有 rejoin/remount 偏好，不新增 storage、timer、autoplay 呼叫或權限。新增 part(playback) 讓 host 調整這一列樣式；驗證為假 DOM／SDK 控制事件，不宣稱真實 keyboard、layout 或輔助科技測試。

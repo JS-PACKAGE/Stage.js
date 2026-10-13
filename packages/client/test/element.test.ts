@@ -15,9 +15,15 @@ class Node extends EventTarget {
   textContent = '';
   className = '';
   type = '';
+  id = '';
+  value = '';
+  min = '';
+  max = '';
+  step = '';
   tagName = '';
   isConnected = true;
   onclick?: () => void;
+  oninput?: (event: Event) => void;
   append(...nodes: Node[]): void { this.children.push(...nodes); }
   remove(): void { this.isConnected = false; }
   attachShadow(): Node { const root = new Node(); this.children.push(root); return root; }
@@ -81,10 +87,18 @@ function roomState(onStage = false, roomId = 'one'): RoomStatePayload {
   };
 }
 
+const subscribedVolumes = new WeakMap<TestContext, number[]>();
 async function subscribedWidget(t: TestContext, onStage = false) {
-  t.mock.method(StageClient.prototype, 'connect', async () => {});
-  t.mock.method(StageClient.prototype, 'join', async () => {});
-  t.mock.method(StageClient.prototype as unknown as { createMedia(): void }, 'createMedia', () => {});
+  let initialVolumes = subscribedVolumes.get(t);
+  if (!initialVolumes) {
+    initialVolumes = [];
+    subscribedVolumes.set(t, initialVolumes);
+    // Looping over fixtures in one test must not stack prototype mocks and restore an older mock.
+    const volumes = initialVolumes;
+    t.mock.method(StageClient.prototype, 'connect', async function (this: StageClient) { volumes.push(this.playbackVolume); });
+    t.mock.method(StageClient.prototype, 'join', async () => {});
+    t.mock.method(StageClient.prototype as unknown as { createMedia(): void }, 'createMedia', () => {});
+  }
   const element = new StageElement(); widgets.push(element);
   Object.assign(element, { isConnected: false });
   element.setAttribute('room', 'one'); element.setAttribute('name', 'Listener');
@@ -92,7 +106,7 @@ async function subscribedWidget(t: TestContext, onStage = false) {
   const client = element.client;
   assert.ok(client);
   await client['receive']({ type: 'room:state', ...roomState(onStage) });
-  return { element, client };
+  return { element, client, initialVolumes };
 }
 
 function assertRoomControlsHidden(element: InstanceType<typeof StageElement>): void {
@@ -2089,6 +2103,312 @@ describe('widget playback volume', () => {
       for (const pending of connections) pending.resolve();
       await settle();
     }
+  });
+});
+
+
+/** These assertions inspect the widget DOM and invoke its handler; they do not emulate native range interaction. */
+describe('widget listening volume slider', () => {
+  function descendants(node: Node, hidden = false): { node: Node; hidden: boolean }[] {
+    hidden ||= node.hidden;
+    return [{ node, hidden }, ...node.children.flatMap(child => descendants(child, hidden))];
+  }
+  function slider(element: InstanceType<typeof StageElement>): Node {
+    const inputs = descendants(element as unknown as Node).filter(({ node }) => node.tagName === 'INPUT' && node.type === 'range');
+    assert.equal(inputs.length, 1, 'the compact widget has exactly one native range control');
+    return inputs[0]!.node;
+  }
+  function input(control: Node, value: string): void {
+    control.value = value;
+    assert.equal(typeof control.oninput, 'function', 'the range handles input rather than waiting for change');
+    control.oninput!.call(control, new Event('input'));
+  }
+  function assertDisplay(element: InstanceType<typeof StageElement>, percent: number, visible = true): Node {
+    const control = slider(element);
+    assert.equal(control.value, String(percent));
+    assert.equal(control.getAttribute('aria-valuetext'), `${percent}%`);
+    const nodes = descendants(element as unknown as Node);
+    assert.equal(nodes.find(({ node }) => node === control)!.hidden, !visible, 'the control follows joined-state visibility');
+    if (visible) {
+      const text = nodes.filter(({ hidden }) => !hidden).map(({ node }) => node.textContent).join(' ');
+      assert.match(text, /收聽音量/, 'the listening volume has a visible label');
+      assert.match(text, new RegExp(`(?:^|\\s|音量)${percent}%(?:\\s|$)`), 'the percentage is visible text');
+    }
+    return control;
+  }
+
+  it('provides a named 0–100 native range and keeps it hidden and disabled until joined', async t => {
+    const { element, connections, joins } = deferredJoiningWidget(t);
+    const control = assertDisplay(element, 100, false);
+    assert.equal(control.min, '0'); assert.equal(control.max, '100'); assert.equal(control.step, '1');
+    const label = descendants(element as unknown as Node).find(({ node }) => node.tagName === 'LABEL' && node.getAttribute('for') === control.id)?.node;
+    assert.ok(control.id && label, 'a native label is associated with the range');
+    assert.equal(label.textContent, '收聽音量');
+    assert.equal(control.getAttribute('aria-busy'), null);
+    assert.equal(control.disabled, true);
+    assert.equal(element.hasAttribute('playback-volume'), false, 'render does not create a preference');
+    await settle();
+    assert.equal(control.disabled, true, 'an SDK client without a room snapshot is not joined');
+    connections[0]!.pending.resolve(); await settle();
+    assertDisplay(element, 100, false); assert.equal(control.disabled, true);
+    await element.client!['receive']({ type: 'room:state', ...roomState() });
+    assertDisplay(element, 100); assert.equal(control.disabled, false);
+    assert.equal(element['listen'].hidden, false);
+    joins[0]!.pending.resolve(); await settle();
+  });
+
+  it('applies zero, full and fractional input synchronously through reflection with no room work', async t => {
+    const { element, client, socket } = await socketJoinedWidget(t);
+    const control = slider(element);
+    const generation = element['generation'], state = client.state, frames = [...socket.sent];
+    const apply = t.mock.method(client, 'setPlaybackVolume');
+    const timers = t.mock.method(globalThis, 'setTimeout');
+    const intervals = t.mock.method(globalThis, 'setInterval');
+    const play = t.mock.method(client['audio'], 'play');
+    let statusText = element['status'].textContent, statusWrites = 0;
+    Object.defineProperty(element['status'], 'textContent', { configurable: true,
+      get: () => statusText, set: (value: string) => { statusText = value; statusWrites++; },
+    });
+    const events: string[] = [];
+    for (const type of ['status', 'state', 'mic', 'hand', 'error', 'audioblocked']) {
+      element.addEventListener(`stage-${type}`, () => { events.push(type); });
+    }
+    for (const [raw, expected] of [['0', 0], ['100', 1], ['37', 0.37], ['37.5', 0.375]] as const) {
+      input(control, raw);
+      assert.equal(element.playbackVolume, expected);
+      assert.equal(element.getAttribute('playback-volume'), String(expected));
+      assert.equal(client.playbackVolume, expected);
+      assert.equal(client['audio'].volume, expected);
+      assertDisplay(element, Math.round(expected * 100));
+      assert.equal(control.disabled, false);
+      assert.equal(control.getAttribute('aria-busy'), null);
+      assert.equal(element['pendingActions'].size, 0);
+    }
+    assert.deepEqual(apply.mock.calls.map(call => call.arguments), [[0], [1], [0.37], [0.375]], 'each input reaches the existing reflected SDK path once');
+    assert.equal(element.client, client); assert.equal(element['generation'], generation); assert.equal(client.state, state);
+    assert.deepEqual(socket.sent, frames); assert.equal(client['pending'].size, 0); assert.equal(client['pendingControlRequests'], 0);
+    assert.equal(timers.mock.callCount(), 0); assert.equal(intervals.mock.callCount(), 0); assert.equal(play.mock.callCount(), 0);
+    assert.equal(statusWrites, 0, 'input does not rewrite the unrelated room-status live region');
+    element.playbackVolume = 0.625; element.setAttribute('playback-volume', '0.4'); element.removeAttribute('playback-volume');
+    assert.equal(statusWrites, 0, 'external volume reflection also leaves room status alone');
+    assert.deepEqual(events, []);
+  });
+
+  it('synchronizes property and attribute changes without rounding the stored or applied preference', t => {
+    const { element, client } = widget();
+    const apply = t.mock.method(client, 'setPlaybackVolume');
+    for (const value of [0, 0.3749, 0.375, 0.625, 0.99949, 1]) {
+      element.playbackVolume = value;
+      assertDisplay(element, Math.round(value * 100));
+      assert.equal(element.getAttribute('playback-volume'), String(value));
+      assert.equal(element.playbackVolume, value); assert.equal(client.playbackVolume, value);
+      const applied = apply.mock.callCount();
+      element['render'](); element['render']();
+      assertDisplay(element, Math.round(value * 100));
+      assert.equal(apply.mock.callCount(), applied, 'display-only rounding never writes back');
+      assert.equal(element.getAttribute('playback-volume'), String(value));
+      assert.equal(element.playbackVolume, value); assert.equal(client.playbackVolume, value);
+    }
+    element.setAttribute('playback-volume', ' 0.375 ');
+    assertDisplay(element, 38);
+    assert.equal(element.getAttribute('playback-volume'), ' 0.375 ');
+    assert.equal(element.playbackVolume, 0.375); assert.equal(client.playbackVolume, 0.375);
+    element.removeAttribute('playback-volume');
+    assertDisplay(element, 100);
+    assert.equal(element.hasAttribute('playback-volume'), false); assert.equal(client.playbackVolume, 1);
+    for (const raw of ['', ' ', 'invalid', 'NaN', 'Infinity', '-0.01', '1.01']) {
+      element.playbackVolume = 0.375;
+      element.setAttribute('playback-volume', raw);
+      assertDisplay(element, 100);
+      assert.equal(element.getAttribute('playback-volume'), raw);
+      assert.equal(element.playbackVolume, 1); assert.equal(client.playbackVolume, 1);
+    }
+  });
+
+  it('restores its display after invalid synthetic input without throwing or mutating preferences', t => {
+    const { element, client } = widget();
+    element.playbackVolume = 0.375;
+    const control = assertDisplay(element, 38);
+    const apply = t.mock.method(client, 'setPlaybackVolume');
+    const reflect = t.mock.method(element, 'setAttribute');
+    // A real range normally sanitizes values. The minimal DOM deliberately permits hostile synthetic values.
+    for (const raw of ['', ' ', '\t\n', 'NaN', 'Infinity', '-Infinity', '1e309', 'invalid', '37oops', '-1', '100.01']) {
+      assert.doesNotThrow(() => input(control, raw), JSON.stringify(raw));
+      assertDisplay(element, 38);
+      assert.equal(element.getAttribute('playback-volume'), '0.375');
+      assert.equal(element.playbackVolume, 0.375); assert.equal(client.playbackVolume, 0.375);
+    }
+    assert.equal(apply.mock.callCount(), 0); assert.equal(reflect.mock.callCount(), 0);
+  });
+
+  it('leaves the control synchronized when an invalid external property setter rejects', () => {
+    const { element, client } = widget();
+    element.playbackVolume = 0.375;
+    for (const value of [NaN, Infinity, -Infinity, -0.1, 1.1]) {
+      assert.throws(() => { element.playbackVolume = value; }, RangeError);
+      assertDisplay(element, 38);
+      assert.equal(element.getAttribute('playback-volume'), '0.375'); assert.equal(client.playbackVolume, 0.375);
+    }
+  });
+
+  it('keeps listening mute, zero volume and microphone policy independent', async () => {
+    const { element, client, calls } = widget(true);
+    const control = slider(element);
+    for (const muted of [false, true]) {
+      element.playbackMuted = muted;
+      for (const micMuted of [false, true]) {
+        Object.assign(client.me, { muted: micMuted, forceMuted: micMuted }); element['render']();
+        const me = { ...client.me };
+        for (const value of ['0', '45', '100']) {
+          input(control, value);
+          assert.equal(element.playbackMuted, muted); assert.equal(client.playbackMuted, muted);
+          assert.equal(element.hasAttribute('playback-muted'), muted);
+          assert.equal(element['listen'].getAttribute('aria-pressed'), String(muted));
+          assert.equal(element['mic'].disabled, micMuted); assert.equal(control.disabled, false);
+          assert.deepEqual(client.me, me); assert.equal(calls(), 0);
+        }
+      }
+    }
+    input(control, '0');
+    click(element['listen']); await settle();
+    assert.equal(element.playbackMuted, false); assert.equal(client.playbackMuted, false);
+    assert.equal(element.playbackVolume, 0); assert.equal(client.playbackVolume, 0); assertDisplay(element, 0);
+  });
+
+  for (const action of ['hand', 'mic'] as const) {
+    it(`stays local while ${action} is pending and preserves unrelated errors and busy state`, async () => {
+      const { element, pending, calls } = widget(action === 'mic');
+      const control = slider(element);
+      click(element[action]);
+      element['show'](new Error('Existing room action error'));
+      for (const value of ['25', '0', '100']) {
+        input(control, value);
+        assertDisplay(element, Number(value));
+        assert.equal(element['error'].hidden, false); assert.equal(element['error'].textContent, 'Existing room action error');
+        assert.equal(element[action].disabled, true); assert.equal(element[action].getAttribute('aria-busy'), 'true');
+        assert.deepEqual([...element['pendingActions']], [element[action]]);
+        assert.equal(control.disabled, false); assert.equal(control.getAttribute('aria-busy'), null); assert.equal(calls(), 1);
+      }
+      pending.reject(new Error('Rejected room action')); await settle();
+      input(control, '63');
+      assert.equal(element['error'].hidden, false); assert.equal(element['error'].textContent, 'Rejected room action');
+      assert.equal(element['pendingActions'].size, 0); assertDisplay(element, 63);
+    });
+  }
+
+  it('does not trigger audio unlock or clear its failure when changing local volume', async t => {
+    const { element, client } = await subscribedWidget(t);
+    const control = slider(element), pending = deferred();
+    const unlock = t.mock.method(client, 'unlockAudio', () => pending.promise);
+    element['unlock'].hidden = false; click(element['unlock']);
+    input(control, '20');
+    assert.equal(element['unlock'].disabled, true); assert.equal(element['unlock'].getAttribute('aria-busy'), 'true');
+    assert.equal(unlock.mock.callCount(), 1); assert.equal(control.disabled, false);
+    pending.reject(new Error('Audio unlock failed')); await settle();
+    input(control, '30');
+    assert.equal(element['error'].hidden, false); assert.equal(element['error'].textContent, 'Audio unlock failed');
+    assert.equal(element['unlock'].hidden, false); assert.equal(unlock.mock.callCount(), 1); assertDisplay(element, 30);
+  });
+
+  it('remains usable across reconnect backoff, opening, hello and pending resume ACK', async t => {
+    const { element, client, socket, sockets, tick, hello } = await socketJoinedWidget(t, roomState(true));
+    const control = slider(element), generation = element['generation'];
+    element.playbackMuted = true;
+    socket.close(); await settle();
+    for (let phase = 0; phase < 4; phase++) {
+      if (phase === 1) await tick(500);
+      if (phase === 2) sockets[1]!.readyState = 1;
+      if (phase === 3) await hello(sockets[1]!);
+      const frames = sockets.map(current => [...current.sent]), pending = client['pending'].size;
+      assertDisplay(element, Math.round(element.playbackVolume * 100)); assert.equal(control.disabled, false);
+      input(control, String(phase * 25));
+      assert.equal(client.playbackVolume, phase / 4); assert.equal(client.playbackMuted, true);
+      assert.equal(element.client, client); assert.equal(element['generation'], generation); assert.equal(client.status, 'reconnecting');
+      assert.equal(element['mic'].disabled, true); assert.equal(element['pendingActions'].size, 0);
+      assert.equal(client['pending'].size, pending); assert.deepEqual(sockets.map(current => current.sent), frames);
+    }
+    const replacement = sockets[1]!, resume = replacement.sent.find(message => message.type === 'join');
+    assert.ok(resume && resume.type === 'join');
+    replacement.deliver({ type: 'room:state', ...roomState(true), resumeToken: 'resume-me' }); await settle();
+    assert.equal(client['pending'].has(resume.requestId), true);
+    assertDisplay(element, 75); assert.equal(control.disabled, false);
+    input(control, '38');
+    replacement.deliver({ type: 'ok', requestId: resume.requestId }); await settle();
+    assertDisplay(element, 38); assert.equal(client.playbackVolume, 0.38); assert.equal(client.playbackMuted, true);
+  });
+
+  it('rejects a disabled handler and stale input after detachment before its callback runs', () => {
+    const { element, client } = widget();
+    element.playbackVolume = 0.375;
+    const control = slider(element);
+    control.disabled = true;
+    input(control, '90');
+    assert.equal(element.playbackVolume, 0.375); assert.equal(client.playbackVolume, 0.375);
+    element['render']();
+    assertDisplay(element, 38); assert.equal(control.disabled, false);
+    Object.assign(element, { isConnected: false });
+    input(control, '70');
+    assert.equal(element.playbackVolume, 0.375); assert.equal(client.playbackVolume, 0.375);
+    element.disconnectedCallback();
+    assertDisplay(element, 38, false); assert.equal(control.disabled, true);
+    input(control, '80');
+    assert.equal(element.playbackVolume, 0.375); assert.equal(client.playbackVolume, 0.375);
+  });
+
+  it('rejects stale enabled input when the current client or joined participant disappears', () => {
+    const { element, client } = widget();
+    element.playbackVolume = 0.375;
+    const control = slider(element);
+    Object.assign(client, { me: null });
+    input(control, '90');
+    assert.equal(element.playbackVolume, 0.375); assert.equal(client.playbackVolume, 0.375);
+    element['render']();
+    assertDisplay(element, 38, false); assert.equal(control.disabled, true);
+    element['current'] = null;
+    control.disabled = false;
+    input(control, '80');
+    assert.equal(element.playbackVolume, 0.375); assert.equal(client.playbackVolume, 0.375);
+    element['render']();
+    assertDisplay(element, 38, false); assert.equal(control.disabled, true);
+  });
+
+  for (const terminal of terminalCases) {
+    it(`hides and disables the control after ${terminal.title} without losing its preference`, async t => {
+      const { element, client } = await subscribedWidget(t);
+      const control = slider(element);
+      input(control, '37');
+      await client['receive'](terminal.message);
+      assertDisplay(element, 37, false); assert.equal(control.disabled, true);
+      input(control, '90');
+      assert.equal(element.playbackVolume, 0.37); assert.equal(client.playbackVolume, 0.37);
+      assert.equal(element['status'].textContent, terminal.text);
+    });
+  }
+
+  it('retains input preferences across room rejoin and remount, applying them before connecting', async t => {
+    const { element, client: first, initialVolumes } = await subscribedWidget(t);
+    const control = slider(element);
+    input(control, '37'); element.playbackMuted = true;
+    element.setAttribute('room', 'two'); await settle();
+    const second = element.client;
+    assert.ok(second); assert.notEqual(second, first);
+    assertDisplay(element, 37, false); assert.equal(control.disabled, true); assert.equal(second.playbackVolume, 0.37);
+    await second['receive']({ type: 'room:state', ...roomState(false, 'two') });
+    assertDisplay(element, 37); assert.equal(control.disabled, false);
+    element.playbackVolume = 0.625;
+    assertDisplay(element, 63);
+    Object.assign(element, { isConnected: false }); element.disconnectedCallback(); await settle();
+    assert.equal(element.client, null); assertDisplay(element, 63, false); assert.equal(control.disabled, true);
+    input(control, '90');
+    assert.equal(element.playbackVolume, 0.625); assert.equal(element.getAttribute('playback-volume'), '0.625');
+    Object.assign(element, { isConnected: true }); element.connectedCallback(); await settle();
+    const remounted = element.client as StageClient | null;
+    assert.ok(remounted); assert.notEqual(remounted, second);
+    assert.deepEqual(initialVolumes, [1, 0.37, 0.625]);
+    assert.equal(remounted.playbackVolume, 0.625); assert.equal(remounted.playbackMuted, true);
+    assertDisplay(element, 63, false);
+    await remounted['receive']({ type: 'room:state', ...roomState(false, 'two') });
+    assertDisplay(element, 63); assert.equal(control.disabled, false); assert.equal(slider(element), control, 'remount reuses the same native control');
   });
 });
 

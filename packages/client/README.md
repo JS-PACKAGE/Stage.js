@@ -121,14 +121,14 @@ WebSocket 建構失敗、hello 逾時或尚未進房的連線關閉，也會釋�
 - 舉手佇列位置來自目前 `state.hands` 的本人 ID；快照更新時重算，未找到本人則只顯示「已舉手」，重連期間標示「上次佇列」。保留寬限期的斷線者仍在佇列中；主控可任意核准人選，因此這不是保證的發言順序或等待時間。
 - 內建介面：狀態列（房名．直播狀態．收聽中／已舉手／台上；舉手時顯示目前佇列第幾位）、錯誤列、`啟用音訊`（自動播放被擋時出現，失敗可重試、成功後隱藏）、觀眾的舉手／收回（含冷卻倒數）、台上的麥克風靜音／離開舞台，以及所有已進房者的「靜音收聽／恢復收聽」。離開、關房與被踢後隱藏失效操作。主控功能請改用 `element.client`（底層 `StageClient`，尚未建立實例或元件已移除時為 null）。
 - 本機收聽靜音：布林屬性 `playback-muted` 與反映它的 `element.playbackMuted` property。加入 `playback-muted` 可初始靜音；移除屬性或設定 property 為 false 恢復收聽。HTML 布林屬性只看是否存在，`playback-muted="false"` 仍表示靜音。變更立即套用於本機 audio，不重新進房、不送控制請求、不改麥克風；更換房間、移除再掛載與 ws 重連保留設定。建議透過此 widget property 控制收聽偏好；直接修改 `element.client` 的 audio 設定不會反映回 widget attribute。按鈕使用原生 button 與 `aria-pressed`，未進房時隱藏。
-- 本機收聽音量：`playback-volume="0.5"` 或 `element.playbackVolume = 0.5`，範圍 0–1（預設 1）。property 反映到 attribute，非有限數值或超出範圍會拋出 RangeError 且不改原設定；attribute 缺省、移除、空白或無效時採 1。初始音量在 connect 前套用，執行中變更不重新進房，換房／移除再掛載／ws 重連保留偏好。音量 0 不會切換 `playback-muted`，調高音量也不會解除靜音；不影響麥克風或其他人，直接改底層 client 不會反映回 widget attribute。
+- 本機收聽音量：`playback-volume="0.5"` 或 `element.playbackVolume = 0.5`，範圍 0–1（預設 1）。property 反映到 attribute，非有限數值或超出範圍會拋出 RangeError 且不改原設定；attribute 缺省、移除、空白或無效時採 1。初始音量在 connect 前套用，執行中變更不重新進房，換房／移除再掛載／ws 重連保留偏好。音量 0 不會切換 `playback-muted`，調高音量也不會解除靜音；不影響麥克風或其他人，直接改底層 client 不會反映回 widget attribute。 進房後也可使用「收聽音量」原生滑桿，以 1% 為單位調整 0–100%，旁邊顯示百分比，信令重連時仍可調整。本機靜音保持獨立，調高音量不會自動解除靜音；外部 property 的更精細數值仍完整保留，滑桿只顯示最接近的整數百分比，不因重畫而回寫四捨五入的值。沒有新增儲存或自動播放要求。
 - 進場進度：連線握手期間顯示「連線中…」，等待加入房間時顯示「正在加入房間…」。快照一到即顯示房間與操作，不等 ACK；沒有快照的當前進場失敗顯示「未連線」與原本錯誤。離開／關房／被踢的提示優先，舊進場回覆不會覆寫換房後的畫面。這只是 widget 文案，不新增 SDK status 或 `stage-status` 事件值。
 - 初次握手／加入仍在等待且從未收到房間狀態時，提供「取消加入」。按下會立即停止本機等待、顯示「已取消加入。」並提供手動「重試加入」，保留屬性與收聽偏好；取消自己的等待不顯示成加入錯誤，其他當前錯誤照常顯示。快照到達（包括 ACK 前）、關房／被踢、換房或移除後會撤銷取消操作，自動重連不提供此按鈕。取消不保證撤銷伺服器已接受的加入，也不保證底層 socket 立即關閉。
 - 初次連線／加入失敗且從未收到房間狀態時，顯示「重試加入」。按下會先清理舊 client，再使用目前 url／room／code／name 與收聽偏好重新加入；等待中隱藏並停用，避免重複送出。這是手動重試，不會自動重試錯誤；已收到房間狀態、正在自動回座、關房／維護或被踢後不顯示。若房間不存在或代碼錯誤，重試仍由伺服器判定，嵌入端需修正相應屬性。
 - 信令重連時，舉手／收回、麥克風靜音／解除與離開舞台按鈕暫停操作，直到回座狀態恢復；既有 pending、舉手冷卻與強制靜音限制仍適用。本機收聽靜音、音量與啟用音訊仍可操作。這只限制 widget 按鈕，不改 SDK 請求的送出／重試語意，也不自動改變麥克風狀態。
 - 連線結束提示：呼叫 `element.client.disconnect()` 會顯示「未連線」並隱藏房內操作；一般關房、被移出與伺服器維護／重啟各有提示，收聽偏好變更不會清掉提示。換房或重新掛載後清除舊提示，舊 client 的遲到事件不更新或重新派發到新 widget。
 - 事件：所有 client 事件以 `stage-<type>` 從元素派發（`bubbles`、`composed`，`detail` 相同），例如 `stage-state`、`stage-hand`、`stage-kicked`。
-- 樣式：`::part(panel)`、`::part(status)`、`::part(error)`、`::part(actions)`，以及 CSS 變數 `--stage-fg`、`--stage-bg`、`--stage-border`、`--stage-radius`、`--stage-button-bg`、`--stage-accent`、`--stage-accent-fg`、`--stage-error`。
+- 樣式：`::part(panel)`、`::part(status)`、`::part(error)`、`::part(actions)`、`::part(playback)`，以及 CSS 變數 `--stage-fg`、`--stage-bg`、`--stage-border`、`--stage-radius`、`--stage-button-bg`、`--stage-accent`、`--stage-accent-fg`、`--stage-error`。
 - 自訂標籤名：`import { defineStageElement } from 'https://host/lib/stage-element.js'` 後呼叫 `defineStageElement('my-stage')`（`stage-client` 已於載入時註冊，多個自訂標籤可並存）。每個自訂標籤使用 `StageElement` 的獨立子類別，因此仍是 `instanceof StageElement`，但 constructor 不與預設／其他標籤相同；重複註冊同名標籤為 no-op，既有其他元件不被覆寫。
 
 `<stage-client>` 的舉手、麥克風、離台與音訊解鎖按鈕在各自請求完成前保持停用並標示 `aria-busy`，不會被冷卻倒數或新 state 的重新繪製提前解鎖。失敗後顯示錯誤並重新套用目前冷卻／強制靜音限制；切換房間或移除元件時，舊請求不會改動新房間的按鈕狀態。
