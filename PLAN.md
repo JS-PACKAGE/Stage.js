@@ -608,3 +608,6 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 
 
 141. **觀眾篩選的 Unicode 正規等價（2026-10-13）：** actual sanitizeName 會把分解形式 Cafe\u0301 存成 NFC Café，但完整範例原 query 只 trim／toLowerCase，使用者輸入原本同一名稱卻找不到。只在 query 與 decodeName 後的觀眾名稱 key 加 NFC，再沿用原 lowercase／literal includes；不改 input 原文字、快照、顯示名稱、伺服器驗證或名單順序。NFC 只處理正規等價，不新增 NFKC、重音移除或語言特定大小寫折疊，重音／全形等非正規等價差異仍保留。回歸以實際 sanitizer／decoder 與 whole-module 假 DOM 驗證 Latin／Hangul、組合順序、原有中文／大小寫／空白及生命週期；既有權限、hidden-row admission、cache 與記憶體 query 政策不變，不宣稱原生 IME／鍵盤／輔助科技驗收。
+
+
+142. **Web Component 的明確離房與手動重入（2026-10-13）：** actual mounted widget／SDK fake socket/media probe 證實已進房者只有收聽靜音、麥克風與離開舞台，無法從 widget 本身結束整個房間連線；公開 disconnect 可完整清理，但之後也沒有 UI 重入。新增獨立 room action，已取得 state/me 的任何角色（含重連、state-before-ACK）可主動離房，先遞增 generation、退休 current，再沿用既有 teardown。獨立 leftRoom 與 cleanup token 保留明確意圖，pending 時停用，settlement 僅能更新同一 token；同一元素改屬性／移除重掛也不自動進房，cleanup barrier 保留，明確重新加入才清除 left flag 並使用最新 attrs／偏好。新元素正常 autojoin，初次取消／失敗 retry、terminal／kicked、直接 SDK disconnect 保持既有資格。退休 client 的 SDK 事件不轉送，與原元件 teardown 一致，不合成新 status；舊控制／capture／初次 join 回覆不能覆蓋離房或新 client。伺服器既有主控寬限／席位政策不變，fresh join 不保證舊身分或台位，不宣稱立即 socket 關閉／房間結束。測試限定 actual SDK 與 fake DOM/socket/media 邊界。

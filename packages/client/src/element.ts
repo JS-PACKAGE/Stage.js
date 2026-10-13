@@ -26,7 +26,9 @@ button.primary { background: var(--stage-accent, #2563eb); border-color: transpa
  * `<stage-client url room code name>`: a self-contained listener / speaker widget over StageClient.
  *
  * Joins when it is in the document and has `room` and `name`; leaves when removed. Changing
- * `url`, `room`, `code` or `name` rejoins. `url` defaults to `/ws` on the origin the library was
+ * `url`, `room`, `code` or `name` rejoins, except after the user explicitly leaves: the same
+ * element then waits for its manual rejoin button, including across attribute edits/remounts.
+ * `url` defaults to `/ws` on the origin the library was
  * loaded from. The underlying client is exposed as `.client` for anything the widget does not
  * offer. `playback-muted` / `.playbackMuted` and `playback-volume` / `.playbackVolume`
  * control local listening without rejoining,
@@ -47,6 +49,9 @@ export class StageElement extends HTMLElement {
   private micFailure: { client: StageClient; roomId: string; participantId: string; errorRevision: number; pending: boolean } | undefined;
   private errorRevision = 0;
   private readonly leaveStage: HTMLButtonElement;
+  private readonly roomAction: HTMLButtonElement;
+  private leftRoom = false;
+  private roomExit: object | undefined;
   private readonly listen: HTMLButtonElement;
   private readonly playback: HTMLDivElement;
   private readonly volume: HTMLInputElement;
@@ -99,6 +104,9 @@ export class StageElement extends HTMLElement {
         || (!me.onStage && me.role !== 'controller')) return;
       return me.onStage ? client.leaveStage() : client.returnToStage();
     });
+    this.roomAction = document.createElement('button');
+    this.roomAction.type = 'button';
+    this.roomAction.onclick = () => this.changeRoomPresence();
     this.listen = this.button('靜音收聽', () => { this.playbackMuted = !this.playbackMuted; });
     this.listen.setAttribute('aria-label', '靜音收聽');
     this.playback = document.createElement('div');
@@ -120,13 +128,13 @@ export class StageElement extends HTMLElement {
     this.playback.append(volumeLabel, this.volume, this.volumeValue);
     this.retry = this.button('重試加入', () => { if (this.canRetry()) this.rejoin(); });
     this.cancelJoin = this.button('取消加入', () => this.cancelInitial?.());
-    actions.append(this.unlock, this.listen, this.hand, this.mic, this.micRetry, this.leaveStage, this.retry, this.cancelJoin);
+    actions.append(this.unlock, this.listen, this.hand, this.mic, this.micRetry, this.leaveStage, this.roomAction, this.retry, this.cancelJoin);
     panel.append(this.status, this.error, actions, this.playback);
     root.append(style, panel);
     this.render();
   }
 
-  /** The SDK instance; null before initialization or after element teardown, not a joined-state indicator. */
+  /** The SDK instance; null before initialization or after room/element teardown, not a joined-state indicator. */
   get client(): StageClient | null { return this.current; }
 
   /** Local listening preference; reflected as a boolean attribute and retained across rejoins. */
@@ -144,13 +152,13 @@ export class StageElement extends HTMLElement {
     this.setAttribute('playback-volume', String(value));
   }
 
-  connectedCallback(): void { this.rejoin(); }
+  connectedCallback(): void { if (this.leftRoom) this.render(); else this.rejoin(); }
   disconnectedCallback(): void { ++this.generation; void this.leave(); }
   attributeChangedCallback(name: string, previous: string | null, next: string | null): void {
     if (previous === next) return;
     if (name === 'playback-volume') { this.current?.setPlaybackVolume(this.playbackVolume); this.renderVolume(); return; }
     if (name === 'playback-muted') { this.current?.setPlaybackMuted(this.playbackMuted); this.render(); return; }
-    if (this.isConnected) this.rejoin();
+    if (this.isConnected) { if (this.leftRoom) this.render(); else this.rejoin(); }
   }
 
   private button(label: string, action: () => Promise<unknown> | void, className = ''): HTMLButtonElement {
@@ -184,6 +192,7 @@ export class StageElement extends HTMLElement {
 
   private rejoin(): void {
     const generation = ++this.generation;
+    this.leftRoom = false; this.roomExit = undefined;
     void this.leave().then(async () => {
       const room = this.getAttribute('room')?.trim(), name = this.getAttribute('name')?.trim();
       if (generation !== this.generation || !this.isConnected || !room || !name) { this.render(); return; }
@@ -266,6 +275,26 @@ export class StageElement extends HTMLElement {
           this.render();
         }
       }
+    });
+  }
+
+  private changeRoomPresence(): void {
+    if (!this.isConnected || this.roomExit) return;
+    if (this.leftRoom) {
+      if (this.getAttribute('room')?.trim() && this.getAttribute('name')?.trim()) this.rejoin();
+      return;
+    }
+    if (!this.current?.state || !this.current.me) return;
+    ++this.generation;
+    const exit = {};
+    this.leftRoom = true; this.roomExit = exit;
+    this.error.hidden = true;
+    // Retire the event lane before disconnect can synchronously invoke application callbacks.
+    void this.leave().catch(error => {
+      if (this.roomExit === exit) this.show(error);
+    }).finally(() => {
+      if (this.roomExit !== exit) return;
+      this.roomExit = undefined; this.render();
     });
   }
 
@@ -396,8 +425,14 @@ export class StageElement extends HTMLElement {
     } else if (this.joinPhase) {
       this.status.textContent = this.joinPhase === 'connecting' ? '連線中…' : '正在加入房間…';
     } else if (!client) {
-      this.status.textContent = this.getAttribute('room') && this.getAttribute('name') ? '' : '請設定 room 與 name 屬性。';
+      this.status.textContent = this.leftRoom ? '已離開房間。'
+        : this.getAttribute('room') && this.getAttribute('name') ? '' : '請設定 room 與 name 屬性。';
     }
+    this.roomAction.hidden = !me && !this.leftRoom;
+    this.roomAction.textContent = this.leftRoom ? '重新加入' : '離開房間';
+    this.roomAction.disabled = !this.isConnected || this.roomAction.hidden || Boolean(this.roomExit)
+      || (this.leftRoom && (!this.getAttribute('room')?.trim() || !this.getAttribute('name')?.trim()));
+    this.roomAction.setAttribute('aria-busy', String(Boolean(this.roomExit)));
     const reconnecting = client?.status === 'reconnecting';
     this.cancelJoin.hidden = !this.cancelInitial || !this.joinPhase || Boolean(state) || Boolean(reconnecting);
     this.cancelJoin.disabled = this.cancelJoin.hidden || this.pendingActions.has(this.cancelJoin);
