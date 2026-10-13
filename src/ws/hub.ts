@@ -299,6 +299,7 @@ export class StageHub {
     const { room } = rt;
     const now = this.now();
     let events: RoomEvent[];
+    let unchangedMic = false;
     switch (msg.type) {
       case 'room:close':
         if (pid !== room.controllerId) throw new StageError('forbidden', 'controller only');
@@ -327,15 +328,19 @@ export class StageHub {
         events = room.transfer(pid, msg.targetId);
         break;
       case 'mic:mute':
+        unchangedMic = room.get(pid)?.selfMuted === true;
         events = room.mute(pid);
         break;
       case 'mic:unmute':
+        unchangedMic = room.get(pid)?.selfMuted === false;
         events = room.unmute(pid);
         break;
       case 'mic:force-mute':
+        unchangedMic = room.get(msg.targetId)?.forceMuted === true;
         events = room.forceMute(pid, msg.targetId);
         break;
       case 'mic:force-unmute':
+        unchangedMic = room.get(msg.targetId)?.forceMuted === false;
         events = room.forceUnmute(pid, msg.targetId);
         break;
       case 'participant:kick':
@@ -345,6 +350,7 @@ export class StageHub {
         this.deps.log.info('participant kicked', { roomId: room.roomId, byId: pid, participantId: msg.targetId });
         break;
       case 'mic:gain':
+        unchangedMic = room.get(msg.targetId)?.gainDb === msg.gainDb;
         room.setGain(pid, msg.targetId, msg.gainDb);
         if (rt.publishers.has(msg.targetId)) rt.mixer.setGain(msg.targetId, msg.gainDb);
         events = [];
@@ -363,10 +369,12 @@ export class StageHub {
         throw new StageError('bad_request', `unroutable ${msg.type}`);
     }
     const handOnly = msg.type === 'hand:raise' || msg.type === 'hand:withdraw';
-    this.apply(rt, events, handOnly);
+    // Still run the Room method above: identical values do not bypass permission/invariant checks.
+    // A true no-op needs only the requester refresh and must not consume a pending room broadcast.
+    if (!unchangedMic) this.apply(rt, events, handOnly);
     // Preserve the requester's state-before-ACK contract without sending N full snapshots
     // for every hand in a crowd. Other clients receive ordered events, then one fresh snapshot.
-    if (handOnly) session.send({ type: 'room:state', ...room.snapshot(pid) });
+    if (handOnly || unchangedMic) session.send({ type: 'room:state', ...room.snapshot(pid) });
     session.send({ type: 'ok', requestId: msg.requestId });
     if (msg.type === 'control:transfer') this.deps.log.info('control transferred', { roomId: room.roomId, fromId: pid, toId: msg.targetId });
   }

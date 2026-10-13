@@ -278,6 +278,8 @@ npm audit
 
 ### 觀眾計數 microbenchmark
 
+重複送出已生效的個人靜音／取消靜音、強制靜音／解除或相同 gain 時，Hub 仍執行原有權限與模型檢查，但不把完全未變的狀態再次廣播全房；發起者照常在 ACK 前收到自己的個人化快照。判斷依 selfMuted／forceMuted／gainDb 原值，不以「沒有 mic event」推斷，因此有效靜音不變、但底層靜音旗標改變時仍完整廣播。既有待送 presence／舉手快照保留，真正變動與 mixer gain setter 的執行方式不變。
+
 `node scripts/bench-audience-count.ts` 比較舊逐人掃描與目前觀眾計數 getter：以 1／9／301 人的合法房間、主控在台／離台及零／滿額發言者，warm-up 後交錯執行固定次數並核對 checksum。目前計數從 participant／speaker 集合大小取得，不掃描參與者、不新增快取狀態。這只是 getter 的 JIT microbenchmark，不代表整個 snapshot／廣播／請求的延遲；主控名單、invariant 掃描、序列化與 fan-out 仍照常執行。
 
 ## 授權

@@ -569,3 +569,6 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 
 
 128. **完整範例主動離房的初次等待回報（2026-10-13）：** actual SDK／whole sample fake-socket probe 證實 create 與 join 在 room:state 早於 ACK 時，使用者可正常按離開房間，但 SDK disconnect 拒絕尚未完成的初次請求後，舊 runLanding catch 又顯示「連線已中斷。」；沒有 SDK error event。只在明確離房 action 呼叫 disconnect 前退休當前 landingEntry 的 feedback，沿用既有 cancelled 判斷阻止舊錯誤及 create continuation；不提早釋放 shared busy lock，不改 SDK／伺服器操作。普通建立／加入失敗、關房／被踢的既有診斷及其他 error listener 保留。測試驗證 state-before-ACK、主動離房、下一次失敗／重試與晚到 settlement；fake DOM／socket／media 不代表真實瀏覽器音訊驗收。
+
+
+129. **重複麥克風控制的無變動快照（2026-10-13）：** bounded actual Hub／MockMedia probe 在 301 席、20 人舉手時，重複已生效的 mic mute／force mute／相同 gain 仍各產生 301 份、約 1.4 MB 的相同 room:state。只針對五種 mic command 比較將被設定的 selfMuted／forceMuted／gainDb 原值，仍執行各 Room method 既有的權限、台位、強制鎖與 invariant 檢查（setGain 本來沒有額外 invariant 掃描）；gain mixer setter 保留。確定底層值未變才略過全房 apply，發起者仍收到個人化 snapshot 然後 ACK，已有 coalesced state timer 不取消、不重排。空 events 不等於 no-op：selfMuted 在 force lock 下改變及 self mute 下 forceMuted 改變均走原完整廣播。真正變動、錯誤、stale session admission、私人欄位與媒體政策不變。同一 301 席／20 人舉手 fixture 的重複 mute：baseline 301 份／1,363,087 JSON UTF-8 bytes，候選 1 份／60,617 bytes，省去 1,302,470 bytes 的重複快照；僅計 snapshot payload，不含 WebSocket framing／ACK。測試以 bounded mock recipients 計數及序列化位元組比較，不宣稱實際網路、音訊容量、CPU 或延遲改善。
