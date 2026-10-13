@@ -178,7 +178,7 @@ JSON frame，型別定義在 [`shared/protocol.ts`](shared/protocol.ts)。每個
 | `room:created`、`room:closed` | 開房（只有建立者收到 code）、關房（全員離房）；伺服器停止時 `room:closed` 帶 `reason: 'shutdown'`，連線隨後以 close code 1001 關閉 |
 | `kicked` | `{roomId}`：你被主控踢出，伺服器隨即以 close code 4001 關閉連線 |
 | `rtc:config` | 瀏覽器用的 ICE servers（設定 `rtc.turn` 時含該參與者專屬的短期 TURN 憑證） |
-| `speaking` | `{participantIds}`：目前在混音中有聲的參與者（VAD＋釋放延遲），集合變動時才送 |
+| `speaking` | `{participantIds}`：目前在混音中有聲的參與者（VAD＋釋放延遲）；成功建立／加入／恢復連線時，在房間快照之後、ACK 之前送目前集合（可為空），之後只在集合變動時廣播 |
 | `quality` | `{participants: [{participantId, uplinkLossPercent?, downlinkLossPercent?, rttMs?}]}`：依 `qualityIntervalMs` 回報可取得統計的上行者連線品質（上行掉包為該區間伺服器實際遺失比例，下行掉包取自對方 RTCP 接收報告），只送給主控與台上者 |
 | `role:update`、`hand:raise`／`hand:withdraw`、`stage:invite`、`stage:joined`、`stage:left`、`control:transferred`、`mic:muted`／`mic:unmuted` | 事件廣播 |
 | `rtc:answer`、`rtc:ice` | 伺服器端信令 |

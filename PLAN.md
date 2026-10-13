@@ -638,3 +638,6 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 
 
 151. **SDK disconnect 文件的席位寬限契約校正（2026-10-13）：** bounded整合文件／built artifacts審查發現client README舊連線段落聲稱disconnect立即讓位，漏掉Hub一直存在的controller例外。client README與root README同時明示此例外，只改文件：本機完成不等於server收到close，收到正常1000後noncontroller不進participant grace；controller仍照controllerGraceMs等待再沿原繼任／關房政策處理。pagehide4002也明示依角色寬限設定，不保證無條件回座。既有Hub departure／kick／close三個focused tests與額外in-memory角色probe確認：kick先移除／解除binding，不因後續detach復活grace；roomclose清理room／media／timers。另以NodeNext與Bundler消費built package declarations、核對widget SDK identity／aliases與八個compressed artifact byte roundtrip均通過，未發現其他具體mismatch。沒有runtime／SDK API／server policy或nativebrowser／media驗收變更。
+
+
+152. **新加入／恢復信令連線的說話指示基準（2026-10-13）：** actual Hub、RoomMixer 與 public SDK 的 bounded in-memory socket probe 顯示：新觀眾在持續說話期間加入，25 個 active PCM tick 仍收不到 speaking；原觀眾斷線時漏掉釋放至空集合，恢復同一身分後25個silent tick仍保留舊指示。Hub 每房只保留一份獨立複製的最新 mixer full set，在原變動廣播前更新；成功create／join／resume於room state之後、ACK之前針對該session送出目前集合，空集合也送，既有觀眾不因加入而額外收到speaking。送出時以目前participant、onStage、self/force mute與publisher身分過濾，保留grace期間仍publish的disconnected席位，不把connected誤當media可用性；每次snapshot獨立陣列，closed callback不再更新，關房清空。沒有新增timer、週期廣播、protocol欄位或SDK／mixer／transport行為。驗證以受控PCM、真實model/mixer/SDK與mock transport為界，不代表native browser、ICE、麥克風或實際可聽音訊驗收。

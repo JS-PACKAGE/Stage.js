@@ -62,6 +62,8 @@ interface RoomRuntime {
   readonly sessions: Map<string, Session>;
   /** Token changes when a participant stops and resumes publishing. */
   readonly publishers: Map<string, symbol>;
+  /** Latest full mixer set, owned by this room rather than any listener's array. */
+  speakingIds: readonly string[];
   graceTimer: unknown;
   /** Seat-hold timers of disconnected non-controllers (`rooms.participantGraceMs`). */
   readonly graceTimers: Map<string, unknown>;
@@ -228,6 +230,7 @@ export class StageHub {
       mixer,
       sessions: new Map([[controller.participantId, session]]),
       publishers: new Map(),
+      speakingIds: [],
       graceTimer: undefined,
       graceTimers: new Map(),
       stateTimer: undefined,
@@ -240,14 +243,19 @@ export class StageHub {
     };
     this.rooms.set(roomId, rt);
     transport.setMixedStream(roomId, mixer);
-    // Fired from the mixer clock, outside the room queue: read-only fan-out, so no queueing needed.
-    mixer.onSpeaking((participantIds) => { if (!rt.closed) this.broadcast(rt, { type: 'speaking', participantIds }); });
+    // Fired from the mixer clock: update the room-local baseline and fan out without queueing.
+    mixer.onSpeaking((participantIds) => {
+      if (rt.closed) return;
+      rt.speakingIds = [...participantIds];
+      this.broadcast(rt, { type: 'speaking', participantIds });
+    });
     this.bindings.set(session, { roomId, participantId: controller.participantId });
     log.info('room created', { roomId, participantId: controller.participantId, codeRequired });
 
     session.send(codeRequired ? { type: 'room:created', roomId, code } : { type: 'room:created', roomId });
     session.send({ type: 'rtc:config', iceServers: iceServersFor(config.rtc, controller.participantId, this.now()) });
     session.send({ type: 'room:state', ...room.snapshot(controller.participantId) });
+    this.sendSpeaking(rt, session);
     session.send({ type: 'ok', requestId: msg.requestId });
   }
 
@@ -291,6 +299,7 @@ export class StageHub {
     session.send({ type: 'rtc:config', iceServers: iceServersFor(this.deps.config.rtc, participantId, this.now()) });
     session.send({ type: 'room:state', ...room.snapshot(participantId) });
     this.presenceChanged(rt);
+    this.sendSpeaking(rt, session);
     session.send({ type: 'ok', requestId: msg.requestId });
   }
 
@@ -632,6 +641,15 @@ export class StageHub {
     for (const s of rt.sessions.values()) s.send(msg, encoded);
   }
 
+  /** A new or resumed reader needs a baseline even if the mixer set never changes again. */
+  private sendSpeaking(rt: RoomRuntime, session: Session): void {
+    const participantIds = rt.speakingIds.filter((id) => {
+      const participant = rt.room.get(id);
+      return participant?.onStage && !participant.selfMuted && !participant.forceMuted && rt.publishers.has(id);
+    });
+    session.send({ type: 'speaking', participantIds });
+  }
+
   /**
    * An audience member came or went: everyone else's snapshot changes only in `audienceCount` (and
    * the controller's audience list). A crowd joining or leaving at once would otherwise cost
@@ -690,6 +708,7 @@ export class StageHub {
     }
     rt.sessions.clear();
     rt.publishers.clear();
+    rt.speakingIds = [];
     this.deps.transport.setMixedStream(roomId, null);
     this.deps.transport.closeRoom(roomId);
     rt.mixer.stop();

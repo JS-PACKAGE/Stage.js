@@ -15,7 +15,8 @@
  *   - `room:state` carries `onStage`/`forceMuted` per participant, `audienceCount`,
  *     and controller-only fields (`code`, `audience`), recipient-only `resumeToken`.
  *   - S→C `speaking`  : participants currently audible in the mix (voice activity with
- *     a release hold); sent only when the set changes.
+ *     a release hold); seeded after successful create/join state and before ACK (including
+ *     resume and empty sets), then broadcast only when the set changes.
  *   - C→S `participant:kick` (controller): removes a participant from the room; the target
  *     gets S→C `kicked` and its connection is closed (it must not auto-rejoin). Kick, then
  *     `room:rotate-code`, to keep them out.
