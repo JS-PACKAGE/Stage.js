@@ -584,3 +584,6 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 
 
 133. **同步 callback 中的靜音音量讀值（2026-10-13）：** actual SDK／fake analyser probe 重現初次已靜音擷取的 micready callback，或既有發言者收到靜音的 state callback，me.muted 已 true 但實際 track.enabled 尚未同步，舊 micLevel 仍回 0.25，違反文件的 muted→0 契約。getter 現先檢查目前 me.onStage／muted，再保留實際 track.enabled gate；不在未上台／靜音時讀 analyser。沒有重排 event、capture、replaceTrack 或伺服器轉送政策，unmuted 但尚未 enable 的音軌仍回 0，獨立預覽 level 與 enableMicMeter:false 契約不變。驗證為公開同步 callbacks 配合受控媒體，僅證明本機 RMS getter，不宣稱曾有或修復網路音訊外洩。
+
+
+134. **重複麥克風控制的原生連線契約驗證（2026-10-13）：** 決策 129 已用 actual Hub／mock recipients 驗證 requester-only no-op，但仍缺 SDK event 與真正序列化後的 ACK 順序覆蓋。新增 test-only 三個公開 StageClient／native loopback WebSocket 整合，檢查五個 command 的 requester state→ACK→Promise、其他連線無多餘 state、hidden self／force flag 變動仍廣播、私人欄位與 gain 正規化、peer／mixer 身分不變。觀察者負向斷言在 requester ACK 後逐連線使用唯一 ping／pong 屏障，避免 sleep 掩蓋晚到訊息。既有子程序 fixture 的 opt-in 控制 ACK 暫存用來驗證逾時後容量釋放、舊 ACK 不解鎖新請求與正常錯誤恢復；所有等待與 owned-child teardown 有期限。不改 production、SDK／Hub 政策或 media implementation；使用 fake browser media 與 MockMediaTransport，不宣稱真實 ICE、硬體音訊、吞吐或延遲改善。

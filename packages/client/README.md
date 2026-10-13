@@ -152,3 +152,5 @@ WebSocket 建構失敗、hello 逾時或尚未進房的連線關閉，也會釋�
 ## 信令整合測試
 
 `npm test -w packages/client` 也會啟動獨立 Node 子程序的 loopback 伺服器，讓實際 StageClient 經真實 WebSocket 完成建立／加入房間、舉手核准、個人／主控靜音、下台、同席位與同媒體 peer 自動恢復、被踢與伺服器關閉。同一流程會分別使用預設 unlimited 與 maxPendingControlRequests=1，並檢查額外控制操作的本機拒絕、名額釋放與信令仍可完成；cap=1 的 child fixture 刻意延後初次 join ACK，確認名額仍占用時 SDP 已完成，再釋放 ACK。測試檢查個人化快照、ACK 錯誤、收聽偏好保留，以及終止後不重連；伺服器使用 MockMediaTransport，瀏覽器 PeerConnection／音軌／AudioContext 為 fake，不代表實際 ICE、音訊品質或瀏覽器權限驗證。需允許本機 loopback listener 與 Node 子程序；不使用外部服務。
+
+`micNoopIntegration.test.ts` 另外以主控、發言者、觀眾三個實際 SDK 經 native WebSocket，檢查五種重複麥克風控制只刷新發起者的個人化 state，順序仍為 state → ACK → 公開 Promise 完成；底層 self／force mute 真正改變時仍廣播。觀察者的零額外快照以各自連線的 ping／pong 排序屏障確認，不以短暫 sleep 當作沒有訊息的證據。測試也涵蓋私人欄位、gain 正規化、既有 peer／mixer 身分、權限拒絕後恢復，以及延後 ACK 的逾時、名額釋放和舊 ACK 隔離；媒體仍為 fake／MockMediaTransport，不是實際音訊或效能測量。
