@@ -123,6 +123,7 @@ function signalingUrl(host: URL, value: string): URL {
 join.onsubmit = (event) => {
   event.preventDefault();
   const hostValue = input('host').value, pathValue = input('ws-path').value;
+  const joinOptions = { roomId: input('room').value.trim(), code: input('code').value.trim() || undefined, name: input('name').value.trim() };
   playbackGeneration++; scheduleHandCooldown(0);
   const generation = ++entryGeneration, feedback = feedbackRevision;
   let progress = true, receivedState = false, cancelledEntry = false;
@@ -201,7 +202,7 @@ join.onsubmit = (event) => {
       await current.connect();
       if (generation !== entryGeneration) return;
       showProgress('加入房間中…');
-      await current.join({ roomId: input('room').value.trim(), code: input('code').value.trim() || undefined, name: input('name').value.trim() });
+      await current.join(joinOptions);
       showProgress('加入請求已完成，尚未收到房間狀態。');
     } catch (error) { if (generation === entryGeneration) report(error); }
     finally {

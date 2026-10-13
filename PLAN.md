@@ -629,3 +629,6 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 
 
 148. **已套用 overlay 與房間重用 key 分離（2026-10-13）：** 現有speaking／quality事件已逐列就地更新，但完整combined signature仍停在上次room render，因此下一個完全相同的新快照又重建。先以scratch prototype跑90個既有回歸，再把structural[state,roomCode,status]與rendered speaking／quality signature分開；每個overlay handler只在自己的DOM更新迴圈完成後記錄相應key，speaking採實際套用的去重detail IDs，不盲信可被呼叫者改動的SDK Set。room render仍比較當前三種輸入，故漏事件／共用quality object mutation／另一種overlay偷偷改動仍造成cache miss，dirty slider也保留原authoritative重設。landing清除三key，角色／身分／狀態／code變更與pending／冷卻／notice／filter更新順序不變。100席×100個speaking+quality後相同snapshot的bounded假DOM工作量，原100次重建／75,701個新節點降成0次重建／1個warning badge；新增每event小型overlay序列化，沒有把full room序列化移入overlay事件，也無unbounded cache。只主張合成操作數，不主張瀏覽器CPU／layout／memory／音訊提升；不為無實際callback邊界的DOM monkeypatch重入加入production token。
+
+
+149. **最小嵌入範例的整筆送出快照（2026-10-13）：** whole-module bounded probe在previous disconnect、module import與connect三個等待點修改五欄，原實作仍使用已擷取的舊host/path，卻在join時讀入新room/code/name。把join options與既有host/path在同步submit起點一起擷取；之後current.join只使用該attempt物件，保留原roomId/name/code trim與空白code undefined，不增加localStorage、diagnostic或URL欄位。輸入仍可編輯供下一次明確送出，既有取消／generation／terminal／state-before-ACK流程不變，不自動重試。這延伸原本host/path-only快照契約，修正無意的跨attempt payload混用；所選主機模組本來就在頁面執行且可讀DOM，不能把它宣稱為隔離惡意host的安全邊界。回歸以whole embed及actual SDK fake socket確認送出目的地與payload，只有syntheticcode、不接觸實際憑證或外部主機。
