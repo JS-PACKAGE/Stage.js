@@ -176,6 +176,7 @@ export class StageClient extends EventTarget {
   private micFailed = false;
   private inputDeviceId = '';
   private micMeter: MicTest | null = null;
+  private readonly pendingMicReplacements = new Set<() => void>();
   private micTests = new Set<MicTest>();
   private readonly micTestRequests = new Set<AbortController>();
   private testRevision = 0;
@@ -272,6 +273,14 @@ export class StageClient extends EventTarget {
       const captureRevision = this.captureRevision;
       const stream = await this.acquireMic(deviceId, generation);
       let meter: MicTest | null = null;
+      let stopped = false;
+      const dispose = () => {
+        this.pendingMicReplacements.delete(dispose);
+        meter?.stop();
+        meter = null;
+        if (!stopped) { stopped = true; stream.getTracks().forEach((track) => { track.enabled = false; track.stop(); }); }
+      };
+      this.pendingMicReplacements.add(dispose);
       try {
         if (captureRevision !== this.captureRevision) throw new StageError('disconnected', '麥克風要求已取消。');
         if (pc !== this.pc || !this.me?.onStage) return;
@@ -279,17 +288,23 @@ export class StageClient extends EventTarget {
         if (!track) throw new StageError('media_error', '所選裝置沒有音訊軌道。');
         track.enabled = !this.me.muted;
         meter = createMicMeter(stream);
+        if (stopped || pc !== this.pc || !this.me?.onStage || captureRevision !== this.captureRevision) return;
         await transceiver.sender.replaceTrack(track);
-        if (pc !== this.pc || !this.me?.onStage || captureRevision !== this.captureRevision) return;
+        if (stopped || pc !== this.pc || !this.me?.onStage || captureRevision !== this.captureRevision) return;
         track.enabled = !this.me.muted;
         this.micMeter?.stop();
         this.mic?.getTracks().forEach((oldTrack) => oldTrack.stop());
         this.mic = stream;
         this.micMeter = meter;
+        // Ownership moved to the installed microphone before application callbacks run.
+        this.pendingMicReplacements.delete(dispose);
+        meter = null;
+        stopped = true;
         this.inputDeviceId = deviceId;
         this.emit('micready', undefined);
       } finally {
-        if (this.mic !== stream) { meter?.stop(); stream.getTracks().forEach((track) => track.stop()); }
+        this.pendingMicReplacements.delete(dispose);
+        if (this.mic !== stream) dispose();
       }
     });
     this.mediaTask = task.catch(() => {});
@@ -637,7 +652,7 @@ export class StageClient extends EventTarget {
         const previousId = this.snapshot?.me.participantId;
         if (previousId !== state.me.participantId) this.lastHandAt = -Infinity;
         this.snapshot = state;
-        if (!state.me.onStage) this.micFailed = false;
+        if (!state.me.onStage) { this.micFailed = false; this.stopRoomMic(); }
         if (this.session) {
           this.session.resumeToken = state.resumeToken;
           this.refreshSessionCode(this.session, state);
@@ -648,7 +663,7 @@ export class StageClient extends EventTarget {
         if (this.snapshot !== state) return;
         this.emit('state', state);
         if (this.snapshot !== state) return;
-        for (const track of this.mic?.getAudioTracks() ?? []) track.enabled = !state.me.muted;
+        for (const track of this.mic?.getAudioTracks() ?? []) track.enabled = state.me.onStage && !state.me.muted;
         // First snapshot of a (new) identity → fresh PeerConnection. A resumed seat keeps the one that
         // survived the ws drop unless the network side died meanwhile.
         const pcState = this.pc?.connectionState;
@@ -774,11 +789,17 @@ export class StageClient extends EventTarget {
     };
     // Wait for the personalised snapshot before choosing the publishing direction.
   }
+  private stopRoomMic(): void {
+    ++this.captureRevision;
+    this.micRequest?.abort(new StageError('disconnected', '麥克風要求已取消。'));
+    this.micMeter?.stop();
+    this.micMeter = null;
+    this.mic?.getTracks().forEach((track) => { track.enabled = false; track.stop(); });
+    this.mic = null;
+    for (const dispose of this.pendingMicReplacements) dispose();
+  }
   private syncMedia(): void {
-    if (!this.me?.onStage) {
-      ++this.captureRevision;
-      this.micRequest?.abort(new StageError('disconnected', '已離開舞台，麥克風要求已取消。'));
-    }
+    if (!this.me?.onStage) this.stopRoomMic();
     const generation = this.mediaAbort;
     const revision = ++this.mediaRevision;
     this.mediaTask = this.mediaTask.catch(() => {}).then(async () => {
@@ -792,8 +813,12 @@ export class StageClient extends EventTarget {
           const stream = await this.acquireMic(this.inputDeviceId, generation);
           if (pc !== this.pc || !this.me?.onStage || captureRevision !== this.captureRevision) { stream.getTracks().forEach((track) => track.stop()); return; }
           this.mic = stream;
-          try { this.micMeter = createMicMeter(stream); }
-          catch (error) { this.mic = null; stream.getTracks().forEach((track) => track.stop()); throw error; }
+          try {
+            const meter = createMicMeter(stream);
+            if (this.mic !== stream || pc !== this.pc || captureRevision !== this.captureRevision) { meter.stop(); return; }
+            this.micMeter = meter;
+          }
+          catch (error) { if (this.mic === stream) { this.mic = null; stream.getTracks().forEach((track) => track.stop()); } throw error; }
           this.emit('micready', undefined);
         } catch (error) {
           if (pc !== this.pc || !this.me?.onStage || captureRevision !== this.captureRevision || (error instanceof StageError && error.code === 'disconnected')) return;
@@ -807,13 +832,13 @@ export class StageClient extends EventTarget {
       if (pc !== this.pc) return;
       const current = this.me;
       if (!current) return;
-      if (!current.onStage) { this.micMeter?.stop(); this.micMeter = null; this.mic?.getTracks().forEach((track) => track.stop()); this.mic = null; }
+      if (!current.onStage) this.stopRoomMic();
       const track = this.mic?.getAudioTracks()[0] ?? null;
       if (track) track.enabled = !current.muted;
       const direction = current.onStage && track ? 'sendrecv' : 'recvonly';
       const changed = transceiver.direction !== direction || transceiver.sender.track !== track;
       await transceiver.sender.replaceTrack(track);
-      if (pc !== this.pc) return;
+      if (pc !== this.pc || revision !== this.mediaRevision) return;
       transceiver.direction = direction;
       if (changed || !pc.localDescription || pc.signalingState !== 'stable') this.negotiate();
     }).catch((error: unknown) => { if (generation === this.mediaAbort) this.report(error); });
@@ -874,10 +899,7 @@ export class StageClient extends EventTarget {
     this.pc = null;
     this.pcParticipantId = null;
     this.transceiver = null;
-    this.micMeter?.stop();
-    this.micMeter = null;
-    this.mic?.getTracks().forEach((track) => track.stop());
-    this.mic = null;
+    this.stopRoomMic();
     this.micFailed = false;
     this.audio.pause();
     this.audio.srcObject = null;

@@ -154,7 +154,7 @@ for (const { capacity: maxPendingControlRequests, reentrant, rotate } of scenari
     await assert.rejects(guest.unmute(), (error: unknown) => error instanceof StageError && error.code === 'forbidden');
     await host.forceUnmute(id); await guest.leaveStage();
     await until(() => !guest.me!.onStage && guest['mic'] === null, 'stage leave');
-    await until(() => guest['pc']?.remoteDescription != null && !guest['negotiating'], 'initial negotiation completes');
+    await until(() => guest['transceiver']?.direction === 'recvonly' && guest['transceiver'].sender.track === null && guest['pc']?.remoteDescription != null && !guest['negotiating'], 'stage-leave receive-only negotiation completes');
     const before = await request('inspect');
     const peer = before.peers.find(peer => peer.participantId === id); assert.ok(peer);
     const pc = guest['pc']; const oldSocket = guest['socket'] as unknown as Socket;

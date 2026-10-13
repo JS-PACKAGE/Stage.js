@@ -1,0 +1,433 @@
+import assert from 'node:assert/strict';
+import { it, type TestContext } from 'node:test';
+import { StageClient } from '../src/index.ts';
+import type { ClientMessage, RoomStatePayload, ServerMessage } from '../../../shared/protocol.ts';
+
+function deferred<T>() {
+  let resolve!: (value: T) => void, reject!: (error: unknown) => void;
+  const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; });
+  return { promise, resolve, reject };
+}
+const flush = async () => { for (let n = 0; n < 48; n++) await Promise.resolve(); };
+function stream() {
+  const track = { enabled: true, readyState: 'live', stops: 0,
+    stop() { this.stops++; this.readyState = 'ended'; } };
+  return { track, value: { getTracks: () => [track], getAudioTracks: () => [track] } as unknown as MediaStream };
+}
+function state(onStage: boolean, muted = false): RoomStatePayload {
+  return { roomId: 'room', name: 'Room', controllerId: 'host', speakers: [], hands: [], audienceCount: 1,
+    codeRequired: false, limits: { maxSpeakers: 8, maxAudience: 300 }, status: 'live', resumeToken: 'test-resume-token',
+    me: { participantId: 'guest', name: 'Guest', role: onStage ? 'speaker' : 'audience', onStage,
+      handRaised: false, muted, forceMuted: false, gainDb: 0, connected: true, joinedAt: 0 } };
+}
+
+class Socket {
+  static OPEN = 1;
+  static instances: Socket[] = [];
+  readyState = Socket.OPEN;
+  onStage = false;
+  readonly sent: ClientMessage[] = [];
+  onmessage: ((event: { data: string }) => void) | null = null;
+  onclose: (() => void) | null = null;
+  constructor() {
+    Socket.instances.push(this);
+    queueMicrotask(() => this.deliver({ type: 'hello', protocol: 1, serverVersion: 'test',
+      limits: { controlPerSecond: 2000, icePerSecond: 2000, handRaiseIntervalMs: 10000 } }));
+  }
+  deliver(message: ServerMessage) {
+    if (message.type === 'room:state') this.onStage = message.me.onStage;
+    this.onmessage?.({ data: JSON.stringify(message) });
+  }
+  send(data: string) {
+    assert.equal(this.readyState, Socket.OPEN);
+    const message = JSON.parse(data) as ClientMessage;
+    this.sent.push(message);
+    queueMicrotask(() => {
+      if (message.type === 'join') this.deliver({ type: 'room:state', ...state(false) });
+      if (message.type === 'stage:leave') {
+        this.deliver({ type: 'stage:left', participantId: 'guest', role: 'audience', reason: 'leave' });
+        // The real room model clears self/forced mute when a participant leaves the stage.
+        this.deliver({ type: 'room:state', ...state(false) });
+      }
+      if (message.type === 'rtc:offer') {
+        // Match the hub's fail-closed policy instead of accepting a stale publishing offer.
+        if (!this.onStage && message.payload.sdp.includes('a=sendrecv')) {
+          this.deliver({ type: 'error', requestId: message.requestId, code: 'forbidden', message: '禁止此操作。' });
+          return;
+        }
+        this.deliver({ type: 'rtc:answer', fromId: 'server', payload: { type: 'answer', sdp: 'v=0\r\n' } });
+      }
+      if ('requestId' in message) this.deliver({ type: 'ok', requestId: message.requestId });
+    });
+  }
+  close() { this.readyState = 3; this.onclose?.(); }
+}
+
+type ReplacementGate = ReturnType<typeof deferred<void>> & { entered: boolean };
+class Peer {
+  static instances: Peer[] = [];
+  connectionState: RTCPeerConnectionState = 'connected';
+  signalingState: RTCSignalingState = 'stable';
+  localDescription: RTCSessionDescriptionInit | null = null;
+  remoteDescription: RTCSessionDescriptionInit | null = null;
+  readonly replacements: (MediaStreamTrack | null)[] = [];
+  readonly offers: { direction: string; onStage: boolean }[] = [];
+  readonly gates: ReplacementGate[] = [];
+  private readonly pendingGates: ReplacementGate[] = [];
+  readonly transceiver = { direction: 'recvonly', sender: { track: null as MediaStreamTrack | null,
+    replaceTrack: async (track: MediaStreamTrack | null) => {
+      this.replacements.push(track);
+      const gate = this.pendingGates.shift();
+      if (gate) { gate.entered = true; await gate.promise; }
+      this.transceiver.sender.track = track;
+    } } };
+  constructor() { Peer.instances.push(this); }
+  holdNextReplacement(): ReplacementGate {
+    const gate = { ...deferred<void>(), entered: false };
+    this.gates.push(gate); this.pendingGates.push(gate); return gate;
+  }
+  addTransceiver() { return this.transceiver; }
+  async createOffer(): Promise<RTCSessionDescriptionInit> {
+    const direction = this.transceiver.direction;
+    this.offers.push({ direction, onStage: Socket.instances.at(-1)!.onStage });
+    return { type: 'offer', sdp: `v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=${direction}\r\n` };
+  }
+  async setLocalDescription(description: RTCSessionDescriptionInit) {
+    this.localDescription = description; this.signalingState = 'have-local-offer';
+  }
+  async setRemoteDescription(description: RTCSessionDescriptionInit) {
+    this.remoteDescription = description; this.signalingState = 'stable';
+  }
+  async addIceCandidate() {}
+  close() { this.connectionState = 'closed'; }
+}
+class Context {
+  static instances: Context[] = [];
+  closes = 0;
+  constructor() { Context.instances.push(this); }
+  createMediaStreamSource() { return { connect() {}, disconnect() {} }; }
+  createAnalyser() { return { fftSize: 2048, disconnect() {}, getFloatTimeDomainData() {} }; }
+  async resume() {}
+  async close() { this.closes++; }
+}
+
+/** Real SDK/public operations, fake socket and browser media; no native capture or network. */
+function setup(t: TestContext, options: { holdCapture?: boolean } = {}) {
+  Socket.instances = []; Peer.instances = []; Context.instances = [];
+  const sources: ReturnType<typeof stream>[] = [];
+  const captureRequests: ReturnType<typeof deferred<MediaStream>>[] = [];
+  const originals = new Map(['window', 'WebSocket', 'RTCPeerConnection', 'AudioContext', 'navigator']
+    .map(name => [name, Object.getOwnPropertyDescriptor(globalThis, name)]));
+  for (const [name, value] of Object.entries({ window: new EventTarget(), WebSocket: Socket,
+    RTCPeerConnection: Peer, AudioContext: Context,
+    navigator: { mediaDevices: { getUserMedia: async () => {
+      if (options.holdCapture) { const request = deferred<MediaStream>(); captureRequests.push(request); return request.promise; }
+      const source = stream(); sources.push(source); return source.value;
+    } } } })) {
+    Object.defineProperty(globalThis, name, { configurable: true, value });
+  }
+  let now = 1000;
+  t.mock.method(performance, 'now', () => now);
+  t.mock.timers.enable({ apis: ['setTimeout', 'setInterval'] });
+  const tick = async (ms = 1) => { now += ms; t.mock.timers.tick(ms); await flush(); };
+  async function until(predicate: () => boolean, label: string) {
+    for (let n = 0; n < 40; n++) { if (predicate()) return; await tick(); }
+    assert.ok(predicate(), `bounded fake-time wait: ${label}`);
+  }
+  async function complete<T>(promise: Promise<T>, label: string): Promise<T> {
+    let settled = false;
+    void promise.then(() => { settled = true; }, () => { settled = true; });
+    await until(() => settled, label); return promise;
+  }
+  const audio = { volume: 1, muted: false, pause() {}, srcObject: null } as unknown as HTMLAudioElement;
+  const client = new StageClient({ url: 'ws://localhost/ws', audioElement: audio, requestTimeoutMs: 1000 });
+  const errors: string[] = [], micErrors: unknown[] = [];
+  let micReady = 0;
+  client.on('error', event => errors.push(event.detail.code));
+  client.on('micerror', event => micErrors.push(event.detail));
+  client.on('micready', () => { micReady++; });
+  t.after(async () => {
+    await client.disconnect();
+    for (const peer of Peer.instances) for (const gate of peer.gates) gate.resolve();
+    await flush();
+    for (const [name, descriptor] of originals) {
+      if (descriptor) Object.defineProperty(globalThis, name, descriptor);
+      else Reflect.deleteProperty(globalThis, name);
+    }
+  });
+  async function join() {
+    await complete(client.join({ roomId: 'room', name: 'Guest' }), 'public join');
+    const socket = Socket.instances.at(-1)!, peer = Peer.instances.at(-1)!;
+    await until(() => peer.remoteDescription !== null && !client['negotiating'], 'initial audience negotiation');
+    return { socket, peer };
+  }
+  async function promote(socket: Socket, peer: Peer, muted = false) {
+    socket.deliver({ type: 'room:state', ...state(true, muted) });
+    await until(() => peer.transceiver.direction === 'sendrecv' && peer.signalingState === 'stable'
+      && peer.transceiver.sender.track !== null && !client['negotiating'], 'speaker capture and negotiation');
+  }
+  return { client, sources, captureRequests, errors, micErrors, micReady: () => micReady, tick, until, complete, join, promote };
+}
+
+for (const muted of [false, true]) it(`stops installed and pending replacement capture immediately on stage exit (muted=${muted})`, async t => {
+  const h = setup(t), { socket, peer } = await h.join();
+  await h.promote(socket, peer, muted);
+  const original = h.sources[0]!;
+  assert.equal(original.track.enabled, !muted);
+  const gate = peer.holdNextReplacement();
+  let changed = false;
+  const change = h.client.setInputDevice('candidate').then(() => { changed = true; });
+  void change.catch(() => {});
+  await h.until(() => gate.entered, 'device replacement entered');
+  const candidate = h.sources[1]!;
+  assert.equal(candidate.track.enabled, !muted);
+  await h.complete(h.client.leaveStage(), 'public leaveStage acknowledgement');
+  assert.equal(h.client.me!.onStage, false);
+  assert.equal(changed, false, 'the browser replacement itself is still pending');
+  assert.equal(original.track.readyState, 'ended', 'installed capture must not wait for browser replacement');
+  assert.equal(candidate.track.readyState, 'ended', 'pending candidate capture must stop on stage exit too');
+  assert.deepEqual(Context.instances.map(context => context.closes), [1, 1]);
+  assert.equal(Peer.instances.length, 1, 'stage exit retains the receiving peer');
+  assert.notEqual(peer.connectionState, 'closed');
+  gate.resolve(); await h.complete(change, 'retired device replacement');
+  await h.until(() => peer.transceiver.direction === 'recvonly' && !h.client['negotiating'], 'receive-only cleanup');
+  assert.equal(peer.transceiver.sender.track, null);
+  assert.equal(h.micReady(), 1, 'the retired candidate is never installed');
+  assert.equal(original.track.stops, 1); assert.equal(candidate.track.stops, 1);
+  assert.deepEqual(Context.instances.map(context => context.closes), [1, 1], 'stale finally must not close either meter twice');
+  assert.deepEqual(h.errors, []);
+});
+
+it('does not negotiate stale sendrecv when a promotion replacement settles after stage exit', async t => {
+  const h = setup(t), { socket, peer } = await h.join();
+  const gate = peer.holdNextReplacement();
+  socket.deliver({ type: 'room:state', ...state(true) });
+  await h.until(() => gate.entered, 'promotion replacement entered');
+  await h.complete(h.client.leaveStage(), 'public leaveStage acknowledgement');
+  gate.resolve();
+  await h.until(() => peer.replacements.at(-1) === null && peer.transceiver.direction === 'recvonly', 'queued stage exit');
+  await h.tick(5);
+  assert.deepEqual(peer.offers.filter(offer => !offer.onStage && offer.direction === 'sendrecv'), [],
+    'a stale replacement must not create an offstage publishing offer');
+  assert.deepEqual(h.errors, [], 'the server must not need to reject a stale publishing offer');
+  await h.until(() => peer.signalingState === 'stable' && !h.client['negotiating'], 'receive-only negotiation settles');
+  assert.equal(h.sources[0]!.track.readyState, 'ended');
+  assert.match(peer.localDescription!.sdp!, /a=recvonly/);
+});
+
+it('acquires fresh capture after stage exit and reentry while an older device replacement is held', async t => {
+  const h = setup(t), { socket, peer } = await h.join();
+  await h.promote(socket, peer);
+  const original = h.sources[0]!, gate = peer.holdNextReplacement();
+  const change = h.client.setInputDevice('retired-device'); void change.catch(() => {});
+  await h.until(() => gate.entered, 'device replacement entered');
+  const candidate = h.sources[1]!;
+  await h.complete(h.client.leaveStage(), 'public leaveStage acknowledgement');
+  socket.deliver({ type: 'room:state', ...state(true) }); await flush();
+  assert.equal(h.sources.length, 2, 'same-peer replacement work remains serialized');
+  gate.resolve(); await h.complete(change, 'retired replacement completion');
+  await h.tick(5);
+  assert.equal(h.sources.length, 3, 'reentry must acquire a fresh stream instead of reusing retired capture');
+  const current = h.sources[2]!;
+  await h.until(() => peer.transceiver.sender.track === (current.track as unknown as MediaStreamTrack)
+    && !h.client['negotiating'], 'fresh capture installation');
+  assert.equal(original.track.readyState, 'ended');
+  assert.equal(candidate.track.readyState, 'ended');
+  assert.equal(current.track.readyState, 'live');
+  assert.equal(current.track.enabled, true);
+  assert.equal(Peer.instances.length, 1);
+  assert.equal(h.micReady(), 2);
+  assert.notEqual(h.client['inputDeviceId'], 'retired-device');
+  assert.deepEqual(h.errors, []);
+});
+
+it('preserves muted current replacement and keeps its installed source alive until success', async t => {
+  const h = setup(t), { socket, peer } = await h.join();
+  await h.promote(socket, peer, true);
+  const original = h.sources[0]!, gate = peer.holdNextReplacement(), offers = peer.offers.length;
+  const change = h.client.setInputDevice('current-device');
+  await h.until(() => gate.entered, 'device replacement entered');
+  const candidate = h.sources[1]!;
+  assert.equal(original.track.readyState, 'live');
+  assert.equal(candidate.track.readyState, 'live');
+  assert.equal(original.track.enabled, false); assert.equal(candidate.track.enabled, false);
+  gate.resolve(); await h.complete(change, 'current replacement completion');
+  assert.equal(original.track.readyState, 'ended');
+  assert.equal(candidate.track.readyState, 'live'); assert.equal(candidate.track.enabled, false);
+  assert.equal(peer.transceiver.sender.track, candidate.track);
+  assert.equal(h.client['inputDeviceId'], 'current-device');
+  assert.equal(peer.offers.length, offers, 'ordinary device replacement does not renegotiate');
+  assert.equal(h.micReady(), 2);
+  assert.deepEqual(h.errors, []);
+});
+
+it('rejects a current device replacement failure and retains the installed source and preference', async t => {
+  const h = setup(t), { socket, peer } = await h.join();
+  await h.promote(socket, peer);
+  const original = h.sources[0]!, gate = peer.holdNextReplacement(), offers = peer.offers.length;
+  const error = new Error('controlled replacement failure');
+  const change = h.client.setInputDevice('failed-device');
+  const rejected = assert.rejects(change, reason => reason === error);
+  await h.until(() => gate.entered, 'device replacement entered');
+  const candidate = h.sources[1]!;
+  gate.reject(error); await h.complete(rejected, 'current replacement rejection');
+  assert.equal(original.track.readyState, 'live'); assert.equal(candidate.track.readyState, 'ended');
+  assert.equal(peer.transceiver.sender.track, original.track);
+  assert.notEqual(h.client['inputDeviceId'], 'failed-device');
+  assert.equal(peer.offers.length, offers); assert.equal(h.micReady(), 1);
+  assert.deepEqual(h.errors, []); assert.deepEqual(h.micErrors, []);
+  await h.complete(h.client.setInputDevice('recovered-device'), 'replacement after ordinary failure');
+  assert.equal(h.client['inputDeviceId'], 'recovered-device');
+  assert.equal(h.sources[2]!.track.readyState, 'live');
+  assert.equal(original.track.readyState, 'ended');
+});
+
+it('reports a current promotion replacement failure without misclassifying capture as denied', async t => {
+  const h = setup(t), { socket, peer } = await h.join();
+  const gate = peer.holdNextReplacement();
+  socket.deliver({ type: 'room:state', ...state(true) });
+  await h.until(() => gate.entered, 'promotion replacement entered');
+  gate.reject(new Error('controlled current promotion failure'));
+  await h.until(() => h.errors.length > 0, 'current replacement error');
+  assert.deepEqual(h.errors, ['media_error']); assert.deepEqual(h.micErrors, []);
+  assert.equal(h.sources[0]!.track.readyState, 'live');
+  assert.equal(h.client.me!.onStage, true);
+  await h.promote(socket, peer);
+  assert.equal(h.sources.length, 1, 'a later current snapshot can retry installation of its owned stream');
+  assert.equal(peer.transceiver.sender.track, h.sources[0]!.track);
+});
+
+it('keeps a new peer microphone isolated from a disconnected peer replacement continuation', async t => {
+  const h = setup(t), old = await h.join();
+  await h.promote(old.socket, old.peer);
+  const original = h.sources[0]!, gate = old.peer.holdNextReplacement();
+  const change = h.client.setInputDevice('retired-device'); void change.catch(() => {});
+  await h.until(() => gate.entered, 'old replacement entered');
+  const candidate = h.sources[1]!;
+  await h.client.disconnect();
+  assert.equal(original.track.readyState, 'ended');
+  assert.equal(candidate.track.readyState, 'ended', 'disconnect immediately retires in-flight candidate capture');
+  assert.deepEqual(Context.instances.map(context => context.closes), [1, 1]);
+  const currentPeer = await h.join(); await h.promote(currentPeer.socket, currentPeer.peer);
+  const current = h.sources[2]!;
+  assert.equal(current.track.readyState, 'live');
+  assert.equal(old.peer.connectionState, 'closed');
+  gate.resolve(); await h.complete(change, 'disconnected replacement completion');
+  assert.equal(candidate.track.readyState, 'ended');
+  assert.equal(current.track.readyState, 'live');
+  assert.equal(currentPeer.peer.transceiver.sender.track, current.track);
+  assert.notEqual(h.client['inputDeviceId'], 'retired-device');
+  assert.equal(original.track.stops, 1); assert.equal(candidate.track.stops, 1); assert.equal(current.track.stops, 0);
+  assert.deepEqual(Context.instances.map(context => context.closes), [1, 1, 0]);
+  assert.deepEqual(h.errors, []);
+});
+
+for (const callback of ['state', 'status'] as const) it(`retires installed and candidate capture before the offstage ${callback} callback`, async t => {
+  const h = setup(t), { socket, peer } = await h.join();
+  await h.promote(socket, peer);
+  const original = h.sources[0]!, gate = peer.holdNextReplacement();
+  const change = h.client.setInputDevice('retired-device'); void change.catch(() => {});
+  await h.until(() => gate.entered, 'device replacement entered');
+  const candidate = h.sources[1]!;
+  const seen: { installed: string; candidate: string }[] = [];
+  const observe = () => { seen.push({ installed: original.track.readyState, candidate: candidate.track.readyState }); };
+  h.client.on('state', event => { if (callback === 'state' && !event.detail.me.onStage) observe(); });
+  h.client.on('status', event => { if (callback === 'status' && event.detail === 'waiting') observe(); });
+  socket.deliver({ type: 'room:state', ...state(false), status: 'waiting' });
+  assert.deepEqual(seen, [{ installed: 'ended', candidate: 'ended' }], 'application callbacks must observe already-retired capture');
+  gate.resolve(); await h.complete(change, 'retired replacement completion');
+  await h.until(() => peer.transceiver.direction === 'recvonly' && !h.client['negotiating'], 'receive-only cleanup');
+  assert.equal(peer.transceiver.sender.track, null);
+  assert.deepEqual(h.errors, []);
+});
+
+it('transfers device replacement ownership before a micready callback disconnects and rejoins', async t => {
+  const h = setup(t), { socket, peer } = await h.join();
+  await h.promote(socket, peer);
+  let disconnecting: Promise<void> | undefined, rejoining: Promise<void> | undefined;
+  const off = h.client.on('micready', () => {
+    off(); disconnecting = h.client.disconnect(); rejoining = h.client.join({ roomId: 'room', name: 'Guest' });
+    void rejoining.catch(() => {});
+  });
+  await h.complete(h.client.setInputDevice('selected-device'), 'replacement with micready disconnect');
+  assert.ok(disconnecting); await disconnecting;
+  assert.equal(h.sources.length, 2);
+  assert.equal(h.sources[0]!.track.stops, 1);
+  assert.equal(h.sources[1]!.track.stops, 1, 'callback teardown owns the installed replacement exactly once');
+  assert.equal(peer.connectionState, 'closed');
+  assert.ok(rejoining); await h.complete(rejoining, 'micready callback rejoin');
+  const nextSocket = Socket.instances.at(-1)!, nextPeer = Peer.instances.at(-1)!;
+  await h.until(() => nextPeer.remoteDescription !== null && !h.client['negotiating'], 'rejoined audience negotiation');
+  await h.promote(nextSocket, nextPeer);
+  assert.equal(h.sources[2]!.track.stops, 0);
+  assert.equal(nextPeer.transceiver.sender.track, h.sources[2]!.track);
+  assert.deepEqual(Context.instances.map(context => context.closes), [1, 1, 0]);
+  assert.deepEqual(h.errors, []);
+});
+
+for (const callback of ['state', 'status'] as const) it(`starts fresh capture after an offstage ${callback} callback immediately reenters during permission wait`, async t => {
+  const h = setup(t, { holdCapture: true }), { socket, peer } = await h.join();
+  socket.deliver({ type: 'room:state', ...state(true) });
+  await h.until(() => h.captureRequests.length === 1, 'first permission request');
+  let reentered = false;
+  const reenter = () => {
+    if (reentered) return;
+    reentered = true;
+    socket.deliver({ type: 'room:state', ...state(true) });
+  };
+  h.client.on('state', event => { if (callback === 'state' && !event.detail.me.onStage) reenter(); });
+  h.client.on('status', event => { if (callback === 'status' && event.detail === 'waiting') reenter(); });
+  socket.deliver({ type: 'room:state', ...state(false), status: 'waiting' });
+  assert.equal(reentered, true);
+  assert.equal(h.client.me!.onStage, true);
+  await h.until(() => h.captureRequests.length === 2, 'fresh permission request before retired permission settles');
+  const retired = stream(); h.captureRequests[0]!.resolve(retired.value); await flush();
+  assert.equal(retired.track.stops, 1, 'the late old grant is disposed rather than installed');
+  assert.equal(h.micReady(), 0);
+  const current = stream(); h.captureRequests[1]!.resolve(current.value);
+  await h.until(() => peer.transceiver.sender.track === (current.track as unknown as MediaStreamTrack)
+    && peer.signalingState === 'stable' && !h.client['negotiating'], 'fresh capture installation');
+  assert.equal(current.track.readyState, 'live');
+  assert.equal(Peer.instances.length, 1);
+  assert.equal(h.micReady(), 1);
+  assert.deepEqual(h.micErrors, []); assert.deepEqual(h.errors, []);
+});
+
+for (const terminal of ['kicked', 'room:closed'] as const) it(`immediately retires installed and pending replacement capture on ${terminal}`, async t => {
+  const h = setup(t), { socket, peer } = await h.join();
+  await h.promote(socket, peer);
+  const original = h.sources[0]!, gate = peer.holdNextReplacement();
+  const change = h.client.setInputDevice('retired-device'); void change.catch(() => {});
+  await h.until(() => gate.entered, 'device replacement entered');
+  const candidate = h.sources[1]!;
+  socket.deliver(terminal === 'kicked' ? { type: 'kicked', roomId: 'room' }
+    : { type: 'room:closed', roomId: 'room', reason: 'shutdown' });
+  assert.equal(h.client.state, null);
+  assert.equal(original.track.readyState, 'ended'); assert.equal(candidate.track.readyState, 'ended');
+  assert.deepEqual(Context.instances.map(context => context.closes), [1, 1]);
+  assert.equal(peer.connectionState, 'closed');
+  gate.resolve(); await h.complete(change, 'terminal replacement continuation');
+  assert.equal(original.track.stops, 1); assert.equal(candidate.track.stops, 1);
+  assert.deepEqual(Context.instances.map(context => context.closes), [1, 1]);
+  assert.equal(h.micReady(), 1); assert.deepEqual(h.errors, []);
+});
+
+it('uses the latest mute snapshot when a still-current replacement completes', async t => {
+  const h = setup(t), { socket, peer } = await h.join();
+  await h.promote(socket, peer);
+  const original = h.sources[0]!, gate = peer.holdNextReplacement();
+  const change = h.client.setInputDevice('current-device');
+  await h.until(() => gate.entered, 'device replacement entered');
+  const candidate = h.sources[1]!;
+  assert.equal(candidate.track.enabled, true);
+  socket.deliver({ type: 'room:state', ...state(true, true) });
+  assert.equal(original.track.enabled, false);
+  gate.resolve(); await h.complete(change, 'current replacement completion');
+  await h.until(() => !h.client['negotiating'] && peer.signalingState === 'stable', 'latest snapshot synchronization');
+  assert.equal(candidate.track.enabled, false); assert.equal(candidate.track.readyState, 'live');
+  assert.equal(original.track.stops, 1); assert.equal(candidate.track.stops, 0);
+  assert.equal(peer.transceiver.sender.track, candidate.track);
+  assert.equal(h.client['inputDeviceId'], 'current-device');
+  assert.deepEqual(Context.instances.map(context => context.closes), [1, 0]);
+  assert.deepEqual(h.errors, []);
+});
