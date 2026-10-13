@@ -530,3 +530,6 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 
 
 115. **POSIX restart 停機前預檢（2026-10-13）：** strict shell mocks 重現原本 restart 先 TERM／移除健康 PID，才發現 Node 失敗／版本過舊、缺少 dist entry 或指定設定；invalid schema／空 STAGE_CONFIG 也在 stop 後才進入 launch。新增 restart-only preflight，先保留 timeout 與 PID 驗證／探測優先序，再檢查 Node、built entry 與 built checker，沿用 ensure_config，使用無 positional argument 的 built checker 驗證原始環境。checker 與 server 同樣 import dist config schema，缺少舊版 checker 時要求 build，不回退到可能不同版的 source。預設設定不存在時仍可由既有準備步驟複製範例；checker 本身唯讀。驗證成功後才沿用 stop/start，保留 start/run/dev 的既有條件；不宣稱零停機、runtime health、PID ownership 或 TOCTOU 保證，不讀使用者真實設定／憑證。測試只在 synthetic fixture 內使用受限程序 mocks，沒有真實訊號或 server 啟動，Windows 行為另行保留。
+
+
+116. **未列出之已選擇裝置的顯示（2026-10-13）：** whole-module devicechange probe 證實選定 input/output 後，最新 enumeration 移除該 ID 時仍保存 selectedInput/selectedOutput，但 select options 不再有匹配項；native value setter 因而失去選取顯示，不能反映仍保留的選擇。新增 UI-only reconciliation，在 refresh、device-change finally 與離房 settings reset 復原選擇時，為非空且未列出的 chosen ID 建立停用的「已選擇的裝置（目前未列出）」option；不輸出原始 ID 標籤，不把缺席推論為裝置故障。重新列出即回正常 option，選其他裝置／default 即撤掉舊 placeholder；不主動呼叫 SDK 切換、不改 permission／capture／output promise 語意。測試補充受限 native select clamping 模型及 pending change／refresh 排序，不宣稱實際 browser/device 測試。

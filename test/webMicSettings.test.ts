@@ -26,6 +26,8 @@ function setup() {
     function element() { return { disabled: false, isConnected: true, attrs: {}, setAttribute(key, value) { this.attrs[key] = value; } }; }
     function showError(message) { errors.push(message); }
     function updateCooldown() {}
+    // This fragment tests capture ownership; whole-app selection tests exercise actual option reconciliation.
+    function restoreDeviceSelection(select, chosen) { select.value = chosen; }
     ${button}
     ${testButton}
     ${inputChange}

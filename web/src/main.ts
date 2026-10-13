@@ -178,15 +178,26 @@ micSelect.onchange = () => {
     } catch (error) { if (generation === micSettingsGeneration) throw error; }
   }).finally(() => {
     if (generation !== micSettingsGeneration) return;
-    testingBusy = false; micSelect.disabled = false; micSelect.value = selectedInput; syncMeter();
+    testingBusy = false; micSelect.disabled = false; restoreDeviceSelection(micSelect, selectedInput); syncMeter();
   });
 };
 speakerSelect.onchange = () => {
   const deviceId = speakerSelect.value;
   speakerSelect.disabled = true;
   void run(async () => { await client.setOutputDevice(deviceId); selectedOutput = deviceId; })
-    .finally(() => { speakerSelect.disabled = false; speakerSelect.value = selectedOutput; });
+    .finally(() => { speakerSelect.disabled = false; restoreDeviceSelection(speakerSelect, selectedOutput); });
 };
+function restoreDeviceSelection(select: HTMLSelectElement, chosen: string): void {
+  for (const option of Array.from(select.options)) {
+    if (option.dataset.unlisted === 'true') option.remove();
+  }
+  if (chosen && !Array.from(select.options).some(option => option.value === chosen)) {
+    const option = element('option', '', '已選擇的裝置（目前未列出）');
+    option.value = chosen; option.disabled = true; option.dataset.unlisted = 'true';
+    select.append(option);
+  }
+  select.value = chosen;
+}
 async function refreshDevices(): Promise<void> {
   const sequence = ++deviceRefreshSequence;
   const devices = await client.listAudioDevices();
@@ -200,7 +211,7 @@ async function refreshDevices(): Promise<void> {
       option.value = device.deviceId;
       select.append(option);
     }
-    select.value = chosen;
+    restoreDeviceSelection(select, chosen);
   }
 }
 client.on('micready', () => { micRetryAvailable = micRetryPending = false; micNotice = ''; renderNotices(); void refreshDevices().catch(() => {}); });
@@ -234,7 +245,7 @@ function resetMicSettings(): void {
   micSettingsGeneration++;
   cancelPreviewCapture();
   micTest?.stop(); micTest = null; testingBusy = false;
-  micSelect.disabled = false; micSelect.value = selectedInput;
+  micSelect.disabled = false; restoreDeviceSelection(micSelect, selectedInput);
   testButton.textContent = '測試麥克風'; testButton.setAttribute('aria-pressed', 'false');
   syncMeter();
 }

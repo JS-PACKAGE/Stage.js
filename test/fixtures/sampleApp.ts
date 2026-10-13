@@ -22,6 +22,7 @@ export class SampleNode {
   private text = '';
   readonly tagName: string;
   constructor(tagName: string) { this.tagName = tagName; }
+  get options(): SampleNode[] { return this.children.filter(child => child.tagName === 'option'); }
   get isConnected(): boolean { return this.tagName === '#document' || (this.parentNode?.isConnected ?? false); }
   get textContent(): string { return this.text + this.children.map(child => child.textContent).join(''); }
   set textContent(value: string) { this.replaceChildren(); this.text = value; }
