@@ -66,6 +66,7 @@ export class SampleNode {
       '[data-return-stage]': node => node.dataset.returnStage !== undefined,
       '.badge.quality': node => node.classList.contains('badge') && node.classList.contains('quality'),
       '.identity': node => node.classList.contains('identity'),
+      '.invite-link': node => node.classList.contains('invite-link'),
       '.person[data-participant-id]': node => node.classList.contains('person') && node.dataset.participantId !== undefined,
     };
     const matches = predicates[selector]; assert.ok(matches, `unmodeled selector: ${selector}`);
@@ -245,7 +246,11 @@ export function roomState(me: Partial<ParticipantView> = {}): RoomStatePayload {
 }
 export async function flushSample(): Promise<void> { for (let i = 0; i < 16; i++) await Promise.resolve(); }
 
-export function sampleApp(options: { deferAudioDevices?: boolean } = {}) {
+export function sampleApp(options: {
+  deferAudioDevices?: boolean;
+  clipboard?: { writeText(text: string): Promise<void> };
+  confirm?: (message: string) => boolean;
+} = {}) {
   const clock = new SampleClock(), sdk = new SampleSdk(clock, options.deferAudioDevices);
   const documentRoot = new SampleNode('#document'), documentElement = new SampleNode('html'), body = new SampleNode('body');
   const app = new SampleNode('div'); app.id = 'app';
@@ -268,10 +273,10 @@ export function sampleApp(options: { deferAudioDevices?: boolean } = {}) {
   runInNewContext(`'use strict';\n${executable}`, {
     document, location: { protocol: 'https:', host: 'sample.test', search: '', pathname: '/', origin: 'https://sample.test' },
     localStorage: { getItem: (key: string) => storage.get(key) ?? null, setItem: (key: string, value: string) => storage.set(key, value) },
-    navigator: { mediaDevices: { addEventListener(type: string, listener: () => void) {
+    navigator: { clipboard: options.clipboard, mediaDevices: { addEventListener(type: string, listener: () => void) {
       assert.equal(type, 'devicechange'); deviceChangeListeners.push(listener);
     } } },
-    window: { confirm() { throw new Error('Unexpected confirmation dialog in lifecycle test'); } },
+    window: { confirm: options.confirm ?? (() => { throw new Error('Unexpected confirmation dialog in lifecycle test'); }) },
     StageClient: function (options: { url: string }) { constructions++; assert.equal(options.url, 'wss://sample.test/ws'); return sdk; },
     decodeName: (value: string) => value, MAX_GAIN_DB, URL, URLSearchParams, Error,
     setTimeout: clock.setTimeout, clearTimeout: clock.clear, setInterval: clock.setInterval, clearInterval: clock.clear,

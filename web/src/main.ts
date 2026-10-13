@@ -16,6 +16,7 @@ let cooldownButton: HTMLButtonElement | null = null;
 let cooldownTimer: ReturnType<typeof setTimeout> | undefined;
 let roomActionIdentity = '';
 let roomActionGeneration = 0;
+let inviteCopySequence = 0;
 const pendingRoomActions = new Map<string, symbol>();
 /** Latest server report per publisher; loss at or above this is flagged in the stage list. */
 const POOR_LOSS_PERCENT = 5;
@@ -361,8 +362,16 @@ function renderRoom(state: RoomStatePayload): void {
     inviteLink.value = link.href; inviteLink.readOnly = true;
     inviteLink.setAttribute('aria-label', '邀請連結');
     const copy = button('複製邀請連結', async () => {
-      try { await navigator.clipboard.writeText(link.href); invitation = '已複製邀請連結，請只分享給受邀者。'; }
-      catch { inviteLink.focus(); inviteLink.select(); invitation = '請長按或使用複製快捷鍵複製已選取的連結。'; }
+      const sequence = ++inviteCopySequence;
+      let copied = false;
+      try { await navigator.clipboard.writeText(link.href); copied = true; }
+      catch { /* The current link can still be selected for manual copying. */ }
+      // Snapshots can replace this button/input while an earlier write is pending.
+      const currentLink = content.querySelector<HTMLInputElement>('.invite-link');
+      if (generation !== roomActionGeneration || sequence !== inviteCopySequence
+        || !currentLink?.isConnected || currentLink.value !== link.href) return;
+      if (copied) invitation = '已複製邀請連結，請只分享給受邀者。';
+      else { currentLink.focus(); currentLink.select(); invitation = '請長按或使用複製快捷鍵複製已選取的連結。'; }
       renderNotices();
     });
     summary.append(inviteLink, copy);
