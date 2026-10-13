@@ -4,6 +4,26 @@ import './styles.css';
 
 const app = document.querySelector<HTMLDivElement>('#app')!;
 const client = new StageClient({ url: `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws` });
+const PLAYBACK_STORAGE_KEY = 'stage-playback';
+function restorePlaybackPreferences(): void {
+  try {
+    const raw = localStorage.getItem(PLAYBACK_STORAGE_KEY);
+    if (!raw || raw.length > 128) return;
+    const parsed: unknown = JSON.parse(raw);
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return;
+    const prefs = parsed as Record<string, unknown>;
+    if (prefs.version !== 1 || typeof prefs.volume !== 'number' || !Number.isFinite(prefs.volume)
+      || prefs.volume < 0 || prefs.volume > 1 || typeof prefs.muted !== 'boolean') return;
+    client.setPlaybackVolume(prefs.volume);
+    client.setPlaybackMuted(prefs.muted);
+  } catch { /* Unavailable or invalid storage must not prevent listening. */ }
+}
+function savePlaybackPreferences(): void {
+  try {
+    localStorage.setItem(PLAYBACK_STORAGE_KEY, JSON.stringify({ version: 1, volume: client.playbackVolume, muted: client.playbackMuted }));
+  } catch { /* Local controls still apply when storage is blocked or full. */ }
+}
+restorePlaybackPreferences();
 const statusLabels = { waiting: '等待發言', live: '直播中', reconnecting: '重新連線中', disconnected: '未連線' };
 const roleLabels = { controller: '主控', speaker: '發言者', audience: '觀眾' };
 const params = new URLSearchParams(location.search);
@@ -78,14 +98,17 @@ playbackValue.htmlFor.value = playbackVolume.id;
 playbackVolume.oninput = () => {
   client.setPlaybackVolume(Number(playbackVolume.value) / 100);
   playbackValue.value = `${Math.round(client.playbackVolume * 100)}%`;
+  savePlaybackPreferences();
 };
 playbackLabel.append(playbackVolume, playbackValue);
-const playbackMute = button('靜音收聽', async () => {
+const playbackMute = button(client.playbackMuted ? '恢復收聽' : '靜音收聽', async () => {
   client.setPlaybackMuted(!client.playbackMuted);
   playbackMute.textContent = client.playbackMuted ? '恢復收聽' : '靜音收聽';
   playbackMute.setAttribute('aria-pressed', String(client.playbackMuted));
+  savePlaybackPreferences();
 });
 playbackMute.id = 'playback-mute';
+playbackMute.setAttribute('aria-label', '靜音收聽');
 playbackMute.setAttribute('aria-pressed', String(client.playbackMuted));
 settings.append(playbackLabel, playbackMute, element('p', 'muted', '僅調整你聽到的聲音，不影響麥克風或其他人。'));
 let micTest: MicTest | null = null;

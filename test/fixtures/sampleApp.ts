@@ -250,6 +250,7 @@ export function sampleApp(options: {
   deferAudioDevices?: boolean;
   clipboard?: { writeText(text: string): Promise<void> };
   confirm?: (message: string) => boolean;
+  localStorage?: { getItem(key: string): string | null; setItem(key: string, value: string): void };
 } = {}) {
   const clock = new SampleClock(), sdk = new SampleSdk(clock, options.deferAudioDevices);
   const documentRoot = new SampleNode('#document'), documentElement = new SampleNode('html'), body = new SampleNode('body');
@@ -272,7 +273,7 @@ export function sampleApp(options: {
   let constructions = 0;
   runInNewContext(`'use strict';\n${executable}`, {
     document, location: { protocol: 'https:', host: 'sample.test', search: '', pathname: '/', origin: 'https://sample.test' },
-    localStorage: { getItem: (key: string) => storage.get(key) ?? null, setItem: (key: string, value: string) => storage.set(key, value) },
+    localStorage: options.localStorage ?? { getItem: (key: string) => storage.get(key) ?? null, setItem: (key: string, value: string) => storage.set(key, value) },
     navigator: { clipboard: options.clipboard, mediaDevices: { addEventListener(type: string, listener: () => void) {
       assert.equal(type, 'devicechange'); deviceChangeListeners.push(listener);
     } } },
