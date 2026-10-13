@@ -233,6 +233,8 @@ npm audit
 
 完整範例的 `test/webLifecycle.test.ts` 會執行整份 `web/src/main.ts`（只替換 SDK／CSS imports），透過實際註冊的表單、按鈕與 SDK event handlers 驗證離房／重入、預覽取消與晚到完成、統計／冷卻排程、preview→stage meter 切換及關房／kick 通知。fixture 使用可斷開／重掛 DOM、依 SDK 順序派發的 stub events 與有 callback 上限的虛擬時鐘；沒有真實網路、麥克風或新依賴。這補足函式片段測試的初始化／事件串接覆蓋，不替代瀏覽器版面、原生輸入／accessibility、權限提示、CSS 或真實 SDK／WebRTC 整合驗證。
 
+範例的品質警示沿用每次 render 的 participant→rows 索引，只更新前次／本次品質報告涉及的人，省去每則事件掃描所有觀眾列；省略的人仍會移除舊警示，同人出現在舉手與觀眾名單時會一併更新。`test/webQuality.test.ts` 以 301 人、593 個顯示列、100 次單人品質報告計數：完整列查詢 100 → 0 次，badge 查詢 59,300 → 100 次。這是 fake DOM 操作數，不是瀏覽器 CPU／延遲量測；房間重繪、品質資料本身的更新頻率與 badge 文案不變。
+
 ### 本機控制面容量煙霧測試
 
 `node scripts/bench-control-plane.ts` 只在 `127.0.0.1` 啟動臨時伺服器，依範本的 300 位觀眾上限，以每批 50 條真實 WebSocket 驗證進房、Mock SDP、滿房拒絕、10 位斷線回座與全體關機通知。30 秒硬期限避免卡住；完成即關閉連線與伺服器。輸出 ACK 延遲分位數、CPU、取樣 RSS 高點、事件迴圈延遲與訊息量，並檢查可用的輸入／輸出超限計數器為零（舊版無該指標時輸出 `null`）。

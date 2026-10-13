@@ -181,7 +181,7 @@ it('whole sample preserves quality badges and gain controls while speaking chang
     { participantId: 'audience-0', downlinkLossPercent: 11 },
     { participantId: 'missing', uplinkLossPercent: 99 },
   ] });
-  assert.equal(operations.queries.filter(call => call.selector === PERSON_SELECTOR).length, 1);
+  assert.equal(operations.queries.filter(call => call.selector === PERSON_SELECTOR).length, 0);
   assert.equal(operations.toggles.length, 0); assertSpeaking(h, ['speaker-0']);
   const firstBadges = targetRows.map(row => {
     const found = badges(row); assert.equal(found.length, 1);
@@ -198,7 +198,7 @@ it('whole sample preserves quality badges and gain controls while speaking chang
 
   operations.reset();
   h.sdk.emit('quality', { participants: [{ participantId: 'speaker-0', uplinkLossPercent: 5, rttMs: 40 }] });
-  assert.equal(operations.queries.filter(call => call.selector === PERSON_SELECTOR).length, 1);
+  assert.equal(operations.queries.filter(call => call.selector === PERSON_SELECTOR).length, 0);
   assert.equal(operations.toggles.length, 0); assertSpeaking(h, ['audience-0']);
   for (const [index, row] of targetRows.entries()) {
     const found = badges(row);

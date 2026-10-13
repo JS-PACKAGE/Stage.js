@@ -536,8 +536,12 @@ client.on('speaking', ({ detail }) => {
   speakingIds = ids;
 });
 client.on('quality', ({ detail }) => {
+  const previous = quality;
   quality = new Map(detail.participants.map((q) => [q.participantId, q]));
-  for (const row of content.querySelectorAll<HTMLElement>('.person[data-participant-id]')) applyQuality(row);
+  // Omitted IDs still need their old warnings removed, including duplicate rows.
+  for (const id of new Set([...previous.keys(), ...quality.keys()])) {
+    for (const row of personRows.get(id) ?? []) applyQuality(row);
+  }
 });
 function refreshConnectionLine(): void {
   if (!client.state) return;
