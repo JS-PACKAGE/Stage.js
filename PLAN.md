@@ -476,3 +476,6 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 
 
 97. **最小嵌入範例的舉手等待鎖（2026-10-13）：** whole-module bounded VM probe 重現 embed.ts 的 250ms timer 與 state callback 在 withdraw ACK 未回時覆寫 disabled，使三次點擊送出三筆同時等待的請求。新增 current-client operation token 與 shared hand renderer，state、timer 與 settlement 都保留 pending 限制／aria-busy；handler 本身也拒絕重入，同步 throw 與 rejection 在目前 owner 下顯示並解鎖。離房、重加入、disconnected／terminal 撤銷 token，舊 finally／錯誤不得解鎖或污染新 client；會寫入 hand 狀態的事件回呼檢查 client identity。保留 state-before-ACK、角色／reconnect／cooldown 政策與原 250ms 排程，不擴大為 embed join/import 的完整生命週期重構。測試使用全模組假 DOM／SDK／timer，不執行外部動態匯入，不宣稱 native browser 或音訊驗證。
+
+
+98. **最小嵌入範例的播放錯誤歸屬（2026-10-13）：** whole-module probe 使用 SDK 對應的 pause 後 srcObject=null／pending play 拒絕順序，重現 unlockAudio().catch(report) 覆寫 Leave、disconnected、closed 與 kicked 提示。新增 playback lifecycle generation，join start／Leave／目前 client 的 disconnected／terminal 撤銷舊回報；unlock 捕捉 client 與 generation，只限制後續 error sink，play 仍在原點擊同步呼叫，當前錯誤與未加入時 audio.play 失敗照常顯示。不新增 latest-attempt、成功後狀態寫入或 SDK 取消語意。以同步清理拒絕模型，稍後完成的 rejoin 會自行重畫，因此跨新 client 測試僅為 defensive ownership，不能宣稱 native rejoin bug。測試使用全模組假 DOM／play promises，沒有真實瀏覽器或音訊驗證。

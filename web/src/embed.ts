@@ -15,6 +15,7 @@ input('room').value = params.get('room') ?? '';
 input('code').value = params.get('code') ?? '';
 let client: Client | null = null;
 let pendingHand: { client: Client } | undefined;
+let playbackGeneration = 0;
 function syncHand(): void {
   const me = client?.me;
   const pending = Boolean(pendingHand && pendingHand.client === client);
@@ -26,6 +27,7 @@ function syncHand(): void {
 function report(error: unknown): void { status.textContent = error instanceof Error ? error.message : '操作失敗。'; }
 join.onsubmit = (event) => {
   event.preventDefault();
+  playbackGeneration++;
   const submit = join.querySelector<HTMLButtonElement>('button')!;
   submit.disabled = true;
   void (async () => {
@@ -52,19 +54,25 @@ join.onsubmit = (event) => {
       client.on('status', ({ detail }) => {
         if (client !== current) return;
         if (detail === 'reconnecting') { status.textContent = '重新連線中'; hand.disabled = true; }
-        else if (detail === 'disconnected') { pendingHand = undefined; syncHand(); status.textContent = '未連線'; hand.disabled = leave.disabled = true; }
+        else if (detail === 'disconnected') { playbackGeneration++; pendingHand = undefined; syncHand(); status.textContent = '未連線'; hand.disabled = leave.disabled = true; }
       });
       client.on('error', ({ detail }) => report(detail));
       client.on('audioblocked', () => { status.textContent = '請點擊啟用音訊。'; });
-      client.on('closed', () => { if (client !== current) return; pendingHand = undefined; syncHand(); status.textContent = '房間已關閉。'; hand.disabled = leave.disabled = true; });
-      client.on('kicked', () => { if (client !== current) return; pendingHand = undefined; syncHand(); status.textContent = '你已被主控移出房間。'; hand.disabled = leave.disabled = true; });
+      client.on('closed', () => { if (client !== current) return; playbackGeneration++; pendingHand = undefined; syncHand(); status.textContent = '房間已關閉。'; hand.disabled = leave.disabled = true; });
+      client.on('kicked', () => { if (client !== current) return; playbackGeneration++; pendingHand = undefined; syncHand(); status.textContent = '你已被主控移出房間。'; hand.disabled = leave.disabled = true; });
       await client.connect();
       await client.join({ roomId: input('room').value.trim(), code: input('code').value.trim() || undefined, name: input('name').value.trim() });
     } catch (error) { report(error); }
     finally { submit.disabled = false; }
   })();
 };
-document.querySelector<HTMLButtonElement>('#unlock')!.onclick = () => { void (client ? client.unlockAudio() : audio.play()).catch(report); };
+document.querySelector<HTMLButtonElement>('#unlock')!.onclick = () => {
+  const current = client, generation = playbackGeneration;
+  // Keep play inside the user gesture; only its later feedback is lifecycle-scoped.
+  void (current ? current.unlockAudio() : audio.play()).catch(error => {
+    if (generation === playbackGeneration && client === current) report(error);
+  });
+};
 hand.onclick = () => {
   syncHand();
   if (!client || hand.disabled) return;
@@ -79,6 +87,7 @@ hand.onclick = () => {
   })();
 };
 leave.onclick = () => {
+  playbackGeneration++;
   pendingHand = undefined; hand.setAttribute('aria-busy', 'false');
   void client?.disconnect().then(() => { status.textContent = '已離開。'; hand.disabled = leave.disabled = true; });
 };
