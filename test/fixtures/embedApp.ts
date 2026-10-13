@@ -9,7 +9,7 @@ type Me = Pick<ParticipantView, 'participantId' | 'name' | 'role' | 'onStage' | 
 interface State { roomId: string; name: string; me: Me }
 interface JoinOptions { roomId: string; code?: string; name: string }
 interface ClientOptions { url: string; audioElement: EmbedNode }
-type Action = 'raise' | 'withdraw' | 'mute' | 'unmute';
+type Action = 'raise' | 'withdraw' | 'mute' | 'unmute' | 'leaveStage' | 'returnToStage';
 
 export class Deferred {
   private readonly work = Promise.withResolvers<void>();
@@ -93,17 +93,20 @@ export class EmbedSdk {
   withdrawHand(): Promise<void> { return this.request('withdraw'); }
   mute(): Promise<void> { return this.request('mute'); }
   unmute(): Promise<void> { return this.request('unmute'); }
+  leaveStage(): Promise<void> { return this.request('leaveStage'); }
+  returnToStage(): Promise<void> { return this.request('returnToStage'); }
 }
 const source = readFileSync(new URL('../../web/src/embed.ts', import.meta.url), 'utf8');
 export const flush = async (): Promise<void> => { for (let i = 0; i < 16; i++) await Promise.resolve(); };
 
 export function embedApp(options: { libraryLoad?: Promise<void> } = {}) {
-  const nodes = new Map(['host', 'room', 'code', 'name', 'status', 'join', 'hand', 'mic', 'leave', 'audio', 'unlock'].map(id => [id, new EmbedNode()]));
+  const nodes = new Map(['host', 'room', 'code', 'name', 'status', 'join', 'hand', 'mic', 'stage', 'leave', 'audio', 'unlock'].map(id => [id, new EmbedNode()]));
   const node = (id: string): EmbedNode => { const found = nodes.get(id); assert.ok(found, `unmodeled node: ${id}`); return found; };
-  const hand = node('hand'), mic = node('mic'), leave = node('leave'), form = node('join'), status = node('status');
+  const hand = node('hand'), mic = node('mic'), stage = node('stage'), leave = node('leave'), form = node('join'), status = node('status');
   hand.disabled = leave.disabled = true; hand.textContent = '舉手發言'; status.textContent = '尚未加入';
   mic.hidden = mic.disabled = true; mic.textContent = '靜音麥克風';
   mic.setAttribute('aria-label', '麥克風靜音'); mic.setAttribute('aria-pressed', 'false'); mic.setAttribute('aria-busy', 'false');
+  stage.hidden = stage.disabled = true; stage.textContent = '離開舞台'; stage.setAttribute('aria-busy', 'false');
   const submit = new EmbedNode(); form.submitButton = submit; node('name').value = ' 測試聽眾 ';
   const clients: EmbedSdk[] = [], moduleUrls: string[] = [];
   type Timer = { id: number; kind: 'timeout' | 'interval'; callback(): void; ms: number; due: number };
@@ -171,7 +174,7 @@ export function embedApp(options: { libraryLoad?: Promise<void> } = {}) {
     clearTimeout: (id: number) => clear('timeout', id),
   }, { filename: 'web/src/embed.ts', timeout: 1000 });
   return {
-    hand, mic, leave, form, submit, status, clients, moduleUrls, node, tick, clock,
+    hand, mic, stage, leave, form, submit, status, clients, moduleUrls, node, tick, clock,
     async join(overrides: Partial<Me> = {}): Promise<EmbedSdk> {
       const count = clients.length; form.submit(); assert.equal(submit.disabled, true); await flush();
       assert.equal(clients.length, count + 1); const sdk = clients.at(-1)!;

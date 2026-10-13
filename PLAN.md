@@ -560,3 +560,6 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 
 
 125. **WebSocket 錯誤診斷不阻斷清理（2026-10-13）：** exact queue-error callback 的 VM probe 重現 null-prototype rejection 在 String(error) 拋錯，連 log 與 session.terminate 都未執行，會破壞停止佇列後終止連線的保證。只將 message-handler、detach 與 active-work-cleanup 三個錯誤 sink 改成原始值交給安全 logger，保留 session termination 及先 detach、等待 active work、再 detach 的兩階段順序。不改 static／TLS／一般 ws error 診斷，不更動入站上限、訊息排序或回座 ownership；自訂 logger／sink 拋錯不在本修正保證範圍。有界 native WebSocket regression 注入 mock Hub 失敗，驗證 hostile 與一般值、等待工作清除、正常終止及 post-drain 清理；無真實音訊或外部流量。
+
+
+126. **最小嵌入範例的個人舞台操作（2026-10-13）：** embed 已提供上台後麥克風靜音，但原頁面無法自行下台而留房收聽。新增單一 native action button：台上者使用既有 leaveStage；台下主控使用既有 returnToStage；其他台下觀眾隱藏並沿用 hand 流程。依快照而非 ACK 樂觀切換文字／資格，獨立 pendingStage 防止重複請求，重連禁止操作，強制靜音仍允許下台。micClient 改名 controlsClient，共用新加入／leave／終止之前撤銷的 client eligibility；舊請求晚到 error/finally 不影響替換 client。保留主控保有控制權與額外席位、伺服器 capacity／error 政策及 SDK 下台 capture cleanup，無新增 timer／權限／自動 retry；返回舞台仍可能依原 SDK 流程要求麥克風。測試含 whole-module 假 DOM、實際 Hub snapshot 與 SDK 假媒體的 cleanup，不宣稱原生瀏覽器或硬體驗收。
