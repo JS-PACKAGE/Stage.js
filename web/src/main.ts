@@ -193,7 +193,7 @@ async function refreshDevices(): Promise<void> {
 client.on('micready', () => { micNotice = ''; renderNotices(); void refreshDevices().catch(() => {}); });
 navigator.mediaDevices?.addEventListener('devicechange', () => { void refreshDevices().catch(() => {}); });
 void refreshDevices().catch(() => {});
-/** The level meter polls only while there is something to meter: a mic test or an on-stage mic. */
+/** Muted room microphones have a known zero level; only previews or unmuted stage mics need polling. */
 let meterTimer: ReturnType<typeof setInterval> | undefined;
 /** Leave/rejoin releases the UI immediately; late previews still dispose only their own stream. */
 function resetMicSettings(): void {
@@ -209,7 +209,7 @@ function syncMeter(): void {
     testButton.textContent = '測試麥克風'; testButton.setAttribute('aria-pressed', 'false');
   }
   testButton.disabled = testingBusy || Boolean(client.me?.onStage);
-  const metering = Boolean(micTest) || Boolean(client.me?.onStage);
+  const metering = Boolean(micTest) || Boolean(client.me?.onStage && !client.me.muted);
   if (metering && meterTimer === undefined) {
     meterTimer = setInterval(() => { level.value = client.me?.onStage ? client.micLevel : micTest?.level() ?? 0; }, 50);
   } else if (!metering && meterTimer !== undefined) {
