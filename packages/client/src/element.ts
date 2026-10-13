@@ -292,7 +292,11 @@ export class StageElement extends HTMLElement {
     const me = client?.me ?? null;
     const state = client?.state ?? null;
     if (state && me) {
-      const where = me.onStage ? (me.muted ? '台上（已靜音）' : '台上') : me.handRaised ? '已舉手' : '收聽中';
+      const handIndex = !me.onStage && me.role !== 'controller' && me.handRaised
+        ? state.hands.findIndex(person => person.participantId === me.participantId) : -1;
+      const raised = handIndex < 0 ? '已舉手'
+        : `已舉手（${client!.status === 'reconnecting' ? '上次' : ''}佇列第 ${handIndex + 1} 位）`;
+      const where = me.onStage ? (me.muted ? '台上（已靜音）' : '台上') : me.handRaised ? raised : '收聽中';
       this.status.textContent = `${decodeName(state.name)} · ${STATUS_LABELS[client!.status]} · ${where}`;
     } else if (this.joinPhase) {
       this.status.textContent = this.joinPhase === 'connecting' ? '連線中…' : '正在加入房間…';

@@ -518,3 +518,6 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 
 
 111. **最小嵌入範例的初次加入進度（2026-10-13）：** whole-module probe 證實首次 submit 在動態 import、hello 與 pre-snapshot join 等待期間一直顯示「尚未加入」，重新進入時可能留在「未連線」。沿用 entry generation，依序顯示載入舞台元件／連線／加入房間，submit 的 aria-busy 與 disabled 共用既有 owner。共用 report 的 feedback revision 也讓手動 unlock 的當前失敗優先於後續階段；每個 attempt 的進度 eligibility 在 state、error／micerror／audioblocked 或 reconnect/disconnected feedback 出現時撤銷，async phase 不得覆寫已收到的快照或當前訊息；正常 Hub 先發 state 再 ACK；若防禦性 ACK-only 回覆仍成功，明確顯示請求已完成但未收到房間狀態，而不維持處理中的標籤。finally 不改 status，只有仍持有的 attempt 清 busy，Leave／terminal 立即退休舊 busy。保留 state-before-ACK 的即時房間顯示、舊 finally 隔離與目前錯誤；不新增 spinner／timer、取消／重試按鈕或 SDK 狀態。測試仍是 actual SDK 搭配假 DOM／socket／media，不宣稱 browser accessibility 或實際連線體驗量測。
+
+
+112. **Web Component 舉手佇列位置（2026-10-13）：** compact widget 原本只有「已舉手」而無完整名單。以既有公開權威 state.hands 的 participantId 查找顯示 1-based 位置，僅 offstage／非主控且 handRaised 時計算；找不到本人則保留「已舉手」，不猜測或露出其他資料。重連保留快照時明示「上次佇列」，新 state 自動重算，withdraw／上台／身分替換沿用現有 UI 判斷。舉手按鈕、pending／cooldown／reconnect／controller gates、既有 status role 與 polite live region 均不改，不新增 SDK API／timer／cache。Room.handQueue 包含 grace 內斷線者，主控可任意核准，因此這是目前名單位置，並非發言保證或預估等待時間。測試使用假 DOM／受控 SDK 事件，不宣稱真實輔助科技朗讀或 browser layout 驗證。

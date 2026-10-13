@@ -60,8 +60,8 @@ function widget(onStage = false) {
   let calls = 0;
   const action = () => { calls++; return pending.promise; };
   const client = {
-    me: { onStage, muted: false, forceMuted: false, handRaised: false, role: 'audience' },
-    state: { name: 'Room' }, status: 'live', handCooldownMs: 0,
+    me: { participantId: 'me', onStage, muted: false, forceMuted: false, handRaised: false, role: 'audience' },
+    state: { name: 'Room', hands: [] }, status: 'live', handCooldownMs: 0,
     raiseHand: action, withdrawHand: action, mute: action, unmute: action, leaveStage: action,
     disconnect: async () => {}, playbackMuted: false, setPlaybackMuted(muted: boolean) { this.playbackMuted = muted; },
     playbackVolume: 1, setPlaybackVolume(volume: number) { this.playbackVolume = volume; },
@@ -188,6 +188,196 @@ async function socketJoinedWidget(t: TestContext, state = roomState()) {
   assert.equal(client['pending'].size, 0);
   return { ...fixture, socket, client };
 }
+
+describe('widget hand queue position', () => {
+  function queuedState(ids: string[], ownId = 'me'): RoomStatePayload {
+    const state = roomState();
+    state.me.participantId = ownId;
+    state.me.handRaised = ids.includes(ownId);
+    state.hands = ids.map((participantId, index) => ({ ...state.me, participantId,
+      name: 'Private listener', handRaised: true, joinedAt: 100 - index }));
+    return state;
+  }
+
+  it('uses the first, middle and last snapshot positions without sorting or exposing the queue', async t => {
+    const { element, client } = await subscribedWidget(t);
+    const status = element['status'];
+    assert.equal(status.getAttribute('role'), 'status');
+    assert.equal(status.getAttribute('aria-live'), 'polite');
+    for (const ids of [['me', 'a', 'b'], ['a', 'me', 'b'], ['a', 'b', 'me']]) {
+      const state = queuedState(ids);
+      state.code = 'PRIVATE-CODE';
+      for (const hand of state.hands) Object.freeze(hand);
+      Object.freeze(state.hands);
+      Object.freeze(state.me);
+      await client['receive']({ type: 'room:state', ...state });
+      assert.equal(status.textContent, `Room & Hall · 直播中 · 已舉手（佇列第 ${ids.indexOf('me') + 1} 位）`);
+      assert.equal(element['status'], status, 'the existing live region is reused');
+      assert.equal(element['hand'].textContent, '收回舉手');
+      assert.equal(element['hand'].hidden, false);
+      assert.equal(element['hand'].disabled, false);
+      assert.deepEqual(client.state?.hands.map(hand => hand.participantId), ids);
+      assert.equal(client.state?.hands, state.hands);
+      assert.doesNotMatch(status.textContent ?? '', /Private listener|PRIVATE-CODE/);
+    }
+  });
+
+  it('updates only from authoritative snapshots, without adding requests or queue timers', async t => {
+    const { element, client } = await subscribedWidget(t);
+    await client['receive']({ type: 'room:state', ...queuedState(['a', 'b', 'me']) });
+    const before = client.state;
+    const timers = t.mock.method(globalThis, 'setTimeout');
+    const raise = t.mock.method(client, 'raiseHand');
+    const withdraw = t.mock.method(client, 'withdrawHand');
+    const forwarded: unknown[] = [];
+    element.addEventListener('stage-hand', event => { forwarded.push((event as CustomEvent).detail); });
+    await client['receive']({ type: 'hand:withdraw', participantId: 'a' });
+    assert.equal(client.state, before);
+    assert.equal(element['status'].textContent, 'Room & Hall · 直播中 · 已舉手（佇列第 3 位）');
+    await client['receive']({ type: 'room:state', ...queuedState(['b', 'me']) });
+    assert.equal(element['status'].textContent, 'Room & Hall · 直播中 · 已舉手（佇列第 2 位）');
+    await client['receive']({ type: 'room:state', ...queuedState(['me']) });
+    assert.equal(element['status'].textContent, 'Room & Hall · 直播中 · 已舉手（佇列第 1 位）');
+    assert.deepEqual(forwarded, [{ participantId: 'a', raised: false }]);
+    assert.equal(raise.mock.callCount(), 0);
+    assert.equal(withdraw.mock.callCount(), 0);
+    assert.equal(timers.mock.callCount(), 0);
+    assert.equal(element['cooldownTimer'], undefined);
+    assert.equal(element['pendingActions'].size, 0);
+  });
+
+  it('clears the position after withdrawal and uses the new tail position after reentry', async t => {
+    const { element, client } = await subscribedWidget(t);
+    await client['receive']({ type: 'room:state', ...queuedState(['me', 'a']) });
+    assert.equal(element['status'].textContent, 'Room & Hall · 直播中 · 已舉手（佇列第 1 位）');
+    await client['receive']({ type: 'room:state', ...queuedState(['a']) });
+    assert.equal(element['status'].textContent, 'Room & Hall · 直播中 · 收聽中');
+    assert.equal(element['hand'].textContent, '舉手發言');
+    await client['receive']({ type: 'room:state', ...queuedState(['a', 'b', 'me']) });
+    assert.equal(element['status'].textContent, 'Room & Hall · 直播中 · 已舉手（佇列第 3 位）');
+    assert.equal(element['hand'].textContent, '收回舉手');
+  });
+
+  it('retains disconnected hands in their snapshot positions', async t => {
+    const { element, client } = await subscribedWidget(t);
+    const state = queuedState(['offline', 'me']);
+    state.hands[0]!.connected = false;
+    await client['receive']({ type: 'room:state', ...state });
+    assert.equal(element['status'].textContent, 'Room & Hall · 直播中 · 已舉手（佇列第 2 位）');
+    state.hands[0]!.connected = true;
+    await client['receive']({ type: 'room:state', ...state });
+    assert.equal(element['status'].textContent, 'Room & Hall · 直播中 · 已舉手（佇列第 2 位）');
+    await client['receive']({ type: 'room:state', ...queuedState(['me']) });
+    assert.equal(element['status'].textContent, 'Room & Hall · 直播中 · 已舉手（佇列第 1 位）');
+  });
+
+  it('falls back to the raised-hand label when self is absent and uses the first duplicate defensively', async t => {
+    const { element, client } = await subscribedWidget(t);
+    for (const ids of [[], ['other']]) {
+      const state = queuedState(ids);
+      // The server forbids this mismatch, but consumers can mutate the exposed SDK snapshot.
+      state.me.handRaised = true;
+      await client['receive']({ type: 'room:state', ...state });
+      assert.equal(element['status'].textContent, 'Room & Hall · 直播中 · 已舉手');
+      assert.equal(element['hand'].textContent, '收回舉手');
+    }
+    await client['receive']({ type: 'room:state', ...queuedState(['other', 'me', 'me']) });
+    assert.equal(element['status'].textContent, 'Room & Hall · 直播中 · 已舉手（佇列第 2 位）');
+  });
+
+  it('never adds a position to unraised, on-stage or controller state', async t => {
+    const { element, client } = await subscribedWidget(t);
+    await client['receive']({ type: 'room:state', ...queuedState(['me']) });
+    for (const muted of [false, true]) {
+      const promoted = roomState(true);
+      promoted.me.muted = muted;
+      await client['receive']({ type: 'room:state', ...promoted });
+      assert.equal(element['status'].textContent, `Room & Hall · 直播中 · ${muted ? '台上（已靜音）' : '台上'}`);
+      assert.equal(element['hand'].hidden, true);
+    }
+    const unraised = queuedState(['me']);
+    unraised.me.handRaised = false;
+    await client['receive']({ type: 'room:state', ...unraised });
+    assert.equal(element['status'].textContent, 'Room & Hall · 直播中 · 收聽中');
+    for (const onStage of [false, true]) {
+      const controller = queuedState(['me']);
+      controller.me.role = 'controller'; controller.me.onStage = onStage;
+      // Invalid retained hand data must not turn a controller into a queued listener.
+      await client['receive']({ type: 'room:state', ...controller });
+      assert.doesNotMatch(element['status'].textContent ?? '', /佇列/);
+      assert.equal(element['hand'].hidden, true);
+    }
+  });
+
+  it('labels the retained reconnect position as previous and restores fresh rank before the resume ACK', async t => {
+    const { element, client, socket, sockets, tick, hello } = await socketJoinedWidget(t, queuedState(['a', 'me']));
+    const retained = client.state;
+    socket.close(); await settle();
+    assert.equal(client.state, retained);
+    assert.equal(element['status'].textContent, 'Room & Hall · 重新連線中 · 已舉手（上次佇列第 2 位）');
+    assert.equal(element['hand'].disabled, true);
+    assert.equal(element['hand'].textContent, '收回舉手');
+    click(element['hand']);
+    await tick(500);
+    const replacement = sockets[1]!;
+    const resume = await hello(replacement);
+    assert.equal(element['status'].textContent, 'Room & Hall · 重新連線中 · 已舉手（上次佇列第 2 位）');
+    assert.equal(replacement.sent.some(message => message.type === 'hand:withdraw'), false);
+    replacement.deliver({ type: 'room:state', ...queuedState(['me']), resumeToken: 'resume-me' });
+    await settle();
+    assert.equal(client['pending'].has(resume.requestId), true);
+    assert.equal(element['status'].textContent, 'Room & Hall · 直播中 · 已舉手（佇列第 1 位）');
+    assert.equal(element['hand'].disabled, false);
+    replacement.deliver({ type: 'ok', requestId: resume.requestId }); await settle();
+    assert.equal(element['status'].textContent, 'Room & Hall · 直播中 · 已舉手（佇列第 1 位）');
+  });
+
+  it('uses a replacement participant identity rather than a remembered own position', async t => {
+    const { element, client } = await subscribedWidget(t);
+    await client['receive']({ type: 'room:state', ...queuedState(['me', 'other']) });
+    await client['receive']({ type: 'room:state', ...queuedState(['me', 'other', 'new-me'], 'new-me') });
+    assert.equal(element['status'].textContent, 'Room & Hall · 直播中 · 已舉手（佇列第 3 位）');
+    const fresh = roomState(); fresh.me.participantId = 'fresh';
+    await client['receive']({ type: 'room:state', ...fresh });
+    assert.equal(element['status'].textContent, 'Room & Hall · 直播中 · 收聽中');
+  });
+
+  for (const transition of ['room change', 'remount'] as const) {
+    it(`clears the old position on ${transition} and ignores the retired client's queue`, async t => {
+      const { element, client } = await subscribedWidget(t);
+      await client['receive']({ type: 'room:state', ...queuedState(['a', 'me']) });
+      if (transition === 'room change') element.setAttribute('room', 'two');
+      else {
+        Object.assign(element, { isConnected: false }); element.disconnectedCallback(); await settle();
+        Object.assign(element, { isConnected: true }); element.connectedCallback();
+      }
+      assert.doesNotMatch(element['status'].textContent ?? '', /佇列/);
+      await settle();
+      const replacement = element.client;
+      assert.ok(replacement); assert.notEqual(replacement, client);
+      await replacement['receive']({ type: 'room:state', ...queuedState(['me']), roomId: 'two', name: 'New room' });
+      const forwarded: unknown[] = [];
+      element.addEventListener('stage-state', event => { forwarded.push((event as CustomEvent).detail); });
+      await client['receive']({ type: 'room:state', ...queuedState(['a', 'b', 'me']), name: 'Old room' });
+      await client['receive']({ type: 'status', state: 'reconnecting' });
+      assert.deepEqual(forwarded, []);
+      assert.equal(element['status'].textContent, 'New room · 直播中 · 已舉手（佇列第 1 位）');
+    });
+  }
+
+  it('clears position on exposed-client disconnect and terminal room events', async t => {
+    const { element, client } = await subscribedWidget(t);
+    for (const terminal of [null, ...terminalCases]) {
+      await client['receive']({ type: 'room:state', ...queuedState(['me']) });
+      if (terminal) await client['receive'](terminal.message);
+      else await client.disconnect();
+      assert.equal(element['status'].textContent, terminal?.text ?? '未連線');
+      assertRoomControlsHidden(element);
+      element.playbackMuted = true;
+      assert.equal(element['status'].textContent, terminal?.text ?? '未連線');
+    }
+  });
+});
 
 const reconnectActions = [
   { title: 'raise hand', key: 'hand', method: 'raiseHand', type: 'hand:raise', onStage: false, raised: false, muted: false },
