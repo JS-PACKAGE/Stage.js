@@ -207,11 +207,13 @@ function button(label: string, action: () => Promise<unknown>, className = ''): 
   node.onclick = () => { void run(action, node); };
   return node;
 }
-async function run(action: () => Promise<unknown>, target?: HTMLButtonElement): Promise<void> {
+async function run(action: () => Promise<unknown>, target?: HTMLButtonElement, generation?: number): Promise<void> {
   if (target) target.disabled = true;
   errorBox.hidden = true;
   try { await action(); }
-  catch (error) { showError(error instanceof Error ? error.message : '操作失敗，請稍後再試。'); }
+  catch (error) {
+    if (generation === undefined || generation === roomActionGeneration) showError(error instanceof Error ? error.message : '操作失敗，請稍後再試。');
+  }
   finally { if (target?.isConnected) target.disabled = false; updateCooldown(); syncMeter(); }
 }
 /** Room controls retain their pending state when snapshots replace their DOM nodes. */
@@ -463,7 +465,7 @@ function gainSlider(person: ParticipantView): HTMLLabelElement {
   slider.min = String(-MAX_GAIN_DB); slider.max = String(MAX_GAIN_DB); slider.step = '1';
   slider.value = String(person.gainDb);
   slider.title = `${person.gainDb} dB`;
-  slider.onchange = () => { void run(() => client.setGain(person.participantId, Number(slider.value))); };
+  slider.onchange = () => { void run(() => client.setGain(person.participantId, Number(slider.value)), undefined, roomActionGeneration); };
   label.append(slider);
   return label;
 }
