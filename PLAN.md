@@ -503,3 +503,6 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 
 
 106. **離線設定預檢（2026-10-13）：** 新增 src/check-config.ts 與 npm config:check，使用同一 loadConfig schema，無 startup／media imports，支援 source 與 dist entry。explicit path > STAGE_CONFIG > repo-root config.yaml，relative explicit/env 依 cwd，保留空 env 的既有 nullish 語意；help0／usage2／驗證錯誤1／成功0，不複製或改寫設定，不探測憑證、靜態資源、port 或 TURN。synthetic malformed token／alias／unknown tag／directive／complex-key probe 證實舊 yaml.parse error.message 與 warning 可含設定內容；共用 loader 改用 logLevel:error、prettyErrors:false、LineCounter，只輸出 parser code 與數字位置，read／conversion error 採靜態診斷，不印路徑或原文。不得使用 logLevel:silent，該 library 模式會丟棄 parse errors（例如多文件），已用對照確認。warning-only YAML 維持先前接受規則但不輸出原文 warning，schema field diagnostics 保留。測試只使用 example-derived synthetic fixture tree，default path 不讀真實 config.yaml；不啟動網路／worker 或讀取真實憑證。
+
+
+107. **主控 gain slider 的重連限制（2026-10-13）：** whole-module sample＋actual SDK／fake socket probe 重現 retained room 在 reconnecting 時 slider 仍可操作：沒有 open socket 會產生離線錯誤，replacement socket OPEN 但 hello 尚未完成時會送出 mic:gain。將 slider 加入既有 data-room-action 同步停用路徑，採獨立 gain:<participantId> key，不建立 pending lock；change handler 同時檢查 disabled 與 reconnecting，避免程式化事件繞過 UI。state/status 重畫沿用現有恢復規則，已送出的請求照常 settle，多人與同人的並行 gain、目前房間錯誤、離房錯誤歸屬不變；本機 playback controls 不受影響。不修改 SDK admission／server policy，不宣稱 native browser、真實網路或音訊驗證。

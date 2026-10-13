@@ -307,7 +307,7 @@ function roomButton(key: string, label: string, action: () => Promise<unknown>, 
   return node;
 }
 function syncRoomActions(): void {
-  for (const node of content.querySelectorAll<HTMLButtonElement>('[data-room-action]')) {
+  for (const node of content.querySelectorAll<HTMLButtonElement | HTMLInputElement>('[data-room-action]')) {
     const key = node.dataset.roomAction!;
     const pending = pendingRoomActions.has(key);
     node.setAttribute('aria-busy', String(pending));
@@ -553,10 +553,14 @@ function gainSlider(person: ParticipantView): HTMLLabelElement {
   const label = element('label', 'gain', '音量');
   const slider = element('input');
   slider.type = 'range';
+  slider.dataset.roomAction = `gain:${person.participantId}`;
   slider.min = String(-MAX_GAIN_DB); slider.max = String(MAX_GAIN_DB); slider.step = '1';
   slider.value = String(person.gainDb);
   slider.title = `${person.gainDb} dB`;
-  slider.onchange = () => { void run(() => client.setGain(person.participantId, Number(slider.value)), undefined, roomActionGeneration); };
+  slider.onchange = () => {
+    if (slider.disabled || client.status === 'reconnecting') return;
+    void run(() => client.setGain(person.participantId, Number(slider.value)), undefined, roomActionGeneration);
+  };
   label.append(slider);
   return label;
 }
