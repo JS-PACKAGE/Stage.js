@@ -532,6 +532,8 @@ function renderRoom(state: RoomStatePayload): void {
     actions.append(cooldownButton);
   }
   actions.append(button('離開房間', async () => {
+    // Leaving after a pre-ACK snapshot also retires that entry's local feedback.
+    if (landingEntry) landingEntry.cancelled = true;
     micTest?.stop(); micTest = null;
     testButton.textContent = '測試麥克風'; testButton.setAttribute('aria-pressed', 'false');
     await client.disconnect(); createdRoom = null; micNotice = invitation = ''; landing();

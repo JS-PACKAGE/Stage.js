@@ -566,3 +566,6 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 
 
 127. **最小嵌入範例的明確麥克風重試（2026-10-13）：** 已上台者發生 micerror 原本只得到文字，必須離房或改變台位才有重新擷取途徑。新增 failed-participant-only 重試按鈕，沿用 retryMicrophone boolean admission；目前 client／controlsClient、同一 participant、onStage、live、未 pending 才接納，強制靜音不自動解除也不阻止使用者準備擷取。同步先保留 operation token，false／throw 只復原仍由該 token 擁有的 UI，micready／micerror／離房同步 reentry 優先。micready 清掉 pending 並只呈現「已取得麥克風」，不當作 sender install／SDP／真正發聲成功；後續 current error 仍顯示。micerror 與 micready listener 增加 current-client／controlsClient guard，退休 client 不能重建重試狀態；下台、participant 替換、離房、終止與重加清除，普通同席重連保留失敗／pending 狀態但暫停 admission。無自動 retry、新 capture API、SDK／Hub 政策或背景 timer。測試以 whole embed、實際 SDK 與 fake permission/track promises 驗證，原生權限 UI 與硬體音訊仍未驗收。
+
+
+128. **完整範例主動離房的初次等待回報（2026-10-13）：** actual SDK／whole sample fake-socket probe 證實 create 與 join 在 room:state 早於 ACK 時，使用者可正常按離開房間，但 SDK disconnect 拒絕尚未完成的初次請求後，舊 runLanding catch 又顯示「連線已中斷。」；沒有 SDK error event。只在明確離房 action 呼叫 disconnect 前退休當前 landingEntry 的 feedback，沿用既有 cancelled 判斷阻止舊錯誤及 create continuation；不提早釋放 shared busy lock，不改 SDK／伺服器操作。普通建立／加入失敗、關房／被踢的既有診斷及其他 error listener 保留。測試驗證 state-before-ACK、主動離房、下一次失敗／重試與晚到 settlement；fake DOM／socket／media 不代表真實瀏覽器音訊驗收。
