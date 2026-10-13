@@ -78,8 +78,27 @@ notices.setAttribute('aria-live', 'polite');
 const errorBox = element('p', 'banner error');
 errorBox.hidden = true;
 errorBox.setAttribute('role', 'alert');
+const audienceFilter = element('section', 'panel audience-filter');
+audienceFilter.hidden = true;
+const audienceSearch = element('input');
+audienceSearch.type = 'search'; audienceSearch.id = 'audience-search';
+audienceSearch.autocomplete = 'off';
+const audienceSearchLabel = element('label', '', '篩選觀眾名稱');
+audienceSearchLabel.setAttribute('for', audienceSearch.id);
+const audienceFilterCount = element('p', 'muted');
+audienceFilterCount.setAttribute('role', 'status');
+const audienceFilterClear = element('button', '', '清除篩選');
+audienceFilterClear.type = 'button';
+audienceFilter.append(audienceSearchLabel, audienceSearch, audienceFilterClear, audienceFilterCount);
+let audienceFilterIdentity = '';
+const audienceFilterRows: { row: HTMLLIElement; name: string }[] = [];
+audienceSearch.oninput = () => { if (canFilterAudience()) applyAudienceFilter(); };
+audienceFilterClear.onclick = () => {
+  if (!canFilterAudience()) return;
+  audienceSearch.value = ''; applyAudienceFilter();
+};
 const content = element('main');
-app.append(header, notices, errorBox, content);
+app.append(header, notices, errorBox, audienceFilter, content);
 const settings = element('section', 'panel audio-settings');
 settings.append(element('h2', '', '音訊設定'));
 const micSelect = element('select');
@@ -296,12 +315,12 @@ function resetRoomActions(identity: string): void {
   roomActionIdentity = identity; roomActionGeneration++; pendingRoomActions.clear();
   micRetryAvailable = micRetryPending = false; micNotice = '';
 }
-function roomButton(key: string, label: string, action: () => Promise<unknown>, className = ''): HTMLButtonElement {
+function roomButton(key: string, label: string, action: () => Promise<unknown>, className = '', canAct?: () => boolean): HTMLButtonElement {
   const node = element('button', className, label);
   node.type = 'button'; node.dataset.roomAction = key;
   const generation = roomActionGeneration;
   node.onclick = () => {
-    if (node.disabled || generation !== roomActionGeneration || pendingRoomActions.has(key)) return;
+    if (node.disabled || generation !== roomActionGeneration || pendingRoomActions.has(key) || (canAct && !canAct())) return;
     const token = Symbol(key); pendingRoomActions.set(key, token);
     updateCooldown(); errorBox.hidden = true;
     void (async () => {
@@ -368,6 +387,7 @@ function field(form: HTMLFormElement, label: string, name: string, value = '', r
   return input;
 }
 function landing(): void {
+  resetAudienceFilter();
   renderedRoomSignature = undefined; renderedGainInputs.length = 0;
   personRows.clear(); speakingIds.clear();
   resetMicSettings();
@@ -472,6 +492,39 @@ function renderNotices(): void {
   }
   if (invitation) notices.append(element('p', 'banner', invitation));
 }
+function resetAudienceFilter(): void {
+  audienceFilterIdentity = ''; audienceSearch.value = '';
+  audienceFilterRows.length = 0;
+  audienceFilter.hidden = true; audienceSearch.disabled = audienceFilterClear.disabled = true;
+  audienceFilterCount.textContent = '';
+}
+function canFilterAudience(): boolean {
+  const state = client.state;
+  return Boolean(state?.me.role === 'controller' && state.audience
+    && audienceFilterIdentity === JSON.stringify([state.roomId, state.me.participantId]));
+}
+function applyAudienceFilter(): void {
+  const query = audienceSearch.value.trim().toLowerCase();
+  let visible = 0;
+  for (const { row, name } of audienceFilterRows) {
+    const matches = name.includes(query);
+    if (row.hidden !== !matches) row.hidden = !matches;
+    if (matches) visible++;
+  }
+  audienceFilterClear.disabled = audienceSearch.value.length === 0;
+  const count = query && visible === 0 && audienceFilterRows.length > 0
+    ? `沒有符合名稱的觀眾（0／${audienceFilterRows.length}）`
+    : `顯示 ${visible}／${audienceFilterRows.length} 位觀眾`;
+  if (audienceFilterCount.textContent !== count) audienceFilterCount.textContent = count;
+}
+function syncAudienceFilter(state: RoomStatePayload): void {
+  if (state.me.role !== 'controller' || !state.audience) { resetAudienceFilter(); return; }
+  const identity = JSON.stringify([state.roomId, state.me.participantId]);
+  if (audienceFilterIdentity !== identity) audienceSearch.value = '';
+  audienceFilterIdentity = identity;
+  audienceFilter.hidden = false; audienceSearch.disabled = false;
+  applyAudienceFilter();
+}
 function renderRoom(state: RoomStatePayload): void {
   resetRoomActions(JSON.stringify([state.roomId, state.me.participantId]));
   if (!state.me.onStage) {
@@ -483,9 +536,9 @@ function renderRoom(state: RoomStatePayload): void {
   const signature = JSON.stringify([state, roomCode, [...client.speaking], [...quality], client.status]);
   if (signature === renderedRoomSignature && !renderedGainInputs.some(({ input, value }) => input.value !== value)) {
     status.textContent = statusLabels[client.status];
-    updateCooldown(); renderNotices(); return;
+    syncAudienceFilter(state); updateCooldown(); renderNotices(); return;
   }
-  renderedGainInputs.length = 0;
+  renderedGainInputs.length = 0; audienceFilterRows.length = 0;
   personRows.clear(); speakingIds = new Set(client.speaking);
   const generation = roomActionGeneration;
   brand.textContent = decodeName(state.name);
@@ -571,7 +624,7 @@ function renderRoom(state: RoomStatePayload): void {
   const top = element('div', 'landing-grid'); top.append(summary, controls);
   content.replaceChildren(top, grid);
   renderedRoomSignature = signature;
-  updateCooldown(); renderNotices();
+  syncAudienceFilter(state); updateCooldown(); renderNotices();
 }
 function panelList(title: string, people: ParticipantView[], controller: boolean, kind: 'speaker' | 'hand'): HTMLElement {
   const panel = element('section', 'panel');
@@ -585,6 +638,7 @@ function panelList(title: string, people: ParticipantView[], controller: boolean
 function personRow(person: ParticipantView, controller: boolean, kind: 'speaker' | 'hand' | 'audience'): HTMLLIElement {
   const row = element('li', 'person');
   row.dataset.participantId = person.participantId;
+  if (kind === 'audience') audienceFilterRows.push({ row, name: decodeName(person.name).toLowerCase() });
   const rows = personRows.get(person.participantId);
   if (rows) rows.push(row); else personRows.set(person.participantId, [row]);
   row.classList.toggle('speaking', client.speaking.has(person.participantId));
@@ -599,14 +653,17 @@ function personRow(person: ParticipantView, controller: boolean, kind: 'speaker'
   // The controller manages others; its own mic/stage use the personal controls above.
   if (controller && person.participantId !== client.me?.participantId) {
     const id = person.participantId, forceMuted = person.forceMuted, name = decodeName(person.name);
+    const canManageAudience = () => kind !== 'audience' || Boolean(row.isConnected && !row.hidden
+      && client.status !== 'reconnecting' && client.me?.role === 'controller'
+      && client.state?.audience?.some((p) => p.participantId === id));
     const actions = element('div', 'actions');
     if (kind === 'hand') actions.append(roomButton(`stage:${id}`, '核准上台', () => client.approve(id), 'primary'), roomButton(`stage:${id}`, '婉拒', () => client.reject(id)));
     if (kind === 'speaker') actions.append(gainSlider(person), roomButton(`force-mute:${id}`, forceMuted ? '解除強制靜音' : '強制靜音', () => forceMuted ? client.forceUnmute(id) : client.forceMute(id)), roomButton(`stage:${id}`, '移出舞台', () => client.removeFromStage(id)));
     actions.append(roomButton('transfer', '移交控制權', async () => {
-      if (window.confirm(`確定將控制權移交給 ${name}？`)) await client.transferControl(id);
-    }), roomButton(`kick:${id}`, '踢出房間', async () => {
-      if (window.confirm(`確定將 ${name} 踢出房間？若要防止對方再進來，請接著更換房間代碼。`)) await client.kick(id);
-    }, 'danger'));
+      if (window.confirm(`確定將控制權移交給 ${name}？`) && canManageAudience()) await client.transferControl(id);
+    }, '', canManageAudience), roomButton(`kick:${id}`, '踢出房間', async () => {
+      if (window.confirm(`確定將 ${name} 踢出房間？若要防止對方再進來，請接著更換房間代碼。`) && canManageAudience()) await client.kick(id);
+    }, 'danger', canManageAudience));
     row.append(actions);
   }
   return row;

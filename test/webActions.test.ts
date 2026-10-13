@@ -9,6 +9,7 @@ const source = readFileSync(new URL('../web/src/main.ts', import.meta.url), 'utf
 const actions = source.slice(source.indexOf('function resetRoomActions('), source.indexOf('function showError('));
 const people = source.slice(source.indexOf('function panelList('), source.indexOf('/** Controller\'s per-speaker')) ;
 const landing = source.slice(source.indexOf('function landing()'), source.indexOf('function renderNotices()'));
+const audienceFilter = source.slice(source.indexOf('function resetAudienceFilter()'), source.indexOf('function renderRoom('));
 const render = source.slice(source.indexOf('function renderRoom('), source.indexOf('function panelList('));
 const cooldown = source.slice(source.indexOf('function updateCooldown('), source.indexOf("client.on('state', ({ detail })"));
 interface Button {
@@ -39,12 +40,14 @@ function setup(): Harness {
     const pendingRoomActions = new Map(), nodes = [], errors = [];
     const personRows = new Map(), quality = new Map(); let speakingIds = new Set();
     let renderedRoomSignature; const renderedGainInputs = [];
+    let audienceFilterIdentity = ''; const audienceFilterRows = [];
+    const audienceFilter = {}, audienceSearch = { value: '' }, audienceFilterClear = {}, audienceFilterCount = {};
     let nextTimer = 0, clock = 0, callbacks = 0;
     const performance = { now: () => clock };
     const timers = new Map();
     const setTimeout = (fn, delay) => { const id = ++nextTimer; timers.set(id, { fn, at: clock + delay }); return id; };
     const clearTimeout = id => timers.delete(id);
-    const client = { status: 'waiting', handCooldownMs: 0, me: { handRaised: false }, speaking: new Set() };
+    const client = { state: null, status: 'waiting', handCooldownMs: 0, me: { handRaised: false }, speaking: new Set() };
     const content = { querySelectorAll: selector => selector === '[data-room-action]' ? nodes : [], querySelector: () => nodes.find(node => node.dataset.returnStage),
       replaceChildren(...children) {
         nodes.length = 0;
@@ -67,6 +70,7 @@ function setup(): Harness {
     function syncMeter() {}
     ${actions}
     ${cooldown}
+    ${audienceFilter}
     ${render}
     ${people}
     ${landing}
@@ -77,7 +81,7 @@ function setup(): Harness {
         for (const [id, timer] of [...timers]) if (timer.at <= clock && timers.has(id)) {
           timers.delete(id); callbacks++; timer.fn();
         }
-      }, reset: resetRoomActions, tick: updateCooldown, render(state) { client.me = state.me; renderRoom(state); },
+      }, reset: resetRoomActions, tick: updateCooldown, render(state) { client.state = state; client.me = state.me; renderRoom(state); },
       button(key, action) { const node = roomButton(key, key, action); nodes.push(node); updateCooldown(); return node; } });
   `), { Symbol, Map, Error, Math, Promise, URL }) as Harness;
 }

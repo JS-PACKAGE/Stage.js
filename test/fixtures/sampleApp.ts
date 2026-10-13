@@ -259,6 +259,7 @@ export async function flushSample(): Promise<void> { for (let i = 0; i < 16; i++
 
 interface SampleAppOptions {
   source?: string;
+  decodeName?: (value: string) => string;
   deferAudioDevices?: boolean;
   clipboard?: { writeText(text: string): Promise<void> };
   confirm?: (message: string) => boolean;
@@ -298,7 +299,7 @@ function mountSampleApp<Client extends SampleClient = SampleSdk>(options: Sample
     } } },
     window: { confirm: options.confirm ?? (() => { throw new Error('Unexpected confirmation dialog in lifecycle test'); }) },
     StageClient: function (options: { url: string }) { constructions++; assert.equal(options.url, 'wss://sample.test/ws'); return sdk; },
-    decodeName: (value: string) => value, MAX_GAIN_DB, URL, URLSearchParams, Error, AbortController,
+    decodeName: options.decodeName ?? ((value: string) => value), MAX_GAIN_DB, URL, URLSearchParams, Error, AbortController,
     performance: { now: () => clock.now },
     setTimeout: clock.setTimeout, clearTimeout: clock.clear, setInterval: clock.setInterval, clearInterval: clock.clear,
   }, { timeout: 1000, filename: 'web/src/main.ts', contextCodeGeneration: { strings: false, wasm: false } });
