@@ -527,3 +527,6 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 
 
 114. **完整範例的手動麥克風重試（2026-10-13）：** 沿用 SDK retryMicrophone boolean admission，在目前 onstage micerror banner 提供明確「重試麥克風」，不自動呼叫。獨立 available/pending flag 保留跨 notice/state 重畫的等待狀態，handler 檢查 room generation、DOM/current policy 與重入；先保留 pending，再依 true／false admission 處理，不把 boolean 當作完成 promise。false 保留既有錯誤、不永久鎖定；目前 micerror 恢復手動操作，micready 清除擷取提示但不宣稱 sender／negotiation 成功。reconnect 只停用新操作；offstage／disconnect／身分替換退休 UI 工作，舊 DOM 不得要求新房擷取。完整範例上台時已禁止／取消自己的 preview，仍不將共享 micready 描述為一般 API completion guarantee。保留裝置選擇、mute／force-mute、本機 playback、generic error sink 與 SDK generation semantics，不修改 SDK／server。測試使用 whole-module 假 DOM 加 actual SDK／fake media，不觸發真實授權提示或宣稱音訊 E2E。
+
+
+115. **POSIX restart 停機前預檢（2026-10-13）：** strict shell mocks 重現原本 restart 先 TERM／移除健康 PID，才發現 Node 失敗／版本過舊、缺少 dist entry 或指定設定；invalid schema／空 STAGE_CONFIG 也在 stop 後才進入 launch。新增 restart-only preflight，先保留 timeout 與 PID 驗證／探測優先序，再檢查 Node、built entry 與 built checker，沿用 ensure_config，使用無 positional argument 的 built checker 驗證原始環境。checker 與 server 同樣 import dist config schema，缺少舊版 checker 時要求 build，不回退到可能不同版的 source。預設設定不存在時仍可由既有準備步驟複製範例；checker 本身唯讀。驗證成功後才沿用 stop/start，保留 start/run/dev 的既有條件；不宣稱零停機、runtime health、PID ownership 或 TOCTOU 保證，不讀使用者真實設定／憑證。測試只在 synthetic fixture 內使用受限程序 mocks，沒有真實訊號或 server 啟動，Windows 行為另行保留。

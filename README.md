@@ -89,6 +89,8 @@ node dist/src/check-config.js /path/to/config.yaml # 建置後也可直接執行
 
 `stage.sh` 只接受 PID 檔中的正十進位整數（1–2147483647，可含前導零與尾端換行；拒絕 NUL 等其他位元組）。內容無效或讀取失敗時，`start`／`status`／`stop`／`restart` 以 exit code 1 結束，保留檔案供檢查，不探測／發送訊號／啟動程序；有效但已不存在的 PID 仍清除，`status` 回 3、`stop` 成功返回。這只防止錯誤格式與 process-group selector，不驗證 PID 是否仍屬於原本的 Stage 程序，也不解決作業系統的 PID 重用。
 
+`stage.sh restart` 在送出 SIGTERM 前先檢查 Node 版本、已建置的 server／設定檢查器與設定語法／schema；檢查失敗時不停止目前程序。請先執行 `build`，舊版建置若沒有 `dist/src/check-config.js` 也會拒絕 restart。檢查器與 server 使用同一份已建置 schema，不改用可能較新的 source schema。原有 timeout／PID 驗證仍優先；設定準備沿用 `start`，因此缺少預設設定時仍可能先由範例建立 `config.yaml`，而 checker 本身不寫入設定。`STAGE_CONFIG` 原值會保留給 checker，relative path 從腳本所在專案目錄解析，空值仍依 server 語意驗證並失敗。通過後仍依序 stop／start，不保證零停機或啟動成功，也不預測 port、TLS／media 資源、相依套件的所有 runtime 路徑或檢查後的檔案變更。其他控制指令與 Windows 腳本維持原本行為。
+
 Windows 用 `.\stage.ps1 <command>`，指令相同；Windows 無法對背景 node 送 SIGTERM，`stop` 為直接終止。
 
 ## 設定（`config.yaml`）

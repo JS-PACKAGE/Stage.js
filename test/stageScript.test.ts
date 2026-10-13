@@ -19,6 +19,7 @@ const MOCKED_CALLS = new Set([
   'major=$(node -p \'process.versions.node.split(".")[0]\')',
   '[ "$major" -ge 24 ] || die "Node.js 版本為 $(node --version)，需要 24 以上"',
   'nohup node "$ENTRY" >>"$LOG_FILE" 2>&1 &',
+  'node "$CHECKER"',
   // This dispatch is unreachable through the fixture's command options.
   'run) check_node; ensure_config; exec node "$ENTRY" ;;',
 ]);
@@ -319,7 +320,7 @@ describe('stage.sh PID-file validation', { skip }, () => {
       assert.deepEqual(result.trace, [
         `kill -0 ${FAKE_PID}`, 'node -p process.versions.node.split(".")[0]',
       ]);
-      assert.equal(result.stdout, command === 'restart' ? '未在執行\n' : '');
+      assert.equal(result.stdout, '');
       assert.equal(result.stderr, '');
       assert.equal(result.pid, undefined);
     });
