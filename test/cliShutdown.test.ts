@@ -3,6 +3,7 @@ import { readFileSync } from 'node:fs';
 import { stripTypeScriptTypes } from 'node:module';
 import { it } from 'node:test';
 import { runInNewContext } from 'node:vm';
+import { createLogger } from '../src/log.ts';
 
 const source = readFileSync(new URL('../src/index.ts', import.meta.url), 'utf8');
 const shutdownMarker = 'let stopping = false;';
@@ -190,10 +191,120 @@ it('CLI unrelated unhandled rejections remain logged without starting shutdown',
   const h = fixture(), rejection = new Error('stray WebRTC timer');
   h.emit('unhandledRejection', rejection);
   h.emit('unhandledRejection', 'non-Error rejection');
+  h.emit('unhandledRejection', null);
   assert.deepEqual(h.calls, []);
   assert.deepEqual(h.infos, []);
-  assert.deepEqual(h.errors.map(entry => entry.message), ['unhandled rejection', 'unhandled rejection']);
-  assert.deepEqual(h.errors.map(entry => entry.fields?.error), [rejection.stack, 'non-Error rejection']);
+  assert.deepEqual(h.errors.map(entry => entry.message), Array(3).fill('unhandled rejection'));
+  assert.equal(h.errors[0]!.fields?.error, rejection);
+  assert.equal(h.errors[1]!.fields?.error, 'non-Error rejection');
+  assert.equal(h.errors[2]!.fields?.error, null);
   await bounded(h.stop('SIGTERM'));
   assert.deepEqual(h.calls, ['server.close', 'transport.close', 'exit:0']);
 });
+
+function hostileDiagnostics() {
+  const reads: string[] = [];
+  const forbidden = (hook: string): never => { reads.push(hook); throw new Error(`unexpected ${hook}`); };
+  const error = new Error('hostile error');
+  Object.defineProperty(error, 'stack', { get() { return forbidden('error.stack'); } });
+  Object.defineProperty(error, 'message', { get() { return forbidden('error.message'); } });
+  Object.defineProperty(error, 'name', { get() { return forbidden('error.name'); } });
+  const object = {
+    safe: 'retained',
+    toString() { return forbidden('toString'); },
+    valueOf() { return forbidden('valueOf'); },
+    toJSON() { return forbidden('toJSON'); },
+    [Symbol.toPrimitive]() { return forbidden('Symbol.toPrimitive'); },
+    get computed() { return forbidden('computed'); },
+    get secret() { return forbidden('secret'); },
+  };
+  const proxy = new Proxy({}, {
+    get() { return forbidden('proxy.get'); },
+    getPrototypeOf() { return forbidden('proxy.getPrototypeOf'); },
+    getOwnPropertyDescriptor() { return forbidden('proxy.getOwnPropertyDescriptor'); },
+    ownKeys() { return forbidden('proxy.ownKeys'); },
+  });
+  const revoked = Proxy.revocable({}, {}); revoked.revoke();
+  const values: { label: string; value: unknown; serialized: unknown }[] = [
+    { label: 'null-prototype object', value: Object.assign(Object.create(null), { safe: 'null-prototype' }), serialized: { safe: 'null-prototype' } },
+    { label: 'hostile Error accessors', value: error, serialized: { name: '[Accessor]', message: '[Accessor]', stack: '[Accessor]' } },
+    { label: 'hostile coercion and JSON hooks', value: object, serialized: {
+      safe: 'retained', toString: '[Function]', valueOf: '[Function]', toJSON: '[Function]', computed: '[Accessor]', secret: '[redacted]',
+    } },
+    { label: 'hostile proxy', value: proxy, serialized: '[Proxy]' },
+    { label: 'revoked proxy', value: revoked.proxy, serialized: '[Proxy]' },
+  ];
+  return { reads, values };
+}
+
+for (const event of ['unhandledRejection', 'uncaughtException'] as const) {
+  it(`CLI ${event} passes hostile diagnostics unchanged without inspecting them`, async () => {
+    const { reads, values } = hostileDiagnostics();
+    const gate = Promise.withResolvers<void>();
+    const h = fixture(() => gate.promise);
+    let closing: Promise<void> | undefined;
+    try {
+      if (event === 'uncaughtException') closing = bounded(h.stop('SIGTERM'));
+      for (const { label, value } of values) {
+        assert.doesNotThrow(() => h.emit(event, value), label);
+        assert.equal(h.errors.at(-1)!.fields?.error, value, `${label} is passed by identity`);
+      }
+      assert.equal(h.errors.length, values.length);
+      assert.deepEqual(h.errors.map(entry => entry.message), Array(values.length).fill(event === 'unhandledRejection'
+        ? 'unhandled rejection' : 'uncaught exception, shutting down'));
+      assert.deepEqual(reads, []);
+      assert.deepEqual(h.calls, event === 'unhandledRejection' ? [] : ['server.close']);
+      if (event === 'unhandledRejection') assert.deepEqual(h.infos, []);
+    } finally {
+      gate.resolve();
+      if (closing) await closing;
+    }
+    if (event === 'uncaughtException') {
+      assert.deepEqual(h.calls, ['server.close', 'transport.close', 'exit:1']);
+      assert.equal(h.infos.length, 1, 'concurrent hostile fatals do not duplicate shutdown');
+    }
+  });
+
+  it(`CLI ${event} delegates safe structured output and redaction to the real logger`, async () => {
+    const lines: string[] = [], requests: { signal: string; code: number | undefined }[] = [], observed: Promise<void>[] = [];
+    const h = fixture();
+    runInNewContext(stripTypeScriptTypes(handlersSource), {
+      process: h.process, log: createLogger('error', line => lines.push(line)), Error,
+      stop(signal: string, code?: number) {
+        requests.push({ signal, code });
+        const completion = Promise.resolve();
+        observed.push(completion);
+        return completion;
+      },
+    }, { timeout: 1000, filename: 'cli-process-errors-logger.vm.js' });
+    const { reads, values } = hostileDiagnostics();
+    const cause = { token: 'synthetic-token', nested: [{ SeCrEt: 'synthetic-secret', safe: 42 }] };
+    const error = new TypeError('ordinary failure', { cause });
+    // V8 can expose a lazy stack accessor; a data property gives this assertion a stable diagnostic.
+    Object.defineProperty(error, 'stack', { value: 'TypeError: ordinary failure\n    at synthetic', configurable: true });
+    values.push(
+      { label: 'ordinary Error', value: error, serialized: {
+        name: 'TypeError', message: 'ordinary failure', stack: 'TypeError: ordinary failure\n    at synthetic',
+        cause: { token: '[redacted]', nested: [{ SeCrEt: '[redacted]', safe: 42 }] },
+      } },
+      { label: 'ordinary string', value: 'ordinary rejection', serialized: 'ordinary rejection' },
+      { label: 'null', value: null, serialized: null },
+    );
+    for (const { label, value } of values) assert.doesNotThrow(() => h.emit(event, value), label);
+    await bounded(Promise.all(observed));
+    assert.deepEqual(reads, []);
+    assert.equal(lines.length, values.length);
+    const entries = lines.map(line => JSON.parse(line) as { level: string; msg: string; error: unknown });
+    values.forEach(({ label, serialized }, index) => {
+      const entry = entries[index]!;
+      assert.equal(entry.level, 'error', label);
+      assert.equal(entry.msg, event === 'unhandledRejection' ? 'unhandled rejection' : 'uncaught exception, shutting down', label);
+      assert.deepEqual(entry.error, serialized, label);
+    });
+    assert.doesNotMatch(lines.join('\n'), /synthetic-token|synthetic-secret/);
+    assert.deepEqual(cause, { token: 'synthetic-token', nested: [{ SeCrEt: 'synthetic-secret', safe: 42 }] });
+    assert.deepEqual(requests, event === 'unhandledRejection' ? []
+      : Array.from({ length: values.length }, () => ({ signal: 'uncaughtException', code: 1 })));
+    assert.deepEqual(h.calls, [], 'no real process events, shutdown or exit are exposed to the handler proof');
+  });
+}

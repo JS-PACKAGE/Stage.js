@@ -551,3 +551,6 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 
 
 122. **停用 metrics 時不啟動程序延遲取樣（2026-10-13）：** CLI 原本無條件呼叫 processSamples，即使 server.metrics.enabled 為 false、HTTP 不使用 provider，仍 enable 10ms resolution 的 native event-loop histogram。以 exact CLI wiring／processSamples source 和 inert server／transport 作有界 probe，300ms 觀察中舊 disabled 路徑有 1 個 histogram／29 筆 samples，條件初始化後為 0／0；enabled 兩版仍為 1／29 且第一次 scrape 前即取樣。只在 CLI 依啟動設定決定是否建立取樣器，保留 enabled since-start 語意、原 provider、HTTP 關閉／授權政策、其他 counters 與正常停機，不改 processSamples 公開介面或新增動態設定。此證據只表示省去停用功能的 native 取樣，不宣稱 CPU、RSS、耗電或音訊效能提升。
+
+
+123. **程序錯誤事件安全診斷（2026-10-13）：** exact production handler tail 的 inert VM probe 重現 unhandledRejection 收到 null-prototype value 時，原 String(reason) 在 log 前拋錯；uncaughtException 的 Error.stack getter 拋錯時，原診斷讀取甚至跳過 stop。兩個事件只改成將原始 error value 交給既有安全結構化 logger，沿用 getter／coercion 防護與 nested redaction；一般 Error 由 logger 呈現 name/message/stack。保留 rejection 只記錄、exception 呼叫 stop(...,1)、併發停機只執行一次及非零優先序，不註冊新事件或改全域失敗政策。測試使用 synthetic rejection 與 VM process／真實 logger 的受控 sink，不對真實程序送 signal、exit 或製造未處理 rejection；自訂 logger／sink 自身失敗及永不 settle 的 close 仍不在保證範圍。
