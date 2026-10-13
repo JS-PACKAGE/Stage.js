@@ -653,3 +653,6 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 
 
 156. **只改觀眾數的完整範例重用（2026-10-13）：** source audit 確認 audienceCount 除了完整 signature，只用於觀眾標題；非主控收到單純進出房人數更新時，原本仍重建整個房間內容。先以 scratch prototype 驗證後，僅把 audienceCount 從 structural key 分離，保留所有其他 enumerable 狀態欄位、有效房間代碼、連線狀態及既有 speaking／quality key。cache hit 按最新人數與上限更新標題；完整替換成功後才保存新標題參照，landing 清除。保留 dirty gain 強制重建、pending／冷卻／提示／filter 更新和原本 handler scalar captures；正常主控觀眾名單變更仍使 structural key 不同。9 位台上者、20 筆舉手、50 次人數快照的 whole-module 假 DOM 工作量，新增節點 6,800→0、參與者列 1,450→0、內容替換 50→0，兩版標題均正確 50/50。只主張受控操作數；每次仍淺拷貝與序列化其餘狀態，並非零配置或原生瀏覽器 CPU／焦點／延遲驗收。
+
+
+157. **widget 播放解鎖的席位所有權（2026-10-13）：** 以實際 SDK 與受控 socket／RTC／audio 重現：已出現的啟用音訊按鈕在直接 disconnect、關房、被踢及 shutdown 後仍可點擊無來源 audio；pending rejection 也會覆蓋終止畫面。同一 public client 明確斷線後再 join，舊成功可隱藏新提示、舊失敗可污染新席位。只替 widget unlock 設置 client／room／participant 與操作 token，失去 state 時在轉送事件前撤銷；handler 在任何 pending／error 改動前檢查當前所有權，且同步呼叫 unlockAudio 保留使用者手勢。成功、錯誤與 finally 只作用於自己的操作，新 audioblocked 記錄避免舊成功清掉新提示。信令重連仍保留 state／媒體與操作，舞台或麥克風變動不撤銷收聽。SDK promise、媒體擷取與一般控制動作不變；受控遲到結果是生命週期防禦測試，不宣稱原生瀏覽器排序、權限繞過或音訊驗收。

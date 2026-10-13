@@ -1990,6 +1990,292 @@ describe('widget subscribed connection status', () => {
   });
 });
 
+describe('widget playback unlock lifecycle ownership', () => {
+  type Widget = InstanceType<typeof StageElement>;
+  function assertUnlock(element: Widget, { hidden = false, busy = false }: { hidden?: boolean; busy?: boolean } = {}): void {
+    assert.equal(element['unlock'].hidden, hidden, 'unlock visibility');
+    assert.equal(element['unlock'].getAttribute('aria-busy'), busy ? 'true' : null, 'unlock accessibility ownership');
+    assert.equal(element['pendingActions'].has(element['unlock']), busy, 'unlock pending ownership');
+    if (busy) assert.equal(element['unlock'].disabled, true);
+  }
+  function blockedEvent(client: StageClient): void {
+    client.dispatchEvent(new CustomEvent('audioblocked', { detail: { message: 'playback blocked' } }));
+  }
+  function currentError(client: StageClient): void {
+    client.dispatchEvent(new CustomEvent('error', { detail: new Error('current room alert') }));
+  }
+  function assertCurrentError(element: Widget): void {
+    assert.equal(element['error'].hidden, false);
+    assert.equal(element['error'].textContent, 'current room alert');
+  }
+  async function playbackWidget(t: TestContext) {
+    const original = Object.getOwnPropertyDescriptor(globalThis, 'RTCPeerConnection');
+    class Peer {
+      static instances: Peer[] = [];
+      connectionState = 'connected'; signalingState = 'stable'; closed = false;
+      ontrack?: (event: { streams: MediaStream[]; track: MediaStreamTrack }) => void;
+      readonly transceiver = { direction: 'recvonly', sender: { track: null as unknown,
+        async replaceTrack(track: unknown) { this.track = track; },
+      } };
+      constructor() { Peer.instances.push(this); }
+      addTransceiver() { return this.transceiver; }
+      close(): void { this.closed = true; this.connectionState = 'closed'; }
+      track(stream: MediaStream): void { this.ontrack?.({ streams: [stream], track: {} as MediaStreamTrack }); }
+    }
+    Object.defineProperty(globalThis, 'RTCPeerConnection', { configurable: true, value: Peer });
+    // SDK playback/session ownership is real; SDP and media hardware are outside this fixture.
+    t.mock.method(StageClient.prototype as unknown as { negotiate(): void }, 'negotiate', () => {});
+    t.after(() => {
+      if (original) Object.defineProperty(globalThis, 'RTCPeerConnection', original);
+      else Reflect.deleteProperty(globalThis, 'RTCPeerConnection');
+    });
+    const fixture = await socketJoinedWidget(t, roomState(), true);
+    const audio = fixture.client['audio'];
+    const plays: ReturnType<typeof deferred>[] = [];
+    const play = t.mock.method(audio, 'play', () => {
+      const attempt = deferred(); plays.push(attempt); return attempt.promise;
+    });
+    t.after(async () => { for (const attempt of plays) attempt.resolve(); await settle(); });
+    const blocked = async () => {
+      const stream = {} as MediaStream;
+      Peer.instances.at(-1)!.track(stream);
+      assert.equal(audio.srcObject, stream);
+      plays.at(-1)!.reject(new DOMException('autoplay denied', 'NotAllowedError'));
+      await settle(); assertUnlock(fixture.element);
+      return stream;
+    };
+    const rejoin = async (participantId = 'me') => {
+      const connecting = fixture.client.connect();
+      const socket = fixture.sockets.at(-1)!;
+      socket.hello(); await connecting;
+      const joining = fixture.client.join({ roomId: 'one', name: 'Listener' });
+      void joining.catch(() => {}); // Preserve the original assertion if fixture setup fails.
+      await settle(); await fixture.tick(100);
+      const request = fixture.joinRequest(socket), state = roomState();
+      state.me.participantId = participantId;
+      socket.deliver({ type: 'room:state', ...state });
+      socket.deliver({ type: 'ok', requestId: request.requestId });
+      await joining; await settle();
+      assert.equal(fixture.element.client, fixture.client, 'public reconnect/join reuses the exposed client');
+      return socket;
+    };
+    return { ...fixture, audio, plays, play, Peer, blocked, rejoin };
+  }
+
+  it('rejects stale programmatic clicks and blocked notices before the first joined snapshot', async t => {
+    const { element, sockets, hello } = socketJoiningWidget(t); await settle();
+    const client = element.client!, play = t.mock.method(client['audio'], 'play');
+    for (const phase of ['connecting', 'joining'] as const) {
+      if (phase === 'joining') await hello(sockets[0]!);
+      blockedEvent(client); assertUnlock(element, { hidden: true });
+      currentError(client);
+      const revision = element['errorRevision'];
+      element['unlock'].disabled = false; click(element['unlock']);
+      assert.equal(play.mock.callCount(), 0, phase);
+      assert.equal(element['errorRevision'], revision); assertCurrentError(element);
+      assert.equal(element['pendingActions'].size, 0);
+      assert.equal(element['unlock'].getAttribute('aria-busy'), null);
+    }
+  });
+
+  for (const terminal of [null, ...terminalCases]) {
+    it(`retires a visible unlock before forwarded ${terminal?.title ?? 'direct disconnect'} callbacks and rejects source-less clicks`, async t => {
+      const { element, client, socket, audio, play, blocked, Peer } = await playbackWidget(t);
+      await blocked();
+      const peer = Peer.instances[0]!, generation = element['generation'];
+      const callbacks: string[] = [];
+      for (const type of ['status', ...(terminal ? [terminal.event] : [])]) {
+        element.addEventListener(`stage-${type}`, event => {
+          if (type === 'status' && (event as CustomEvent).detail !== 'disconnected') return;
+          callbacks.push(type); assertUnlock(element, { hidden: true });
+          assert.equal(audio.srcObject, null); assert.equal(peer.closed, true);
+          currentError(client);
+          const revision = element['errorRevision'];
+          // Bypass the fake DOM's disabled/hidden surface to exercise handler admission itself.
+          element['unlock'].disabled = false; click(element['unlock']);
+          assert.equal(play.mock.callCount(), 1);
+          assert.equal(element['errorRevision'], revision); assertCurrentError(element);
+          assert.equal(element['pendingActions'].size, 0);
+          assert.equal(element['unlock'].getAttribute('aria-busy'), null);
+        });
+      }
+      if (terminal) socket.deliver(terminal.message); else await client.disconnect();
+      await settle(); await settle();
+      assert.deepEqual(callbacks, terminal ? ['status', terminal.event] : ['status']);
+      assert.equal(element['generation'], generation, 'SDK retirement does not replace the widget generation');
+      assert.equal(element.client, client); assert.equal(client.state, null);
+      assertUnlock(element, { hidden: true });
+      assert.equal(element['status'].textContent, terminal?.text ?? '未連線');
+      blockedEvent(client); assertUnlock(element, { hidden: true }); assertCurrentError(element);
+      element['unlock'].disabled = false; click(element['unlock']); await settle();
+      assert.equal(play.mock.callCount(), 1, 'retired audio is never played without a joined state');
+      assertCurrentError(element);
+    });
+
+    for (const outcome of ['resolve', 'reject'] as const) {
+      it(`ignores a pending unlock ${outcome} after ${terminal?.title ?? 'direct disconnect'}`, async t => {
+        const { element, client, socket, audio, plays, play, blocked } = await playbackWidget(t);
+        await blocked(); click(element['unlock']);
+        assert.equal(play.mock.callCount(), 2, 'play is invoked in the click turn');
+        assertUnlock(element, { busy: true }); const old = plays.at(-1)!;
+        if (terminal) socket.deliver(terminal.message); else await client.disconnect();
+        await settle(); assertUnlock(element, { hidden: true }); assert.equal(audio.srcObject, null);
+        currentError(client); const revision = element['errorRevision'];
+        // Pause/source clearing deliberately do not settle the fake promise: this tests ownership,
+        // not any particular native browser ordering for pending HTMLMediaElement.play().
+        if (outcome === 'resolve') old.resolve(); else old.reject(new DOMException('retired play failed', 'AbortError'));
+        await settle(); await settle();
+        assertUnlock(element, { hidden: true }); assertCurrentError(element);
+        assert.equal(element['errorRevision'], revision);
+        assert.equal(element['status'].textContent, terminal?.text ?? '未連線');
+        assert.equal(play.mock.callCount(), 2);
+      });
+    }
+  }
+
+  for (const identity of ['same', 'replacement'] as const) {
+    for (const pending of [false, true]) {
+      for (const outcome of ['resolve', 'reject'] as const) {
+        it(`isolates old unlock ${outcome} after same-client ${identity}-identity rejoin with ${pending ? 'a new retry pending' : 'a new blocked notice'}`, async t => {
+          const { element, client, audio, plays, play, blocked, rejoin } = await playbackWidget(t);
+          await blocked(); click(element['unlock']); const old = plays.at(-1)!;
+          const generation = element['generation'];
+          await client.disconnect(); assertUnlock(element, { hidden: true }); assert.equal(audio.srcObject, null);
+          await rejoin(identity === 'same' ? 'me' : 'replacement');
+          assert.equal(element['generation'], generation);
+          assertUnlock(element, { hidden: true }); await blocked();
+          let active: ReturnType<typeof deferred> | undefined;
+          if (pending) { click(element['unlock']); active = plays.at(-1)!; }
+          assertUnlock(element, { busy: pending }); currentError(client);
+          const revision = element['errorRevision'], calls = play.mock.callCount();
+          if (outcome === 'resolve') old.resolve(); else old.reject(new Error('old seat unlock failure'));
+          await settle(); await settle();
+          assertUnlock(element, { busy: pending }); assertCurrentError(element);
+          assert.equal(element['errorRevision'], revision); assert.equal(play.mock.callCount(), calls);
+          if (!pending) { click(element['unlock']); active = plays.at(-1)!; }
+          assertUnlock(element, { busy: true });
+          active!.resolve(); await settle(); await settle();
+          assertUnlock(element, { hidden: true });
+        });
+      }
+    }
+  }
+
+  for (const transition of ['room', 'identity'] as const) {
+    for (const outcome of ['resolve', 'reject'] as const) {
+      it(`retires an unlock before forwarded ${transition} snapshot replacement and ignores its ${outcome}`, async t => {
+        const { element, client } = await subscribedWidget(t);
+        const old = deferred(), active = deferred();
+        let calls = 0;
+        t.mock.method(client, 'unlockAudio', () => ++calls === 1 ? old.promise : active.promise);
+        blockedEvent(client); click(element['unlock']); assertUnlock(element, { busy: true });
+        const next = roomState(false, transition === 'room' ? 'two' : 'one');
+        if (transition === 'identity') next.me.participantId = 'replacement';
+        let callbacks = 0;
+        element.addEventListener('stage-state', () => {
+          callbacks++; assertUnlock(element, { hidden: true });
+        }, { once: true });
+        await client['receive']({ type: 'room:state', ...next });
+        assert.equal(callbacks, 1); assertUnlock(element, { hidden: true });
+        blockedEvent(client); click(element['unlock']); assert.equal(calls, 2); assertUnlock(element, { busy: true });
+        currentError(client);
+        if (outcome === 'resolve') old.resolve(); else old.reject(new Error('replaced snapshot failure'));
+        await settle(); assertUnlock(element, { busy: true }); assertCurrentError(element);
+        active.resolve(); await settle(); assertUnlock(element, { hidden: true });
+      });
+    }
+  }
+
+  for (const outcome of ['resolve', 'reject'] as const) {
+    it(`preserves a current pending unlock ${outcome} across real transport reconnect and same-identity redraws`, async t => {
+      const { element, client, socket, sockets, tick, hello, audio, plays, play, blocked, Peer } = await playbackWidget(t);
+      const stream = await blocked(), peer = Peer.instances[0]!;
+      const me = { ...client.me };
+      click(element['unlock']); const pending = plays.at(-1)!;
+      assert.equal(play.mock.callCount(), 2, 'the browser gesture reaches play synchronously');
+      socket.close(); await settle();
+      assert.equal(client.status, 'reconnecting'); assert.equal(audio.srcObject, stream); assert.equal(peer.closed, false);
+      assertUnlock(element, { busy: true });
+      click(element['listen']); await settle(); element.playbackVolume = 0.375;
+      assert.equal(client.playbackMuted, true); assert.equal(client.playbackVolume, 0.375);
+      assert.deepEqual(client.me, me); assertUnlock(element, { busy: true });
+      await tick(500); assertUnlock(element, { busy: true });
+      const replacement = sockets[1]!, request = await hello(replacement); assertUnlock(element, { busy: true });
+      replacement.deliver({ type: 'room:state', ...roomState(), resumeToken: 'resume-me' });
+      replacement.deliver({ type: 'ok', requestId: request.requestId }); await settle();
+      for (const state of ['waiting', 'live'] as const) {
+        replacement.deliver({ type: 'status', state });
+        replacement.deliver({ type: 'room:state', ...roomState(), status: state });
+        await settle(); assertUnlock(element, { busy: true }); click(element['unlock']);
+      }
+      assert.equal(play.mock.callCount(), 2); assert.equal(audio.srcObject, stream); assert.equal(Peer.instances.length, 1);
+      if (outcome === 'resolve') pending.resolve(); else pending.reject(new Error('current play failure'));
+      await settle(); await settle();
+      assertUnlock(element, { hidden: outcome === 'resolve' });
+      assert.equal(element['error'].hidden, outcome === 'resolve');
+      if (outcome === 'reject') {
+        assert.equal(element['error'].textContent, 'current play failure');
+        click(element['unlock']); assert.equal(play.mock.callCount(), 3); assertUnlock(element, { busy: true });
+        assert.equal(element['error'].hidden, true);
+        plays.at(-1)!.resolve(); await settle(); assertUnlock(element, { hidden: true });
+      }
+      assert.equal(client.playbackMuted, true); assert.equal(client.playbackVolume, 0.375);
+      assert.equal(client['pending'].size, 0);
+    });
+  }
+
+  it('preserves a newer same-seat blocked notice when an earlier synthetic play attempt resolves', async t => {
+    const { element, client } = await subscribedWidget(t);
+    const old = deferred(), retry = deferred(); let calls = 0;
+    t.mock.method(client, 'unlockAudio', () => ++calls === 1 ? old.promise : retry.promise);
+    blockedEvent(client); click(element['unlock']); assertUnlock(element, { busy: true });
+    // Deliberately injected event/promise order tests notice ownership, not native play ordering.
+    blockedEvent(client); click(element['unlock']); assert.equal(calls, 1);
+    old.resolve(); await settle(); assertUnlock(element);
+    assert.equal(element['error'].hidden, true);
+    click(element['unlock']); assert.equal(calls, 2); assertUnlock(element, { busy: true });
+    retry.resolve(); await settle(); assertUnlock(element, { hidden: true });
+  });
+
+  it('shows a current synchronous SDK unlock failure and admits a later retry without another blocked event', async t => {
+    const { element, client } = await subscribedWidget(t);
+    const pending = deferred(); let calls = 0;
+    t.mock.method(client, 'unlockAudio', () => {
+      if (++calls === 1) throw new Error('synchronous unlock failure');
+      return pending.promise;
+    });
+    blockedEvent(client); click(element['unlock']); assert.equal(calls, 1); await settle();
+    assertUnlock(element); assert.equal(element['error'].textContent, 'synchronous unlock failure');
+    assert.equal(element['error'].hidden, false);
+    click(element['unlock']); assert.equal(calls, 2); assertUnlock(element, { busy: true });
+    assert.equal(element['error'].hidden, true);
+    pending.resolve(); await settle(); assertUnlock(element, { hidden: true });
+  });
+
+  for (const transition of ['room', 'name', 'code', 'url', 'unmount'] as const) {
+    for (const outcome of ['resolve', 'reject'] as const) {
+      it(`isolates pending unlock ${outcome} across ${transition} replacement from a new pending retry`, async t => {
+        const { element, client } = await subscribedWidget(t);
+        const old = deferred(); t.mock.method(client, 'unlockAudio', () => old.promise);
+        blockedEvent(client); click(element['unlock']); assertUnlock(element, { busy: true });
+        if (transition === 'unmount') {
+          Object.assign(element, { isConnected: false }); element.disconnectedCallback(); await settle();
+          assertUnlock(element, { hidden: true });
+          Object.assign(element, { isConnected: true }); element.connectedCallback();
+        } else element.setAttribute(transition, transition === 'url' ? 'wss://replacement.invalid/ws' : 'replacement');
+        await settle(); const current = element.client!; assert.ok(current); assert.notEqual(current, client);
+        await current['receive']({ type: 'room:state', ...roomState() }); assertUnlock(element, { hidden: true });
+        const active = deferred(); t.mock.method(current, 'unlockAudio', () => active.promise);
+        blockedEvent(current); click(element['unlock']); assertUnlock(element, { busy: true }); currentError(current);
+        blockedEvent(client);
+        if (outcome === 'resolve') old.resolve(); else old.reject(new Error('retired widget unlock failure'));
+        await settle(); assertUnlock(element, { busy: true }); assertCurrentError(element);
+        active.resolve(); await settle(); assertUnlock(element, { hidden: true });
+      });
+    }
+  }
+});
+
 describe('widget actions and local playback', () => {
   it('keeps hand, mic and leave-stage actions disabled across renders until their request settles', async () => {
     for (const key of ['hand', 'mic', 'leaveStage'] as const) {

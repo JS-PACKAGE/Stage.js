@@ -43,6 +43,8 @@ export class StageElement extends HTMLElement {
   /** Last failure (request rejected, mic denied…); stays until the next action or join. */
   private readonly error: HTMLParagraphElement;
   private readonly unlock: HTMLButtonElement;
+  private playbackOwner: { client: StageClient; roomId: string; participantId: string; notice: number } | undefined;
+  private unlockAttempt: object | undefined;
   private readonly hand: HTMLButtonElement;
   private readonly mic: HTMLButtonElement;
   private readonly micRetry: HTMLButtonElement;
@@ -84,11 +86,9 @@ export class StageElement extends HTMLElement {
     this.error.hidden = true;
     const actions = document.createElement('div');
     actions.part.add('actions');
-    this.unlock = this.button('啟用音訊', async () => {
-      const client = this.current;
-      await client?.unlockAudio();
-      if (this.current === client) this.unlock.hidden = true;
-    }, 'primary');
+    this.unlock = document.createElement('button');
+    this.unlock.type = 'button'; this.unlock.className = 'primary'; this.unlock.textContent = '啟用音訊';
+    this.unlock.onclick = () => this.unlockPlayback();
     this.unlock.hidden = true;
     this.hand = this.button('舉手發言', () => (this.current?.me?.handRaised ? this.current.withdrawHand() : this.current?.raiseHand()), '', () => this.canUseHand());
     this.mic = this.button('靜音', () => (this.current?.me?.muted ? this.current.unmute() : this.current?.mute()), '', () => this.canUseMic());
@@ -222,12 +222,13 @@ export class StageElement extends HTMLElement {
           const micLifecycle = type === 'state' || type === 'status' || type === 'micerror' || type === 'micready'
             || type === 'closed' || type === 'kicked';
           if (micLifecycle) this.syncMicRetry();
+          if (type === 'state' || type === 'status' || type === 'closed' || type === 'kicked' || type === 'audioblocked') this.syncPlaybackOwner();
           // SDK status precedes state; a forwarded status listener may disconnect immediately.
           if (type === 'state' || client.state) { receivedState = true; this.hideRetry(); this.hideCancel(); }
           if (type === 'closed' || type === 'kicked') { terminal = true; this.micFailure = undefined; this.hideRetry(); this.hideCancel(); }
           if (type === 'state' || type === 'closed' || type === 'kicked'
             || (type === 'status' && detail === 'disconnected')) this.joinPhase = undefined;
-          if (type === 'audioblocked') this.unlock.hidden = false;
+          if (type === 'audioblocked' && this.playbackOwner) { this.playbackOwner.notice++; this.unlock.hidden = false; this.unlock.disabled = Boolean(this.unlockAttempt); }
           if (type === 'status' && detail === 'disconnected') {
             this.hideCancel();
             this.status.textContent = cancelled && !receivedState && !terminal ? '已取消加入。' : STATUS_LABELS.disconnected;
@@ -313,6 +314,43 @@ export class StageElement extends HTMLElement {
     this.unlock.hidden = true;
     this.render();
     await client?.disconnect();
+  }
+
+  /** Signaling reconnect retains the seat/audio; explicit disconnect retires both synchronously. */
+  private syncPlaybackOwner(): void {
+    const client = this.current, state = client?.state, me = client?.me;
+    const owner = this.playbackOwner;
+    if (this.isConnected && client && state && me && owner?.client === client
+      && owner.roomId === state.roomId && owner.participantId === me.participantId) return;
+    this.playbackOwner = this.isConnected && client && state && me
+      ? { client, roomId: state.roomId, participantId: me.participantId, notice: 0 } : undefined;
+    this.unlockAttempt = undefined;
+    this.pendingActions.delete(this.unlock); this.unlock.removeAttribute('aria-busy');
+    this.unlock.hidden = this.unlock.disabled = true;
+  }
+
+  private unlockPlayback(): void {
+    this.syncPlaybackOwner();
+    const owner = this.playbackOwner;
+    if (!owner || this.unlock.hidden || this.unlock.disabled || this.unlockAttempt) return;
+    const attempt = this.unlockAttempt = {};
+    const notice = owner.notice;
+    this.pendingActions.add(this.unlock); this.unlock.disabled = true;
+    this.unlock.setAttribute('aria-busy', 'true'); this.error.hidden = true;
+    const current = () => this.playbackOwner === owner && this.unlockAttempt === attempt;
+    // Invoke before the first await so browser gesture admission remains synchronous.
+    void (async () => {
+      try {
+        await owner.client.unlockAudio();
+        if (current() && owner.notice === notice) this.unlock.hidden = true;
+      } catch (error) { if (current()) this.show(error); }
+      finally {
+        if (current()) {
+          this.unlockAttempt = undefined; this.pendingActions.delete(this.unlock);
+          this.unlock.removeAttribute('aria-busy'); this.render();
+        }
+      }
+    })();
   }
 
   private hideCancel(): void {
@@ -423,6 +461,7 @@ export class StageElement extends HTMLElement {
   }
 
   private render(): void {
+    this.syncPlaybackOwner();
     this.syncMicRetry();
     const client = this.current;
     const me = client?.me ?? null;
@@ -462,7 +501,7 @@ export class StageElement extends HTMLElement {
     this.playback.hidden = !me;
     this.volume.disabled = !client || !me;
     this.renderVolume();
-    this.unlock.disabled = this.pendingActions.has(this.unlock);
+    this.unlock.disabled = !this.playbackOwner || Boolean(this.unlockAttempt);
     this.hand.disabled = !this.canUseHand() || this.pendingActions.has(this.hand);
     this.hand.textContent = me?.handRaised ? '收回舉手' : cooldown > 0 ? `舉手發言（${cooldown} 秒）` : '舉手發言';
     this.mic.hidden = !me?.onStage;
