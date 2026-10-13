@@ -5,7 +5,7 @@ import { runInNewContext } from 'node:vm';
 import { MAX_GAIN_DB } from '../../shared/protocol.ts';
 import type { ParticipantView, RoomStatePayload } from '../../shared/protocol.ts';
 
-/** Bounded sample integration double, not browser/CSS/permission or real-SDK interoperability coverage. */
+/** Bounded DOM fixture; browser/CSS/permission behavior is not modeled. */
 export class SampleNode {
   readonly children: SampleNode[] = [];
   parentNode: SampleNode | null = null;
@@ -62,6 +62,7 @@ export class SampleNode {
     const predicates: Record<string, (node: SampleNode) => boolean> = {
       '#app': node => node.id === 'app',
       '[data-landing-submit]': node => node.dataset.landingSubmit !== undefined,
+      '[data-landing-cancel]': node => node.dataset.landingCancel !== undefined,
       '[data-room-action]': node => node.dataset.roomAction !== undefined,
       '[data-return-stage]': node => node.dataset.returnStage !== undefined,
       '.badge.quality': node => node.classList.contains('badge') && node.classList.contains('quality'),
@@ -246,20 +247,28 @@ export function roomState(me: Partial<ParticipantView> = {}): RoomStatePayload {
 }
 export async function flushSample(): Promise<void> { for (let i = 0; i < 16; i++) await Promise.resolve(); }
 
-export function sampleApp(options: {
+interface SampleAppOptions {
+  source?: string;
   deferAudioDevices?: boolean;
   clipboard?: { writeText(text: string): Promise<void> };
   confirm?: (message: string) => boolean;
   localStorage?: { getItem(key: string): string | null; setItem(key: string, value: string): void };
-} = {}) {
-  const clock = new SampleClock(), sdk = new SampleSdk(clock, options.deferAudioDevices);
+}
+type SampleClient = { disconnect(): Promise<void> };
+export function sampleApp<Client extends SampleClient>(options: SampleAppOptions & { sdk: Client }): ReturnType<typeof mountSampleApp<Client>>;
+export function sampleApp(options?: SampleAppOptions): ReturnType<typeof mountSampleApp<SampleSdk>>;
+export function sampleApp(options: SampleAppOptions & { sdk?: SampleClient } = {}) { return mountSampleApp(options); }
+
+function mountSampleApp<Client extends SampleClient = SampleSdk>(options: SampleAppOptions & { sdk?: Client }) {
+  const clock = new SampleClock();
+  const sdk = (options.sdk ?? new SampleSdk(clock, options.deferAudioDevices)) as Client;
   const documentRoot = new SampleNode('#document'), documentElement = new SampleNode('html'), body = new SampleNode('body');
   const app = new SampleNode('div'); app.id = 'app';
   documentRoot.append(documentElement); documentElement.append(body); body.append(app);
   const document = { documentElement, createElement: (tag: string) => new SampleNode(tag),
     createTextNode(text: string) { const node = new SampleNode('#text'); node.textContent = text; return node; },
     querySelector: (selector: string) => documentRoot.querySelector(selector) };
-  const source = readFileSync(new URL('../../web/src/main.ts', import.meta.url), 'utf8');
+  const source = options.source ?? readFileSync(new URL('../../web/src/main.ts', import.meta.url), 'utf8');
   const imports = [
     "import { MAX_GAIN_DB, StageClient, decodeName } from '../../packages/client/src/index.ts';",
     "import type { ConnectionQuality, MicTest, ParticipantView, RoomStatePayload } from '../../packages/client/src/index.ts';",
@@ -293,8 +302,11 @@ export function sampleApp(options: {
     button: (text: string) => find(node => node.tagName === 'button' && node.textContent === text),
     async cleanup() {
       await sdk.disconnect();
-      for (const work of [...sdk.joins.map(join => join.work), ...sdk.polls, ...sdk.deviceLists]) if (work.status === 'pending') work.reject(new Error('fixture cleanup'));
-      await flushSample(); clock.jobs.clear(); sdk.assertSettled();
+      if (sdk instanceof SampleSdk) {
+        for (const work of [...sdk.joins.map(join => join.work), ...sdk.polls, ...sdk.deviceLists]) if (work.status === 'pending') work.reject(new Error('fixture cleanup'));
+      }
+      await flushSample(); clock.jobs.clear();
+      if (sdk instanceof SampleSdk) sdk.assertSettled();
     },
   };
 }

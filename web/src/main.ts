@@ -28,6 +28,7 @@ const statusLabels = { waiting: '等待發言', live: '直播中', reconnecting:
 const roleLabels = { controller: '主控', speaker: '發言者', audience: '觀眾' };
 const params = new URLSearchParams(location.search);
 let busy = false;
+let landingEntry: { cancelled: boolean; entered: boolean } | undefined;
 let audioBlocked = false;
 let micNotice = '';
 let invitation = '';
@@ -231,12 +232,12 @@ function button(label: string, action: () => Promise<unknown>, className = '', g
   node.onclick = () => { void run(action, node, generation); };
   return node;
 }
-async function run(action: () => Promise<unknown>, target?: HTMLButtonElement, generation?: number): Promise<void> {
+async function run(action: () => Promise<unknown>, target?: HTMLButtonElement, generation?: number, reportError: () => boolean = () => true): Promise<void> {
   if (target) target.disabled = true;
   errorBox.hidden = true;
   try { await action(); }
   catch (error) {
-    if (generation === undefined || generation === roomActionGeneration) showError(error instanceof Error ? error.message : '操作失敗，請稍後再試。');
+    if (reportError() && (generation === undefined || generation === roomActionGeneration)) showError(error instanceof Error ? error.message : '操作失敗，請稍後再試。');
   }
   finally { if (target?.isConnected) target.disabled = false; updateCooldown(); syncMeter(); }
 }
@@ -286,6 +287,22 @@ function syncLandingActions(): void {
     node.disabled = busy;
     node.setAttribute('aria-busy', String(busy));
   }
+  const cancel = content.querySelector<HTMLButtonElement>('[data-landing-cancel]');
+  if (cancel) {
+    cancel.hidden = cancel.disabled = !canCancelLanding();
+  }
+}
+function canCancelLanding(): boolean {
+  return busy && Boolean(landingEntry && !landingEntry.cancelled && !landingEntry.entered) && !client.state;
+}
+function runLanding(action: (isCancelled: () => boolean) => Promise<unknown>): void {
+  if (busy) return;
+  const entry = { cancelled: false, entered: false };
+  landingEntry = entry; busy = true; syncLandingActions();
+  void run(() => action(() => entry.cancelled), undefined, undefined, () => !entry.cancelled).finally(() => {
+    if (landingEntry !== entry) return;
+    landingEntry = undefined; busy = false; syncLandingActions();
+  });
 }
 function showError(message: string): void { errorBox.textContent = message; errorBox.hidden = false; }
 function field(form: HTMLFormElement, label: string, name: string, value = '', required = true, maxLength = 32): HTMLInputElement {
@@ -324,13 +341,13 @@ function landing(): void {
   create.append(codeLabel, createSubmit);
   create.onsubmit = (event) => {
     event.preventDefault();
-    if (busy) return;
-    busy = true; syncLandingActions();
-    void run(async () => {
+    runLanding(async (isCancelled) => {
       micNotice = invitation = '';
-      createdRoom = await client.createRoom({ name: createName.value.trim(), roomName: roomName.value.trim() || undefined, codeRequired: codeRequired.checked, token: createToken.value || undefined });
+      const result = await client.createRoom({ name: createName.value.trim(), roomName: roomName.value.trim() || undefined, codeRequired: codeRequired.checked, token: createToken.value || undefined });
+      if (isCancelled()) return;
+      createdRoom = result;
       if (client.state) renderRoom(client.state);
-    }).finally(() => { busy = false; syncLandingActions(); });
+    });
   };
   const join = element('form', 'panel');
   join.append(element('h2', '', '加入房間'));
@@ -342,15 +359,21 @@ function landing(): void {
   join.append(joinSubmit);
   join.onsubmit = (event) => {
     event.preventDefault();
-    if (busy) return;
-    busy = true; syncLandingActions();
-    void run(async () => {
+    runLanding(async () => {
       createdRoom = null; micNotice = invitation = '';
       await client.join({ roomId: roomId.value.trim(), code: code.value.trim() || undefined, name: joinName.value.trim() });
-    }).finally(() => { busy = false; syncLandingActions(); });
+    });
   };
   grid.append(create, join);
-  content.replaceChildren(intro, grid);
+  const cancel = element('button', '', '取消連線');
+  cancel.id = 'landing-cancel'; cancel.type = 'button'; cancel.dataset.landingCancel = 'true';
+  cancel.onclick = () => {
+    if (!cancel.isConnected || !canCancelLanding()) return;
+    landingEntry!.cancelled = true;
+    syncLandingActions();
+    void run(() => client.disconnect());
+  };
+  content.replaceChildren(intro, grid, cancel);
   syncLandingActions(); renderNotices();
 }
 function renderNotices(): void {
@@ -536,8 +559,9 @@ function scheduleCooldown(remaining: number): void {
     }, delay);
   }
 }
-client.on('state', ({ detail }) => renderRoom(detail));
+client.on('state', ({ detail }) => { if (landingEntry) landingEntry.entered = true; renderRoom(detail); });
 client.on('status', ({ detail }) => {
+  if (landingEntry && client.state) landingEntry.entered = true;
   status.textContent = statusLabels[detail];
   if (detail === 'disconnected' && !client.state) {
     micTest?.stop(); micTest = null;
@@ -549,8 +573,8 @@ client.on('status', ({ detail }) => {
   updateCooldown();
 });
 client.on('created', ({ detail }) => { createdRoom = detail; });
-client.on('closed', ({ detail }) => { createdRoom = null; micNotice = ''; invitation = detail.reason === 'shutdown' ? '伺服器維護或重新啟動，房間已關閉；請稍後重新建立或加入。' : '房間已關閉，歡迎建立或加入其他舞台。'; audioBlocked = false; landing(); });
-client.on('kicked', () => { createdRoom = null; micNotice = ''; invitation = '你已被主控移出房間。'; audioBlocked = false; landing(); });
+client.on('closed', ({ detail }) => { if (landingEntry) landingEntry.entered = true; createdRoom = null; micNotice = ''; invitation = detail.reason === 'shutdown' ? '伺服器維護或重新啟動，房間已關閉；請稍後重新建立或加入。' : '房間已關閉，歡迎建立或加入其他舞台。'; audioBlocked = false; landing(); });
+client.on('kicked', () => { if (landingEntry) landingEntry.entered = true; createdRoom = null; micNotice = ''; invitation = '你已被主控移出房間。'; audioBlocked = false; landing(); });
 client.on('invite', ({ detail }) => {
   if (detail.participantId === client.me?.participantId) { invitation = '主控已邀請你上台，請允許麥克風權限。'; renderNotices(); }
 });
