@@ -581,3 +581,6 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 
 
 132. **可選停用房間麥克風音量計（2026-10-13）：** actual SDK fake-media probe 證實未讀 micLevel 的 room capture／device replacement 仍各建立並 resume AudioContext、source、analyser 與 2048 個 float sample（8192 bytes），清理正常、並非 leak。直接改 lazy 會改變既有 capture 失敗／activation 時機，因此新增明確 opt-out enableMicMeter:boolean，預設 true 完整保留舊行為；建構前驗證型別並複製，不提供動態切換。false 略過兩個 room meter 建立點，初次擷取另在原 cleanup/catch 內拒絕沒有 audio track 的串流（裝置替換已有此檢查），避免移除 meter 連帶移除有效擷取檢查；預設模式的 meter failure timing 不變。micLevel 回 0，既有 capture、micready、sender／mute／revision／candidate disposal 流程不變；明確 startMicTest 仍 eager 建立獨立 meter／回報失敗。最小 embed 明確使用 false（沒有音量表），完整範例／widget 不變。測試 pin 預設 failure timing 並檢查 opt-out capture／replacement／retry／rejoin 不配置 graph、preview 獨立及串流所有權。資源避免以受控 constructor／node counts 證明，不宣稱 native CPU／電力／音訊延遲或硬體驗收。
+
+
+133. **同步 callback 中的靜音音量讀值（2026-10-13）：** actual SDK／fake analyser probe 重現初次已靜音擷取的 micready callback，或既有發言者收到靜音的 state callback，me.muted 已 true 但實際 track.enabled 尚未同步，舊 micLevel 仍回 0.25，違反文件的 muted→0 契約。getter 現先檢查目前 me.onStage／muted，再保留實際 track.enabled gate；不在未上台／靜音時讀 analyser。沒有重排 event、capture、replaceTrack 或伺服器轉送政策，unmuted 但尚未 enable 的音軌仍回 0，獨立預覽 level 與 enableMicMeter:false 契約不變。驗證為公開同步 callbacks 配合受控媒體，僅證明本機 RMS getter，不宣稱曾有或修復網路音訊外洩。

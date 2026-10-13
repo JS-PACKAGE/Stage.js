@@ -526,3 +526,189 @@ it('keeps a disabled-meter stale replacement continuation isolated from a new pe
   assert.notEqual(h.client['inputDeviceId'], 'retired-device'); assert.equal(h.micReady(), 2); assert.deepEqual(h.errors, []); h.noRoomGraph();
 });
 
+const levelCases: { name: string; options: Partial<StageClientOptions>; metered: boolean }[] = [
+  { name: 'default', options: {}, metered: true },
+  { name: 'enabled', options: { enableMicMeter: true }, metered: true },
+  { name: 'disabled', options: { enableMicMeter: false }, metered: false },
+];
+
+for (const { name, options, metered } of levelCases) {
+  for (const forced of [false, true]) {
+    it(`room micLevel is zero in ${name} initial ${forced ? 'forced' : 'self'}-muted micready`, async t => {
+      const h = setup(t, { clientOptions: options }), { socket, peer } = await h.join();
+      const observed: { level: number; muted: boolean; forced: boolean; enabled: boolean; attached: boolean }[] = [];
+      h.client.on('micready', () => observed.push({ level: h.client.micLevel,
+        muted: h.client.me!.muted, forced: h.client.me!.forceMuted,
+        enabled: h.sources[0]!.track.enabled, attached: peer.transceiver.sender.track !== null }));
+      const snapshot = state(true, true); snapshot.me.forceMuted = forced;
+      socket.deliver({ type: 'room:state', ...snapshot });
+      await h.until(() => peer.transceiver.sender.track !== null && !h.client['negotiating'], 'muted capture installation');
+      assert.deepEqual(observed, [{ level: 0, muted: true, forced, enabled: true, attached: false }],
+        'the snapshot governs the getter before existing capture and sender synchronization');
+      assert.equal(h.client.micLevel, 0); assert.equal(h.sources[0]!.track.enabled, false);
+      assert.equal(Context.attempts, metered ? 1 : 0);
+      assert.equal(Context.instances[0]?.reads.length ?? 0, 0, 'muted callback reads do not sample');
+      assert.equal(h.sources[0]!.track.stops, 0); assert.equal(Context.instances[0]?.closes ?? 0, 0);
+      socket.deliver({ type: 'room:state', ...state(true) });
+      assert.equal(h.client.micLevel, metered ? 0.25 : 0); assert.equal(h.client.micLevel, metered ? 0.25 : 0);
+      assert.deepEqual(Context.instances[0]?.reads ?? [], metered ? [h.sampleBuffers[0], h.sampleBuffers[0]] : []);
+      assert.equal(h.micReady(), 1); assert.deepEqual(h.errors, []); assert.deepEqual(h.micErrors, []);
+    });
+
+    it(`room micLevel is zero in ${name} publishing ${forced ? 'forced' : 'self'}-mute state callback`, async t => {
+      const h = setup(t, { clientOptions: options }), { socket, peer } = await h.join();
+      await h.promote(socket, peer);
+      assert.equal(h.client.micLevel, metered ? 0.25 : 0);
+      const observed: { level: number; muted: boolean; forced: boolean; enabled: boolean }[] = [];
+      h.client.on('state', () => observed.push({ level: h.client.micLevel,
+        muted: h.client.me!.muted, forced: h.client.me!.forceMuted, enabled: h.sources[0]!.track.enabled }));
+      const snapshot = state(true, true); snapshot.me.forceMuted = forced;
+      socket.deliver({ type: 'room:state', ...snapshot });
+      assert.deepEqual(observed, [{ level: 0, muted: true, forced, enabled: true }],
+        'state callbacks still precede track synchronization');
+      assert.equal(h.client.micLevel, 0); assert.equal(h.sources[0]!.track.enabled, false);
+      assert.equal(Context.instances[0]?.reads.length ?? 0, metered ? 1 : 0);
+      assert.equal(peer.transceiver.sender.track, h.sources[0]!.track);
+      assert.equal(h.sources[0]!.track.stops, 0); assert.equal(Context.instances[0]?.closes ?? 0, 0);
+      assert.deepEqual(h.errors, []); assert.deepEqual(h.micErrors, []);
+    });
+  }
+
+  for (const action of ['newer-mute', 'newer-unmute', 'disconnect'] as const) {
+    it(`room micLevel follows ${name} micready callback ${action}`, async t => {
+      const h = setup(t, { clientOptions: options }), { socket, peer } = await h.join();
+      const observed: { before: number; after: number; muted: boolean | null }[] = [];
+      const nested: number[] = [];
+      h.client.on('state', () => { if (h.micReady()) nested.push(h.client.micLevel); });
+      h.client.on('micready', () => {
+        const before = h.client.micLevel;
+        if (action === 'disconnect') void h.client.disconnect();
+        else socket.deliver({ type: 'room:state', ...state(true, action === 'newer-mute') });
+        observed.push({ before, after: h.client.micLevel, muted: h.client.me?.muted ?? null });
+      });
+      socket.deliver({ type: 'room:state', ...state(true, action === 'newer-unmute') });
+      await h.until(() => observed.length === 1, 'reentrant micready callback'); await h.tick(5);
+      const expected = action === 'newer-unmute' && metered ? 0.25 : 0;
+      assert.deepEqual(observed, [{ before: action === 'newer-unmute' || !metered ? 0 : 0.25,
+        after: expected, muted: action === 'disconnect' ? null : action === 'newer-mute' }]);
+      assert.deepEqual(nested, action === 'disconnect' ? [] : [action === 'newer-mute' || !metered ? 0 : 0.25]);
+      assert.equal(h.client.micLevel, expected);
+      assert.equal(h.sources[0]!.track.stops, action === 'disconnect' ? 1 : 0);
+      assert.equal(Context.instances[0]?.closes ?? 0, action === 'disconnect' && metered ? 1 : 0);
+      assert.equal(h.micReady(), 1); assert.deepEqual(h.errors, []); assert.deepEqual(h.micErrors, []);
+      if (action === 'disconnect') {
+        assert.equal(peer.connectionState, 'closed'); assert.equal(peer.transceiver.sender.track, null);
+        assert.equal(h.client['mic'], null); assert.equal(h.client['micMeter'], null);
+      } else {
+        assert.equal(peer.transceiver.sender.track, h.sources[0]!.track);
+        assert.equal(h.sources[0]!.track.enabled, action === 'newer-unmute');
+      }
+    });
+  }
+
+  for (const action of ['newer-unmute', 'disconnect'] as const) {
+    it(`room micLevel follows ${name} muted state callback ${action}`, async t => {
+      const h = setup(t, { clientOptions: options }), { socket, peer } = await h.join();
+      await h.promote(socket, peer);
+      const observed: { before: number; after: number }[] = [];
+      h.client.on('state', event => {
+        if (!event.detail.me.muted) return;
+        const before = h.client.micLevel;
+        if (action === 'disconnect') void h.client.disconnect();
+        else socket.deliver({ type: 'room:state', ...state(true) });
+        observed.push({ before, after: h.client.micLevel });
+      });
+      socket.deliver({ type: 'room:state', ...state(true, true) });
+      await h.tick(5);
+      const expected = action === 'newer-unmute' && metered ? 0.25 : 0;
+      assert.deepEqual(observed, [{ before: 0, after: expected }]); assert.equal(h.client.micLevel, expected);
+      assert.equal(h.sources[0]!.track.stops, action === 'disconnect' ? 1 : 0);
+      assert.equal(h.sources[0]!.track.enabled, action === 'newer-unmute');
+      assert.equal(Context.instances[0]?.closes ?? 0, action === 'disconnect' && metered ? 1 : 0);
+      assert.equal(Context.instances[0]?.reads.length ?? 0, action === 'newer-unmute' && metered ? 2 : 0);
+      assert.equal(h.micReady(), 1); assert.deepEqual(h.errors, []); assert.deepEqual(h.micErrors, []);
+    });
+  }
+
+  it(`room micLevel stays zero through ${name} offstage callback and muted reentry`, async t => {
+    const h = setup(t, { clientOptions: options }), { socket, peer } = await h.join();
+    await h.promote(socket, peer);
+    const original = h.sources[0]!, observed: { level: number; onStage: boolean; stops: number; closes: number }[] = [];
+    const ready: number[] = [];
+    h.client.on('micready', () => ready.push(h.client.micLevel));
+    h.client.on('state', event => {
+      if (event.detail.me.onStage) return;
+      observed.push({ level: h.client.micLevel, onStage: h.client.me!.onStage,
+        stops: original.track.stops, closes: Context.instances[0]?.closes ?? 0 });
+      socket.deliver({ type: 'room:state', ...state(true, true) });
+    });
+    socket.deliver({ type: 'room:state', ...state(false) });
+    await h.until(() => h.sources.length === 2 && peer.transceiver.sender.track === (h.sources[1]!.track as unknown as MediaStreamTrack)
+      && !h.client['negotiating'], 'fresh muted reentry');
+    assert.deepEqual(observed, [{ level: 0, onStage: false, stops: 1, closes: metered ? 1 : 0 }]);
+    assert.deepEqual(ready, [0]); assert.equal(h.client.micLevel, 0);
+    assert.equal(original.track.stops, 1); assert.equal(h.sources[1]!.track.stops, 0);
+    assert.equal(h.sources[1]!.track.enabled, false); assert.equal(Peer.instances.length, 1);
+    assert.deepEqual(Context.instances.map(context => context.closes), metered ? [1, 0] : []);
+    assert.deepEqual(Context.instances.map(context => context.reads.length), metered ? [0, 0] : []);
+    assert.deepEqual(peer.offers.filter(offer => !offer.onStage && offer.direction === 'sendrecv'), []);
+    assert.equal(h.micReady(), 2); assert.deepEqual(h.errors, []); assert.deepEqual(h.micErrors, []);
+  });
+
+  it(`room micLevel respects ${name} disabled physical track with an unmuted snapshot`, async t => {
+    const h = setup(t, { clientOptions: options }), { socket, peer } = await h.join();
+    await h.promote(socket, peer);
+    const track = h.sources[0]!.track; track.enabled = false;
+    assert.equal(h.client.me!.onStage, true); assert.equal(h.client.me!.muted, false);
+    assert.equal(h.client.micLevel, 0); assert.equal(Context.instances[0]?.reads.length ?? 0, 0);
+    track.enabled = true;
+    assert.equal(h.client.micLevel, metered ? 0.25 : 0); assert.equal(Context.instances[0]?.reads.length ?? 0, metered ? 1 : 0);
+    assert.equal(track.stops, 0); assert.equal(Context.instances[0]?.closes ?? 0, 0);
+  });
+
+  it(`room micLevel retains ${name} physical-track gate during an unmute state callback`, async t => {
+    const h = setup(t, { clientOptions: options }), { socket, peer } = await h.join();
+    await h.promote(socket, peer, true);
+    const observed: { level: number; muted: boolean; enabled: boolean }[] = [];
+    h.client.on('state', () => observed.push({ level: h.client.micLevel,
+      muted: h.client.me!.muted, enabled: h.sources[0]!.track.enabled }));
+    socket.deliver({ type: 'room:state', ...state(true) });
+    assert.deepEqual(observed, [{ level: 0, muted: false, enabled: false }]);
+    assert.equal(Context.instances[0]?.reads.length ?? 0, 0);
+    assert.equal(h.sources[0]!.track.enabled, true); assert.equal(h.client.micLevel, metered ? 0.25 : 0);
+    assert.equal(Context.instances[0]?.reads.length ?? 0, metered ? 1 : 0);
+    assert.equal(h.sources[0]!.track.stops, 0); assert.equal(Context.instances[0]?.closes ?? 0, 0);
+  });
+
+  it(`room micLevel retains ${name} same-seat capture during signaling reconnect`, async t => {
+    const h = setup(t, { clientOptions: options }), { socket, peer } = await h.join();
+    await h.promote(socket, peer);
+    const snapshot = h.client.state, source = h.sources[0]!;
+    socket.close();
+    assert.equal(h.client.status, 'reconnecting'); assert.equal(h.client.state, snapshot);
+    assert.equal(h.client.me!.onStage, true); assert.equal(h.client.me!.muted, false);
+    assert.equal(source.track.enabled, true); assert.equal(source.track.stops, 0);
+    assert.equal(peer.transceiver.sender.track, source.track); assert.equal(peer.connectionState, 'connected');
+    assert.equal(h.client.micLevel, metered ? 0.25 : 0);
+    assert.equal(Context.instances[0]?.reads.length ?? 0, metered ? 1 : 0);
+    assert.equal(Context.instances[0]?.closes ?? 0, 0); assert.equal(h.micReady(), 1);
+    assert.deepEqual(h.errors, []); assert.deepEqual(h.micErrors, []);
+  });
+
+  it(`room micLevel leaves ${name} preview sampling independent of room mute and stage exit`, async t => {
+    const h = setup(t, { clientOptions: options }), { socket, peer } = await h.join();
+    await h.promote(socket, peer, true);
+    const preview = await h.client.startMicTest(), source = h.sources[1]!;
+    const previewContext = Context.instances[metered ? 1 : 0]!;
+    assert.equal(Context.attempts, metered ? 2 : 1); assert.equal(preview.level(), 0.25);
+    assert.equal(h.client.micLevel, 0); assert.equal(previewContext.reads.length, 1);
+    if (metered) assert.equal(Context.instances[0]!.reads.length, 0);
+    socket.deliver({ type: 'room:state', ...state(false) });
+    assert.equal(h.client.me!.onStage, false); assert.equal(h.client.micLevel, 0);
+    assert.equal(h.sources[0]!.track.stops, 1); assert.equal(source.track.stops, 0);
+    assert.equal(preview.level(), 0.25); assert.equal(previewContext.reads.length, 2); assert.equal(previewContext.closes, 0);
+    await h.client.disconnect(); preview.stop();
+    assert.equal(source.track.stops, 1); assert.equal(previewContext.closes, 1); assert.equal(preview.level(), 0);
+    assert.equal(h.client.micLevel, 0); assert.deepEqual(h.errors, []); assert.deepEqual(h.micErrors, []);
+  });
+}

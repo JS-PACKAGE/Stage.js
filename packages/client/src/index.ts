@@ -258,8 +258,11 @@ export class StageClient extends EventTarget {
   }
   setPlaybackMuted(muted: boolean): void { this.audio.muted = muted; }
   get outputDeviceSupported(): boolean { return typeof this.audio.setSinkId === 'function'; }
-  /** RMS amplitude in [0, 1]; zero when not publishing, muted, or enableMicMeter is false. */
-  get micLevel(): number { return this.mic?.getAudioTracks()[0]?.enabled ? this.micMeter?.level() ?? 0 : 0; }
+  /** RMS amplitude in [0, 1]; zero when offstage, muted, or enableMicMeter is false. */
+  get micLevel(): number {
+    const me = this.me;
+    return me?.onStage && !me.muted && this.mic?.getAudioTracks()[0]?.enabled ? this.micMeter?.level() ?? 0 : 0;
+  }
   async listAudioDevices(): Promise<AudioDevices> {
     const devices = await navigator.mediaDevices.enumerateDevices();
     return { inputs: devices.filter((device) => device.kind === 'audioinput'), outputs: devices.filter((device) => device.kind === 'audiooutput') };
