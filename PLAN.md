@@ -557,3 +557,6 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 
 
 124. **信令拒絕值不升級為房間失敗（2026-10-13）：** actual StageHub／MockMediaTransport probe 在 negotiate 建立部分 peer 後 reject null-prototype object，原 signal catch 的 String(err) 拋出 TypeError，handle 遂回 internal 並關閉整個房間，違反信令失敗應只影響該請求的契約。只將 SDP 與 remote ICE 兩個預期錯誤 catch 的診斷改為原始值交給安全 logger，仍回既有 generic bad_request；offer 失敗保留 negotiation token／participant／closed guard 的 peer cleanup，ICE 失敗不新增 peer 清理。不改 transport implementation、媒體／角色政策、serial queue 或真正 unexpected invariant failure 關房規則；任意自訂 logger 自身拋錯仍不在保證範圍。回歸以同步 throw／非同步 reject、一般及 hostile synthetic values 測試其他 peer／room survival、部分 peer 清理、後續恢復與舊 offer ownership，不宣稱真實 WebRTC 驗證。
+
+
+125. **WebSocket 錯誤診斷不阻斷清理（2026-10-13）：** exact queue-error callback 的 VM probe 重現 null-prototype rejection 在 String(error) 拋錯，連 log 與 session.terminate 都未執行，會破壞停止佇列後終止連線的保證。只將 message-handler、detach 與 active-work-cleanup 三個錯誤 sink 改成原始值交給安全 logger，保留 session termination 及先 detach、等待 active work、再 detach 的兩階段順序。不改 static／TLS／一般 ws error 診斷，不更動入站上限、訊息排序或回座 ownership；自訂 logger／sink 拋錯不在本修正保證範圍。有界 native WebSocket regression 注入 mock Hub 失敗，驗證 hostile 與一般值、等待工作清除、正常終止及 post-drain 清理；無真實音訊或外部流量。

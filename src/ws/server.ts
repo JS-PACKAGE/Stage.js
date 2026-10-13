@@ -181,7 +181,7 @@ export function createStageServer(deps: StageServerDeps): StageServer {
       if (stopping || ws.readyState !== ws.OPEN) { stopInput(); return Promise.resolve(); }
       return hub.handle(session, message);
     }, (error) => {
-      log.error('ws message handler failed', { session: session.id, error: String(error) });
+      log.error('ws message handler failed', { session: session.id, error });
       session.terminate();
     });
     stopInput = () => { void incoming.stop(); };
@@ -233,13 +233,13 @@ export function createStageServer(deps: StageServerDeps): StageServer {
       const drained = incoming.stop();
       const detach = async (): Promise<void> => {
         try { await hub.detach(session, code === CLOSE_NORMAL); }
-        catch (error) { log.error('ws detach failed', { session: session.id, error: String(error) }); }
+        catch (error) { log.error('ws detach failed', { session: session.id, error }); }
       };
       // Release the existing binding now so a stalled offer cannot prevent same-seat resume.
       void detach();
       // An already accepted join can bind after close; clean it up once active work settles.
       void drained.finally(detach).catch(error => {
-        log.error('ws active work cleanup failed', { session: session.id, error: String(error) });
+        log.error('ws active work cleanup failed', { session: session.id, error });
       });
     });
     ws.on('error', (err) => log.debug('ws error', { session: session.id, error: String(err) }));
