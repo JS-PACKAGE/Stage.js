@@ -479,3 +479,6 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 
 
 98. **最小嵌入範例的播放錯誤歸屬（2026-10-13）：** whole-module probe 使用 SDK 對應的 pause 後 srcObject=null／pending play 拒絕順序，重現 unlockAudio().catch(report) 覆寫 Leave、disconnected、closed 與 kicked 提示。新增 playback lifecycle generation，join start／Leave／目前 client 的 disconnected／terminal 撤銷舊回報；unlock 捕捉 client 與 generation，只限制後續 error sink，play 仍在原點擊同步呼叫，當前錯誤與未加入時 audio.play 失敗照常顯示。不新增 latest-attempt、成功後狀態寫入或 SDK 取消語意。以同步清理拒絕模型，稍後完成的 rejoin 會自行重畫，因此跨新 client 測試僅為 defensive ownership，不能宣稱 native rejoin bug。測試使用全模組假 DOM／play promises，沒有真實瀏覽器或音訊驗證。
+
+
+99. **最小嵌入範例的按需冷卻更新（2026-10-13）：** bounded whole-module fake clock 在 idle audience 的 10 秒測得 40 次 timer callback、120 次內容不變的 hand DOM 寫入；10 秒倒數也只有 10 次必要文字變化。改成 offstage／未舉手且 cooldown>0 才持有一個 timeout，Math.ceil 對齊下一次顯示秒數邊界；以 performance.now 記錄 deadline，重複 state 不延後既有 timer；same-seat reconnect 的 hello 更新舉手間隔時，若下一個邊界變早則改排較早 timer，變晚可保留一次較早的 harmless wake。late wake 讀取當前剩餘時間，不重播漏掉的秒。raiseHand 同步保留冷卻後立即 sync，無需等待 ACK；status-only recovery 也同步刷新政策。join／Leave／terminal／倒數消失清除 handle，callback 檢查自己仍持有 slot，舊 timer 不得清掉新 timer。pending／角色／reconnect gating 與 SDK pacing 不改；不改其他模組 timer。量化只限 fake clock callbacks／DOM 寫入，不宣稱 browser CPU、電量或音訊改善。

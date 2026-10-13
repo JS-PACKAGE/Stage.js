@@ -16,18 +16,38 @@ input('code').value = params.get('code') ?? '';
 let client: Client | null = null;
 let pendingHand: { client: Client } | undefined;
 let playbackGeneration = 0;
+let handTimer: ReturnType<typeof setTimeout> | undefined;
+let handTimerDue = 0;
 function syncHand(): void {
   const me = client?.me;
   const pending = Boolean(pendingHand && pendingHand.client === client);
-  const seconds = me && !me.onStage ? Math.ceil(client!.handCooldownMs / 1000) : 0;
+  const remaining = me && !me.onStage ? client!.handCooldownMs : 0;
+  const seconds = Math.ceil(remaining / 1000);
   hand.disabled = !me || me.onStage || client?.status === 'reconnecting' || pending || (!me.handRaised && seconds > 0);
   hand.setAttribute('aria-busy', String(pending));
   hand.textContent = me?.handRaised ? '收回舉手' : seconds ? `舉手發言（${seconds} 秒）` : '舉手發言';
+  scheduleHandCooldown(me && !me.handRaised ? remaining : 0);
+}
+/** Only a visible countdown needs a clock; state and action events handle other changes. */
+function scheduleHandCooldown(remaining: number): void {
+  if (remaining <= 0) {
+    clearTimeout(handTimer); handTimer = undefined; handTimerDue = 0;
+  } else {
+    const delay = Math.max(1, Math.ceil(remaining - (Math.ceil(remaining / 1000) - 1) * 1000));
+    const due = performance.now() + delay;
+    if (handTimer !== undefined && handTimerDue <= due) return;
+    clearTimeout(handTimer);
+    const timer = setTimeout(() => {
+      if (handTimer !== timer) return;
+      handTimer = undefined; handTimerDue = 0; syncHand();
+    }, delay);
+    handTimer = timer; handTimerDue = due;
+  }
 }
 function report(error: unknown): void { status.textContent = error instanceof Error ? error.message : '操作失敗。'; }
 join.onsubmit = (event) => {
   event.preventDefault();
-  playbackGeneration++;
+  playbackGeneration++; scheduleHandCooldown(0);
   const submit = join.querySelector<HTMLButtonElement>('button')!;
   submit.disabled = true;
   void (async () => {
@@ -54,7 +74,8 @@ join.onsubmit = (event) => {
       client.on('status', ({ detail }) => {
         if (client !== current) return;
         if (detail === 'reconnecting') { status.textContent = '重新連線中'; hand.disabled = true; }
-        else if (detail === 'disconnected') { playbackGeneration++; pendingHand = undefined; syncHand(); status.textContent = '未連線'; hand.disabled = leave.disabled = true; }
+        else if (detail === 'disconnected') { playbackGeneration++; pendingHand = undefined; status.textContent = '未連線'; hand.disabled = leave.disabled = true; }
+        syncHand();
       });
       client.on('error', ({ detail }) => report(detail));
       client.on('audioblocked', () => { status.textContent = '請點擊啟用音訊。'; });
@@ -79,7 +100,12 @@ hand.onclick = () => {
   const operation = { client };
   pendingHand = operation; syncHand();
   void (async () => {
-    try { await (operation.client.me?.handRaised ? operation.client.withdrawHand() : operation.client.raiseHand()); }
+    try {
+      const request = operation.client.me?.handRaised ? operation.client.withdrawHand() : operation.client.raiseHand();
+      // raiseHand reserves its cooldown synchronously, before its ACK settles.
+      syncHand();
+      await request;
+    }
     catch (error) { if (pendingHand === operation && client === operation.client) report(error); }
     finally {
       if (pendingHand === operation && client === operation.client) { pendingHand = undefined; syncHand(); }
@@ -87,9 +113,8 @@ hand.onclick = () => {
   })();
 };
 leave.onclick = () => {
-  playbackGeneration++;
+  playbackGeneration++; scheduleHandCooldown(0);
   pendingHand = undefined; hand.setAttribute('aria-busy', 'false');
   void client?.disconnect().then(() => { status.textContent = '已離開。'; hand.disabled = leave.disabled = true; });
 };
 syncHand();
-setInterval(() => { if (client?.me && !client.me.onStage) syncHand(); }, 250);
