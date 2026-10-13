@@ -36,6 +36,7 @@ interface Harness {
 function setup(): Harness {
   return runInNewContext(stripTypeScriptTypes(`
     let busy = false;
+    let landingRevision = 0;
     let roomActionIdentity = '', roomActionGeneration = 0, cooldownButton = null, cooldownTimer, cooldownDue = 0, invitation = '';
     const pendingRoomActions = new Map(), nodes = [], errors = [];
     const personRows = new Map(), quality = new Map(); let speakingIds = new Set();

@@ -29,6 +29,7 @@ const roleLabels = { controller: '主控', speaker: '發言者', audience: '觀�
 const params = new URLSearchParams(location.search);
 let busy = false;
 let landingEntry: { cancelled: boolean; entered: boolean } | undefined;
+let landingRevision = 0;
 let audioBlocked = false;
 let micNotice = '';
 let micRetryAvailable = false, micRetryPending = false;
@@ -300,12 +301,12 @@ function button(label: string, action: () => Promise<unknown>, className = '', g
   node.onclick = () => { void run(action, node, generation); };
   return node;
 }
-async function run(action: () => Promise<unknown>, target?: HTMLButtonElement, generation?: number, reportError: () => boolean = () => true): Promise<void> {
+async function run(action: () => Promise<unknown>, target?: HTMLButtonElement, generation?: number, reportError: () => boolean = () => true, formatError?: (error: unknown) => string): Promise<void> {
   if (target) target.disabled = true;
   errorBox.hidden = true;
   try { await action(); }
   catch (error) {
-    if (reportError() && (generation === undefined || generation === roomActionGeneration)) showError(error instanceof Error ? error.message : '操作失敗，請稍後再試。');
+    if (reportError() && (generation === undefined || generation === roomActionGeneration)) showError(formatError ? formatError(error) : error instanceof Error ? error.message : '操作失敗，請稍後再試。');
   }
   finally { if (target?.isConnected) target.disabled = false; updateCooldown(); syncMeter(); }
 }
@@ -364,11 +365,20 @@ function syncLandingActions(): void {
 function canCancelLanding(): boolean {
   return busy && Boolean(landingEntry && !landingEntry.cancelled && !landingEntry.entered) && !client.state;
 }
-function runLanding(action: (isCancelled: () => boolean) => Promise<unknown>): void {
+function runLanding(operation: 'create' | 'join', action: (isCancelled: () => boolean) => Promise<unknown>): void {
   if (busy) return;
   const entry = { cancelled: false, entered: false };
+  const revision = landingRevision;
   landingEntry = entry; busy = true; syncLandingActions();
-  void run(() => action(() => entry.cancelled), undefined, undefined, () => !entry.cancelled).finally(() => {
+  void run(() => action(() => entry.cancelled), undefined, undefined, () => !entry.cancelled, error => {
+    const message = error instanceof Error ? error.message : '操作失敗，請稍後再試。';
+    if (landingEntry !== entry || entry.entered || client.state || revision !== landingRevision
+      || !(error instanceof Error) || !('code' in error) || error.code !== 'bad_request') return message;
+    const guidance = operation === 'create'
+      ? '請檢查名稱、房間名稱及建立資料是否符合伺服器規則，或試著縮短名稱後重試。'
+      : '請檢查房間 ID、名稱及代碼是否符合伺服器規則，必要時向主控確認後重試。';
+    return `${message}（bad_request）\n${guidance}`;
+  }).finally(() => {
     if (landingEntry !== entry) return;
     landingEntry = undefined; busy = false; syncLandingActions();
   });
@@ -387,6 +397,7 @@ function field(form: HTMLFormElement, label: string, name: string, value = '', r
   return input;
 }
 function landing(): void {
+  landingRevision += 1;
   resetAudienceFilter();
   renderedRoomSignature = undefined; renderedGainInputs.length = 0;
   personRows.clear(); speakingIds.clear();
@@ -412,7 +423,7 @@ function landing(): void {
   create.append(codeLabel, createSubmit);
   create.onsubmit = (event) => {
     event.preventDefault();
-    runLanding(async (isCancelled) => {
+    runLanding('create', async (isCancelled) => {
       micNotice = invitation = '';
       const result = await client.createRoom({ name: createName.value.trim(), roomName: roomName.value.trim() || undefined, codeRequired: codeRequired.checked, token: createToken.value || undefined });
       if (isCancelled()) return;
@@ -430,7 +441,7 @@ function landing(): void {
   join.append(joinSubmit);
   join.onsubmit = (event) => {
     event.preventDefault();
-    runLanding(async () => {
+    runLanding('join', async () => {
       createdRoom = null; micNotice = invitation = '';
       await client.join({ roomId: roomId.value.trim(), code: code.value.trim() || undefined, name: joinName.value.trim() });
     });
