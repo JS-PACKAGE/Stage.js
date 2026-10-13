@@ -188,7 +188,7 @@ JSON frame，型別定義在 [`shared/protocol.ts`](shared/protocol.ts)。每個
 
 `limits.joinTimeoutMs`、`rooms.controllerGraceMs`、`rooms.participantGraceMs` 的範圍為 0～2147483647 ms；`rooms.heartbeatIntervalMs` 為 1000～2147483647 ms。上限包含 2147483647（約 24.9 天）；更大的值以前會被 Node timer 正規化成約 1 ms，現在啟動與離線 `config:check` 會拒絕該設定。0 的既有語意不變：join deadline 停用、participant 立即移除、controller 立即排程到期。這不限制只做經過時間比較的 `handRaiseIntervalMs`。
 
-範例設定的限制：frame ≤ 64KB，超過以 close code 1009 斷線；控制訊息 ≤ 20/s、`rtc:ice` ≤ 30/s，超過頻率上限以 close code 1008 斷線。房間不存在或代碼錯誤一律回 `unauthorized`。名稱以 HTML 轉義形式傳送。client 以 close code 1000 關閉＝主動離開（立即移出房間）；其他關閉碼或斷線＝保留席位至寬限期結束（主控一律保留 `controllerGraceMs`）。
+範例設定的限制：frame ≤ 64KB，超過以 close code 1009 斷線；控制訊息 ≤ 20/s、`rtc:ice` ≤ 30/s，超過頻率上限以 close code 1008 斷線。房間不存在或代碼錯誤一律回 `unauthorized`。名稱以 HTML 轉義形式傳送。伺服器收到 client 的 close code 1000 時，非主控視為主動離開並移出房間、不保留 participant grace；其他關閉碼或斷線依 `participantGraceMs` 處理。主控的一般斷線不論關閉碼都仍依 `controllerGraceMs` 保留至寬限期結束，再依原規則交接或關房；本機 disconnect 完成不代表伺服器已收到關閉。關房或踢除已移除的房間／成員不會因後續 socket 關閉重新建立寬限。
 
 同席回座後，若新連線已送出通過權限檢查的 offer，舊 offer 遲到的失敗不會再由 hub 清掉新一輪的 peer／訂閱／發布。只有最新通過檢查的 offer 失敗才清理媒體；單純斷線或回座但未送新 offer 時，原協商失敗仍會清理，讓後續 offer 能重新建立 peer。這是 hub 清理的 ownership 保護，不會取消底層已執行中的 WebRTC 工作。
 

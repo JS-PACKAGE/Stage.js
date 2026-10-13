@@ -635,3 +635,6 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 
 
 150. **完整範例的個人舉手位置提示（2026-10-13）：** whole sample probe中四個同名hands，自己ID排第三時只能看到完整佇列的「我」badge，個人區只有收回按鈕；status-only reconnect也沒有位置的新舊提示。新增單一重用role=status段落，從目前state.hands以me.participantId找第一個相符ID；僅offstage非controller且handRaised顯示（與既有embed/widget防禦性predicate一致），找不到自己只保留等待邀請訊息。updateCooldown同步更新此段落，使state／status-only reconnect／cache hit都使用目前資料；重連明示上次，landing清空，升台／主控／撤手隱藏，無timer或server request。保持原withdraw label／roomAction pending與所有permission policy，不把hand位置當邀請順序保證。實際Room證明hands對所有角色相同、code/audience仍controller-only，主控可越過前兩位先邀第三位；新增UI只顯示自己序位，不複製他人名字或私密欄位。驗證以whole-module fake DOM與模型／Hub快照為界，沒有原生assistive technology／語音驗收聲明。
+
+
+151. **SDK disconnect 文件的席位寬限契約校正（2026-10-13）：** bounded整合文件／built artifacts審查發現client README舊連線段落聲稱disconnect立即讓位，漏掉Hub一直存在的controller例外。client README與root README同時明示此例外，只改文件：本機完成不等於server收到close，收到正常1000後noncontroller不進participant grace；controller仍照controllerGraceMs等待再沿原繼任／關房政策處理。pagehide4002也明示依角色寬限設定，不保證無條件回座。既有Hub departure／kick／close三個focused tests與額外in-memory角色probe確認：kick先移除／解除binding，不因後續detach復活grace；roomclose清理room／media／timers。另以NodeNext與Bundler消費built package declarations、核對widget SDK identity／aliases與八個compressed artifact byte roundtrip均通過，未發現其他具體mismatch。沒有runtime／SDK API／server policy或nativebrowser／media驗收變更。
