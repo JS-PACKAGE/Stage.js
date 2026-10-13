@@ -14,6 +14,7 @@ class Node extends EventTarget {
   textContent = '';
   className = '';
   type = '';
+  tagName = '';
   isConnected = true;
   onclick?: () => void;
   append(...nodes: Node[]): void { this.children.push(...nodes); }
@@ -38,7 +39,7 @@ class Audio extends Node {
 }
 const originals = new Map(['HTMLElement', 'document', 'customElements', 'window'].map(name => [name, Object.getOwnPropertyDescriptor(globalThis, name)]));
 Object.defineProperty(globalThis, 'HTMLElement', { configurable: true, value: Node });
-Object.defineProperty(globalThis, 'document', { configurable: true, value: { createElement: (tag: string) => tag === 'audio' ? new Audio() : new Node(), body: { append() {} } } });
+Object.defineProperty(globalThis, 'document', { configurable: true, value: { createElement: (tag: string) => Object.assign(tag === 'audio' ? new Audio() : new Node(), { tagName: tag.toUpperCase() }), body: { append() {} } } });
 Object.defineProperty(globalThis, 'window', { configurable: true, value: new EventTarget() });
 const { StageElement, defineStageElement } = await import('../src/element.ts');
 after(() => { for (const [name, descriptor] of originals) { if (descriptor) Object.defineProperty(globalThis, name, descriptor); else Reflect.deleteProperty(globalThis, name); } });
@@ -103,10 +104,11 @@ const terminalCases = [
   { title: 'shutdown', message: { type: 'room:closed', roomId: 'one', reason: 'shutdown' }, event: 'closed', text: '伺服器維護或重新啟動，房間已關閉。' },
 ] as const satisfies readonly { title: string; message: ServerMessage; event: 'closed' | 'kicked'; text: string }[];
 
-function mountJoiningWidget() {
+function mountJoiningWidget(attributes: Record<string, string> = {}) {
   const element = new StageElement(); widgets.push(element);
   Object.assign(element, { isConnected: false });
   element.setAttribute('room', 'one'); element.setAttribute('name', 'Listener');
+  for (const [name, value] of Object.entries(attributes)) element.setAttribute(name, value);
   Object.assign(element, { isConnected: true }); element.connectedCallback();
   return element;
 }
@@ -131,7 +133,7 @@ function deferredJoiningWidget(t: TestContext) {
 }
 
 /** Runs the real SDK deadlines and request path without opening sockets or creating media. */
-function socketJoiningWidget(t: TestContext) {
+function socketJoiningWidget(t: TestContext, attributes: Record<string, string> = {}) {
   const sockets: Socket[] = [];
   class Socket {
     static OPEN = 1;
@@ -155,7 +157,7 @@ function socketJoiningWidget(t: TestContext) {
   let now = 1000;
   t.mock.method(performance, 'now', () => now);
   t.mock.timers.enable({ apis: ['setTimeout', 'setInterval'] });
-  const element = mountJoiningWidget();
+  const element = mountJoiningWidget(attributes);
   t.after(async () => {
     element.disconnectedCallback(); await settle();
     if (original) Object.defineProperty(globalThis, 'WebSocket', original);
@@ -567,6 +569,7 @@ describe('widget initial connection feedback', () => {
       const element = mountJoiningWidget(); await settle();
       assert.equal(element['status'].textContent, '未連線');
       assert.equal(element['error'].textContent, `${phase} failed`);
+      assertRetry(element, true);
       assert.equal(element['error'].hidden, false);
       assertRoomControlsHidden(element);
     });
@@ -595,6 +598,7 @@ describe('widget initial connection feedback', () => {
           await retired.client['receive']({ type: 'room:closed', roomId: 'one', reason: 'shutdown' });
           await settle();
           assert.equal(element.client, current.client);
+          assertRetry(element, false);
           assert.equal(element['status'].textContent, phase === 'connect' ? '連線中…' : '正在加入房間…');
           assert.equal(element['error'].hidden, true);
           assertRoomControlsHidden(element);
@@ -618,6 +622,7 @@ describe('widget initial connection feedback', () => {
       assert.equal(element.client, null);
       assert.equal(element['status'].textContent, '');
       pending.reject(new Error('removed failure')); await settle();
+      assertRetry(element, false);
       assert.equal(element['status'].textContent, '');
       assert.equal(element['error'].hidden, true);
       element.removeAttribute('name');
@@ -638,6 +643,7 @@ describe('widget initial connection feedback', () => {
         else joins[0]!.pending.reject(new Error('late join failure'));
         await settle();
         assert.equal(element['status'].textContent, terminal.text);
+        assertRetry(element, false);
         if (outcome === 'reject') assert.equal(element['error'].textContent, 'late join failure', 'existing current-client error behavior remains');
         element.playbackMuted = true;
         assert.equal(element['status'].textContent, terminal.text);
@@ -676,6 +682,346 @@ describe('widget initial connection feedback', () => {
     assert.equal(element['status'].textContent, '正在加入房間…');
     assert.equal(element['error'].hidden, true);
   });
+});
+
+function assertRetry(element: InstanceType<typeof StageElement>, available: boolean): void {
+  const retry = element['retry'];
+  assert.equal(retry.tagName, 'BUTTON');
+  assert.equal(retry.type, 'button');
+  assert.equal(retry.textContent, '重試加入');
+  assert.equal(retry.hidden, !available, 'retry visibility follows the current initial attempt');
+  assert.equal(retry.disabled, !available, 'a hidden retry cannot enter a fresh join');
+}
+
+describe('widget manual initial join retry', () => {
+  it('uses a native button and stays unavailable before failure, including unrelated SDK errors', async t => {
+    const empty = new StageElement(); widgets.push(empty);
+    assertRetry(empty, false);
+    empty.connectedCallback(); await settle();
+    assertRetry(empty, false);
+    const { element, sockets, hello } = socketJoiningWidget(t); await settle();
+    assertRetry(element, false);
+    const client = element.client!;
+    await client['receive']({ type: 'error', code: 'bad_request', message: '收到無法解析的伺服器訊息。' });
+    assertRetry(element, false);
+    click(element['retry']); await settle();
+    assert.equal(element.client, client);
+    assert.equal(sockets.length, 1);
+    const request = await hello(sockets[0]!);
+    assertRetry(element, false);
+    await client['receive']({ type: 'error', code: 'bad_request', message: '收到無法解析的伺服器訊息。' });
+    assertRetry(element, false);
+    sockets[0]!.deliver({ type: 'ok', requestId: request.requestId }); await settle();
+    assert.equal(client.state, null, 'a successful ACK without a snapshot is not a failed attempt');
+    assertRetry(element, false);
+  });
+
+  it('retries repeated server rejections once per click, keeps preferences and retires the old SDK resources', async t => {
+    const { element, sockets, hello, tick } = socketJoiningWidget(t, {
+      url: 'wss://stage.example.test/ws', room: ' one ', name: ' Listener ', code: ' SECRET ',
+      'playback-muted': '', 'playback-volume': '0.375',
+    });
+    const statuses: unknown[] = [], errors: unknown[] = [];
+    element.addEventListener('stage-status', event => { statuses.push((event as CustomEvent).detail); });
+    element.addEventListener('stage-error', event => { errors.push((event as CustomEvent).detail); });
+    await settle();
+    for (let attempt = 0; attempt < 2; attempt++) {
+      const client = element.client!, socket = sockets[attempt]!;
+      assert.equal(client.playbackMuted, true);
+      assert.equal(client.playbackVolume, 0.375);
+      assert.equal(client['options'].url, 'wss://stage.example.test/ws');
+      assertRetry(element, false);
+      const request = await hello(socket);
+      assert.deepEqual({ roomId: request.roomId, name: request.name, code: request.code, resumeToken: request.resumeToken },
+        { roomId: 'one', name: 'Listener', code: 'SECRET', resumeToken: undefined });
+      socket.deliver({ type: 'error', requestId: request.requestId, code: 'unauthorized', message: '房間不存在或代碼錯誤。' });
+      await settle();
+      assertRetry(element, true);
+      assert.equal(element['error'].textContent, '房間不存在或代碼錯誤。');
+      assert.equal(element['error'].hidden, false);
+      assert.equal(element['retry'].getAttribute('aria-busy'), null);
+      assert.equal(client['pending'].size, 0);
+      await tick(1000);
+      assert.equal(sockets.length, attempt + 1, 'a failed initial join never starts an automatic retry');
+      const generation = element['generation'];
+      click(element['retry']);
+      assertRetry(element, false);
+      click(element['retry']);
+      await settle();
+      assert.equal(element['generation'], generation + 1, 'a double click starts exactly one new generation');
+      assert.equal(sockets.length, attempt + 2);
+      assert.notEqual(element.client, client);
+      assert.equal(socket.readyState, 3);
+      assert.equal(client['audio'].isConnected, false);
+      assert.equal(client['socket'], null);
+      assert.equal(client['keepaliveTimer'], undefined);
+      assert.equal(client['reconnectTimer'], undefined);
+      assert.equal(client['pending'].size, 0);
+      assert.equal(element['pendingActions'].size, 0);
+      assert.equal(element['retry'].getAttribute('aria-busy'), null);
+      assert.equal(element['error'].hidden, true);
+      assert.equal(element['status'].textContent, '連線中…');
+      assertRoomControlsHidden(element);
+    }
+    assert.deepEqual(statuses, [], 'manual retry adds no SDK status events');
+    assert.equal(errors.length, 2, 'the SDK rejection event is forwarded once per failed request');
+    const socket = sockets[2]!, request = await hello(socket);
+    socket.deliver({ type: 'room:state', ...roomState() }); await settle();
+    assertRetry(element, false);
+    assert.equal(element.client!['pending'].has(request.requestId), true, 'state hides retry before ACK');
+    socket.deliver({ type: 'ok', requestId: request.requestId }); await settle();
+    assertRetry(element, false);
+    assert.equal(element.client?.playbackMuted, true);
+    assert.equal(element.client?.playbackVolume, 0.375);
+    assert.equal(element['error'].hidden, true);
+    assert.deepEqual(statuses, ['live']);
+    assert.equal(element['status'].textContent, 'Room & Hall · 直播中 · 收聽中');
+  });
+
+  for (const phase of ['hello', 'join ACK'] as const) {
+    it(`offers manual recovery only after the real ${phase} deadline and can fail again`, async t => {
+      const { element, sockets, tick, hello } = socketJoiningWidget(t); await settle();
+      for (let attempt = 0; attempt < 2; attempt++) {
+        if (phase === 'join ACK') await hello(sockets[attempt]!);
+        assertRetry(element, false);
+        await tick(14999); assertRetry(element, false);
+        await tick(1); assertRetry(element, true);
+        assert.equal(element.client?.state, null);
+        assert.equal(element['error'].textContent, phase === 'hello' ? '連線逾時，請稍後再試。' : '請求逾時，請重試。');
+        assert.equal(element.client!['pending'].size, 0);
+        await tick(1000);
+        assert.equal(sockets.length, attempt + 1);
+        click(element['retry']); click(element['retry']); await settle();
+        assertRetry(element, false);
+        assert.equal(sockets.length, attempt + 2);
+        assert.equal(element['error'].hidden, true);
+      }
+    });
+  }
+
+  it('stays unavailable while asynchronous retirement is pending and admits only one replacement', async t => {
+    const { element, sockets, hello } = socketJoiningWidget(t); await settle();
+    const client = element.client!, socket = sockets[0]!, request = await hello(socket);
+    socket.deliver({ type: 'error', requestId: request.requestId, code: 'unauthorized', message: '房間不存在或代碼錯誤。' }); await settle();
+    const cleanup = deferred();
+    t.after(() => { cleanup.resolve(); });
+    const disconnect = client.disconnect.bind(client);
+    const retire = t.mock.method(client, 'disconnect', async () => { await disconnect(); await cleanup.promise; });
+    click(element['retry']);
+    assertRetry(element, false);
+    assert.equal(element.client, null);
+    element.playbackMuted = true;
+    element.playbackVolume = 0.25;
+    click(element['retry']); await settle();
+    assert.equal(retire.mock.callCount(), 1);
+    assert.equal(sockets.length, 1);
+    cleanup.resolve(); await settle();
+    assert.equal(sockets.length, 2);
+    assertRetry(element, false);
+    const replacement = element.client as StageClient | null;
+    assert.ok(replacement);
+    assert.equal(replacement.playbackMuted, true);
+    assert.equal(replacement.playbackVolume, 0.25);
+  });
+
+  it('withdraws an offered retry if the current late room snapshot arrives', async t => {
+    const { element, sockets, hello, tick } = socketJoiningWidget(t); await settle();
+    const socket = sockets[0]!;
+    await hello(socket); await tick(15000);
+    assertRetry(element, true);
+    const client = element.client;
+    element.addEventListener('stage-status', event => {
+      if ((event as CustomEvent).detail === 'live') click(element['retry']);
+    });
+    socket.deliver({ type: 'room:state', ...roomState() }); await settle();
+    assertRetry(element, false);
+    click(element['retry']); await settle();
+    assert.equal(element.client, client);
+    assert.equal(sockets.length, 1);
+    assert.equal(element['hand'].hidden, false);
+  });
+
+  for (const outcome of ['rejection', 'timeout', 'disconnect'] as const) {
+    it(`never treats a state-before-ACK ${outcome} as an initial join retry`, async t => {
+      const { element, sockets, hello, tick } = socketJoiningWidget(t); await settle();
+      const socket = sockets[0]!, request = await hello(socket), client = element.client!;
+      socket.deliver({ type: 'room:state', ...roomState() }); await settle();
+      assertRetry(element, false);
+      if (outcome === 'disconnect') await client.disconnect();
+      else if (outcome === 'rejection') socket.deliver({ type: 'error', requestId: request.requestId, code: 'unauthorized', message: '房間不存在或代碼錯誤。' });
+      if (outcome === 'timeout') await tick(15000);
+      await settle();
+      assertRetry(element, false);
+      element.playbackMuted = true;
+      assertRetry(element, false);
+      click(element['retry']); await settle();
+      assert.equal(element.client, client);
+      assert.equal(sockets.length, 1);
+    });
+  }
+
+  it('remembers state received before a forwarded live-status listener disconnects the SDK', async t => {
+    const { element, sockets, hello } = socketJoiningWidget(t); await settle();
+    const socket = sockets[0]!, request = await hello(socket), client = element.client!;
+    let states = 0;
+    element.addEventListener('stage-state', () => { states++; });
+    element.addEventListener('stage-status', event => {
+      if ((event as CustomEvent).detail === 'live') void client.disconnect();
+    });
+    socket.deliver({ type: 'room:state', ...roomState() }); await settle(); await settle();
+    assert.equal(states, 0, 'disconnect during status forwarding suppresses the SDK state event');
+    assert.equal(client.status, 'disconnected');
+    assert.equal(client.state, null);
+    assert.equal(client['pending'].has(request.requestId), false);
+    assertRetry(element, false);
+    click(element['retry']); await settle();
+    assert.equal(element.client, client);
+    assert.equal(sockets.length, 1);
+  });
+
+  it('does not offer a fresh join during the SDK reconnect loop or after a rejected resume', async t => {
+    const { element, client, socket, sockets, tick, hello } = await socketJoinedWidget(t);
+    socket.close(); await settle();
+    assert.equal(client.status, 'reconnecting'); assertRetry(element, false);
+    click(element['retry']); await tick(500);
+    assert.equal(sockets.length, 2); assertRetry(element, false);
+    const replacement = sockets[1]!, resume = await hello(replacement);
+    assert.equal(resume.resumeToken, 'resume-me'); assertRetry(element, false);
+    replacement.deliver({ type: 'error', requestId: resume.requestId, code: 'unauthorized', message: '房間不存在或代碼錯誤。' });
+    await settle(); await settle();
+    assert.equal(client.status, 'disconnected');
+    assert.equal(client.state, null);
+    assertRetry(element, false);
+    click(element['retry']); await tick(1000);
+    assert.equal(element.client, client);
+    assert.equal(sockets.length, 2);
+  });
+
+  for (const terminal of terminalCases) {
+    for (const phase of ['connecting', 'joining', 'retry offered'] as const) {
+      it(`gives ${terminal.title} precedence while ${phase}`, async t => {
+        const { element, sockets, hello, tick } = socketJoiningWidget(t); await settle();
+        const socket = sockets[0]!;
+        if (phase !== 'connecting') {
+          const request = await hello(socket);
+          if (phase === 'retry offered') {
+            socket.deliver({ type: 'error', requestId: request.requestId, code: 'unauthorized', message: '房間不存在或代碼錯誤。' });
+            await settle(); assertRetry(element, true);
+          }
+        }
+        const client = element.client!, generation = element['generation'];
+        element.addEventListener(`stage-${terminal.event}`, () => { click(element['retry']); });
+        socket.deliver(terminal.message); await settle(); await settle();
+        assert.equal(element.client, client, 'a terminal-event listener cannot activate a previously offered retry');
+        assert.equal(element['generation'], generation);
+        assert.equal(element['status'].textContent, terminal.text);
+        assertRetry(element, false);
+        assertRoomControlsHidden(element);
+        await client['receive']({ type: 'error', code: 'bad_request', message: 'late current error' });
+        element.playbackMuted = true;
+        click(element['retry']); await tick(15000);
+        assertRetry(element, false);
+        assert.equal(element['status'].textContent, terminal.text);
+        assert.equal(sockets.length, 1);
+      });
+    }
+  }
+
+  it('ignores retired socket and SDK errors, states and terminal events after manual retry', async t => {
+    const { element, sockets, hello } = socketJoiningWidget(t); await settle();
+    const retired = element.client!, socket = sockets[0]!, request = await hello(socket);
+    socket.deliver({ type: 'error', requestId: request.requestId, code: 'unauthorized', message: '房間不存在或代碼錯誤。' }); await settle();
+    click(element['retry']); await settle();
+    const client = element.client!, replacement = sockets[1]!;
+    await hello(replacement);
+    const forwarded: string[] = [];
+    for (const type of ['error', 'state', 'status', 'closed', 'kicked']) element.addEventListener(`stage-${type}`, () => { forwarded.push(type); });
+    const late: ServerMessage[] = [
+      { type: 'error', requestId: request.requestId, code: 'bad_request', message: 'retired failure' },
+      { type: 'room:state', ...roomState(true), name: 'Retired room' },
+      ...terminalCases.map(terminal => terminal.message),
+    ];
+    for (const message of late) {
+      socket.deliver(message);
+      await retired['receive'](message);
+      await settle();
+      assert.equal(element.client, client);
+      assertRetry(element, false);
+      assert.equal(element['error'].hidden, true);
+      assert.equal(element['status'].textContent, '正在加入房間…');
+    }
+    assert.deepEqual(forwarded, []);
+    assert.equal(sockets.length, 2);
+  });
+
+  for (const phase of ['connect', 'join'] as const) {
+    it(`ignores an old manual retry ${phase} rejection after rapid replacement and remount`, async t => {
+      const { element, connections, joins } = deferredJoiningWidget(t); await settle();
+      const enterPhase = async () => {
+        if (phase === 'join') { connections.at(-1)!.pending.resolve(); await settle(); }
+        return (phase === 'connect' ? connections : joins).at(-1)!;
+      };
+      const first = await enterPhase();
+      first.pending.reject(new Error('initial failure')); await settle();
+      assertRetry(element, true);
+      click(element['retry']); await settle();
+      const retired = await enterPhase();
+      assertRetry(element, false);
+      element.setAttribute('room', 'two');
+      Object.assign(element, { isConnected: false }); element.disconnectedCallback();
+      Object.assign(element, { isConnected: true }); element.connectedCallback(); await settle();
+      const current = await enterPhase();
+      assert.notEqual(current.client, retired.client);
+      retired.pending.reject(new Error('retired retry failure')); await settle();
+      assert.equal(element.client, current.client);
+      assertRetry(element, false);
+      assert.equal(element['error'].hidden, true);
+      assert.equal(element['retry'].getAttribute('aria-busy'), null);
+      assert.equal(element['pendingActions'].size, 0);
+      assert.equal(element['status'].textContent, phase === 'connect' ? '連線中…' : '正在加入房間…');
+      if (phase === 'connect') { current.pending.resolve(); await settle(); }
+      await current.client['receive']({ type: 'room:state', ...roomState(false, 'two') });
+      joins.at(-1)!.pending.resolve(); await settle();
+      assertRetry(element, false);
+      assert.equal(element['hand'].hidden, false);
+    });
+  }
+
+  for (const transition of ['attribute change', 'remount'] as const) {
+    it(`resets retry eligibility on ${transition} and preserves playback preferences`, async t => {
+      const { element, sockets, hello } = socketJoiningWidget(t, { 'playback-muted': '', 'playback-volume': '0.25' }); await settle();
+      const retired = element.client!, socket = sockets[0]!, request = await hello(socket);
+      socket.deliver({ type: 'error', requestId: request.requestId, code: 'unauthorized', message: '房間不存在或代碼錯誤。' }); await settle();
+      assertRetry(element, true);
+      if (transition === 'attribute change') {
+        element.setAttribute('room', 'two'); element.setAttribute('name', 'New listener'); element.setAttribute('code', 'NEW');
+      } else {
+        Object.assign(element, { isConnected: false }); element.disconnectedCallback(); await settle();
+        assertRetry(element, false);
+        assert.equal(element.client, null);
+        click(element['retry']); await settle();
+        assert.equal(sockets.length, 1);
+        Object.assign(element, { isConnected: true }); element.connectedCallback();
+      }
+      assertRetry(element, false);
+      await settle();
+      const client = element.client!;
+      assert.notEqual(client, retired);
+      assert.equal(sockets.length, 2);
+      assert.equal(client.playbackMuted, true);
+      assert.equal(client.playbackVolume, 0.25);
+      assert.equal(element['error'].hidden, true);
+      const next = await hello(sockets[1]!);
+      assert.equal(next.roomId, transition === 'attribute change' ? 'two' : 'one');
+      assert.equal(next.name, transition === 'attribute change' ? 'New listener' : 'Listener');
+      assert.equal(next.code, transition === 'attribute change' ? 'NEW' : undefined);
+      sockets[1]!.deliver({ type: 'error', requestId: next.requestId, code: 'unauthorized', message: '房間不存在或代碼錯誤。' }); await settle();
+      assertRetry(element, true);
+      click(element['retry']); await settle();
+      assert.equal(sockets.length, 3);
+      assertRetry(element, false);
+    });
+  }
 });
 
 describe('widget subscribed connection status', () => {

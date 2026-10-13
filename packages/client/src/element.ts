@@ -42,6 +42,8 @@ export class StageElement extends HTMLElement {
   private readonly mic: HTMLButtonElement;
   private readonly leaveStage: HTMLButtonElement;
   private readonly listen: HTMLButtonElement;
+  private readonly retry: HTMLButtonElement;
+  private retryAvailable = false;
   private readonly pendingActions = new Set<HTMLButtonElement>();
   private cooldownTimer: ReturnType<typeof setTimeout> | undefined;
   /** Bumped on every (re)join, so a superseded join cannot touch the widget. */
@@ -76,7 +78,8 @@ export class StageElement extends HTMLElement {
     this.leaveStage = this.button('離開舞台', () => this.current?.leaveStage());
     this.listen = this.button('靜音收聽', () => { this.playbackMuted = !this.playbackMuted; });
     this.listen.setAttribute('aria-label', '靜音收聽');
-    actions.append(this.unlock, this.listen, this.hand, this.mic, this.leaveStage);
+    this.retry = this.button('重試加入', () => { if (this.canRetry()) this.rejoin(); });
+    actions.append(this.unlock, this.listen, this.hand, this.mic, this.leaveStage, this.retry);
     panel.append(this.status, this.error, actions);
     root.append(style, panel);
     this.render();
@@ -148,9 +151,14 @@ export class StageElement extends HTMLElement {
       client.setPlaybackVolume(this.playbackVolume);
       this.current = client;
       this.joinPhase = 'connecting';
+      let receivedState = false;
+      let terminal = false;
       for (const type of EVENTS) {
         client.on(type, ({ detail }) => {
           if (generation !== this.generation || this.current !== client) return;
+          // SDK status precedes state; a forwarded status listener may disconnect immediately.
+          if (type === 'state' || client.state) { receivedState = true; this.hideRetry(); }
+          if (type === 'closed' || type === 'kicked') { terminal = true; this.hideRetry(); }
           if (type === 'state' || type === 'closed' || type === 'kicked'
             || (type === 'status' && detail === 'disconnected')) this.joinPhase = undefined;
           if (type === 'audioblocked') this.unlock.hidden = false;
@@ -173,7 +181,12 @@ export class StageElement extends HTMLElement {
         const code = this.getAttribute('code')?.trim();
         await client.join({ roomId: room, name, ...(code ? { code } : {}) });
       } catch (error) {
-        if (generation === this.generation && this.current === client) this.show(error);
+        if (generation === this.generation && this.current === client) {
+          // A terminal room event or an accepted snapshot must never become a fresh-join prompt.
+          this.retryAvailable = !receivedState && !terminal && !client.state;
+          this.show(error);
+          this.render();
+        }
       } finally {
         // A snapshot or terminal event can already have replaced the progress message.
         if (generation === this.generation && this.current === client && this.joinPhase) {
@@ -187,6 +200,7 @@ export class StageElement extends HTMLElement {
 
   private async leave(): Promise<void> {
     this.joinPhase = undefined;
+    this.hideRetry();
     for (const button of this.pendingActions) button.removeAttribute('aria-busy');
     this.pendingActions.clear();
     clearTimeout(this.cooldownTimer);
@@ -196,6 +210,18 @@ export class StageElement extends HTMLElement {
     this.unlock.hidden = true;
     this.render();
     await client?.disconnect();
+  }
+
+  private hideRetry(): void {
+    this.retryAvailable = false;
+    // Revoke native click admission before forwarding events that can synchronously invoke it.
+    this.retry.hidden = true;
+    this.retry.disabled = true;
+  }
+
+  private canRetry(): boolean {
+    return this.isConnected && Boolean(this.current) && this.retryAvailable && !this.joinPhase
+      && !this.current?.state && this.current?.status !== 'reconnecting';
   }
 
   private wsUrl(): string {
@@ -242,6 +268,8 @@ export class StageElement extends HTMLElement {
       this.status.textContent = this.getAttribute('room') && this.getAttribute('name') ? '' : '請設定 room 與 name 屬性。';
     }
     const reconnecting = client?.status === 'reconnecting';
+    this.retry.hidden = !this.canRetry();
+    this.retry.disabled = this.retry.hidden || this.pendingActions.has(this.retry);
     const audience = Boolean(me && !me.onStage && me.role !== 'controller');
     const remaining = client?.handCooldownMs ?? 0;
     const cooldown = Math.ceil(remaining / 1000);
