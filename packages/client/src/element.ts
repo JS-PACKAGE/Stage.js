@@ -46,6 +46,7 @@ export class StageElement extends HTMLElement {
   private cooldownTimer: ReturnType<typeof setTimeout> | undefined;
   /** Bumped on every (re)join, so a superseded join cannot touch the widget. */
   private generation = 0;
+  private joinPhase: 'connecting' | 'joining' | undefined;
 
   constructor() {
     super();
@@ -146,9 +147,12 @@ export class StageElement extends HTMLElement {
       client.setPlaybackMuted(this.playbackMuted);
       client.setPlaybackVolume(this.playbackVolume);
       this.current = client;
+      this.joinPhase = 'connecting';
       for (const type of EVENTS) {
         client.on(type, ({ detail }) => {
           if (generation !== this.generation || this.current !== client) return;
+          if (type === 'state' || type === 'closed' || type === 'kicked'
+            || (type === 'status' && detail === 'disconnected')) this.joinPhase = undefined;
           if (type === 'audioblocked') this.unlock.hidden = false;
           if (type === 'status' && detail === 'disconnected') this.status.textContent = STATUS_LABELS.disconnected;
           if (type === 'closed') this.status.textContent = (detail as StageEventMap['closed']).reason === 'shutdown'
@@ -164,15 +168,25 @@ export class StageElement extends HTMLElement {
       try {
         await client.connect();
         if (generation !== this.generation || this.current !== client || !this.isConnected) return;
+        if (this.joinPhase === 'connecting') this.joinPhase = 'joining';
+        this.render();
         const code = this.getAttribute('code')?.trim();
         await client.join({ roomId: room, name, ...(code ? { code } : {}) });
       } catch (error) {
-        if (generation === this.generation) this.show(error);
+        if (generation === this.generation && this.current === client) this.show(error);
+      } finally {
+        // A snapshot or terminal event can already have replaced the progress message.
+        if (generation === this.generation && this.current === client && this.joinPhase) {
+          this.joinPhase = undefined;
+          if (!client.state) this.status.textContent = STATUS_LABELS[client.status];
+          this.render();
+        }
       }
     });
   }
 
   private async leave(): Promise<void> {
+    this.joinPhase = undefined;
     for (const button of this.pendingActions) button.removeAttribute('aria-busy');
     this.pendingActions.clear();
     clearTimeout(this.cooldownTimer);
@@ -222,6 +236,8 @@ export class StageElement extends HTMLElement {
     if (state && me) {
       const where = me.onStage ? (me.muted ? '台上（已靜音）' : '台上') : me.handRaised ? '已舉手' : '收聽中';
       this.status.textContent = `${decodeName(state.name)} · ${STATUS_LABELS[client!.status]} · ${where}`;
+    } else if (this.joinPhase) {
+      this.status.textContent = this.joinPhase === 'connecting' ? '連線中…' : '正在加入房間…';
     } else if (!client) {
       this.status.textContent = this.getAttribute('room') && this.getAttribute('name') ? '' : '請設定 room 與 name 屬性。';
     }

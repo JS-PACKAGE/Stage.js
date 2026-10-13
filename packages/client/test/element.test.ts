@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { after, afterEach, describe, it } from 'node:test';
 import type { TestContext } from 'node:test';
 import { StageClient } from '../src/index.ts';
-import type { RoomStatePayload, ServerMessage } from '../../../shared/protocol.ts';
+import type { ClientMessage, RoomStatePayload, ServerMessage } from '../../../shared/protocol.ts';
 
 /** Minimal DOM surface for widget state tests; this does not simulate a browser layout or input system. */
 class Node extends EventTarget {
@@ -102,6 +102,313 @@ const terminalCases = [
   { title: 'shutdown', message: { type: 'room:closed', roomId: 'one', reason: 'shutdown' }, event: 'closed', text: '伺服器維護或重新啟動，房間已關閉。' },
 ] as const satisfies readonly { title: string; message: ServerMessage; event: 'closed' | 'kicked'; text: string }[];
 
+function mountJoiningWidget() {
+  const element = new StageElement(); widgets.push(element);
+  Object.assign(element, { isConnected: false });
+  element.setAttribute('room', 'one'); element.setAttribute('name', 'Listener');
+  Object.assign(element, { isConnected: true }); element.connectedCallback();
+  return element;
+}
+
+function deferredJoiningWidget(t: TestContext) {
+  const connections: { client: StageClient; pending: ReturnType<typeof deferred> }[] = [];
+  const joins: { client: StageClient; pending: ReturnType<typeof deferred> }[] = [];
+  t.mock.method(StageClient.prototype, 'connect', function (this: StageClient) {
+    const pending = deferred(); connections.push({ client: this, pending }); return pending.promise;
+  });
+  t.mock.method(StageClient.prototype, 'join', function (this: StageClient) {
+    const pending = deferred(); joins.push({ client: this, pending }); return pending.promise;
+  });
+  t.mock.method(StageClient.prototype as unknown as { createMedia(): void }, 'createMedia', () => {});
+  const element = mountJoiningWidget();
+  t.after(async () => {
+    element.disconnectedCallback();
+    for (const { pending } of [...connections, ...joins]) pending.resolve();
+    await settle();
+  });
+  return { element, connections, joins };
+}
+
+/** Runs the real SDK deadlines and request path without opening sockets or creating media. */
+function socketJoiningWidget(t: TestContext) {
+  const sockets: Socket[] = [];
+  class Socket {
+    static OPEN = 1;
+    readyState = 0;
+    readonly sent: ClientMessage[] = [];
+    onmessage: ((event: { data: string }) => void) | null = null;
+    onclose: (() => void) | null = null;
+    constructor() { sockets.push(this); }
+    send(data: string): void { this.sent.push(JSON.parse(data) as ClientMessage); }
+    deliver(message: ServerMessage): void { this.onmessage?.({ data: JSON.stringify(message) }); }
+    hello(): void {
+      this.readyState = Socket.OPEN;
+      this.deliver({ type: 'hello', protocol: 1, serverVersion: 'test',
+        limits: { controlPerSecond: 20, icePerSecond: 30, handRaiseIntervalMs: 10000 } });
+    }
+    close(): void { this.readyState = 3; this.onclose?.(); }
+  }
+  const original = Object.getOwnPropertyDescriptor(globalThis, 'WebSocket');
+  Object.defineProperty(globalThis, 'WebSocket', { configurable: true, value: Socket });
+  t.mock.method(StageClient.prototype as unknown as { createMedia(): void }, 'createMedia', () => {});
+  let now = 1000;
+  t.mock.method(performance, 'now', () => now);
+  t.mock.timers.enable({ apis: ['setTimeout', 'setInterval'] });
+  const element = mountJoiningWidget();
+  t.after(async () => {
+    element.disconnectedCallback(); await settle();
+    if (original) Object.defineProperty(globalThis, 'WebSocket', original);
+    else Reflect.deleteProperty(globalThis, 'WebSocket');
+  });
+  const tick = async (ms: number) => { now += ms; t.mock.timers.tick(ms); await settle(); await settle(); };
+  const joinRequest = (socket: Socket) => {
+    const request = socket.sent.find(message => message.type === 'join');
+    assert.ok(request && request.type === 'join', 'the real SDK sent its join request');
+    return request;
+  };
+  const hello = async (socket: Socket) => { socket.hello(); await settle(); await tick(0); return joinRequest(socket); };
+  return { element, sockets, tick, hello, joinRequest };
+}
+
+describe('widget initial connection feedback', () => {
+  it('shows connect and join progress without changing SDK statuses, events or accessibility state', async t => {
+    const { element, sockets, hello } = socketJoiningWidget(t);
+    const statuses: unknown[] = [];
+    element.addEventListener('stage-status', event => { statuses.push((event as CustomEvent).detail); });
+    await settle();
+    const client = element.client;
+    assert.ok(client);
+    assert.equal(element['status'].textContent, '連線中…');
+    assert.equal(client.status, 'disconnected');
+    assertRoomControlsHidden(element);
+    assert.equal(element['status'].getAttribute('role'), 'status');
+    assert.equal(element['status'].getAttribute('aria-live'), 'polite');
+    assert.equal(element['status'].getAttribute('aria-busy'), null);
+    assert.equal(element.getAttribute('aria-busy'), null);
+    element.playbackMuted = true;
+    assert.equal(element['status'].textContent, '連線中…', 'preference renders retain progress');
+    const socket = sockets[0]!;
+    const request = await hello(socket);
+    assert.equal(element['status'].textContent, '正在加入房間…');
+    assert.equal(client.status, 'disconnected');
+    assert.deepEqual(statuses, [], 'widget-only progress does not fabricate SDK events');
+    assertRoomControlsHidden(element);
+    for (const key of ['hand', 'mic', 'leaveStage', 'listen', 'unlock'] as const) assert.equal(element[key].getAttribute('aria-busy'), null);
+    socket.deliver({ type: 'room:state', ...roomState() }); await settle();
+    assert.equal(element['status'].textContent, 'Room & Hall · 直播中 · 收聽中', 'state wins before the join ACK');
+    assert.equal(element['hand'].hidden, false);
+    socket.deliver({ type: 'ok', requestId: request.requestId }); await settle();
+    assert.equal(element['status'].textContent, 'Room & Hall · 直播中 · 收聽中');
+    assert.deepEqual(statuses, ['live']);
+  });
+
+  it('shows the actual hello timeout and recovers on a replacement connection', async t => {
+    const { element, sockets, tick, hello } = socketJoiningWidget(t);
+    await settle();
+    await tick(14999);
+    assert.equal(element['error'].hidden, true);
+    await tick(1);
+    assert.equal(element['status'].textContent, '未連線');
+    assert.equal(element['error'].hidden, false);
+    assert.equal(element['error'].textContent, '連線逾時，請稍後再試。');
+    assert.equal(sockets[0]!.readyState, 3);
+    assertRoomControlsHidden(element);
+    const retired = element.client;
+    element.setAttribute('code', 'RETRY'); await settle();
+    assert.notEqual(element.client, retired);
+    assert.equal(element['error'].hidden, true);
+    assert.equal(element['status'].textContent, '連線中…');
+    const socket = sockets[1]!;
+    const request = await hello(socket);
+    assert.equal(request.code, 'RETRY');
+    assert.equal(element['status'].textContent, '正在加入房間…');
+    socket.deliver({ type: 'room:state', ...roomState() });
+    socket.deliver({ type: 'ok', requestId: request.requestId }); await settle();
+    assert.equal(element['status'].textContent, 'Room & Hall · 直播中 · 收聽中');
+    assert.equal(element['error'].hidden, true);
+  });
+
+  it('clears join progress after the actual ACK timeout before any snapshot and accepts later state', async t => {
+    const { element, sockets, tick, hello } = socketJoiningWidget(t);
+    await settle();
+    const socket = sockets[0]!;
+    await hello(socket);
+    await tick(14999);
+    assert.equal(element['error'].hidden, true);
+    await tick(1);
+    assert.equal(element['status'].textContent, '未連線');
+    assert.equal(element['error'].textContent, '請求逾時，請重試。');
+    assert.equal(element['error'].hidden, false);
+    assertRoomControlsHidden(element);
+    socket.deliver({ type: 'room:state', ...roomState() }); await settle();
+    assert.equal(element['status'].textContent, 'Room & Hall · 直播中 · 收聽中');
+    assert.equal(element['hand'].hidden, false);
+  });
+
+  it('keeps the current live snapshot and controls when its join ACK times out', async t => {
+    const { element, sockets, tick, hello } = socketJoiningWidget(t);
+    await settle();
+    const socket = sockets[0]!;
+    await hello(socket);
+    socket.deliver({ type: 'room:state', ...roomState(true) }); await settle();
+    await tick(15000);
+    assert.equal(element['status'].textContent, 'Room & Hall · 直播中 · 台上');
+    assert.equal(element['mic'].hidden, false);
+    assert.equal(element['listen'].hidden, false);
+    assert.equal(element['error'].textContent, '請求逾時，請重試。');
+    assert.equal(element['error'].hidden, false);
+    element.playbackMuted = true;
+    assert.equal(element['status'].textContent, 'Room & Hall · 直播中 · 台上');
+  });
+
+  it('clears join progress if an ACK arrives without a room snapshot', async t => {
+    const { element, sockets, hello } = socketJoiningWidget(t);
+    await settle();
+    const socket = sockets[0]!;
+    const request = await hello(socket);
+    socket.deliver({ type: 'ok', requestId: request.requestId }); await settle();
+    assert.equal(element['status'].textContent, '未連線');
+    assert.equal(element.client?.state, null);
+    assert.equal(element['error'].hidden, true);
+    assertRoomControlsHidden(element);
+  });
+
+  it('shows the current server join rejection without leaving a pending label', async t => {
+    const { element, sockets, hello } = socketJoiningWidget(t);
+    await settle();
+    const socket = sockets[0]!;
+    const request = await hello(socket);
+    const forwarded: unknown[] = [];
+    element.addEventListener('stage-error', event => { forwarded.push((event as CustomEvent).detail); });
+    socket.deliver({ type: 'error', requestId: request.requestId, code: 'unauthorized', message: '房間不存在或代碼錯誤。' }); await settle();
+    assert.equal(element['status'].textContent, '未連線');
+    assert.equal(element['error'].textContent, '房間不存在或代碼錯誤。');
+    assert.equal(element['error'].hidden, false);
+    assert.equal(forwarded.length, 1);
+    assertRoomControlsHidden(element);
+  });
+
+  for (const phase of ['connect', 'join'] as const) {
+    it(`shows a synchronous ${phase} failure before any room state`, async t => {
+      t.mock.method(StageClient.prototype, 'connect', () => {
+        if (phase === 'connect') throw new Error('connect failed');
+        return Promise.resolve();
+      });
+      t.mock.method(StageClient.prototype, 'join', () => { throw new Error('join failed'); });
+      const element = mountJoiningWidget(); await settle();
+      assert.equal(element['status'].textContent, '未連線');
+      assert.equal(element['error'].textContent, `${phase} failed`);
+      assert.equal(element['error'].hidden, false);
+      assertRoomControlsHidden(element);
+    });
+
+    for (const outcome of ['resolve', 'reject'] as const) {
+      it(`ignores retired ${phase} ${outcome} after rapid room changes and remount`, async t => {
+        const { element, connections, joins } = deferredJoiningWidget(t);
+        const startPhase = async () => {
+          await settle();
+          if (phase === 'join') { connections.at(-1)!.pending.resolve(); await settle(); }
+          return (phase === 'connect' ? connections : joins).at(-1)!;
+        };
+        const first = await startPhase();
+        element.setAttribute('room', 'two');
+        element.setAttribute('room', 'three');
+        const second = await startPhase();
+        Object.assign(element, { isConnected: false }); element.disconnectedCallback();
+        Object.assign(element, { isConnected: true }); element.connectedCallback();
+        const current = await startPhase();
+        assert.notEqual(current.client, first.client);
+        assert.notEqual(current.client, second.client);
+        for (const retired of [first, second]) {
+          if (outcome === 'resolve') retired.pending.resolve();
+          else retired.pending.reject(new Error('retired failure'));
+          await retired.client['receive']({ type: 'room:state', ...roomState(true), name: 'Retired room' });
+          await retired.client['receive']({ type: 'room:closed', roomId: 'one', reason: 'shutdown' });
+          await settle();
+          assert.equal(element.client, current.client);
+          assert.equal(element['status'].textContent, phase === 'connect' ? '連線中…' : '正在加入房間…');
+          assert.equal(element['error'].hidden, true);
+          assertRoomControlsHidden(element);
+        }
+        if (phase === 'connect') {
+          assert.equal(joins.length, 0, 'retired connect completions cannot join');
+          current.pending.resolve(); await settle();
+        }
+        await current.client['receive']({ type: 'room:state', ...roomState(false, 'three'), name: 'Current room' });
+        joins.at(-1)!.pending.resolve(); await settle();
+        assert.equal(element['status'].textContent, 'Current room · 直播中 · 收聽中');
+      });
+    }
+
+    it(`clears ${phase} progress on removal and ignores its late rejection`, async t => {
+      const { element, connections, joins } = deferredJoiningWidget(t);
+      await settle();
+      if (phase === 'join') { connections[0]!.pending.resolve(); await settle(); }
+      const pending = (phase === 'connect' ? connections : joins)[0]!.pending;
+      Object.assign(element, { isConnected: false }); element.disconnectedCallback(); await settle();
+      assert.equal(element.client, null);
+      assert.equal(element['status'].textContent, '');
+      pending.reject(new Error('removed failure')); await settle();
+      assert.equal(element['status'].textContent, '');
+      assert.equal(element['error'].hidden, true);
+      element.removeAttribute('name');
+      Object.assign(element, { isConnected: true }); element.connectedCallback(); await settle();
+      assert.equal(element['status'].textContent, '請設定 room 與 name 屬性。');
+      assert.equal(element.client, null);
+    });
+  }
+
+  for (const terminal of terminalCases) {
+    for (const outcome of ['resolve', 'reject'] as const) {
+      it(`preserves ${terminal.title} before any snapshot when the pending join later ${outcome}s`, async t => {
+        const { element, connections, joins } = deferredJoiningWidget(t);
+        await settle(); connections[0]!.pending.resolve(); await settle();
+        await element.client!['receive'](terminal.message);
+        assert.equal(element['status'].textContent, terminal.text);
+        if (outcome === 'resolve') joins[0]!.pending.resolve();
+        else joins[0]!.pending.reject(new Error('late join failure'));
+        await settle();
+        assert.equal(element['status'].textContent, terminal.text);
+        if (outcome === 'reject') assert.equal(element['error'].textContent, 'late join failure', 'existing current-client error behavior remains');
+        element.playbackMuted = true;
+        assert.equal(element['status'].textContent, terminal.text);
+        assertRoomControlsHidden(element);
+      });
+    }
+  }
+
+  it('preserves disconnected status after a live pending join settles', async t => {
+    const { element, connections, joins } = deferredJoiningWidget(t);
+    await settle(); connections[0]!.pending.resolve(); await settle();
+    const client = element.client!;
+    await client['receive']({ type: 'room:state', ...roomState() });
+    await client.disconnect();
+    assert.equal(element['status'].textContent, '未連線');
+    joins[0]!.pending.resolve(); await settle();
+    assert.equal(element['status'].textContent, '未連線');
+    element.playbackMuted = true;
+    assert.equal(element['status'].textContent, '未連線');
+    assertRoomControlsHidden(element);
+  });
+
+  it('does not let a rejected join overwrite a replacement started by its forwarded error', async t => {
+    const { element, sockets, hello } = socketJoiningWidget(t);
+    await settle();
+    const socket = sockets[0]!;
+    const request = await hello(socket);
+    const retired = element.client;
+    element.addEventListener('stage-error', () => { element.setAttribute('room', 'two'); }, { once: true });
+    socket.deliver({ type: 'error', requestId: request.requestId, code: 'unauthorized', message: '房間不存在或代碼錯誤。' }); await settle();
+    assert.notEqual(element.client, retired);
+    assert.equal(element['status'].textContent, '連線中…');
+    assert.equal(element['error'].hidden, true);
+    const replacement = sockets[1]!;
+    await hello(replacement);
+    assert.equal(element['status'].textContent, '正在加入房間…');
+    assert.equal(element['error'].hidden, true);
+  });
+});
+
 describe('widget subscribed connection status', () => {
   it('shows disconnected and hides room controls after the exposed live client disconnects', async t => {
     for (const onStage of [false, true]) {
@@ -194,7 +501,7 @@ describe('widget subscribed connection status', () => {
         const replacement = element.client as StageClient | null;
         assert.ok(replacement);
         assert.notEqual(replacement, client);
-        assert.equal(element['status'].textContent, '');
+        assert.equal(element['status'].textContent, '未連線');
         assertRoomControlsHidden(element);
         await replacement['receive']({ type: 'room:state', ...roomState(false, 'two'), name: 'New room' });
         assert.equal(element['status'].textContent, 'New room · 直播中 · 收聽中');
@@ -238,7 +545,7 @@ describe('widget subscribed connection status', () => {
     assert.ok(replacement);
     assert.notEqual(replacement, client);
     assert.deepEqual(terminalEvents, [], 'the now-retired terminal event is not forwarded');
-    assert.equal(element['status'].textContent, '', 'the old handler cannot restore its disconnect or terminal notice');
+    assert.equal(element['status'].textContent, '未連線', 'the settled replacement has no snapshot or inherited terminal notice');
     await replacement['receive']({ type: 'room:state', ...roomState(false, 'two'), name: 'New room' });
     assert.equal(element['status'].textContent, 'New room · 直播中 · 收聽中');
   });
