@@ -659,3 +659,6 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 
 
 158. **隱藏頁面的診斷輪詢暫停（2026-10-13）：** scratch whole-module prototype 證明 document.hidden 時原本仍保有 50ms meter 與 2 秒 getStats timer，10 秒受控工作量為 200 次音量讀取與 5 次統計要求。只在完整範例加入 visibility gate 與單一 page-lifetime listener，隱藏時取消兩個診斷 interval、歸零 meter／清除統計，回到可見時依當前狀態恢復 timer 並要求新統計。timer identity 防止舊 callback 在 hide／show 後重入，既有 poll sequence 與 room generation 防止晚到結果寫入；不取消底層 getStats promise 或重設 SDK delta baseline，恢復第一筆可能涵蓋隱藏時間。mic lifecycle cleanup 在 hidden 時照常執行，visibility 本身不停止預覽、擷取、播放或 session。listener 與既有頁面事件同壽命，不每次 join 註冊；landing 預覽仍需要它，無新增獨立卸載契約。prototype 30 個無 socket 假時鐘案例及既有 focused compatibility 通過，可見工作量不變、隱藏計數為 0／0；只主張操作數，原生瀏覽器已有背景節流，未量測 CPU／電池／音訊效果。
+
+
+159. **上台權限提示的擷取完成清理（2026-10-13）：** whole-module 完整範例搭配實際 SDK／受控 socket／media 重現 invite→role→state→micready 後，既有 invitation 仍顯示「請允許麥克風權限」，甚至 sender 安裝與受控 answer 完成後亦然。只為該固定提示記錄 room／participant／room generation；目前同席且 onstage 的 micready 清掉仍屬於它的文字，之後的複製／換碼／終止／離台文字及 errorBox 不受影響。landing 和自己的 stageleft 撤銷所有權；不同房間／身分或 generation 不可用晚到事件清除既有提示。保留既有 micNotice／重試與 capture／publish 語意，預覽共用的 micready 不代表房內 sender 安裝或可聽音訊。受控驗證保留 micready 時 sender 尚未安裝的順序，並檢查後續安裝失敗仍可回報；不可變前版 source 對照驗證提示缺陷，不宣稱原生瀏覽器權限或可聽音訊驗收。

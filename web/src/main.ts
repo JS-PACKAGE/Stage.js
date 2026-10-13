@@ -50,7 +50,9 @@ let audioBlocked = false;
 let micNotice = '';
 let micRetryAvailable = false, micRetryPending = false;
 let micRetryButton: HTMLButtonElement | undefined;
+const STAGE_PERMISSION_NOTICE = '主控已邀請你上台，請允許麥克風權限。';
 let invitation = '';
+let stagePermissionOwner: { roomId: string; participantId: string; generation: number } | undefined;
 let createdRoom: { roomId: string; code?: string } | null = null;
 let renderedRoomSignature: string | undefined;
 let renderedAudienceHeading: HTMLHeadingElement | undefined;
@@ -257,7 +259,16 @@ async function refreshDevices(): Promise<void> {
     restoreDeviceSelection(select, chosen);
   }
 }
-client.on('micready', () => { micRetryAvailable = micRetryPending = false; micNotice = ''; renderNotices(); void refreshDevices().catch(() => {}); });
+client.on('micready', () => {
+  const owner = stagePermissionOwner, state = client.state;
+  // micready confirms capture, not sender installation; only retire this seat's permission prompt.
+  if (owner && state?.me.onStage && owner.generation === roomActionGeneration
+    && owner.roomId === state.roomId && owner.participantId === state.me.participantId) {
+    if (invitation === STAGE_PERMISSION_NOTICE) invitation = '';
+    stagePermissionOwner = undefined;
+  }
+  micRetryAvailable = micRetryPending = false; micNotice = ''; renderNotices(); void refreshDevices().catch(() => {});
+});
 navigator.mediaDevices?.addEventListener('devicechange', () => { void refreshDevices().catch(() => {}); });
 void refreshDevices().catch(() => {});
 /** Muted room microphones have a known zero level; only previews or unmuted stage mics need polling. */
@@ -425,6 +436,7 @@ function field(form: HTMLFormElement, label: string, name: string, value = '', r
   return input;
 }
 function landing(): void {
+  stagePermissionOwner = undefined;
   landingRevision += 1;
   ownHandPosition.hidden = true; ownHandPosition.textContent = '';
   resetAudienceFilter();
@@ -807,10 +819,14 @@ client.on('created', ({ detail }) => { createdRoom = detail; });
 client.on('closed', ({ detail }) => { if (landingEntry) landingEntry.entered = true; createdRoom = null; micNotice = ''; invitation = detail.reason === 'shutdown' ? '伺服器維護或重新啟動，房間已關閉；請稍後重新建立或加入。' : '房間已關閉，歡迎建立或加入其他舞台。'; audioBlocked = false; landing(); });
 client.on('kicked', () => { if (landingEntry) landingEntry.entered = true; createdRoom = null; micNotice = ''; invitation = '你已被主控移出房間。'; audioBlocked = false; landing(); });
 client.on('invite', ({ detail }) => {
-  if (detail.participantId === client.me?.participantId) { invitation = '主控已邀請你上台，請允許麥克風權限。'; renderNotices(); }
+  const state = client.state;
+  if (state && detail.participantId === state.me.participantId) {
+    stagePermissionOwner = { roomId: state.roomId, participantId: state.me.participantId, generation: roomActionGeneration };
+    invitation = STAGE_PERMISSION_NOTICE; renderNotices();
+  }
 });
 client.on('stageleft', ({ detail }) => {
-  if (detail.participantId === client.me?.participantId) { invitation = detail.reason === 'removed' ? '主控已將你移出舞台，你仍可收聽。' : ''; renderNotices(); }
+  if (detail.participantId === client.me?.participantId) { stagePermissionOwner = undefined; invitation = detail.reason === 'removed' ? '主控已將你移出舞台，你仍可收聽。' : ''; renderNotices(); }
 });
 client.on('micerror', ({ detail }) => { micRetryPending = false; micRetryAvailable = Boolean(client.me?.onStage); micNotice = `${detail.message}（${detail.name}）`; renderNotices(); });
 client.on('audioblocked', () => { audioBlocked = true; renderNotices(); });
