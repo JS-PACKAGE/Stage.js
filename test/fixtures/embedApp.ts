@@ -64,6 +64,9 @@ export class EmbedSdk {
   set handCooldownMs(value: number) { this.cooldownUntil = this.now() + value; }
   readonly options: ClientOptions;
   readonly joins: JoinOptions[] = [];
+  retryCalls = 0;
+  retryAdmission: () => boolean = () => true;
+  retryMicrophone(): boolean { this.retryCalls++; return this.retryAdmission(); }
   readonly actions: { type: Action; work: Deferred }[] = [];
   private readonly listeners = new Map<string, ((event: { detail: unknown }) => void)[]>();
   constructor(options: ClientOptions, now: () => number = () => 0) { this.options = options; this.now = now; }
@@ -96,17 +99,17 @@ export class EmbedSdk {
   leaveStage(): Promise<void> { return this.request('leaveStage'); }
   returnToStage(): Promise<void> { return this.request('returnToStage'); }
 }
-const source = readFileSync(new URL('../../web/src/embed.ts', import.meta.url), 'utf8');
 export const flush = async (): Promise<void> => { for (let i = 0; i < 16; i++) await Promise.resolve(); };
 
-export function embedApp(options: { libraryLoad?: Promise<void> } = {}) {
-  const nodes = new Map(['host', 'room', 'code', 'name', 'status', 'join', 'hand', 'mic', 'stage', 'leave', 'audio', 'unlock'].map(id => [id, new EmbedNode()]));
+export function embedApp(options: { libraryLoad?: Promise<void>; source?: string } = {}) {
+  const nodes = new Map(['host', 'room', 'code', 'name', 'status', 'join', 'hand', 'mic', 'stage', 'mic-retry', 'leave', 'audio', 'unlock'].map(id => [id, new EmbedNode()]));
   const node = (id: string): EmbedNode => { const found = nodes.get(id); assert.ok(found, `unmodeled node: ${id}`); return found; };
-  const hand = node('hand'), mic = node('mic'), stage = node('stage'), leave = node('leave'), form = node('join'), status = node('status');
+  const hand = node('hand'), mic = node('mic'), stage = node('stage'), micRetry = node('mic-retry'), leave = node('leave'), form = node('join'), status = node('status');
   hand.disabled = leave.disabled = true; hand.textContent = '舉手發言'; status.textContent = '尚未加入';
   mic.hidden = mic.disabled = true; mic.textContent = '靜音麥克風';
   mic.setAttribute('aria-label', '麥克風靜音'); mic.setAttribute('aria-pressed', 'false'); mic.setAttribute('aria-busy', 'false');
   stage.hidden = stage.disabled = true; stage.textContent = '離開舞台'; stage.setAttribute('aria-busy', 'false');
+  micRetry.hidden = micRetry.disabled = true; micRetry.textContent = '重試麥克風'; micRetry.setAttribute('aria-busy', 'false');
   const submit = new EmbedNode(); form.submitButton = submit; node('name').value = ' 測試聽眾 ';
   const clients: EmbedSdk[] = [], moduleUrls: string[] = [];
   type Timer = { id: number; kind: 'timeout' | 'interval'; callback(): void; ms: number; due: number };
@@ -158,13 +161,14 @@ export function embedApp(options: { libraryLoad?: Promise<void> } = {}) {
     decodeName: (value: string) => value,
   };
   // Execute the complete module; replace only its external-host import and stylesheet import.
+  const source = options.source ?? readFileSync(new URL('../../web/src/embed.ts', import.meta.url), 'utf8');
   const dynamicImport = 'import(/* @vite-ignore */ moduleUrl)';
   assert.equal(source.split(dynamicImport).length, 2, 'the external library import seam must stay exact and unique');
   assert.equal(source.split("import './styles.css';").length, 2, 'the stylesheet import seam must stay exact and unique');
   const executable = stripTypeScriptTypes(source.replace("import './styles.css';", '').replace(dynamicImport, 'loadLibrary(moduleUrl)'));
   assert.doesNotMatch(executable, /\bimport\s*(?:\(|['"])/, 'the fixture must never import a real external library');
   runInNewContext(executable, {
-    document: { querySelector(selector: string) { assert.match(selector, /^#[a-z]+$/); return node(selector.slice(1)); } },
+    document: { querySelector(selector: string) { assert.match(selector, /^#[a-z-]+$/); return node(selector.slice(1)); } },
     location: { search: '?host=https%3A%2F%2Fstage.example.test%2Fprefix&room=%20same-room%20&code=%20TEST42%20', origin: 'https://embed.example.test' },
     URL, URLSearchParams, Error, Promise, performance: { now: () => now },
     loadLibrary: async (url: string) => { moduleUrls.push(url); if (options.libraryLoad) await options.libraryLoad; return library; },
@@ -174,7 +178,7 @@ export function embedApp(options: { libraryLoad?: Promise<void> } = {}) {
     clearTimeout: (id: number) => clear('timeout', id),
   }, { filename: 'web/src/embed.ts', timeout: 1000 });
   return {
-    hand, mic, stage, leave, form, submit, status, clients, moduleUrls, node, tick, clock,
+    hand, mic, stage, micRetry, leave, form, submit, status, clients, moduleUrls, node, tick, clock,
     async join(overrides: Partial<Me> = {}): Promise<EmbedSdk> {
       const count = clients.length; form.submit(); assert.equal(submit.disabled, true); await flush();
       assert.equal(clients.length, count + 1); const sdk = clients.at(-1)!;

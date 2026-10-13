@@ -563,3 +563,6 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 
 
 126. **最小嵌入範例的個人舞台操作（2026-10-13）：** embed 已提供上台後麥克風靜音，但原頁面無法自行下台而留房收聽。新增單一 native action button：台上者使用既有 leaveStage；台下主控使用既有 returnToStage；其他台下觀眾隱藏並沿用 hand 流程。依快照而非 ACK 樂觀切換文字／資格，獨立 pendingStage 防止重複請求，重連禁止操作，強制靜音仍允許下台。micClient 改名 controlsClient，共用新加入／leave／終止之前撤銷的 client eligibility；舊請求晚到 error/finally 不影響替換 client。保留主控保有控制權與額外席位、伺服器 capacity／error 政策及 SDK 下台 capture cleanup，無新增 timer／權限／自動 retry；返回舞台仍可能依原 SDK 流程要求麥克風。測試含 whole-module 假 DOM、實際 Hub snapshot 與 SDK 假媒體的 cleanup，不宣稱原生瀏覽器或硬體驗收。
+
+
+127. **最小嵌入範例的明確麥克風重試（2026-10-13）：** 已上台者發生 micerror 原本只得到文字，必須離房或改變台位才有重新擷取途徑。新增 failed-participant-only 重試按鈕，沿用 retryMicrophone boolean admission；目前 client／controlsClient、同一 participant、onStage、live、未 pending 才接納，強制靜音不自動解除也不阻止使用者準備擷取。同步先保留 operation token，false／throw 只復原仍由該 token 擁有的 UI，micready／micerror／離房同步 reentry 優先。micready 清掉 pending 並只呈現「已取得麥克風」，不當作 sender install／SDP／真正發聲成功；後續 current error 仍顯示。micerror 與 micready listener 增加 current-client／controlsClient guard，退休 client 不能重建重試狀態；下台、participant 替換、離房、終止與重加清除，普通同席重連保留失敗／pending 狀態但暫停 admission。無自動 retry、新 capture API、SDK／Hub 政策或背景 timer。測試以 whole embed、實際 SDK 與 fake permission/track promises 驗證，原生權限 UI 與硬體音訊仍未驗收。

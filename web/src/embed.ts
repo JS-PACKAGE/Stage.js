@@ -12,6 +12,7 @@ const hand = document.querySelector<HTMLButtonElement>('#hand')!;
 const leave = document.querySelector<HTMLButtonElement>('#leave')!;
 const mic = document.querySelector<HTMLButtonElement>('#mic')!;
 const stage = document.querySelector<HTMLButtonElement>('#stage')!;
+const micRetry = document.querySelector<HTMLButtonElement>('#mic-retry')!;
 const audio = document.querySelector<HTMLAudioElement>('#audio')!;
 const params = new URLSearchParams(location.search);
 input('host').value = params.get('host') ?? location.origin;
@@ -22,9 +23,15 @@ let pendingHand: { client: Client } | undefined;
 let pendingMic: { client: Client } | undefined;
 let pendingStage: { client: Client } | undefined;
 let controlsClient: Client | undefined;
+let micRetryParticipant: string | undefined;
+let pendingMicRetry: { client: Client } | undefined;
 let playbackGeneration = 0;
 let entryGeneration = 0;
 let feedbackRevision = 0;
+function retireControls(): void {
+  pendingHand = undefined; pendingMic = undefined; pendingStage = undefined;
+  controlsClient = undefined; micRetryParticipant = undefined; pendingMicRetry = undefined;
+}
 /** Retire initial-join feedback before user or terminal callbacks can start another entry. */
 function retireEntry(): number {
   submit.disabled = false; submit.setAttribute('aria-busy', 'false');
@@ -61,6 +68,16 @@ function syncStage(): void {
   stage.setAttribute('aria-busy', String(pending));
   stage.textContent = me && !me.onStage && me.role === 'controller' ? '返回舞台' : '離開舞台';
 }
+function syncMicRetry(): void {
+  const me = client === controlsClient ? client?.me : undefined;
+  if (!me?.onStage || me.participantId !== micRetryParticipant) {
+    micRetryParticipant = undefined; pendingMicRetry = undefined;
+  }
+  micRetry.hidden = !micRetryParticipant;
+  const pending = Boolean(pendingMicRetry && pendingMicRetry.client === client);
+  micRetry.disabled = micRetry.hidden || client?.status !== 'live' || pending;
+  micRetry.setAttribute('aria-busy', String(pending));
+}
 /** Only a visible countdown needs a clock; state and action events handle other changes. */
 function scheduleHandCooldown(remaining: number): void {
   if (remaining <= 0) {
@@ -92,9 +109,9 @@ join.onsubmit = (event) => {
   submit.disabled = true; submit.setAttribute('aria-busy', 'true');
   void (async () => {
     try {
-      pendingHand = undefined; pendingMic = undefined; pendingStage = undefined; controlsClient = undefined;
+      retireControls();
       mic.hidden = mic.disabled = true; mic.setAttribute('aria-busy', 'false');
-      stage.hidden = stage.disabled = true; stage.setAttribute('aria-busy', 'false');
+      stage.hidden = stage.disabled = true; stage.setAttribute('aria-busy', 'false'); syncMicRetry();
       hand.setAttribute('aria-busy', 'false');
       hand.disabled = leave.disabled = true;
       await client?.disconnect();
@@ -113,20 +130,31 @@ join.onsubmit = (event) => {
         if (client !== current) return;
         progress = false;
         status.textContent = `${library.decodeName(detail.name)} · ${library.decodeName(detail.me.name)} · ${detail.me.onStage ? '已上台' : '收聽中'}`;
-        syncHand(); syncMic(); syncStage();
+        syncHand(); syncMic(); syncStage(); syncMicRetry();
         leave.disabled = false;
       });
-      client.on('micerror', ({ detail }) => { progress = false; status.textContent = `${detail.message}（${detail.name}）`; });
+      client.on('micerror', ({ detail }) => {
+        if (client !== current || controlsClient !== current) return;
+        progress = false; pendingMicRetry = undefined;
+        micRetryParticipant = current.me?.onStage ? current.me.participantId : undefined;
+        status.textContent = `${detail.message}（${detail.name}）`; syncMicRetry();
+      });
+      client.on('micready', () => {
+        if (client !== current || controlsClient !== current) return;
+        const retrying = micRetryParticipant !== undefined;
+        micRetryParticipant = undefined; pendingMicRetry = undefined; syncMicRetry();
+        if (retrying) { progress = false; status.textContent = '已取得麥克風。'; }
+      });
       client.on('status', ({ detail }) => {
         if (client !== current) return;
         if (detail === 'reconnecting') { progress = false; status.textContent = '重新連線中'; hand.disabled = true; }
-        else if (detail === 'disconnected') { progress = false; playbackGeneration++; pendingHand = undefined; pendingMic = undefined; pendingStage = undefined; controlsClient = undefined; status.textContent = '未連線'; hand.disabled = leave.disabled = true; }
-        syncHand(); syncMic(); syncStage();
+        else if (detail === 'disconnected') { progress = false; playbackGeneration++; retireControls(); status.textContent = '未連線'; hand.disabled = leave.disabled = true; }
+        syncHand(); syncMic(); syncStage(); syncMicRetry();
       });
       client.on('error', ({ detail }) => { progress = false; report(detail); });
       client.on('audioblocked', () => { progress = false; status.textContent = '請點擊啟用音訊。'; });
-      client.on('closed', () => { if (client !== current) return; retireEntry(); playbackGeneration++; pendingHand = undefined; pendingMic = undefined; pendingStage = undefined; controlsClient = undefined; syncHand(); syncMic(); syncStage(); status.textContent = '房間已關閉。'; hand.disabled = leave.disabled = true; });
-      client.on('kicked', () => { if (client !== current) return; retireEntry(); playbackGeneration++; pendingHand = undefined; pendingMic = undefined; pendingStage = undefined; controlsClient = undefined; syncHand(); syncMic(); syncStage(); status.textContent = '你已被主控移出房間。'; hand.disabled = leave.disabled = true; });
+      client.on('closed', () => { if (client !== current) return; retireEntry(); playbackGeneration++; retireControls(); syncHand(); syncMic(); syncStage(); syncMicRetry(); status.textContent = '房間已關閉。'; hand.disabled = leave.disabled = true; });
+      client.on('kicked', () => { if (client !== current) return; retireEntry(); playbackGeneration++; retireControls(); syncHand(); syncMic(); syncStage(); syncMicRetry(); status.textContent = '你已被主控移出房間。'; hand.disabled = leave.disabled = true; });
       showProgress('連線中…');
       await current.connect();
       if (generation !== entryGeneration) return;
@@ -190,13 +218,28 @@ stage.onclick = () => {
     }
   })();
 };
+micRetry.onclick = () => {
+  syncMicRetry();
+  if (!client || micRetry.disabled || micRetry.hidden) return;
+  const current = client;
+  const operation = { client: current };
+  pendingMicRetry = operation; syncMicRetry();
+  try {
+    const accepted = current.retryMicrophone();
+    if (client !== current || controlsClient !== current || pendingMicRetry !== operation) return;
+    if (!accepted) { pendingMicRetry = undefined; syncMicRetry(); }
+    else status.textContent = '重新取得麥克風中…';
+  } catch (error) {
+    if (client === current && controlsClient === current && pendingMicRetry === operation) { pendingMicRetry = undefined; syncMicRetry(); report(error); }
+  }
+};
 leave.onclick = () => {
   const generation = retireEntry(), current = client;
   playbackGeneration++; scheduleHandCooldown(0);
-  pendingHand = undefined; pendingMic = undefined; pendingStage = undefined; controlsClient = undefined; hand.setAttribute('aria-busy', 'false'); syncMic(); syncStage();
+  retireControls(); hand.setAttribute('aria-busy', 'false'); syncMic(); syncStage(); syncMicRetry();
   void current?.disconnect().then(() => {
     if (generation !== entryGeneration || client !== current) return;
     status.textContent = '已離開。'; hand.disabled = leave.disabled = true;
   });
 };
-syncHand(); syncMic(); syncStage();
+syncHand(); syncMic(); syncStage(); syncMicRetry();

@@ -60,7 +60,7 @@ async function fixture(t: TestContext, options: { deferLibrary?: boolean } = {})
   t.mock.timers.enable({ apis: ['setTimeout', 'setInterval'] });
   let now = 1000;
   t.mock.method(performance, 'now', () => now);
-  const nodes = new Map(['host', 'room', 'code', 'name', 'status', 'join', 'hand', 'mic', 'stage', 'leave', 'audio', 'unlock'].map(id => [id, new EmbedNode()]));
+  const nodes = new Map(['host', 'room', 'code', 'name', 'status', 'join', 'hand', 'mic', 'stage', 'mic-retry', 'leave', 'audio', 'unlock'].map(id => [id, new EmbedNode()]));
   const node = (id: string): EmbedNode => { const found = nodes.get(id); assert.ok(found); return found; };
   const form = node('join'), submit = new EmbedNode(), status = node('status'), leave = node('leave'), hand = node('hand');
   form.submitButton = submit; node('name').value = ' 測試聽眾 ';
@@ -77,7 +77,7 @@ async function fixture(t: TestContext, options: { deferLibrary?: boolean } = {})
   const executable = stripTypeScriptTypes(source.replace("import './styles.css';", '').replace(dynamicImport, 'loadLibrary(moduleUrl)'));
   assert.doesNotMatch(executable, /\bimport\s*(?:\(|['"])/);
   runInNewContext(executable, {
-    document: { querySelector(selector: string) { assert.match(selector, /^#[a-z]+$/); return node(selector.slice(1)); } },
+    document: { querySelector(selector: string) { assert.match(selector, /^#[a-z-]+$/); return node(selector.slice(1)); } },
     location: { search: '?room=same-room&code=TEST42', origin: 'https://stage.example.test' },
     URL, URLSearchParams, Error, Promise, performance, setTimeout, clearTimeout, setInterval, clearInterval,
     loadLibrary: async (url: string) => {

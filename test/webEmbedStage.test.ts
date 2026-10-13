@@ -1,11 +1,10 @@
 import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
-import { stripTypeScriptTypes } from 'node:module';
-import { it, type TestContext } from 'node:test';
+import { it } from 'node:test';
 import { setImmediate as nextTurn } from 'node:timers/promises';
-import { runInNewContext } from 'node:vm';
-import type { ClientMessage, ParticipantView, RoomStatePayload, ServerMessage } from '../shared/protocol.ts';
+import type { RoomStatePayload } from '../shared/protocol.ts';
 import { Deferred, EmbedNode, embedApp, flush, type EmbedSdk } from './fixtures/embedApp.ts';
+import { actualApp, actualState, StageSocket, StagePeer, StageContext } from './fixtures/embedSdkApp.ts';
 import { harness, RECVONLY_OFFER, SENDRECV_OFFER, testConfig, type Harness } from './helpers.ts';
 
 const latest = (sdk: EmbedSdk): Deferred => { const action = sdk.actions.at(-1); assert.ok(action); return action.work; };
@@ -199,113 +198,6 @@ it('whole embed actual Hub successor returns with eight retained speakers and ke
   assert.deepEqual(speakers.map(person => hub.transport.rooms.get(host.roomId)!.peers.get(person.id)), retained);
   assert.equal(h.clock.timers.length, 0);
 });
-
-interface ActualClient { readonly me: ParticipantView | null; readonly status: string; disconnect(): Promise<void> }
-function actualState(overrides: Partial<ParticipantView> = {}): RoomStatePayload {
-  return { roomId: 'same-room', name: '測試舞台', controllerId: 'guest', speakers: [], hands: [], audienceCount: 0,
-    codeRequired: false, limits: { maxSpeakers: 8, maxAudience: 300 }, status: 'live', resumeToken: 'test-resume',
-    me: { participantId: 'guest', name: '測試主控', role: 'controller', onStage: false, handRaised: false, muted: false,
-      forceMuted: false, gainDb: 0, connected: true, joinedAt: 0, ...overrides } };
-}
-class StageSocket {
-  static OPEN = 1;
-  static instances: StageSocket[] = [];
-  readyState = StageSocket.OPEN;
-  readonly sent: ClientMessage[] = [];
-  onmessage: ((event: { data: string }) => void) | null = null;
-  onclose: (() => void) | null = null;
-  constructor() { StageSocket.instances.push(this); }
-  deliver(message: ServerMessage): void { this.onmessage?.({ data: JSON.stringify(message) }); }
-  send(data: string): void {
-    assert.equal(this.readyState, StageSocket.OPEN); const message = JSON.parse(data) as ClientMessage; this.sent.push(message);
-    if (message.type === 'rtc:offer') queueMicrotask(() => {
-      this.deliver({ type: 'rtc:answer', fromId: 'server', payload: { type: 'answer', sdp: 'v=0\r\n' } });
-      this.deliver({ type: 'ok', requestId: message.requestId });
-    });
-  }
-  close(): void { this.readyState = 3; this.onclose?.(); }
-}
-class StagePeer {
-  static instances: StagePeer[] = [];
-  connectionState = 'connected';
-  signalingState = 'stable';
-  localDescription: { type: 'offer'; sdp: string } | null = null;
-  readonly transceiver = { direction: 'recvonly', sender: { track: null as unknown, async replaceTrack(track: unknown) { this.track = track; } } };
-  constructor() { StagePeer.instances.push(this); }
-  addTransceiver() { return this.transceiver; }
-  async createOffer() { return { type: 'offer' as const, sdp: `v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=${this.transceiver.direction}\r\n` }; }
-  async setLocalDescription(description: { type: 'offer'; sdp: string }): Promise<void> { this.localDescription = description; this.signalingState = 'have-local-offer'; }
-  async setRemoteDescription(): Promise<void> { this.signalingState = 'stable'; }
-  async addIceCandidate(): Promise<void> {}
-  close(): void { this.connectionState = 'closed'; }
-}
-class StageContext {
-  static instances: StageContext[] = [];
-  closes = 0;
-  constructor() { StageContext.instances.push(this); }
-  createMediaStreamSource() { return { connect() {}, disconnect() {} }; }
-  createAnalyser() { return { fftSize: 2048, getFloatTimeDomainData() {}, disconnect() {} }; }
-  async resume(): Promise<void> {}
-  async close(): Promise<void> { this.closes++; }
-}
-/** Complete production module and real SDK. Only external-host import, socket, DOM and browser media are replaced. */
-async function actualApp(t: TestContext) {
-  const { StageClient, decodeName } = await import(new URL('../packages/client/src/index.ts', import.meta.url).href);
-  StageSocket.instances = []; StagePeer.instances = []; StageContext.instances = [];
-  const tracks: { enabled: boolean; stopped: boolean; stop(): void }[] = [];
-  const globals = { window: new EventTarget(), WebSocket: StageSocket, RTCPeerConnection: StagePeer, AudioContext: StageContext,
-    navigator: { mediaDevices: { async getUserMedia() {
-      const track = { enabled: true, stopped: false, stop() { this.stopped = true; } }; tracks.push(track);
-      return { getTracks: () => [track], getAudioTracks: () => [track] };
-    } } } };
-  const originals = new Map(Object.keys(globals).map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
-  for (const [key, value] of Object.entries(globals)) Object.defineProperty(globalThis, key, { configurable: true, value });
-  t.mock.timers.enable({ apis: ['setTimeout', 'setInterval'] }); let now = 1000; t.mock.method(performance, 'now', () => now);
-  const nodes = new Map(['host', 'room', 'code', 'name', 'status', 'join', 'hand', 'mic', 'stage', 'leave', 'audio', 'unlock'].map(id => [id, new EmbedNode()]));
-  const node = (id: string): EmbedNode => { const found = nodes.get(id); assert.ok(found, id); return found; };
-  const form = node('join'), stage = node('stage'), status = node('status'), mic = node('mic'), leave = node('leave');
-  form.submitButton = new EmbedNode(); node('name').value = '測試主控'; Object.assign(node('audio'), { pause() {} });
-  const clients: ActualClient[] = [];
-  const library = { StageClient: function (options: unknown): ActualClient { const client: ActualClient = new StageClient(options); clients.push(client); return client; }, decodeName };
-  const source = readFileSync(new URL('../web/src/embed.ts', import.meta.url), 'utf8'), dynamicImport = 'import(/* @vite-ignore */ moduleUrl)';
-  assert.equal(source.split(dynamicImport).length, 2); assert.equal(source.split("import './styles.css';").length, 2);
-  const executable = stripTypeScriptTypes(source.replace("import './styles.css';", '').replace(dynamicImport, 'loadLibrary(moduleUrl)'));
-  assert.doesNotMatch(executable, /\bimport\s*(?:\(|['"])/, 'no real external host import');
-  runInNewContext(executable, {
-    document: { querySelector(selector: string) { assert.match(selector, /^#[a-z]+$/); return node(selector.slice(1)); } },
-    location: { search: '?room=same-room', origin: 'https://stage.example.test' },
-    URL, URLSearchParams, Error, Promise, performance, setTimeout, clearTimeout, setInterval, clearInterval,
-    loadLibrary: async (url: string) => { assert.equal(url, 'https://stage.example.test/lib/stage-client.js'); return library; },
-  }, { filename: 'web/src/embed.ts', timeout: 1000 });
-  const tick = async (ms = 1): Promise<void> => { now += ms; t.mock.timers.tick(ms); await flush(); };
-  const until = async (predicate: () => boolean, label: string): Promise<void> => {
-    for (let count = 0; count < 80 && !predicate(); count++) await tick(); assert.ok(predicate(), label);
-  };
-  t.after(async () => {
-    try {
-      for (const client of clients) await client.disconnect(); await flush();
-      assert.ok(clients.every(client => client.status === 'disconnected' && client.me === null));
-      assert.ok(StageSocket.instances.every(socket => socket.readyState === 3)); assert.ok(tracks.every(track => track.stopped));
-      assert.ok(StagePeer.instances.every(peer => peer.connectionState === 'closed')); assert.ok(StageContext.instances.every(context => context.closes === 1));
-    } finally { for (const [key, descriptor] of originals) { if (descriptor) Object.defineProperty(globalThis, key, descriptor); else Reflect.deleteProperty(globalThis, key); } }
-  });
-  return { stage, status, mic, leave, clients, tracks, tick, until,
-    async join() {
-      form.submit(); await flush(); const socket = StageSocket.instances.at(-1)!;
-      socket.deliver({ type: 'hello', protocol: 1, serverVersion: 'test', limits: { controlPerSecond: 2000, icePerSecond: 2000, handRaiseIntervalMs: 10000 } });
-      await until(() => socket.sent.some(message => message.type === 'join'), 'join request');
-      const request = socket.sent.find(message => message.type === 'join')!;
-      socket.deliver({ type: 'room:state', ...actualState() }); socket.deliver({ type: 'ok', requestId: request.requestId });
-      const peer = StagePeer.instances.at(-1)!; await until(() => peer.localDescription !== null && peer.signalingState === 'stable', 'initial negotiation');
-      return { socket, peer };
-    },
-    async command(socket: StageSocket, type: 'stage:leave' | 'stage:approve') {
-      const before = socket.sent.filter(message => message.type === type).length; stage.click();
-      await until(() => socket.sent.filter(message => message.type === type).length === before + 1, type);
-      const request = socket.sent.filter(message => message.type === type).at(-1)!; assert.ok(request.type === 'stage:leave' || request.type === 'stage:approve'); return request;
-    },
-  };
-}
 
 it('whole embed actual SDK stage actions release capture before ACK, retain receiving peer, and reacquire fresh capture on controller return', async t => {
   const h = await actualApp(t), { socket, peer } = await h.join(); assert.equal(h.tracks.length, 0);
