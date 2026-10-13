@@ -21,6 +21,7 @@ export interface StageClientOptions {
   requestTimeoutMs?: number;
   /** Optional cap on queued/unacknowledged caller controls; RTC and automatic resume are excluded. */
   maxPendingControlRequests?: number;
+  /** Finite delays in 0–2147483647 ms; values are captured when the client is constructed. */
   reconnect?: { initialDelayMs: number; maxDelayMs: number };
   audioElement?: HTMLAudioElement;
   micConstraints?: MediaTrackConstraints;
@@ -154,6 +155,7 @@ export class StageClient extends EventTarget {
   private readonly ownsAudio: boolean;
   private socket: WebSocket | null = null;
   private readonly requestTimeoutMs: number;
+  private readonly reconnectConfig: { initialDelayMs: number; maxDelayMs: number };
   private connecting: Promise<void> | null = null;
   private helloWait: { cancel: () => void } | null = null;
   private pending = new Map<string, Pending>();
@@ -209,6 +211,12 @@ export class StageClient extends EventTarget {
     if (!Number.isInteger(timeout) || timeout < 1 || timeout > 300000) throw new RangeError('請求逾時必須是 1 到 300000 之間的整數毫秒。');
     const capacity = options.maxPendingControlRequests;
     if (capacity !== undefined && (!Number.isSafeInteger(capacity) || capacity < 1)) throw new RangeError('待回覆控制請求上限必須是正安全整數。');
+    const { initialDelayMs, maxDelayMs } = options.reconnect ?? { initialDelayMs: 500, maxDelayMs: 15000 };
+    for (const delay of [initialDelayMs, maxDelayMs]) {
+      if (!Number.isFinite(delay) || delay < 0 || delay > 2147483647) throw new RangeError('重連延遲必須是 0 到 2147483647 之間的有限毫秒數。');
+    }
+    // Retain the validated values, not a caller-owned object that could invalidate future timers.
+    this.reconnectConfig = { initialDelayMs, maxDelayMs };
     this.maxPendingControlRequests = capacity ?? Infinity;
     this.requestTimeoutMs = timeout;
     this.options = options;
@@ -689,7 +697,7 @@ export class StageClient extends EventTarget {
     const current = () => !this.intentional && this.session === session && this.sessionRevision === revision;
     this.setStatus('reconnecting');
     if (!current()) return;
-    const config = this.options.reconnect ?? { initialDelayMs: 500, maxDelayMs: 15000 };
+    const config = this.reconnectConfig;
     const delay = Math.min(config.maxDelayMs, config.initialDelayMs * 2 ** Math.min(this.reconnectAttempt++, 20));
     const timer = setTimeout(() => {
       if (this.reconnectTimer !== timer) return;
