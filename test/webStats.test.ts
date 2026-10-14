@@ -17,6 +17,7 @@ function setup() {
     function retireHandRejection() {}
     const pendingRoomActions = new Map(), POOR_LOSS_PERCENT = 5;
     const client = { state: null, getStats: collect }, document = { hidden: false };
+    const audioRetryNotice = { hidden: true, textContent: '' };
     const connectionLine = { textContent: '', error: false, classList: { toggle(_name, value) { connectionLine.error = value; } } };
     const setInterval = () => 1, clearInterval = () => {};
     ${reset}

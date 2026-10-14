@@ -44,6 +44,14 @@ SDK 不樂觀改寫 `me.name`，也不在較晚的 ACK continuation 寫回提案
 
 舊伺服器可能以 `unknown_type` 拒絕此新增指令；呼叫端應顯示錯誤，不會自動離房／重入。Web Component 的 `name` attribute 仍維持原本重入語意；可使用內建本人名稱編輯，或明確呼叫 `element.client.setName()`，並以 state 顯示結果。完整範例提供「修改我的名稱」對話框；文字以 decodeName 後的 textContent 顯示，不寫入 URL、儲存空間或新增名稱日誌。
 
+## 手動重試音訊協商
+
+`retryAudioConnection(): Promise<void>` 可在仍保有房間席位、但先前 SDP 協商失敗時明確重送目前 peer 的 offer，不必為了觸發快照而改名或重新加入。需要權威房間快照、waiting／live 狀態、開啟的控制連線及屬於目前席位的可用 peer；尚未加入回 `not_joined`，未連線／重連中回 `disconnected`，沒有可用 peer 回 `media_error`，已有協商進行則回 `conflict`，不另外排一輪。初次 state 先於 join ACK 到達仍可依快照驗證，並非要求 session 已建立。
+
+完成代表這個既有協商迴圈（包含快照變更要求的後續輪次）均取得 offer ACK、套用 answer 並完成既有緩衝 ICE 處理；不代表 ICE 已連通或已聽到音訊。沿用目前 peer、音軌、方向與 SDP 政策，不重新擷取麥克風、不啟動播放、不呼叫 ICE restart、不改席位，也不自動重試。麥克風擷取失敗仍使用 `retryMicrophone()`，瀏覽器播放限制仍使用 `unlockAudio()`。協商錯誤沿用既有 error 事件與原錯誤回傳，不新增去重或錯誤原因推論。
+
+斷線或媒體退役立即拒絕呼叫方的等待，即使瀏覽器還停在 createOffer／setLocalDescription。這不取消原生操作：若迴圈仍在等待 createOffer／setLocalDescription，同一 peer 的內部協商鎖仍等該 await 結束，期間再次手動重試可能回 conflict；answer waiter 取消與已開始套用的 answer／ICE 則沿用既有 ownership 及瀏覽器操作順序，不額外等待它們才允許後續協商。回座快照沿用既有 dirty 協商流程，原先已被拒絕的 Promise 不會轉成成功。真正替換 peer 後，舊結果不能完成或清理新一輪。既有期限從 offer 實際送出開始，不涵蓋永不完成的原生 SDP 操作；此方法不提供額外 timeout 或整段復原時間上限。
+
 ## 請求期限
 
 `new StageClient({ url, requestTimeoutMs: 30000 })` 可調整等待伺服器 hello、請求 ACK 及 SDP answer 的期限。省略時維持 15000 ms；接受 1–300000 的整數毫秒，其他值在建構時拋 `RangeError`，尚未修改／建立 audio。

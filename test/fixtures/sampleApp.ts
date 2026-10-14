@@ -173,6 +173,7 @@ export class SampleSdk {
   readonly previewSignals: (AbortSignal | undefined)[] = [];
   readonly polls: Deferred<Stats>[] = [];
   readonly raises: Deferred<void>[] = [];
+  readonly audioRetries: Deferred<void>[] = [];
   readonly deviceLists: Deferred<SampleAudioDevices>[] = [];
   readonly inputDevices: string[] = [];
   readonly outputDevices: string[] = [];
@@ -219,6 +220,7 @@ export class SampleSdk {
   async setOutputDevice(id: string): Promise<void> { this.outputDevices.push(id); }
   async setName(_name: string): Promise<void> {}
   async setRoomName(_name: string): Promise<void> {}
+  retryAudioConnection(): Promise<void> { const work = new Deferred<void>(); this.audioRetries.push(work); return work.promise; }
   setPlaybackVolume(value: number): void { assert.ok(value >= 0 && value <= 1); this.playbackVolume = value; }
   setPlaybackMuted(value: boolean): void { this.playbackMuted = value; }
   startMicTest(options: { signal?: AbortSignal } = {}): Promise<SamplePreview> {
@@ -246,6 +248,7 @@ export class SampleSdk {
     for (const work of this.previews) if (work.status === 'pending') work.reject(new Error('麥克風測試已取消。'));
     for (const preview of this.activePreviews) preview.stop();
     for (const work of this.raises) if (work.status === 'pending') work.reject(new Error('連線已中斷。'));
+    for (const work of this.audioRetries) if (work.status === 'pending') work.reject(new Error('連線已中斷。'));
     this.state = null; this.cooldownUntil = 0; this.speaking = new Set(); this.setStatus('disconnected');
   }
   async terminal(kind: 'closed' | 'kicked', reason?: 'shutdown'): Promise<void> {
@@ -256,7 +259,7 @@ export class SampleSdk {
     else this.emit('kicked', { roomId });
   }
   assertSettled(): void {
-    const work = [...this.joins.map(join => join.work), ...this.previews, ...this.polls, ...this.raises, ...this.deviceLists];
+    const work = [...this.joins.map(join => join.work), ...this.previews, ...this.polls, ...this.raises, ...this.audioRetries, ...this.deviceLists];
     assert.equal(work.filter(item => item.status === 'pending').length, 0, 'all deferred work must settle');
     assert.equal(this.activePreviews.size, 0, 'all granted previews must stop');
   }

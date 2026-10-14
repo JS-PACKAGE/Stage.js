@@ -78,6 +78,9 @@ const personRows = new Map<string, HTMLElement[]>();
 let speakingIds = new Set<string>();
 /** Own connection, refreshed from `getStats()`; kept across re-renders of the room view. */
 const connectionLine = element('p', 'muted connection');
+const audioRetryNotice = element('p', 'muted');
+audioRetryNotice.id = 'audio-retry-status'; audioRetryNotice.hidden = true;
+audioRetryNotice.setAttribute('role', 'status');
 const ownHandPosition = element('p', 'muted own-hand-position');
 ownHandPosition.hidden = true; ownHandPosition.setAttribute('role', 'status');
 const handRejectionNotice = element('p', 'banner hand-rejected');
@@ -447,6 +450,7 @@ async function run(action: () => Promise<unknown>, target?: HTMLButtonElement, g
 function resetRoomActions(identity: string): void {
   if (roomActionIdentity === identity) return;
   roomActionIdentity = identity; roomActionGeneration++; pendingRoomActions.clear();
+  audioRetryNotice.hidden = true; audioRetryNotice.textContent = '';
   handRejectionRoomActive = identity !== ''; retireHandRejection();
   pendingAudioUnlock = undefined;
   micRetryAvailable = micRetryPending = false; micNotice = '';
@@ -785,6 +789,20 @@ function renderRoom(state: RoomStatePayload): void {
   controls.append(element('h2', '', `你好，${decodeName(state.me.name)}`), element('p', '', `${roleLabels[state.me.role]}${state.me.forceMuted ? ' · 主控已鎖定靜音' : ''}`), connectionLine, ownHandPosition, handRejectionNotice);
   const actions = element('div', 'actions');
   const ownRoomId = state.roomId, ownParticipantId = state.me.participantId;
+  const canRetryAudio = () => generation === roomActionGeneration && client.state?.roomId === ownRoomId
+    && client.me?.participantId === ownParticipantId && (client.status === 'waiting' || client.status === 'live');
+  const audioRetry = roomButton('audio-retry', '重試音訊連線', async () => {
+    audioRetryNotice.textContent = '正在重新協商音訊連線…'; audioRetryNotice.hidden = false;
+    try {
+      await client.retryAudioConnection();
+      if (canRetryAudio()) audioRetryNotice.textContent = '音訊連線協商已完成。';
+    } catch (error) {
+      if (generation === roomActionGeneration) { audioRetryNotice.hidden = true; audioRetryNotice.textContent = ''; }
+      throw error;
+    }
+  }, '', () => audioRetry.isConnected && canRetryAudio());
+  audioRetry.id = 'audio-retry';
+  controls.append(audioRetry, audioRetryNotice);
   const canRename = () => generation === roomActionGeneration && client.status !== 'reconnecting'
     && client.state?.roomId === ownRoomId && client.me?.participantId === ownParticipantId;
   const rename = roomButton('rename', '修改我的名稱', async () => {
@@ -961,7 +979,9 @@ function scheduleCooldown(remaining: number): void {
 }
 client.on('state', ({ detail }) => { if (landingEntry) landingEntry.entered = true; renderRoom(detail); });
 client.on('status', ({ detail }) => {
-  if (detail === 'reconnecting' || detail === 'disconnected') retireHandRejection();
+  if (detail === 'reconnecting' || detail === 'disconnected') {
+    retireHandRejection(); audioRetryNotice.hidden = true; audioRetryNotice.textContent = '';
+  }
   if (landingEntry && client.state) landingEntry.entered = true;
   status.textContent = statusLabels[detail];
   if (detail === 'disconnected' && !client.state) {

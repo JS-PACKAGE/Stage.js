@@ -61,6 +61,7 @@ function setup(): Harness {
         children.forEach(visit);
       } };
     const brand = {}, status = {}, connectionLine = { dataset: {}, children: [] };
+    const audioRetryNotice = { hidden: true, textContent: '', dataset: {}, children: [] };
     const ownHandPosition = { hidden: true, textContent: '', dataset: {}, children: [] };
     const statusLabels = {}, roleLabels = {}, createdRoom = null;
     const location = { pathname: '/', origin: 'https://example.test' };

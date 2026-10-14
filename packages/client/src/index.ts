@@ -151,6 +151,7 @@ const finite = (value: unknown): number | undefined => typeof value === 'number'
 const nonnegative = (value: unknown): number | undefined => { const n = finite(value); return n !== undefined && n >= 0 ? n : undefined; };
 
 interface Pending { control: boolean; resolve: () => void; reject: (error: StageError) => void; timer: ReturnType<typeof setTimeout>; sendTimer?: ReturnType<typeof setTimeout> }
+interface NegotiationRun { promise: Promise<void>; resolve: () => void; reject: (error: unknown) => void }
 type JoinOptions = { roomId: string; code?: string; name: string; resumeToken?: string };
 type AcceptedName = { readonly roomId: string; readonly participantId: string; readonly revision: number; readonly name: string };
 const DEFAULT_REQUEST_TIMEOUT = 15000;
@@ -208,6 +209,7 @@ export class StageClient extends EventTarget {
   private captureRevision = 0;
   private negotiationDirty = false;
   private negotiating = false;
+  private negotiationRun: NegotiationRun | null = null;
   private answerWait: { resolve: () => void; reject: (error: Error) => void } | null = null;
   private answerTimer: ReturnType<typeof setTimeout> | undefined;
   private limits: RateLimits = DEFAULT_LIMITS;
@@ -364,6 +366,26 @@ export class StageClient extends EventTarget {
     this.syncMedia();
     return true;
   }
+  /**
+   * Retry SDP negotiation on the current peer without recapturing the microphone or restarting ICE.
+   * Requires a joined waiting/live snapshot and open control connection; rejects overlapping attempts.
+   * Resolves after the whole negotiation loop has acknowledged offers, installed answers and drained
+   * buffered ICE. This does not establish that ICE is connected or that audio is audible.
+   */
+  retryAudioConnection(): Promise<void> {
+    const state = this.snapshot;
+    if (!state?.roomId || !state.me.participantId) return Promise.reject(new StageError('not_joined', '尚未加入房間。'));
+    if ((this.currentStatus !== 'waiting' && this.currentStatus !== 'live') || this.socket?.readyState !== WebSocket.OPEN) {
+      return Promise.reject(new StageError('disconnected', '尚未連線至舞台。'));
+    }
+    const pc = this.pc;
+    if (!pc || this.pcParticipantId !== state.me.participantId || pc.connectionState === 'closed'
+      || pc.connectionState === 'failed' || pc.signalingState === 'closed') {
+      return Promise.reject(new StageError('media_error', '目前沒有可重試的音訊連線。'));
+    }
+    if (this.negotiating) return Promise.reject(new StageError('conflict', '音訊協商進行中，請等待完成後再試。'));
+    return this.beginNegotiation();
+  }
   async startMicTest(options: MicTestOptions = {}): Promise<MicTest> {
     const signal = options.signal;
     if (signal?.aborted) throw abortReason(signal);
@@ -514,6 +536,8 @@ export class StageClient extends EventTarget {
     window.removeEventListener('pagehide', this.onPageHide);
     this.stopKeepalive();
     this.rejectPending();
+    // Native SDP operations cannot be cancelled; settle callers now but retain their serialization.
+    this.negotiationRun?.reject(new StageError('disconnected', '音訊協商已中斷。'));
     // An acknowledged offer may still be waiting for its answer; do not let it block resume.
     this.answerWait?.reject(new StageError('disconnected', '音訊協商已中斷。'));
     if (!this.intentional && this.session) this.scheduleReconnect();
@@ -974,50 +998,66 @@ export class StageClient extends EventTarget {
       if (changed || !pc.localDescription || pc.signalingState !== 'stable') this.negotiate();
     }).catch((error: unknown) => { if (generation === this.mediaAbort) this.report(error); });
   }
-  private negotiate(): void {
+  private negotiate(): void { void this.beginNegotiation(); }
+  private beginNegotiation(): Promise<void> {
     this.negotiationDirty = true;
-    if (this.negotiating) return;
+    if (this.negotiating) return this.negotiationRun?.promise ?? Promise.resolve();
     const pc = this.pc;
-    if (!pc) return;
+    if (!pc) return Promise.resolve();
+    let resolve!: () => void, reject!: (error: unknown) => void;
+    const promise = new Promise<void>((yes, no) => { resolve = yes; reject = no; });
+    // Automatic negotiation has no awaiting caller. Retain the original promise for explicit retries.
+    void promise.catch(() => {});
+    const run: NegotiationRun = { promise, resolve, reject };
+    this.negotiationRun = run;
     this.negotiating = true;
+    const current = () => this.pc === pc && this.negotiationRun === run;
     void (async () => {
       try {
-        while (this.negotiationDirty && this.pc === pc) {
+        while (this.negotiationDirty && current()) {
           this.negotiationDirty = false;
           // Replace the pending offer without rollback: an initial rollback changes its MID,
           // while the server still holds the transceiver from the unanswered offer.
-          if (this.pc !== pc) return;
+          if (!current()) return;
           const offer = await pc.createOffer();
-          if (this.pc !== pc) return;
+          if (!current()) return;
           offer.sdp = opusMonoSdp(offer.sdp ?? '');
           await pc.setLocalDescription(offer);
-          if (this.pc !== pc) return;
+          if (!current()) return;
           const answer = new Promise<void>((resolve, reject) => {
             this.answerWait = { resolve, reject };
           });
           const answerWait = this.answerWait;
           await Promise.all([answer, this.request('rtc:offer', { payload: { type: 'offer', sdp: pc.localDescription!.sdp } }, () => {
-            if (this.pc !== pc || !answerWait || this.answerWait !== answerWait) throw new StageError('disconnected', '音訊協商已取消。');
+            if (!current() || !answerWait || this.answerWait !== answerWait) throw new StageError('disconnected', '音訊協商已取消。');
             // Pacing is not time spent waiting for an answer: start only when the offer is sent.
             this.answerTimer = setTimeout(() => answerWait.reject(new StageError('timeout', '音訊協商逾時。')), this.requestTimeoutMs);
           })]);
-          if (this.pc !== pc) return;
+          if (!current()) return;
           clearTimeout(this.answerTimer);
           this.answerTimer = undefined;
           this.answerWait = null;
         }
-      } catch (error) { if (this.pc === pc) this.report(error); }
+        run.resolve();
+      } catch (error) {
+        run.reject(error);
+        if (current()) this.report(error);
+      }
       finally {
-        if (this.pc === pc) {
+        if (current()) {
           clearTimeout(this.answerTimer);
           this.answerTimer = undefined;
           this.answerWait = null;
           this.negotiating = false;
+          this.negotiationRun = null;
         }
       }
     })();
+    return promise;
   }
   private destroyMedia(): void {
+    this.negotiationRun?.reject(new StageError('disconnected', '音訊連線已中斷。'));
+    this.negotiationRun = null;
     ++this.mediaRevision;
     this.mediaAbort.abort(new StageError('disconnected', '音訊連線已中斷。'));
     this.mediaAbort = new AbortController();
