@@ -39,6 +39,7 @@ function setup(): Harness {
     let landingRevision = 0;
     let roomActionIdentity = '', roomActionGeneration = 0, cooldownButton = null, cooldownTimer, cooldownDue = 0, invitation = '';
     const pendingRoomActions = new Map(), nodes = [], errors = [];
+    let renderedRoomActions = nodes, renderedReturnStage = null;
     const personRows = new Map(), quality = new Map(); let speakingIds = new Set();
     let renderedRoomSignature, renderedAudienceHeading, renderedSpeakingSignature, renderedQualitySignature; const renderedGainInputs = [];
     let audienceFilterIdentity = ''; const audienceFilterRows = [];

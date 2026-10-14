@@ -60,6 +60,9 @@ let renderedSpeakingSignature: string | undefined;
 let renderedQualitySignature: string | undefined;
 const renderedGainInputs: { input: HTMLInputElement; value: string }[] = [];
 let cooldownButton: HTMLButtonElement | null = null;
+/** Only the installed room view is retained; action state is still recomputed on every sync. */
+let renderedRoomActions: (HTMLButtonElement | HTMLInputElement)[] = [];
+let renderedReturnStage: HTMLButtonElement | null = null;
 let cooldownTimer: ReturnType<typeof setTimeout> | undefined;
 let cooldownDue = 0;
 let roomActionIdentity = '';
@@ -381,7 +384,7 @@ function roomButton(key: string, label: string, action: () => Promise<unknown>, 
   return node;
 }
 function syncRoomActions(): void {
-  for (const node of content.querySelectorAll<HTMLButtonElement | HTMLInputElement>('[data-room-action]')) {
+  for (const node of renderedRoomActions) {
     const key = node.dataset.roomAction!;
     const pending = pendingRoomActions.has(key);
     node.setAttribute('aria-busy', String(pending));
@@ -445,7 +448,7 @@ function landing(): void {
   personRows.clear(); speakingIds.clear();
   resetMicSettings();
   resetRoomActions('');
-  cooldownButton = null; scheduleCooldown(0);
+  cooldownButton = null; renderedReturnStage = null; renderedRoomActions = []; scheduleCooldown(0);
   brand.textContent = 'Stage.js 音訊舞台';
   const intro = element('section', 'intro');
   intro.append(element('h2', '', '一起聊，所有人都能聽見。'), element('p', '', '建立音訊舞台，邀請朋友發言；觀眾可舉手，經主控核准後上台。'));
@@ -685,6 +688,8 @@ function renderRoom(state: RoomStatePayload): void {
   grid.append(audience);
   const top = element('div', 'landing-grid'); top.append(summary, controls);
   content.replaceChildren(top, grid);
+  renderedRoomActions = Array.from(content.querySelectorAll<HTMLButtonElement | HTMLInputElement>('[data-room-action]'));
+  renderedReturnStage = content.querySelector<HTMLButtonElement>('[data-return-stage]');
   renderedAudienceHeading = audienceHeading;
   renderedRoomSignature = signature; renderedSpeakingSignature = speakingSignature; renderedQualitySignature = qualitySignature;
   syncAudienceFilter(state); updateCooldown(); renderNotices();
@@ -767,7 +772,7 @@ function updateCooldown(): void {
     cooldownButton.disabled = remaining > 0 || client.status === 'reconnecting';
     cooldownButton.textContent = remaining > 0 ? `舉手發言（${remaining} 秒）` : '舉手發言';
   }
-  const returnButton = content.querySelector<HTMLButtonElement>('[data-return-stage]');
+  const returnButton = renderedReturnStage;
   if (returnButton) returnButton.disabled = client.status === 'reconnecting';
   syncRoomActions();
   scheduleCooldown(cooldownButton?.isConnected ? remainingMs : 0);
