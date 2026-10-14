@@ -662,3 +662,6 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 
 
 159. **上台權限提示的擷取完成清理（2026-10-13）：** whole-module 完整範例搭配實際 SDK／受控 socket／media 重現 invite→role→state→micready 後，既有 invitation 仍顯示「請允許麥克風權限」，甚至 sender 安裝與受控 answer 完成後亦然。只為該固定提示記錄 room／participant／room generation；目前同席且 onstage 的 micready 清掉仍屬於它的文字，之後的複製／換碼／終止／離台文字及 errorBox 不受影響。landing 和自己的 stageleft 撤銷所有權；不同房間／身分或 generation 不可用晚到事件清除既有提示。保留既有 micNotice／重試與 capture／publish 語意，預覽共用的 micready 不代表房內 sender 安裝或可聽音訊。受控驗證保留 micready 時 sender 尚未安裝的順序，並檢查後續安裝失敗仍可回報；不可變前版 source 對照驗證提示缺陷，不宣稱原生瀏覽器權限或可聽音訊驗收。
+
+
+160. **共用 micready 公開契約釐清（2026-10-13）：** 事件 detail 為 undefined，SDK 有三個發出位置：初次／重試房間擷取在 sender 安裝前、使用中裝置替換在 replaceTrack 與串流接管後、獨立預覽不需要房間 sender。既有 retry／widget README 使用未限定流程的「早於 sender 安裝」可能被誤讀為通用順序，改為明確限定，並補公開 StageEventMap 的 JSDoc，提醒事件不是可聽傳送或特定公開操作完成的證明。只改文件／註解與本決策紀錄；檢查 generated declaration、三個來源及既有生命週期測試，建置 JS 需與前版逐 byte 相同，無 runtime 或事件順序變更。

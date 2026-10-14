@@ -127,6 +127,8 @@ export interface StageEventMap {
   role: ServerMessageMap['role:update'];
   error: StageError;
   micerror: { name: string; message: string };
+  /** Shared capture-ready signal: initial/retry room capture precedes sender installation;
+   * active device replacement follows replaceTrack, while preview is independent. Not proof of audible delivery. */
   micready: undefined;
   audioblocked: { message: string };
   /** Full audible set: seeded after create/join/resume state and before ACK, then updated on changes. */
