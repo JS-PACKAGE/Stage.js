@@ -5178,3 +5178,413 @@ describe('widget inline participant name editor', () => {
     });
   }
 });
+
+describe('widget latest own connection quality', () => {
+  type Widget = InstanceType<typeof StageElement>;
+  const nodes = (node: Node): Node[] => [node, ...node.children.flatMap(nodes)];
+  function qualityNode(element: Widget): Node {
+    const matches = nodes(element as unknown as Node).filter(node => node.part.has('quality'));
+    assert.equal(matches.length, 1, 'one stable quality summary is exposed through ::part(quality)');
+    return matches[0]!;
+  }
+  const summary = (up = '1.2%', down = '3.5%', rtt = '46 ms') =>
+    `你的連線品質（最近收到）：上行掉包 ${up} · 下行掉包 ${down} · RTT ${rtt}（非端到端音訊延遲）`;
+  const report = (participantId = 'me') => ({ type: 'quality' as const, participants: [
+    { participantId, uplinkLossPercent: 1.24, downlinkLossPercent: 3.46, rttMs: 45.6 },
+  ] });
+  function assertQuality(element: Widget, text?: string): void {
+    const node = qualityNode(element);
+    assert.equal(node.hidden, text === undefined);
+    assert.equal(node.textContent, text ?? '');
+    assert.equal(node.tagName, 'P');
+    assert.equal(node.getAttribute('aria-live'), null, 'periodic quality reports are not live announcements');
+    assert.equal(node.getAttribute('role'), null, 'quality is neither a status live region nor an alert');
+    assert.deepEqual(node.children, [], 'the summary remains plain text');
+    assert.equal(Reflect.get(node, 'innerHTML'), undefined);
+  }
+
+  /** Real SDK capture and sender ownership with fake hardware; no browser audio or SDP claim. */
+  function qualityMedia(t: TestContext) {
+    const originals = new Map(['navigator', 'RTCPeerConnection', 'AudioContext'].map(name => [name, Object.getOwnPropertyDescriptor(globalThis, name)]));
+    const tracks: (EventTarget & { enabled: boolean; readyState: string; stops: number; stop(): void })[] = [];
+    class Peer {
+      static instances: Peer[] = [];
+      connectionState = 'connected'; signalingState = 'stable'; localDescription = null; closed = false;
+      readonly installs: unknown[] = [];
+      readonly transceiver = { direction: 'recvonly', sender: { track: null as unknown, replaceTrack: async (track: unknown) => {
+        this.installs.push(track); this.transceiver.sender.track = track;
+      } } };
+      constructor() { Peer.instances.push(this); }
+      addTransceiver() { return this.transceiver; }
+      getStats(): never { assert.fail('the widget must not poll browser media stats'); }
+      close(): void { this.closed = true; }
+    }
+    class Context {
+      createMediaStreamSource() { return { connect() {}, disconnect() {} }; }
+      createAnalyser() { return { fftSize: 2048, disconnect() {}, getFloatTimeDomainData() {} }; }
+      async resume() {} async close() {}
+    }
+    Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { mediaDevices: { getUserMedia: async () => {
+      const track = Object.assign(new EventTarget(), { enabled: true, readyState: 'live', stops: 0,
+        stop() { this.stops++; this.readyState = 'ended'; } }); tracks.push(track);
+      return { getTracks: () => [track], getAudioTracks: () => [track] } as unknown as MediaStream;
+    } } } });
+    Object.defineProperty(globalThis, 'RTCPeerConnection', { configurable: true, value: Peer });
+    Object.defineProperty(globalThis, 'AudioContext', { configurable: true, value: Context });
+    const negotiate = t.mock.method(StageClient.prototype as unknown as { negotiate(): void }, 'negotiate', () => {});
+    t.after(() => { for (const [name, descriptor] of originals) { if (descriptor) Object.defineProperty(globalThis, name, descriptor); else Reflect.deleteProperty(globalThis, name); } });
+    return { Peer, tracks, negotiate };
+  }
+
+  it('starts empty and does not put quality inside an ancestor live region', () => {
+    const element = new StageElement(); widgets.push(element);
+    assertQuality(element);
+    const target = qualityNode(element);
+    const ancestors = (node: Node): Node[] | undefined => node === target ? []
+      : node.children.map(child => ancestors(child)).find(path => path !== undefined)?.concat(node);
+    const path = ancestors(element as unknown as Node); assert.ok(path);
+    assert.ok(path.every(node => !node.hasAttribute('aria-live') && !['status', 'alert', 'log'].includes(node.getAttribute('role') ?? '')));
+    assert.equal(element['status'].getAttribute('aria-live'), 'polite');
+    assert.equal(element['error'].getAttribute('role'), 'alert');
+  });
+
+  it('shows only the actual Hub own publisher report while forwarding the full raw SDK detail unchanged', async t => {
+    const config = testConfig(c => { c.rooms.presenceBroadcastMs = 0; }), h = harness(config);
+    t.after(async () => { await h.hub.shutdown(); });
+    const host = await h.create('Private host name'), speaker = await h.join(host.roomId, host.code, 'Private speaker name');
+    const audience = await h.join(host.roomId, host.code, 'Private audience name');
+    assert.equal(await h.req(host.s, { type: 'rtc:offer', payload: SENDRECV_OFFER }), 'ok');
+    assert.equal(await h.req(speaker.s, { type: 'hand:raise' }), 'ok');
+    assert.equal(await h.req(host.s, { type: 'stage:approve', targetId: speaker.id }), 'ok');
+    assert.equal(await h.req(speaker.s, { type: 'rtc:offer', payload: SENDRECV_OFFER }), 'ok');
+    const media = qualityMedia(t), { element, client, socket } = await socketJoinedWidget(t, host.s.last('room:state')!, true);
+    await client['mediaTask']; assert.equal(media.tracks.length, 1);
+    const peer = media.Peer.instances[0]!, track = media.tracks[0]!;
+    const frames = [...socket.sent], installs = [...peer.installs], negotiations = media.negotiate.mock.callCount();
+    const nonQuality = () => nodes(element as unknown as Node).filter(node => !node.part.has('quality') && node.tagName !== 'STYLE')
+      .map(node => [node.tagName, node.hidden, node.disabled, node.textContent, [...node.attributes]]);
+    const before = nonQuality(), sdk: unknown[] = [], forwarded: CustomEvent[] = [];
+    client.on('quality', ({ detail }) => sdk.push(detail));
+    element.addEventListener('stage-quality', event => { assertQuality(element, summary('8.0%', '2.0%', '37 ms')); forwarded.push(event as CustomEvent); });
+    let reads = 0;
+    h.transport.getStats = async (_room, id) => { reads++; return id === host.id
+      ? { inbound: { packetsReceived: 92, packetsLost: 8 }, outbound: { fractionLost: 0.02 }, rttMs: 36.6 }
+      : { inbound: { packetsReceived: 1, packetsLost: 99 }, outbound: { fractionLost: 0.88 }, rttMs: 9876 }; };
+    const fire = async () => {
+      const timers = h.timers.filter(timer => !timer.cleared && timer.ms === config.rooms.qualityIntervalMs);
+      assert.equal(timers.length, 1); timers[0]!.cleared = true; timers[0]!.fn(); await nextTurn();
+    };
+    host.s.clear(); speaker.s.clear(); audience.s.clear(); await fire();
+    const message = host.s.last('quality'); assert.ok(message);
+    assert.deepEqual(message.participants.map(person => person.participantId).sort(), [host.id, speaker.id].sort());
+    assert.deepEqual(speaker.s.last('quality'), message); assert.equal(audience.s.last('quality'), undefined);
+    const timeout = t.mock.method(globalThis, 'setTimeout'), interval = t.mock.method(globalThis, 'setInterval');
+    socket.deliver(message); await settle();
+    assert.equal(forwarded.length, 1); assert.equal(forwarded[0]!.detail, sdk[0]);
+    assert.deepEqual(forwarded[0]!.detail, { participants: message.participants });
+    assert.equal(forwarded[0]!.bubbles, true); assert.equal(forwarded[0]!.composed, true);
+    assert.deepEqual(Object.keys(forwarded[0]!.detail), ['participants'], 'wire quality has no room, peer epoch or timestamp');
+    assertQuality(element, summary('8.0%', '2.0%', '37 ms'));
+    assert.deepEqual(nonQuality(), before); assert.deepEqual(socket.sent, frames);
+    assert.equal(timeout.mock.callCount(), 0); assert.equal(interval.mock.callCount(), 0);
+    assert.equal(reads, 2, 'only the existing Hub collection obtains stats');
+    assert.equal(media.tracks.length, 1); assert.equal(track.stops, 0); assert.equal(track.enabled, true);
+    assert.equal(media.Peer.instances.length, 1); assert.equal(peer.closed, false); assert.deepEqual(peer.installs, installs);
+    assert.equal(media.negotiate.mock.callCount(), negotiations);
+  });
+
+  for (const role of ['audience', 'offstage controller', 'speaker', 'onstage controller'] as const) {
+    it(`admits only an onstage own report for ${role}`, async t => {
+      const state = roomState(role === 'speaker' || role === 'onstage controller');
+      if (role.includes('controller')) state.me.role = 'controller';
+      const { element, socket } = await socketJoinedWidget(t, state);
+      const forwarded: CustomEvent[] = []; element.addEventListener('stage-quality', event => forwarded.push(event as CustomEvent));
+      assertQuality(element); socket.deliver(report());
+      assertQuality(element, state.me.onStage ? summary() : undefined);
+      assert.equal(forwarded.length, 1, 'offstage admission never filters the public event');
+      assert.deepEqual(forwarded[0]!.detail, { participants: report().participants });
+    });
+  }
+
+  it('clears a full replacement set without an own report, including empty, and never treats another publisher as self', async t => {
+    const { element, socket } = await socketJoinedWidget(t, roomState(true));
+    const node = qualityNode(element);
+    for (const participants of [report('private-other-id').participants, []]) {
+      socket.deliver(report()); assertQuality(element, summary());
+      socket.deliver({ type: 'quality', participants }); assertQuality(element);
+      socket.deliver({ type: 'room:state', ...roomState(true) }); element.playbackMuted = true;
+      assertQuality(element, undefined); assert.equal(qualityNode(element), node);
+    }
+    socket.deliver({ type: 'quality', participants: [{ participantId: 'me' }] });
+    assertQuality(element, summary('—', '—', '—'));
+  });
+
+  const numericCases = [
+    { label: 'zero', up: 0, down: 0, rtt: 0, text: summary('0.0%', '0.0%', '0 ms') },
+    { label: 'maximum losses and unbounded finite RTT', up: 100, down: 100, rtt: 123456.6, text: summary('100.0%', '100.0%', '123457 ms') },
+    { label: 'rounding without a quality verdict', up: 99.96, down: 0.04, rtt: 0.49, text: summary('100.0%', '0.0%', '0 ms') },
+    { label: 'missing', up: undefined, down: undefined, rtt: undefined, text: summary('—', '—', '—') },
+    { label: 'NaN and infinities', up: NaN, down: Infinity, rtt: -Infinity, text: summary('—', '—', '—') },
+    { label: 'outside allowed ranges', up: -0.01, down: 100.01, rtt: -0.01, text: summary('—', '—', '—') },
+    { label: 'strings and null', up: '5', down: null, rtt: '30', text: summary('—', '—', '—') },
+    { label: 'independent field validation', up: 2.31, down: NaN, rtt: 4.7, text: summary('2.3%', '—', '5 ms') },
+  ];
+  for (const value of numericCases) {
+    it(`formats ${value.label} from synthetic untrusted event fields without coercing raw detail`, async t => {
+      const { element, client } = await socketJoinedWidget(t, roomState(true));
+      // NaN/Infinity and wrong runtime types cannot all be represented by the JSON wire; this is deliberate robustness coverage.
+      const detail = { participants: [{ participantId: 'me', uplinkLossPercent: value.up, downlinkLossPercent: value.down, rttMs: value.rtt }] };
+      let forwarded: unknown;
+      element.addEventListener('stage-quality', event => { forwarded = (event as CustomEvent).detail; assertQuality(element, value.text); });
+      client.dispatchEvent(new CustomEvent('quality', { detail }));
+      assert.equal(forwarded, detail); assertQuality(element, value.text);
+      assert.equal(detail.participants[0]!.uplinkLossPercent, value.up);
+      assert.equal(detail.participants[0]!.downlinkLossPercent, value.down);
+      assert.equal(detail.participants[0]!.rttMs, value.rtt);
+    });
+  }
+
+  it('copies displayed primitives before raw-event listeners mutate the report and keeps them across same-owner snapshots', async t => {
+    const { element, client, socket } = await socketJoinedWidget(t, roomState(true));
+    const detail = { participants: report().participants };
+    element.addEventListener('stage-quality', event => {
+      assert.equal((event as CustomEvent).detail, detail); assertQuality(element, summary());
+      Object.assign(detail.participants[0]!, { participantId: 'private-mutated-id', uplinkLossPercent: 99, downlinkLossPercent: 88, rttMs: 7777 });
+      detail.participants.splice(0);
+    }, { once: true });
+    // Synthetic application mutation tests public detail identity, not a JSON transport mutation.
+    client.dispatchEvent(new CustomEvent('quality', { detail }));
+    assertQuality(element, summary());
+    for (const role of ['controller', 'speaker'] as const) {
+      const state = roomState(true); state.me.role = role; state.me.name = 'Updated own name'; state.me.muted = true;
+      socket.deliver({ type: 'room:state', ...state }); socket.deliver({ type: 'status', state: 'waiting' });
+      element.playbackMuted = !element.playbackMuted; element.playbackVolume = 0.23;
+      assertQuality(element, summary());
+    }
+    assert.deepEqual(detail.participants, []);
+  });
+
+  for (const transition of ['offstage', 'participant identity', 'room identity'] as const) {
+    it(`clears before forwarding ${transition} and requires a new quality event after restoration`, async t => {
+      const { element, socket } = await socketJoinedWidget(t, roomState(true));
+      socket.deliver(report()); assertQuality(element, summary());
+      const next = roomState(true);
+      if (transition === 'offstage') next.me.onStage = false;
+      else if (transition === 'participant identity') next.me.participantId = 'replacement';
+      else next.roomId = 'replacement';
+      next.status = 'waiting';
+      let callbacks = 0;
+      for (const event of ['stage-status', 'stage-state']) element.addEventListener(event, () => { callbacks++; assertQuality(element); }, { once: true });
+      socket.deliver({ type: 'room:state', ...next }); assert.equal(callbacks, 2); assertQuality(element);
+      socket.deliver({ type: 'room:state', ...roomState(true) }); assertQuality(element);
+      socket.deliver(report()); assertQuality(element, summary());
+    });
+  }
+
+  it('clears synchronously on actual reconnect and ignores the retired wire until a new own report arrives', async t => {
+    const { element, client, socket, sockets, hello, tick } = await socketJoinedWidget(t, roomState(true));
+    socket.deliver(report()); const retiredMessage = socket.onmessage;
+    element.addEventListener('stage-status', event => { if ((event as CustomEvent).detail === 'reconnecting') assertQuality(element); });
+    let reports = 0; element.addEventListener('stage-quality', () => { reports++; });
+    socket.close(); assert.equal(client.status, 'reconnecting'); assertQuality(element);
+    retiredMessage?.({ data: JSON.stringify(report()) }); assert.equal(reports, 0); assertQuality(element);
+    await tick(500); const next = sockets[1]!, request = await hello(next);
+    next.deliver({ type: 'room:state', ...roomState(true), resumeToken: 'resume-me' }); assertQuality(element);
+    next.deliver({ type: 'ok', requestId: request.requestId }); await settle(); assertQuality(element);
+    retiredMessage?.({ data: JSON.stringify(report()) }); assert.equal(reports, 0);
+    next.deliver(report()); assertQuality(element, summary()); assert.equal(reports, 1);
+  });
+
+  for (const terminal of [null, ...terminalCases]) {
+    it(`clears before forwarded ${terminal?.title ?? 'public disconnect'} without changing the terminal notice`, async t => {
+      const { element, client, socket } = await socketJoinedWidget(t, roomState(true));
+      socket.deliver(report()); assertQuality(element, summary());
+      let callbacks = 0;
+      element.addEventListener('stage-status', event => { if ((event as CustomEvent).detail === 'disconnected') { callbacks++; assertQuality(element); } });
+      if (terminal) element.addEventListener(`stage-${terminal.event}`, () => { callbacks++; assertQuality(element); });
+      if (terminal) socket.deliver(terminal.message); else await client.disconnect();
+      await settle(); assertQuality(element); assert.equal(callbacks, terminal ? 2 : 1);
+      assert.equal(element['status'].textContent, terminal?.text ?? '未連線');
+      socket.deliver(report()); assertQuality(element);
+    });
+  }
+
+  it('clears on a real microphone track loss; preview micready and snapshots cannot revive it, and a later report means only latest received', async t => {
+    const media = qualityMedia(t), { element, client, socket } = await socketJoinedWidget(t, roomState(true), true);
+    await client['mediaTask']; assert.equal(media.tracks.length, 1);
+    socket.deliver(report()); assertQuality(element, summary());
+    let errors = 0;
+    element.addEventListener('stage-micerror', () => { errors++; assertQuality(element); });
+    media.tracks[0]!.readyState = 'ended'; media.tracks[0]!.dispatchEvent(new Event('ended'));
+    assert.equal(errors, 1); assertQuality(element); await client['mediaTask'];
+    assert.equal(client.me!.onStage, true); assert.equal(media.tracks.length, 1);
+    const preview = await client.startMicTest(); assertQuality(element);
+    assert.equal(client['mic'], null, 'the real preview micready does not install a room sender');
+    assert.equal(media.tracks.length, 2); preview.stop();
+    socket.deliver({ type: 'room:state', ...roomState(true) }); await client['mediaTask']; assertQuality(element);
+    // A quality frame has no peer epoch: receipt alone cannot prove recovery or identify pre-error measurements.
+    socket.deliver(report()); assertQuality(element, summary());
+    assert.match(qualityNode(element).textContent, /最近收到/);
+    assert.equal(media.tracks.length, 2, 'quality never retries capture after the explicitly started preview');
+  });
+
+  it('keeps status, unrelated errors, and pending name/microphone controls unchanged while reports refresh or clear', async t => {
+    const { element, client, socket, tick } = await socketJoinedWidget(t, roomState(true));
+    element['nameInput'].value = 'unsent after ACK'; click(element['nameUpdate']); click(element['mic']); await tick(200);
+    const name = socket.sent.find(message => message.type === 'participant:rename');
+    const mute = socket.sent.find(message => message.type === 'mic:mute'); assert.ok(name); assert.ok(mute);
+    socket.deliver({ type: 'error', code: 'conflict', message: 'Unrelated current failure' });
+    const before = nodes(element as unknown as Node).filter(node => !node.part.has('quality') && node.tagName !== 'STYLE')
+      .map(node => [node.hidden, node.disabled, node.textContent, node.value, [...node.attributes]]);
+    const frames = [...socket.sent], pending = client['pending'].size, attempt = element['nameAttempt'];
+    for (const message of [report(), { type: 'quality' as const, participants: [] }, report()]) socket.deliver(message);
+    assertQuality(element, summary());
+    assert.equal(element['nameAttempt'], attempt); assert.equal(client['pending'].size, pending); assert.deepEqual(socket.sent, frames);
+    assert.deepEqual(nodes(element as unknown as Node).filter(node => !node.part.has('quality') && node.tagName !== 'STYLE')
+      .map(node => [node.hidden, node.disabled, node.textContent, node.value, [...node.attributes]]), before);
+    socket.deliver({ type: 'ok', requestId: name.requestId }); socket.deliver({ type: 'ok', requestId: mute.requestId }); await settle();
+    assertQuality(element, summary()); assert.equal(element['error'].textContent, 'Unrelated current failure');
+  });
+
+  for (const transition of ['room', 'code', 'name', 'url', 'detach', 'leave room'] as const) {
+    it(`retires on ${transition}, isolates replacement quality from old callbacks and keeps the same DOM node`, async t => {
+      const { element, client, socket, sockets, hello } = await socketJoinedWidget(t, roomState(true));
+      socket.deliver(report()); const node = qualityNode(element), oldMessage = socket.onmessage, oldClose = socket.onclose;
+      if (transition === 'detach') { Object.assign(element, { isConnected: false }); element.disconnectedCallback(); }
+      else if (transition === 'leave room') click(element['roomAction']);
+      else element.setAttribute(transition, transition === 'url' ? 'wss://replacement.invalid/ws' : 'replacement');
+      assertQuality(element); await settle();
+      if (transition === 'detach') { Object.assign(element, { isConnected: true }); element.connectedCallback(); }
+      else if (transition === 'leave room') click(element['roomAction']);
+      await settle(); await settle();
+      const current = element.client; assert.ok(current); assert.notEqual(current, client);
+      const next = sockets[1]!, request = await hello(next), state = roomState(true, transition === 'room' ? 'replacement' : 'one');
+      next.deliver({ type: 'room:state', ...state }); next.deliver({ type: 'ok', requestId: request.requestId }); await settle();
+      assertQuality(element); assert.equal(qualityNode(element), node);
+      next.deliver({ type: 'quality', participants: [{ participantId: 'me', rttMs: 123 }] }); assertQuality(element, summary('—', '—', '123 ms'));
+      let callbacks = 0; element.addEventListener('stage-quality', () => { callbacks++; });
+      oldMessage?.({ data: JSON.stringify(report()) }); oldClose?.();
+      // A direct retired-client dispatch additionally stresses the widget subscription generation guard.
+      client.dispatchEvent(new CustomEvent('quality', { detail: { participants: report().participants } }));
+      await settle(); assert.equal(callbacks, 0); assertQuality(element, summary('—', '—', '123 ms'));
+    });
+  }
+
+  for (const initialBeforeAck of [false, true]) {
+    it(`does not restore same-ID quality after public same-client disconnect/rejoin${initialBeforeAck ? ' following initial state-before-ACK socket loss' : ''}`, async t => {
+      const fixture = socketJoiningWidget(t); await settle();
+      const { element, sockets, hello, tick, joinRequest } = fixture;
+      const socket = sockets[0]!, initialJoin = await hello(socket), client = element.client!;
+      socket.deliver({ type: 'room:state', ...roomState(true) });
+      if (!initialBeforeAck) { socket.deliver({ type: 'ok', requestId: initialJoin.requestId }); await settle(); }
+      socket.deliver(report()); assertQuality(element, summary());
+      if (initialBeforeAck) {
+        assert.equal(client['session'], null); socket.close(); await settle();
+        assert.equal(client.status, 'disconnected'); assert.ok(client.state, 'socket loss retains initial snapshot'); assertQuality(element);
+      }
+      let statuses = 0; element.addEventListener('stage-status', () => { statuses++; });
+      await client.disconnect(); assertQuality(element); assert.equal(client.state, null);
+      if (initialBeforeAck) assert.equal(statuses, 0, 'the second disconnected status is intentionally silent');
+      const connecting = client.connect(), next = sockets[1]!; next.hello(); await connecting;
+      const joining = client.join({ roomId: 'one', name: 'Listener' }); await settle(); await tick(100);
+      const join = joinRequest(next);
+      next.deliver({ type: 'room:state', ...roomState(true) }); assertQuality(element);
+      next.deliver({ type: 'ok', requestId: join.requestId }); await joining; assertQuality(element);
+      assert.equal(element.client, client);
+      next.deliver(report()); assertQuality(element, summary());
+    });
+  }
+
+  it('preserves a newer nested report when a forwarded quality callback synchronously reenters the public event lane', async t => {
+    const { element, socket } = await socketJoinedWidget(t, roomState(true));
+    let callbacks = 0;
+    element.addEventListener('stage-quality', () => {
+      callbacks++;
+      if (callbacks === 1) { assertQuality(element, summary()); socket.deliver({ type: 'quality', participants: [{ participantId: 'me', rttMs: 321 }] }); }
+      else assertQuality(element, summary('—', '—', '321 ms'));
+    });
+    socket.deliver(report()); assert.equal(callbacks, 2); assertQuality(element, summary('—', '—', '321 ms'));
+  });
+
+  it('does not repaint an old report after a forwarded quality callback synchronously leaves the room', async t => {
+    const { element, socket } = await socketJoinedWidget(t, roomState(true));
+    element.addEventListener('stage-quality', () => { assertQuality(element, summary()); click(element['roomAction']); assertQuality(element); }, { once: true });
+    socket.deliver(report()); await settle(); assertQuality(element); assert.equal(element.client, null);
+    assert.equal(element['status'].textContent, '已離開房間。');
+  });
+
+  it('does not adopt a pre-snapshot quality event and uses the last whole duplicate own entry without merging', async t => {
+    const { element, sockets, hello } = socketJoiningWidget(t); await settle();
+    const socket = sockets[0]!, request = await hello(socket), client = element.client!;
+    const sdk: unknown[] = [], forwarded: CustomEvent[] = [];
+    client.on('quality', ({ detail }) => sdk.push(detail));
+    element.addEventListener('stage-quality', event => forwarded.push(event as CustomEvent));
+    socket.deliver(report()); assertQuality(element);
+    socket.deliver({ type: 'room:state', ...roomState(true) }); assertQuality(element);
+    socket.deliver({ type: 'ok', requestId: request.requestId }); await settle(); assertQuality(element);
+    const message = { type: 'quality' as const, participants: [
+      ...report().participants, ...report('private-other-id').participants,
+      { participantId: 'me', downlinkLossPercent: 0 },
+    ] };
+    socket.deliver(message); assertQuality(element, summary('—', '0.0%', '—'));
+    assert.equal(forwarded.length, 2); assert.equal(forwarded[1]!.detail, sdk[1]);
+    assert.deepEqual(forwarded[1]!.detail, { participants: message.participants });
+  });
+
+  it('retires on actual Hub own stage:left before its snapshot but retains quality when another participant leaves', async t => {
+    const h = harness(testConfig(c => { c.rooms.presenceBroadcastMs = 0; })); t.after(async () => { await h.hub.shutdown(); });
+    const host = await h.create(), speaker = await h.join(host.roomId, host.code, 'Other speaker');
+    assert.equal(await h.req(speaker.s, { type: 'hand:raise' }), 'ok');
+    assert.equal(await h.req(host.s, { type: 'stage:approve', targetId: speaker.id }), 'ok');
+    const { element, client, socket } = await socketJoinedWidget(t, host.s.last('room:state')!);
+    socket.deliver(report(host.id)); assertQuality(element, summary());
+    let callbacks = 0;
+    element.addEventListener('stage-stageleft', event => {
+      callbacks++; const detail = (event as CustomEvent).detail;
+      assert.equal(client.me!.onStage, true, 'Hub transition events precede the personalised snapshot');
+      assertQuality(element, detail.participantId === host.id ? undefined : summary());
+    });
+    host.s.clear(); assert.equal(await h.req(speaker.s, { type: 'stage:leave' }), 'ok');
+    const other = host.s.inbox.find(message => message.type === 'stage:left'); assert.ok(other);
+    socket.deliver(other); assertQuality(element, summary());
+    socket.deliver(host.s.last('room:state')!); assertQuality(element, summary());
+    host.s.clear(); assert.equal(await h.req(host.s, { type: 'stage:leave' }), 'ok');
+    const own = host.s.inbox.find(message => message.type === 'stage:left'); assert.ok(own);
+    socket.deliver(own); assertQuality(element);
+    element.playbackMuted = true; assertQuality(element, undefined);
+    socket.deliver(host.s.last('room:state')!); assertQuality(element); assert.equal(client.me!.onStage, false);
+    assert.equal(callbacks, 2);
+  });
+
+  for (const terminal of terminalCases) {
+    it(`accepts new quality after ${terminal.title} and a public same-client same-ID rejoin without accepting the retired socket`, async t => {
+      const { element, client, socket, sockets, tick, joinRequest } = await socketJoinedWidget(t, roomState(true));
+      const generation = element['generation'], oldMessage = socket.onmessage;
+      socket.deliver(report()); assertQuality(element, summary());
+      socket.deliver(terminal.message); await settle(); assertQuality(element);
+      assert.equal(element.client, client); assert.equal(client.state, null);
+      const connecting = client.connect(), next = sockets[1]!; next.hello(); await connecting;
+      const joining = client.join({ roomId: 'one', name: 'Listener' }); await settle(); await tick(100);
+      const join = joinRequest(next);
+      next.deliver({ type: 'room:state', ...roomState(true) }); assertQuality(element);
+      next.deliver({ type: 'ok', requestId: join.requestId }); await joining; assertQuality(element);
+      assert.equal(element['generation'], generation); assert.equal(element.client, client);
+      next.deliver(report()); assertQuality(element, summary());
+      let callbacks = 0; element.addEventListener('stage-quality', () => { callbacks++; });
+      oldMessage?.({ data: JSON.stringify({ type: 'quality', participants: [] }) });
+      await settle(); assert.equal(callbacks, 0); assertQuality(element, summary());
+    });
+  }
+
+  it('does not revive retired values when an actual microphone retry emits micready', async t => {
+    const media = qualityMedia(t), { element, client, socket } = await socketJoinedWidget(t, roomState(true), true);
+    await client['mediaTask']; socket.deliver(report()); assertQuality(element, summary());
+    media.tracks[0]!.readyState = 'ended'; media.tracks[0]!.dispatchEvent(new Event('ended'));
+    await client['mediaTask']; assertQuality(element);
+    let ready = 0; element.addEventListener('stage-micready', () => { ready++; assertQuality(element); });
+    click(element['micRetry']); assertQuality(element); await client['mediaTask'];
+    assert.equal(ready, 1); assert.equal(media.tracks.length, 2); assertQuality(element);
+    assert.equal(client['mic']!.getAudioTracks()[0], media.tracks[1]);
+    socket.deliver(report()); assertQuality(element, summary());
+  });
+});

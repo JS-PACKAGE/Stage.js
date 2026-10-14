@@ -1,4 +1,4 @@
-import { StageClient, decodeName, type StageEventMap } from './index.ts';
+import { StageClient, decodeName, type ConnectionQuality, type StageEventMap } from './index.ts';
 
 /** Every StageClient event, re-dispatched from the element as `stage-<type>`. */
 const EVENTS: (keyof StageEventMap)[] = [
@@ -11,6 +11,7 @@ const STYLE = `
 :host { display: block; font: inherit; color: var(--stage-fg, inherit); }
 [part=panel] { display: grid; gap: .5rem; padding: .75rem; border: 1px solid var(--stage-border, #8884); border-radius: var(--stage-radius, .5rem); background: var(--stage-bg, transparent); }
 [part=status] { margin: 0; }
+[part=quality] { margin: 0; font-size: .875em; }
 [part=error] { margin: 0; color: var(--stage-error, #dc2626); }
 [part=actions] { display: flex; flex-wrap: wrap; gap: .5rem; }
 [part=name] { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; }
@@ -37,13 +38,16 @@ button.primary { background: var(--stage-accent, #2563eb); border-color: transpa
  * and every client event is re-dispatched from the element as `stage-<type>` (bubbling,
  * composed) with the same `detail`. The inline name draft starts from each new seat's name;
  * later snapshots update its accepted-name display, not the draft or the `name` attribute.
- * Style through `::part(panel|status|actions|name|playback)` and the
+ * Style through `::part(panel|status|quality|actions|name|playback)` and the
  * `--stage-*` custom properties.
  */
 export class StageElement extends HTMLElement {
   static readonly observedAttributes = ['url', 'room', 'code', 'name', 'playback-muted', 'playback-volume'];
   private current: StageClient | null = null;
   private readonly status: HTMLParagraphElement;
+  private readonly quality: HTMLParagraphElement;
+  private qualityOwner: { client: StageClient; roomId: string; participantId: string; generation: number } | undefined;
+  private qualityReport: Omit<ConnectionQuality, 'participantId'> | undefined;
   /** Last failure (request rejected, mic denied…); stays until the next action or join. */
   private readonly error: HTMLParagraphElement;
   private readonly namePanel: HTMLDivElement;
@@ -90,6 +94,9 @@ export class StageElement extends HTMLElement {
     this.status.part.add('status');
     this.status.setAttribute('role', 'status');
     this.status.setAttribute('aria-live', 'polite');
+    this.quality = document.createElement('p');
+    this.quality.part.add('quality');
+    this.quality.hidden = true;
     this.error = document.createElement('p');
     this.error.part.add('error');
     this.error.setAttribute('role', 'alert');
@@ -151,7 +158,7 @@ export class StageElement extends HTMLElement {
     this.retry = this.button('重試加入', () => { if (this.canRetry()) this.rejoin(); });
     this.cancelJoin = this.button('取消加入', () => this.cancelInitial?.());
     actions.append(this.unlock, this.listen, this.hand, this.mic, this.micRetry, this.leaveStage, this.roomAction, this.retry, this.cancelJoin);
-    panel.append(this.status, this.error, this.namePanel, actions, this.playback);
+    panel.append(this.status, this.quality, this.error, this.namePanel, actions, this.playback);
     root.append(style, panel);
     this.render();
   }
@@ -246,6 +253,11 @@ export class StageElement extends HTMLElement {
           if (micLifecycle) this.syncMicRetry();
           if (type === 'state' || type === 'status' || type === 'closed' || type === 'kicked' || type === 'audioblocked') this.syncPlaybackOwner();
           if (type === 'state' || type === 'status' || type === 'closed' || type === 'kicked') this.syncNameOwner();
+          if (type === 'closed' || type === 'kicked' || type === 'micerror'
+            || (type === 'status' && (detail === 'reconnecting' || detail === 'disconnected'))
+            || (type === 'stageleft' && (detail as StageEventMap['stageleft']).participantId === client.state?.me.participantId)) this.retireQualityOwner();
+          else if (type === 'quality') this.syncQualityOwner((detail as StageEventMap['quality']).participants);
+          else if (type === 'state' || type === 'status') this.syncQualityOwner();
           // SDK status precedes state; a forwarded status listener may disconnect immediately.
           if (type === 'state' || client.state) { receivedState = true; this.hideRetry(); this.hideCancel(); }
           if (type === 'closed' || type === 'kicked') { terminal = true; this.micFailure = undefined; this.hideRetry(); this.hideCancel(); }
@@ -327,6 +339,7 @@ export class StageElement extends HTMLElement {
     this.joinPhase = undefined;
     this.micFailure = undefined;
     this.retireNameOwner();
+    this.retireQualityOwner();
     this.hideCancel();
     this.hideRetry();
     for (const button of this.pendingActions) button.removeAttribute('aria-busy');
@@ -338,6 +351,42 @@ export class StageElement extends HTMLElement {
     this.unlock.hidden = true;
     this.render();
     await client?.disconnect();
+  }
+
+  private retireQualityOwner(): void {
+    this.qualityOwner = undefined; this.qualityReport = undefined;
+    this.quality.textContent = ''; this.quality.hidden = true;
+  }
+
+  /** Reports have no timestamp or media epoch; only a new event may supply this seat's values. */
+  private syncQualityOwner(reports?: readonly ConnectionQuality[]): void {
+    const client = this.current, state = client?.state, me = state?.me;
+    if (!this.isConnected || !client || !state || !me?.onStage
+      || client.status === 'reconnecting' || client.status === 'disconnected') {
+      this.retireQualityOwner(); return;
+    }
+    const owner = this.qualityOwner;
+    if (!owner || owner.client !== client || owner.generation !== this.generation
+      || owner.roomId !== state.roomId || owner.participantId !== me.participantId) {
+      this.retireQualityOwner();
+      this.qualityOwner = { client, roomId: state.roomId, participantId: me.participantId, generation: this.generation };
+    }
+    if (reports !== undefined) {
+      let report: ConnectionQuality | undefined;
+      for (const candidate of reports) if (candidate.participantId === me.participantId) report = candidate;
+      // The event remains public and mutable; retain only primitive values from its full replacement set.
+      this.qualityReport = report ? {
+        uplinkLossPercent: typeof report.uplinkLossPercent === 'number' ? report.uplinkLossPercent : undefined,
+        downlinkLossPercent: typeof report.downlinkLossPercent === 'number' ? report.downlinkLossPercent : undefined,
+        rttMs: typeof report.rttMs === 'number' ? report.rttMs : undefined,
+      } : undefined;
+    }
+    const report = this.qualityReport;
+    this.quality.hidden = !report;
+    if (!report) { this.quality.textContent = ''; return; }
+    const percent = (value: number | undefined) => typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 100 ? `${value.toFixed(1)}%` : '—';
+    const rtt = (value: number | undefined) => typeof value === 'number' && Number.isFinite(value) && value >= 0 ? `${Math.round(value)} ms` : '—';
+    this.quality.textContent = `你的連線品質（最近收到）：上行掉包 ${percent(report.uplinkLossPercent)} · 下行掉包 ${percent(report.downlinkLossPercent)} · RTT ${rtt(report.rttMs)}（非端到端音訊延遲）`;
   }
 
   private retireNameOwner(): void {
@@ -541,6 +590,7 @@ export class StageElement extends HTMLElement {
     this.syncPlaybackOwner();
     this.syncMicRetry();
     this.syncNameOwner();
+    this.syncQualityOwner();
     const client = this.current;
     const me = client?.me ?? null;
     const state = client?.state ?? null;

@@ -718,3 +718,6 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 
 
 179. **最小 embed 保留最近的一般錯誤（2026-10-14）：** 基線 actual SDK 回座 unauthorized/not_found/room_full 三案，以及 actual Hub 換碼／離線關房兩案，均先顯示 generic error 再被 disconnected 覆寫成未連線；peer 正常清理且不再自動重試。公開 error 無 requestId，不能把任意最近錯誤歸因為斷線原因，因此新增獨立最近錯誤 alert 與 dismiss，report 保留原 status 寫法而另存安全文字。state/status/控制成功不清，新 entry/cancel/leave/closed/kicked 清理；clear 不動 feedbackRevision，維持進度優先序。error lane 核對 current client、entryGeneration 與 cancel，原 catch token/generation 沿用；當下新的合法操作仍可回報。micerror/ready 保持原獨立麥克風提示，不混成一般錯誤恢復證明。無 SDK/protocol/媒體或重連政策變更，僅受控 DOM/socket/Hub 證據，未原生 AT/音訊驗收。
+
+
+180. **Web Component 本人連線品質摘要（2026-10-14）：** 基線 actual Hub→受控socket→公開SDK→widget 已收到本人8%上行/2%下行/37ms RTT，但DOM完全不顯示；使用現有quality full-set增加單一本人歷史摘要，不增加poll/API/media或品質閾值。只接受目前台上owner的participantId，複製primitive fields，百分有限0–100/一位小數、RTT有限非負/整數ms，缺失或異常顯示—，0保留。client/generation/room/pid綁定，state/status/quality在host forwarded callback前核對；reconnect/disconnected、下台、terminal/leave/detach/micerror清除，micready不復原，同席普通state不覆寫數字。owner變更不帶舊報告，新own報告才顯示，empty/missing own清除；原stage-quality detail與其他control/error/status不變。無timestamp/peer epoch，錯誤後到達的數字不能證恢復，無新事件不代表健康；明稱最近收到、RTT非端到端延遲。驗證限受控SDK/Hub/DOM與操作計數，不宣稱nativeAT/畫面/音訊或CPU改善。
