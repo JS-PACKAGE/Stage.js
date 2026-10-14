@@ -46,7 +46,8 @@ function setup(options: Parameters<typeof embedApp>[0] = {}) {
     play(): Deferred {
       const count = plays.length; unlock.click();
       assert.equal(plays.length, count + 1, 'play must start synchronously in the unlock click stack');
-      assert.equal(unlock.disabled, false, 'unlock keeps its existing retry and repeat-click behavior');
+      assert.equal(unlock.disabled, true, 'a pending unlock disables repeat activation');
+      assert.equal(unlock.attributes['aria-busy'], 'true');
       return plays.at(-1)!;
     },
     async cleanup(): Promise<void> {
@@ -86,11 +87,13 @@ for (const connected of [false, true]) {
   });
 }
 
-it('whole embed keeps same-lifecycle unlock failures visible after a later attempt succeeds', async t => {
+it('whole embed suppresses concurrent unlock calls and preserves a failure after a later serial success', async t => {
   const h = setup(); t.after(() => h.cleanup()); await h.join();
-  const first = h.play(), second = h.play(); second.resolve(); await flush();
+  const first = h.play(); h.unlock.click(); h.unlock.invoke(); assert.equal(h.plays.length, 1);
   first.reject(blockedMessage); await flush();
-  assert.equal(h.status.textContent, blockedMessage, 'ownership must not introduce latest-attempt semantics');
+  assert.equal(h.unlock.disabled, false); assert.equal(h.unlock.attributes['aria-busy'], 'false');
+  const second = h.play(); second.resolve(); await flush();
+  assert.equal(h.status.textContent, blockedMessage, 'serial success must not erase an earlier failure');
   assert.equal(h.plays.length, 2);
 });
 

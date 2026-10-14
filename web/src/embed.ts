@@ -19,6 +19,7 @@ const rename = document.querySelector<HTMLButtonElement>('#rename')!;
 const stage = document.querySelector<HTMLButtonElement>('#stage')!;
 const micRetry = document.querySelector<HTMLButtonElement>('#mic-retry')!;
 const audio = document.querySelector<HTMLAudioElement>('#audio')!;
+const unlock = document.querySelector<HTMLButtonElement>('#unlock')!;
 const params = new URLSearchParams(location.search);
 input('host').value = params.get('host') ?? location.origin;
 input('ws-path').value = params.get('wsPath') ?? '/ws';
@@ -33,6 +34,7 @@ let pendingRename: { client: Client; roomId: string; participantId: string; gene
 let micRetryParticipant: string | undefined;
 let pendingMicRetry: { client: Client } | undefined;
 let playbackGeneration = 0;
+let pendingUnlock: { client: Client | null; generation: number } | undefined;
 let entryGeneration = 0;
 let feedbackRevision = 0;
 let cancelEntry: (() => void) | undefined;
@@ -123,6 +125,14 @@ function scheduleHandCooldown(remaining: number): void {
     handTimer = timer; handTimerDue = due;
   }
 }
+function syncUnlock(): void {
+  if (pendingUnlock && (pendingUnlock.client !== client || pendingUnlock.generation !== playbackGeneration)) pendingUnlock = undefined;
+  unlock.disabled = Boolean(pendingUnlock);
+  unlock.setAttribute('aria-busy', String(Boolean(pendingUnlock)));
+}
+function retirePlayback(): void {
+  playbackGeneration++; syncUnlock();
+}
 function clearError(): void {
   errorNotice.hidden = true; lastError.textContent = '';
 }
@@ -150,7 +160,7 @@ join.onsubmit = (event) => {
   clearError();
   const hostValue = input('host').value, pathValue = input('ws-path').value;
   const joinOptions = { roomId: input('room').value.trim(), code: input('code').value.trim() || undefined, name: input('name').value.trim() };
-  playbackGeneration++; scheduleHandCooldown(0);
+  retirePlayback(); scheduleHandCooldown(0);
   const generation = ++entryGeneration, feedback = feedbackRevision;
   let progress = true, receivedState = false, cancelledEntry = false;
   let entryClient: Client | undefined;
@@ -163,7 +173,7 @@ join.onsubmit = (event) => {
     cancelledEntry = true;
     const cancelled = retireEntry();
     clearError();
-    playbackGeneration++; scheduleHandCooldown(0); retireControls();
+    retirePlayback(); scheduleHandCooldown(0); retireControls();
     hand.disabled = leave.disabled = true; hand.setAttribute('aria-busy', 'false');
     syncMic(); syncStage(); syncMicRetry();
     try {
@@ -192,7 +202,7 @@ join.onsubmit = (event) => {
       if (generation !== entryGeneration) return;
       // This compact UI has no room-level meter; explicit preview APIs remain available.
       client = new library.StageClient({ url: ws.href, audioElement: audio, enableMicMeter: false });
-      const current = client; controlsClient = current; entryClient = current;
+      const current = client; controlsClient = current; entryClient = current; syncUnlock();
       client.on('state', ({ detail }: CustomEvent<StageEventMap['state']>) => {
         if (client !== current || cancelledEntry) return;
         receivedState = true;
@@ -218,13 +228,13 @@ join.onsubmit = (event) => {
         if (client !== current || cancelledEntry) return;
         if (current.state) { receivedState = true; if (generation === entryGeneration) hideCancel(); }
         if (detail === 'reconnecting') { progress = false; status.textContent = '重新連線中'; hand.disabled = true; }
-        else if (detail === 'disconnected') { progress = false; playbackGeneration++; retireControls(); status.textContent = '未連線'; hand.disabled = leave.disabled = true; }
+        else if (detail === 'disconnected') { progress = false; retirePlayback(); retireControls(); status.textContent = '未連線'; hand.disabled = leave.disabled = true; }
         syncHand(); syncMic(); syncStage(); syncMicRetry(); syncRename();
       });
       client.on('error', ({ detail }) => { if (client !== current || cancelledEntry || generation !== entryGeneration) return; progress = false; report(detail); });
       client.on('audioblocked', () => { if (cancelledEntry) return; progress = false; status.textContent = '請點擊啟用音訊。'; });
-      client.on('closed', () => { if (client !== current || cancelledEntry || generation !== entryGeneration) return; retireEntry(); clearError(); playbackGeneration++; retireControls(); syncHand(); syncMic(); syncStage(); syncMicRetry(); syncRename(); status.textContent = '房間已關閉。'; hand.disabled = leave.disabled = true; });
-      client.on('kicked', () => { if (client !== current || cancelledEntry || generation !== entryGeneration) return; retireEntry(); clearError(); playbackGeneration++; retireControls(); syncHand(); syncMic(); syncStage(); syncMicRetry(); syncRename(); status.textContent = '你已被主控移出房間。'; hand.disabled = leave.disabled = true; });
+      client.on('closed', () => { if (client !== current || cancelledEntry || generation !== entryGeneration) return; retireEntry(); clearError(); retirePlayback(); retireControls(); syncHand(); syncMic(); syncStage(); syncMicRetry(); syncRename(); status.textContent = '房間已關閉。'; hand.disabled = leave.disabled = true; });
+      client.on('kicked', () => { if (client !== current || cancelledEntry || generation !== entryGeneration) return; retireEntry(); clearError(); retirePlayback(); retireControls(); syncHand(); syncMic(); syncStage(); syncMicRetry(); syncRename(); status.textContent = '你已被主控移出房間。'; hand.disabled = leave.disabled = true; });
       showProgress('連線中…');
       await current.connect();
       if (generation !== entryGeneration) return;
@@ -238,12 +248,20 @@ join.onsubmit = (event) => {
   })();
 };
 cancelJoin.onclick = () => cancelEntry?.();
-document.querySelector<HTMLButtonElement>('#unlock')!.onclick = () => {
-  const current = client, generation = playbackGeneration;
-  // Keep play inside the user gesture; only its later feedback is lifecycle-scoped.
-  void (current ? current.unlockAudio() : audio.play()).catch(error => {
-    if (generation === playbackGeneration && client === current) report(error);
-  });
+unlock.onclick = () => {
+  syncUnlock();
+  if (pendingUnlock) return;
+  const operation = { client, generation: playbackGeneration };
+  pendingUnlock = operation; syncUnlock();
+  // Invoke before the first await to preserve the user gesture, including pre-entry playback.
+  void (async () => {
+    try { await (operation.client ? operation.client.unlockAudio() : audio.play()); }
+    catch (error) {
+      if (pendingUnlock === operation && operation.generation === playbackGeneration && client === operation.client) report(error);
+    } finally {
+      if (pendingUnlock === operation) { pendingUnlock = undefined; syncUnlock(); }
+    }
+  })();
 };
 hand.onclick = () => {
   syncHand();
@@ -322,11 +340,11 @@ micRetry.onclick = () => {
 leave.onclick = () => {
   const generation = retireEntry(), current = client;
   clearError();
-  playbackGeneration++; scheduleHandCooldown(0);
+  retirePlayback(); scheduleHandCooldown(0);
   retireControls(); hand.setAttribute('aria-busy', 'false'); syncMic(); syncStage(); syncMicRetry();
   void current?.disconnect().then(() => {
     if (generation !== entryGeneration || client !== current) return;
     status.textContent = '已離開。'; hand.disabled = leave.disabled = true;
   });
 };
-syncHand(); syncMic(); syncStage(); syncMicRetry(); syncRename();
+syncHand(); syncMic(); syncStage(); syncMicRetry(); syncRename(); syncUnlock();

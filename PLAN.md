@@ -745,3 +745,6 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 
 
 188. **Widget 顯示層錯誤關閉（2026-10-14）：** actual SDK／受控socket與getUserMedia拒絕證明，一般錯誤、控制拒絕、初次加入失敗及終止時的alert沒有獨立關閉入口，只能另做控制／重入或等待既有麥克風恢復清除。新增alert外普通type=button「關閉錯誤訊息」，hideError共用既有九個隱藏點以同步按鈕；dismiss只隱藏兩節點，保留文字、errorRevision、micFailure、pending、status與playback。實證若dismiss推進revision，會誤吞同步retryMicrophone回呼後新拋錯，故不改revision語義。新show仍顯示；同一request先error事件再promise catch可能再次show，明確不做去重、因果判斷或恢復承諾。隱藏／未掛載直接callback不操作，不新增timer、SDK、media、storage或新事件；原role=alert文字安全與detail保持。驗證限受控DOM/socket／公開SDK與假媒體，不代表原生AT、鍵盤或可聽音訊驗收。
+
+
+189. **最小 embed 音訊解鎖 pending 接納（2026-10-14）：** whole embed＋公開 SDK／受控 audio 在進房前、live、保留媒體的reconnecting三態連點，基線皆同步發生3次play且按鈕未busy；受控拒絕亂序也可使舊失敗覆寫較新回饋。新增client/playbackGeneration綁定operation，先reserve與disabled/aria-busy再同步呼叫play，重複handler不另送；current失敗可重試，成功維持原feedback。既有generation退役點抽成retirePlayback，client建構時同步退休import等待期間啟動的pre-entry播放；舊catch/finally不得污染新pending。同席重連保留既有pending，保留null-client fallback與終止後明確手動播放，不新增live資格限制、timeout、取消、SDK/media/API或自動重試。原audioblocked舊client假設未有真SDK重現，明確不改；此批不推論原生autoplay／權限／可聽音訊行為。證據限受控DOM/audio/socket與公開SDK，未完成promise持續busy直到settle或lifecycle retirement。
