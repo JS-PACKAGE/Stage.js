@@ -197,6 +197,60 @@ function assertQuiet(h: ReturnType<typeof setup>, captures = 1) {
   assert.equal(h.client['micTestRequests'].size, 0);
 }
 
+it('keeps stopped optional and readonly for older structural MicTest implementations', () => {
+  const legacy: MicTest = { level: () => 0.125, stop() {} };
+  const stopped: boolean | undefined = legacy.stopped;
+  assert.equal(stopped, undefined); assert.equal(legacy.level(), 0.125); legacy.stop();
+  if (false) {
+    // @ts-expect-error The optional status is observation-only, including on older structural implementations.
+    legacy.stopped = true;
+  }
+});
+
+it('exposes stopped as a getter without a setter or observation-triggered audio work', async t => {
+  const h = setup(t), controller = new AbortController();
+  const preview = await h.client.startMicTest({ signal: controller.signal }), source = h.sources[0]!, context = Context.instances[0]!;
+  const descriptor = Object.getOwnPropertyDescriptor(preview, 'stopped');
+  assert.equal(typeof descriptor?.get, 'function'); assert.equal(descriptor?.set, undefined);
+  assert.equal(Reflect.set(preview, 'stopped', true), false, 'a caller cannot overwrite the live flag');
+  for (let n = 0; n < 100; n++) assert.equal(preview.stopped, false);
+  assert.equal(context.reads, 0); assert.equal(context.closes, 0);
+  assert.equal(context.sourceDisconnects, 0); assert.equal(context.analyserDisconnects, 0); assert.equal(source.track.stops, 0);
+  assert.equal(endedListeners(source).length, 1); assert.equal(getEventListeners(controller.signal, 'abort').length, 1);
+  assert.equal(h.ready(), 1); assert.equal(h.client['micTests'].size, 1); assert.deepEqual(h.sampleLengths, [2048]);
+  preview.stop();
+  assert.equal(Reflect.set(preview, 'stopped', false), false, 'a caller cannot revive the terminal flag');
+  for (let n = 0; n < 100; n++) assert.equal(preview.stopped, true);
+  assert.equal(context.reads, 0); assert.deepEqual(h.sampleLengths, [2048]); assert.equal(h.ready(), 1);
+  assertDisposed(source, context, controller.signal); assertQuiet(h);
+});
+
+it('reports stopped while asynchronous meter close is still pending', async t => {
+  const h = setup(t), controller = new AbortController();
+  const preview = await h.client.startMicTest({ signal: controller.signal }), source = h.sources[0]!, context = Context.instances[0]!;
+  const finishClose = deferred<void>(), originalClose = context.close.bind(context);
+  let closeCompleted = false;
+  t.mock.method(context, 'close', async () => {
+    await originalClose(); await finishClose.promise; closeCompleted = true;
+  });
+  try {
+    assert.equal(preview.stopped, false);
+    preview.stop();
+    assert.equal(preview.stopped, true); assert.equal(closeCompleted, false);
+    assertDisposed(source, context, controller.signal);
+    await flush();
+    assert.equal(preview.stopped, true); assert.equal(closeCompleted, false, 'stopped does not wait for AudioContext.close');
+    preview.stop(); controller.abort(); await h.client.disconnect();
+    assert.equal(preview.stopped, true); assert.equal(closeCompleted, false);
+    assert.equal(preview.level(), 0); assert.equal(context.reads, 0);
+    assertDisposed(source, context, controller.signal); assertQuiet(h);
+  } finally {
+    finishClose.resolve(undefined); await flush();
+  }
+  assert.equal(closeCompleted, true); assert.equal(preview.stopped, true);
+  assertDisposed(source, context, controller.signal);
+});
+
 it('rejects an already-ended grant before allocating a preview meter or emitting micready', async t => {
   const h = setup(t), source = stream(), controller = new AbortController();
   source.track.end(); h.supplied.push(source);
@@ -259,9 +313,11 @@ it('binds the ended listener before micready and returns a stopped handle when t
   });
   const preview = await h.client.startMicTest({ signal: controller.signal });
   assert.deepEqual(atReady, [1, 1, 1]); assert.equal(h.ready(), 1);
+  assert.equal(preview.stopped, true);
   assertDisposed(source, Context.instances[0]!, controller.signal);
   assert.equal(h.client['micTests'].size, 0); assert.equal(preview.level(), 0); assert.equal(Context.instances[0]!.reads, 0);
   preview.stop(); controller.abort(); await h.client.disconnect();
+  assert.equal(preview.stopped, true);
   assertDisposed(source, Context.instances[0]!, controller.signal); assertQuiet(h);
 });
 
@@ -273,12 +329,14 @@ it('returns a stopped handle when micready calls track.stop without an ended eve
   h.client.on('micready', () => source.track.stop());
   const preview = await h.client.startMicTest({ signal: controller.signal }), context = Context.instances[0]!;
   assert.equal(h.ready(), 1); assert.equal(endedEvents, 0);
+  assert.equal(preview.stopped, true);
   assert.deepEqual(endedListeners(source), [observeEnd]);
   assert.equal(getEventListeners(controller.signal, 'abort').length, 0);
   assert.equal(source.track.stops, 2, 'one application stop plus one SDK teardown stop');
   assert.equal(context.closes, 1); assert.equal(context.sourceDisconnects, 1); assert.equal(context.analyserDisconnects, 1);
   assert.equal(preview.level(), 0); assert.equal(context.reads, 0); assert.equal(h.client['micTests'].size, 0);
   preview.stop(); controller.abort(); await h.client.disconnect();
+  assert.equal(preview.stopped, true);
   assert.equal(source.track.stops, 2); assert.equal(context.closes, 1); assertQuiet(h);
   source.track.removeEventListener('ended', observeEnd);
 });
@@ -318,23 +376,30 @@ for (const ending of ['natural', 'manual', 'abort', 'disconnect'] as const) {
   it(`${ending} removes owned listeners before graph/track teardown and makes stale callbacks inert`, async t => {
     const h = setup(t), controller = new AbortController();
     const preview = await h.client.startMicTest({ signal: controller.signal }), source = h.sources[0]!, context = Context.instances[0]!;
+    assert.equal(preview.stopped, false);
     const staleEnded = endedListeners(source), staleAbort = getEventListeners(controller.signal, 'abort');
     assert.equal(staleEnded.length, 1); assert.equal(staleAbort.length, 1);
     assert.equal(preview.level(), 0.25); assert.deepEqual(h.sampleLengths, [2048]);
-    const disposalListeners: number[][] = [];
-    const observe = () => disposalListeners.push([endedListeners(source).length, getEventListeners(controller.signal, 'abort').length]);
+    const disposalListeners: number[][] = [], disposalStopped: (boolean | undefined)[] = [];
+    const observe = () => {
+      disposalListeners.push([endedListeners(source).length, getEventListeners(controller.signal, 'abort').length]);
+      disposalStopped.push(preview.stopped);
+    };
     Context.onDispose = observe; source.track.onStop = observe;
     if (ending === 'natural') source.track.end();
     else if (ending === 'manual') preview.stop();
     else if (ending === 'abort') controller.abort();
     else await h.client.disconnect();
     assert.deepEqual(disposalListeners, [[0, 0], [0, 0], [0, 0], [0, 0]]);
+    assert.deepEqual(disposalStopped, [true, true, true, true], 'the terminal flag is visible before every teardown callback');
+    assert.equal(preview.stopped, true);
     assertDisposed(source, context, controller.signal); assert.equal(h.client['micTests'].size, 0);
-    for (let n = 0; n < 100; n++) assert.equal(preview.level(), 0);
+    for (let n = 0; n < 100; n++) { assert.equal(preview.stopped, true); assert.equal(preview.level(), 0); }
     assert.equal(context.reads, 1, 'stopped handle performs no further analyser reads');
     source.track.dispatchEvent(new Event('ended')); replayEnded(source, staleEnded);
     for (const callback of staleAbort) Reflect.apply(callback, controller.signal, [new Event('abort')]);
     preview.stop(); preview.stop(); controller.abort(); await h.client.disconnect();
+    assert.equal(preview.stopped, true); assert.equal(context.reads, 1);
     assertDisposed(source, context, controller.signal); assert.equal(disposalListeners.length, 4); assertQuiet(h);
   });
 }
@@ -345,8 +410,10 @@ it('naturally stops no-option previews and preserves unrelated application track
   const applicationListener = () => { applicationEnds++; };
   source.track.addEventListener('ended', applicationListener);
   const preview = await h.client.startMicTest();
+  assert.equal(preview.stopped, false);
   assert.equal(endedListeners(source).length, 2);
   source.track.end();
+  assert.equal(preview.stopped, true);
   assert.deepEqual(endedListeners(source), [applicationListener]); assert.equal(applicationEnds, 1);
   assert.equal(preview.level(), 0); assert.equal(h.client['micTests'].size, 0);
   source.track.dispatchEvent(new Event('ended')); assert.equal(applicationEnds, 2);
@@ -362,6 +429,7 @@ for (const meter of ['default', 'disabled'] as const) {
     const first = new AbortController(), second = new AbortController();
     const pendingA = h.client.startMicTest({ signal: first.signal }), pendingB = h.client.startMicTest({ signal: second.signal });
     const [a, b] = await Promise.all([pendingA, pendingB]);
+    assert.equal(a.stopped, false); assert.equal(b.stopped, false);
     const aSource = h.sources[1]!, bSource = h.sources[2]!;
     const aContext = Context.instances.at(-2)!, bContext = Context.instances.at(-1)!;
     const staleEnded = endedListeners(aSource);
@@ -371,6 +439,7 @@ for (const meter of ['default', 'disabled'] as const) {
     assert.equal(h.client.micLevel, roomLevel); assert.equal(endedListeners(room).length, 1);
     const roomReads = roomContext?.reads;
     aSource.track.end(); await h.tick(50);
+    assert.equal(a.stopped, true); assert.equal(b.stopped, false);
     assertDisposed(aSource, aContext, first.signal); assert.equal(a.level(), 0);
     assert.equal(b.level(), 0.25); assert.equal(bSource.track.stops, 0); assert.equal(bContext.closes, 0);
     assert.equal(endedListeners(bSource).length, 1); assert.equal(getEventListeners(second.signal, 'abort').length, 1);
@@ -379,17 +448,22 @@ for (const meter of ['default', 'disabled'] as const) {
     assert.equal(peer.transceiver.sender.track, room.track); assert.equal(endedListeners(room).length, 1);
     assert.deepEqual({ replacements: peer.replacements.length, offers: peer.offers, calls: h.constraints.length }, before);
     const replacement: MicTest = await h.client.startMicTest(), replacementSource = h.sources[3]!, replacementContext = Context.instances.at(-1)!;
+    assert.equal(replacement.stopped, false);
     replayEnded(aSource, staleEnded); a.stop(); first.abort();
+    assert.equal(a.stopped, true); assert.equal(b.stopped, false); assert.equal(replacement.stopped, false);
     assert.equal(h.client['micTests'].size, 2); assert.equal(b.level(), 0.25); assert.equal(replacement.level(), 0.25);
     assert.equal(bSource.track.stops, 0); assert.equal(replacementSource.track.stops, 0);
     second.abort(); b.stop(); assertDisposed(bSource, bContext, second.signal);
+    assert.equal(a.stopped, true); assert.equal(b.stopped, true); assert.equal(replacement.stopped, false);
     assert.equal(h.client['micTests'].size, 1); assert.equal(replacement.level(), 0.25);
     replacementSource.track.end(); replacement.stop(); assertDisposed(replacementSource, replacementContext);
+    assert.equal(a.stopped, true); assert.equal(b.stopped, true); assert.equal(replacement.stopped, true);
     assert.equal(h.client['micTests'].size, 0); assert.equal(h.client.micLevel, roomLevel);
     assert.equal(room.track.stops, 0); assert.equal(roomContext?.closes ?? 0, 0);
     assert.equal(peer.replacements.length, before.replacements); assert.equal(peer.offers, before.offers);
     assertQuiet(h, before.calls + 1);
     await h.client.disconnect(); await h.client.disconnect();
+    assert.equal(a.stopped, true); assert.equal(b.stopped, true); assert.equal(replacement.stopped, true);
     assert.equal(room.track.stops, 1); assert.equal(endedListeners(room).length, 0);
     if (roomContext) assert.equal(roomContext.closes, 1);
     assertDisposed(aSource, aContext, first.signal); assertDisposed(bSource, bContext, second.signal);

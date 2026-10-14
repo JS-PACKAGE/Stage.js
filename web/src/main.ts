@@ -278,6 +278,7 @@ micSelect.onchange = () => {
       await client.setInputDevice(deviceId);
       if (generation !== micSettingsGeneration) return;
       selectedInput = deviceId;
+      syncMeter();
       if (micTest) {
         micTest.stop(); micTest = null;
         testButton.textContent = '測試麥克風'; testButton.setAttribute('aria-pressed', 'false');
@@ -373,7 +374,7 @@ function resetMicSettings(): void {
 function syncMeter(): void {
   if (client.me?.onStage && previewCapture) cancelPreviewCapture();
   cancelTestButton.hidden = cancelTestButton.disabled = !previewCapture;
-  if (client.me?.onStage && micTest) {
+  if (micTest && (client.me?.onStage || micTest.stopped === true)) {
     micTest.stop(); micTest = null;
     testButton.textContent = '測試麥克風'; testButton.setAttribute('aria-pressed', 'false');
   }
@@ -384,6 +385,7 @@ function syncMeter(): void {
     const timer = setInterval(() => {
       // A canceled callback may already be queued, including across hide/show.
       if (meterTimer !== timer || document.hidden) return;
+      if (micTest?.stopped === true) { syncMeter(); return; }
       level.value = client.me?.onStage ? client.micLevel : micTest?.level() ?? 0;
     }, 50);
     meterTimer = timer;

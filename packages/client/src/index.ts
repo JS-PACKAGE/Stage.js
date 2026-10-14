@@ -53,7 +53,13 @@ export interface AudioStats {
 export interface StageStats { inbound: AudioStats | null; outbound: AudioStats | null }
 export interface AudioDevices { inputs: MediaDeviceInfo[]; outputs: MediaDeviceInfo[] }
 /** Preview levels become zero after explicit stop or natural capture end; stop remains idempotent. */
-export interface MicTest { level(): number; stop(): void }
+export interface MicTest {
+  /** SDK handles expose a terminal stop flag; optional for older structural implementations.
+   * True means cleanup has started, not that asynchronous AudioContext.close has completed. */
+  readonly stopped?: boolean;
+  level(): number;
+  stop(): void;
+}
 export interface MicTestOptions { signal?: AbortSignal }
 
 
@@ -388,6 +394,7 @@ export class StageClient extends EventTarget {
     const ownedMeter = meter;
     let stopped = false;
     const test: MicTest = {
+      get stopped() { return stopped; },
       level: ownedMeter.level,
       stop: () => {
         if (stopped) return;

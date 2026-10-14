@@ -688,3 +688,6 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 
 
 169. **TLS 憑證監看目錄的原型名稱隔離（2026-10-14）：** parseConfig 接受的相對路徑 __proto__/cert.pem、constructor/cert.pem、toString/cert.pem，在真實 createStageServer 載入有效測試憑證後，原本因一般物件繼承屬性而於分組 .push 拋 TypeError。只將分組字典改為 Object.create(null)，保留 Object.entries 的既有數字鍵順序、同／不同目錄分組、filename 過濾、2 秒 debounce、reload 失敗保留 context、watch 失敗記錄與 shutdown 清理。這是可信設定路徑的啟動健全性修正，不主張遠端可利用性。原生 factory 測試以已安裝 werift helper 產生暫存 synthetic 憑證，僅建立／關閉，無 listen；受控 whole-factory 測試驗證 watcher／timer 語意。不新增依賴、不修改 TLS 政策或使用真實私鑰，不宣稱原生 TLS handshake、ACME 更新或部署驗收。
+
+
+170. **可觀測的預覽停止狀態與完整範例退役（2026-10-14）：** 第168項已清理自然 ended 的 SDK 資源，但 actual SDK／whole sample 受控重現 UI 仍保留 handle，顯示停止測試與 aria-pressed=true，可見10秒繼續200次 meter DOM 寫入且必須兩次點擊才能重測；hidden 期間零 polling 仍正常，返回後卻重開無效 timer。MicTest 新增 optional readonly stopped，SDK public handle 恆以 getter 回報既有 stop latch；true 表示清理已開始，不承諾 AudioContext.close promise 完成。optional 保留舊 structural 實作者／mock 與 startMicTest 回傳型別，不用 level=0 判斷靜音或停止。sample 僅在 stopped===true 清 handle／重設按鈕，使用原有 syncMeter、可見50ms callback與換裝置 await 後同步；保留健康裝置替換、自動stage cleanup、取消／generation、hidden 與 callback token guard。無新事件、timer、權限提示或自動重試；測試涵蓋 callback 內結束、下一tick前重測、hidden後恢復及裝置等待結束，僅聲稱受控DOM工作量，不聲稱原生音訊／CPU。
