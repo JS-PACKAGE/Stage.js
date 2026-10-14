@@ -8844,3 +8844,543 @@ describe('widget controller stage management panel', () => {
   });
 
 });
+
+/**
+ * Stage175 output picker: real SDK enumeration and output selection with controlled native sinks.
+ * This proves widget admission and settlement ordering, not audible routing, browser permissions,
+ * operating-system defaults, native keyboard/AT behavior, or ordering of direct host SDK calls.
+ */
+describe('widget explicit output selection', () => {
+  type Widget = InstanceType<typeof StageElement>;
+  type Operation = 'refresh' | 'apply';
+  type Fixture = Awaited<ReturnType<typeof socketJoinedWidget>>;
+  const nodes = (node: Node): Node[] => [node, ...node.children.flatMap(nodes)];
+  function view(element: Widget) {
+    const panel = nodes(element as unknown as Node).find(node => node.part.has('output-device'));
+    assert.ok(panel, 'the output-device part exists');
+    const children = nodes(panel), select = children.find(node => node.id === 'output-device');
+    const refresh = children.find(node => node.textContent === '重新整理輸出裝置清單');
+    const apply = children.find(node => node.textContent === '送出輸出裝置選擇');
+    assert.ok(select instanceof Select && refresh && apply);
+    return { panel, select, refresh, apply };
+  }
+  const text = (element: Widget) => nodes(view(element).panel).map(node => node.textContent).join('\n');
+  const options = (element: Widget) => view(element).select.options.map(option => ({ value: option.value, label: option.textContent, disabled: option.disabled }));
+  const owner = (element: Widget): unknown => Reflect.get(element, 'outputDeviceOwner');
+  const attempt = (element: Widget): unknown => Reflect.get(element, 'outputDeviceAttempt');
+  const button = (element: Widget, operation: Operation) => view(element)[operation];
+  function press(node: Node): void { node.onclick?.(); }
+  function force(element: Widget): void {
+    for (const key of ['outputDeviceRefresh', 'outputDeviceApply']) {
+      const node = Reflect.get(element, key) as Node; node.disabled = false; press(node);
+    }
+  }
+  function draft(element: Widget, value: string): void {
+    const select = view(element).select; select.value = value;
+    assert.equal(select.value, value, 'requested draft exists in the select');
+    select.onchange?.(new Event('change'));
+  }
+  function assertPicker(element: Widget, { hidden = false, disabled = hidden, value = '', busy }:
+    { hidden?: boolean; disabled?: boolean; value?: string; busy?: Operation } = {}): void {
+    const { panel, select, refresh, apply } = view(element);
+    assert.equal(panel.hidden, hidden, 'output picker visibility');
+    assert.deepEqual([select.disabled, refresh.disabled, apply.disabled], [disabled, disabled, disabled], 'output admission');
+    assert.equal(select.value, value, 'output selection is the retained draft');
+    if (busy) assert.equal(view(element)[busy].getAttribute('aria-busy'), 'true');
+    else assert.equal(Boolean(attempt(element)), false, 'no operation remains pending');
+  }
+  function assertRetired(element: Widget): void {
+    assertPicker(element, { hidden: true }); assert.equal(owner(element), undefined);
+    assert.deepEqual(options(element), [{ value: '', label: '系統預設', disabled: false }]);
+  }
+  function pending<T>() {
+    let resolve!: (value: T) => void, reject!: (error: unknown) => void;
+    const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; });
+    return { promise, resolve, reject };
+  }
+  function device(deviceId: string, label = '', kind: MediaDeviceKind = 'audiooutput'): MediaDeviceInfo {
+    return { deviceId, label, kind, groupId: 'private-output-group', toJSON() { return {}; } };
+  }
+  function fakeOutput(t: TestContext, supported = true) {
+    const navigatorDescriptor = Object.getOwnPropertyDescriptor(globalThis, 'navigator');
+    const sinkDescriptor = Object.getOwnPropertyDescriptor(Audio.prototype, 'setSinkId');
+    const sinks: (ReturnType<typeof pending<void>> & { audio: Audio; id: string })[] = [];
+    const enumerations: ReturnType<typeof pending<MediaDeviceInfo[]>>[] = [];
+    const actual = new WeakMap<Audio, string>();
+    let available = [device('private-output-a', 'USB speaker'), device('private-output-b', 'Headphones')], held = false;
+    let captures = 0;
+    const devices = Object.assign(new EventTarget(), {
+      enumerateDevices() {
+        const request = pending<MediaDeviceInfo[]>(); enumerations.push(request);
+        if (!held) request.resolve(available);
+        return request.promise;
+      },
+      async getUserMedia(): Promise<MediaStream> { captures++; throw new Error('Output picker must not request capture'); },
+    });
+    const setSinkId = function (this: Audio, id: string) {
+      const request = { ...pending<void>(), audio: this, id }; sinks.push(request);
+      return request.promise.then(() => { actual.set(this, id); });
+    };
+    function support(value: boolean): void {
+      if (value) Object.defineProperty(Audio.prototype, 'setSinkId', { configurable: true, writable: true, value: setSinkId });
+      else Reflect.deleteProperty(Audio.prototype, 'setSinkId');
+    }
+    support(supported);
+    Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { mediaDevices: devices } });
+    t.after(async () => {
+      for (const request of sinks) request.resolve();
+      for (const request of enumerations) request.resolve([]);
+      await settle(); await settle();
+      if (navigatorDescriptor) Object.defineProperty(globalThis, 'navigator', navigatorDescriptor); else Reflect.deleteProperty(globalThis, 'navigator');
+      if (sinkDescriptor) Object.defineProperty(Audio.prototype, 'setSinkId', sinkDescriptor); else Reflect.deleteProperty(Audio.prototype, 'setSinkId');
+    });
+    return { sinks, enumerations, devices, support, captures: () => captures,
+      actual(client: StageClient) { return actual.get(client['audio'] as unknown as Audio) ?? ''; },
+      hold(value = true) { held = value; }, list(value: MediaDeviceInfo[]) { available = value; },
+    };
+  }
+  async function refresh(element: Widget): Promise<void> { press(view(element).refresh); await settle(); await settle(); }
+  function error(element: Widget, message = 'Independent current error'): void { element['show'](new Error(message)); }
+  async function rejoin(fixture: Fixture, state = roomState(false, 'two')) {
+    const { client, sockets, tick, joinRequest } = fixture;
+    const connecting = client.connect(), socket = sockets.at(-1)!; socket.hello(); await connecting;
+    const joining = client.join({ roomId: state.roomId, name: 'New seat' }); await settle(); await tick(100);
+    const request = joinRequest(socket); socket.deliver({ type: 'room:state', ...state });
+    socket.deliver({ type: 'ok', requestId: request.requestId }); await joining; await settle();
+    return socket;
+  }
+  function observation(element: Widget) {
+    // EventTarget reports thrown assertions asynchronously; collect raw observations for the test body.
+    const panel = Reflect.get(element, 'outputDevicePanel') as Node, select = Reflect.get(element, 'outputDeviceSelect') as Select;
+    const refresh = Reflect.get(element, 'outputDeviceRefresh') as Node, apply = Reflect.get(element, 'outputDeviceApply') as Node;
+    return { hidden: panel.hidden, disabled: [select.disabled, refresh.disabled, apply.disabled], value: select.value,
+      owner: owner(element), attempt: attempt(element), refresh: refresh.getAttribute('aria-busy'), apply: apply.getAttribute('aria-busy') };
+  }
+
+  it('starts hidden without room state and performs no enumeration, sink change, capture, or autoplay while joining', async t => {
+    const media = fakeOutput(t), play = t.mock.method(Audio.prototype, 'play');
+    const empty = new StageElement(); widgets.push(empty); assertRetired(empty); force(empty); assertRetired(empty);
+    const { element, connections, joins } = deferredJoiningWidget(t); await settle();
+    assertRetired(element); force(element); assert.equal(connections.length, 1);
+    connections[0]!.pending.resolve(); await settle(); assert.equal(joins.length, 1); assertRetired(element); force(element);
+    assert.equal(media.enumerations.length, 0); assert.equal(media.sinks.length, 0); assert.equal(media.captures(), 0); assert.equal(play.mock.callCount(), 0);
+  });
+
+  it('explains unsupported routing and rejects forced controls without enumeration or SDK output calls', async t => {
+    const media = fakeOutput(t, false), { element, client } = await socketJoinedWidget(t);
+    const list = t.mock.method(client, 'listAudioDevices'), set = t.mock.method(client, 'setOutputDevice');
+    assert.equal(client.outputDeviceSupported, false); assertPicker(element, { disabled: true });
+    assert.match(text(element), /此瀏覽器不支援選擇輸出裝置。/); error(element); force(element);
+    assert.equal(list.mock.callCount(), 0); assert.equal(set.mock.callCount(), 0); assert.equal(media.enumerations.length, 0);
+    assert.equal(element['error'].textContent, 'Independent current error'); assertPicker(element, { disabled: true });
+  });
+
+  for (const status of ['waiting', 'live'] as const) for (const role of ['audience', 'speaker', 'controller'] as const) {
+    it(`allows explicit output selection for ${status} ${role} without requiring microphone authority`, async t => {
+      const media = fakeOutput(t), state = roomState(role === 'speaker'); state.status = status; state.me.role = role;
+      if (role === 'controller') state.controllerId = state.me.participantId;
+      const { element, client, socket } = await socketJoinedWidget(t, state), frames = [...socket.sent];
+      assertPicker(element); assert.equal(media.enumerations.length, 0); await refresh(element); draft(element, 'private-output-a');
+      assert.equal(media.sinks.length, 0); press(view(element).apply); assertPicker(element, { disabled: true, value: 'private-output-a', busy: 'apply' });
+      assert.equal(media.sinks.length, 1); assert.equal(media.sinks[0]!.id, 'private-output-a');
+      media.sinks[0]!.resolve(); await settle(); await settle(); assertPicker(element, { value: 'private-output-a' });
+      assert.equal(media.actual(client), 'private-output-a'); assert.deepEqual(socket.sent, frames); assert.equal(media.captures(), 0);
+    });
+  }
+
+  it('labels a draft, filters real outputs, safely renders names, deduplicates IDs, and refreshes without choosing or changing the actual sink', async t => {
+    const media = fakeOutput(t), { element, client } = await socketJoinedWidget(t);
+    const hostile = '<img src=x onerror=alert(1)> &amp; "speaker"';
+    media.list([device('input-secret', 'Not an output', 'audioinput'), device('', 'Empty ID'), device('default', 'OS default'),
+      device('private-output-a', hostile), device('private-output-a', 'Duplicate label'), device('anonymous-id', '   ')]);
+    await refresh(element); const list = options(element);
+    assert.deepEqual(list.map(option => option.value), ['', 'default', 'private-output-a', 'anonymous-id']);
+    assert.equal(list[0]!.label, '系統預設'); assert.equal(list[2]!.label, hostile);
+    assert.match(list[3]!.label, /輸出裝置|揚聲器/); assert.doesNotMatch(list[3]!.label, /anonymous-id/);
+    assert.match(text(element), /輸出裝置選擇（草稿）/); assert.match(text(element), /草稿.*不代表|不代表.*實際/);
+    const label = nodes(view(element).panel).find(node => node.tagName === 'LABEL'); assert.equal(label?.getAttribute('for'), 'output-device');
+    const described = view(element).select.getAttribute('aria-describedby'); assert.ok(described);
+    for (const id of described.split(/\s+/)) assert.ok(nodes(view(element).panel).some(node => node.id === id));
+    for (const node of nodes(view(element).panel)) { assert.equal(Reflect.get(node, 'innerHTML'), undefined); assert.ok(!['IMG', 'SCRIPT'].includes(node.tagName)); }
+    assert.doesNotMatch(text(element), /Not an output|Empty ID|Duplicate label|input-secret|private-output-group/);
+    draft(element, 'private-output-a'); assert.equal(media.sinks.length, 0);
+    media.list([device('private-output-b', 'New speaker')]); await refresh(element);
+    const retained = options(element).find(option => option.value === 'private-output-a'); assert.ok(retained); assert.equal(retained.disabled, true);
+    assert.doesNotMatch(retained.label, /private-output-a/); assert.equal(view(element).select.value, 'private-output-a');
+    media.list([]); await refresh(element); assert.equal(view(element).select.value, 'private-output-a');
+    media.list([device('private-output-a', 'Returned speaker')]); await refresh(element);
+    assert.equal(options(element).find(option => option.value === 'private-output-a')?.disabled, false);
+    assert.equal(media.actual(client), ''); assert.equal(media.sinks.length, 0);
+    const count = media.enumerations.length; media.devices.dispatchEvent(new Event('devicechange')); await settle(); assert.equal(media.enumerations.length, count);
+    assert.equal(getEventListeners(media.devices, 'devicechange').length, 0);
+  });
+
+  it('changes only the local sink, retains volume/listen/mic policy and autoplay notice, and restores system default only on explicit Apply', async t => {
+    const media = fakeOutput(t), state = roomState(true); state.me.muted = true; state.me.forceMuted = true;
+    const { element, client, socket } = await socketJoinedWidget(t, state), frames = [...socket.sent];
+    element.playbackVolume = .37; element.playbackMuted = true;
+    client.dispatchEvent(new CustomEvent('audioblocked', { detail: { message: 'Autoplay blocked' } }));
+    const play = t.mock.method(Audio.prototype, 'play'), unlock = t.mock.method(client, 'unlockAudio');
+    const input = t.mock.method(client, 'setInputDevice'), retry = t.mock.method(client, 'retryMicrophone');
+    const before = structuredClone(client.me); await refresh(element); draft(element, 'private-output-a');
+    const beforeText = text(element); press(view(element).apply); force(element); assert.equal(media.sinks.length, 1);
+    media.sinks[0]!.resolve(); await settle(); await settle(); assert.equal(text(element), beforeText, 'completion adds no actual-device or audible-success claim');
+    assert.equal(element['unlock'].hidden, false); assert.equal(play.mock.callCount(), 0); assert.equal(unlock.mock.callCount(), 0);
+    assert.equal(input.mock.callCount(), 0); assert.equal(retry.mock.callCount(), 0); assert.equal(media.captures(), 0);
+    assert.equal(client.playbackVolume, .37); assert.equal(client.playbackMuted, true); assert.deepEqual(client.me, before); assert.deepEqual(socket.sent, frames);
+    draft(element, ''); assert.equal(media.actual(client), 'private-output-a'); press(view(element).apply); assert.equal(media.sinks[1]!.id, '');
+    media.sinks[1]!.resolve(); await settle(); await settle(); assert.equal(media.actual(client), ''); assertPicker(element);
+  });
+
+  for (const operation of ['refresh', 'apply'] as const) for (const event of ['state', 'status', 'micready'] as const) {
+    it(`reserves ${operation} before synchronous SDK ${event} reentry and shares one lock across both controls`, async t => {
+      const media = fakeOutput(t), { element, client, socket } = await socketJoinedWidget(t); await refresh(element); draft(element, 'private-output-a');
+      const gate = pending<{ inputs: MediaDeviceInfo[]; outputs: MediaDeviceInfo[] }>(), seen: ReturnType<typeof observation>[] = [];
+      const emit = () => {
+        if (event === 'state') socket.deliver({ type: 'room:state', ...roomState() });
+        else client.dispatchEvent(new CustomEvent(event, { detail: event === 'status' ? 'live' : undefined }));
+      };
+      const list = t.mock.method(client, 'listAudioDevices', () => { emit(); return gate.promise; });
+      const sink = t.mock.method(client, 'setOutputDevice', () => { emit(); return gate.promise.then(() => {}); });
+      element.addEventListener(`stage-${event}`, () => { seen.push(observation(element)); force(element); });
+      press(button(element, operation)); const retained = attempt(element); assert.ok(retained);
+      assert.equal(seen.length, 1); assert.deepEqual(seen[0]!.disabled, [true, true, true]); assert.equal(seen[0]!.attempt, retained);
+      assert.equal(seen[0]!.value, 'private-output-a'); assert.equal(seen[0]![operation], 'true');
+      force(element); client.dispatchEvent(new CustomEvent('micready', { detail: undefined })); force(element);
+      assert.equal(list.mock.callCount(), operation === 'refresh' ? 1 : 0); assert.equal(sink.mock.callCount(), operation === 'apply' ? 1 : 0);
+      const select = view(element).select; select.value = ''; select.onchange?.(new Event('change'));
+      assert.equal(select.value, 'private-output-a', 'disabled change cannot replace the pending draft');
+      gate.resolve({ inputs: [], outputs: [device('private-output-a', 'Updated')] }); await settle(); await settle();
+      assertPicker(element, { value: 'private-output-a' }); assert.equal(media.sinks.length, 0);
+    });
+  }
+
+  for (const operation of ['refresh', 'apply'] as const) for (const failure of ['synchronous SDK throw', 'asynchronous native rejection'] as const) {
+    it(`reports ${operation} ${failure}, retains its draft and list, and permits an explicit retry without automatic replay`, async t => {
+      const media = fakeOutput(t), { element, client } = await socketJoinedWidget(t); await refresh(element); draft(element, 'private-output-a');
+      const listed = options(element);
+      const mock = failure === 'synchronous SDK throw'
+        ? t.mock.method(client, operation === 'refresh' ? 'listAudioDevices' : 'setOutputDevice', () => { throw new Error('Current output failure'); }) : undefined;
+      if (operation === 'refresh') media.hold();
+      press(button(element, operation));
+      if (!mock) {
+        if (operation === 'refresh') media.enumerations.at(-1)!.reject(new Error('Current output failure'));
+        else media.sinks.at(-1)!.reject(new DOMException('Current output failure', 'NotAllowedError'));
+      }
+      await settle(); await settle(); assertPicker(element, { value: 'private-output-a' });
+      assert.equal(element['error'].textContent, 'Current output failure'); assert.equal(element['error'].hidden, false); assert.deepEqual(options(element), listed);
+      const counts = [media.enumerations.length, media.sinks.length]; await settle(); assert.deepEqual([media.enumerations.length, media.sinks.length], counts);
+      mock?.mock.restore(); press(button(element, operation)); assert.equal(element['error'].hidden, true);
+      if (operation === 'refresh') media.enumerations.at(-1)!.resolve([device('private-output-a', 'Retry list')]); else media.sinks.at(-1)!.resolve();
+      await settle(); await settle(); assertPicker(element, { value: 'private-output-a' });
+    });
+  }
+
+  for (const operation of ['refresh', 'apply'] as const) {
+    it(`preserves a newer unrelated error when pending ${operation} succeeds`, async t => {
+      const media = fakeOutput(t), { element } = await socketJoinedWidget(t); await refresh(element); draft(element, 'private-output-a'); media.hold();
+      press(button(element, operation)); error(element, 'Newer independent error');
+      if (operation === 'refresh') media.enumerations.at(-1)!.resolve([device('private-output-a')]); else media.sinks.at(-1)!.resolve();
+      await settle(); await settle(); assertPicker(element, { value: 'private-output-a' });
+      assert.equal(element['error'].textContent, 'Newer independent error'); assert.equal(element['error'].hidden, false);
+    });
+  }
+
+  it('rechecks capability at callback time and preserves a pending lock if browser support disappears', async t => {
+    const media = fakeOutput(t), { element, client } = await socketJoinedWidget(t); await refresh(element); draft(element, 'private-output-a');
+    media.support(false); force(element); assert.equal(media.sinks.length, 0); assert.equal(media.enumerations.length, 1); assertPicker(element, { disabled: true, value: 'private-output-a' });
+    media.support(true); client.dispatchEvent(new CustomEvent('micready', { detail: undefined })); press(view(element).apply);
+    const active = attempt(element); media.support(false); client.dispatchEvent(new CustomEvent('micready', { detail: undefined })); force(element);
+    assert.equal(attempt(element), active); assert.equal(media.sinks.length, 1); media.sinks[0]!.resolve(); await settle(); await settle();
+    assertPicker(element, { disabled: true, value: 'private-output-a' }); media.support(true); element['render'](); assertPicker(element, { value: 'private-output-a' });
+  });
+
+  for (const operation of ['refresh', 'apply'] as const) for (const identity of ['room', 'participant'] as const) for (const outcome of ['resolve', 'reject'] as const) {
+    it(`retains the same audio owner and pending ${operation} across a ${identity} change until ${outcome}`, async t => {
+      const media = fakeOutput(t), { element, client, socket } = await socketJoinedWidget(t); await refresh(element); draft(element, 'private-output-a'); media.hold();
+      press(button(element, operation)); const original = owner(element), active = attempt(element), listed = options(element), audio = client['audio'];
+      const seen: ReturnType<typeof observation>[] = [];
+      element.addEventListener('stage-state', () => { seen.push(observation(element)); force(element); }, { once: true });
+      const state = roomState(false, identity === 'room' ? 'two' : 'one'); if (identity === 'participant') state.me.participantId = 'new-seat';
+      socket.deliver({ type: 'room:state', ...state });
+      assert.equal(seen.length, 1); assert.equal(seen[0]!.owner, original); assert.equal(seen[0]!.attempt, active); assert.deepEqual(seen[0]!.disabled, [true, true, true]);
+      assert.equal(client['audio'], audio); assert.deepEqual(options(element), listed); force(element);
+      assert.equal(media.sinks.length, operation === 'apply' ? 1 : 0); assert.equal(media.enumerations.length, operation === 'refresh' ? 2 : 1);
+      const request = operation === 'refresh' ? media.enumerations.at(-1)! : media.sinks.at(-1)!;
+      if (outcome === 'reject') request.reject(new Error('Retained owner failure'));
+      else if (operation === 'refresh') media.enumerations.at(-1)!.resolve([device('private-output-a', 'Retained result')]); else media.sinks.at(-1)!.resolve();
+      await settle(); await settle(); assertPicker(element, { value: 'private-output-a' }); assert.equal(owner(element), original);
+      assert.equal(element['error'].hidden, outcome === 'resolve'); if (outcome === 'reject') assert.equal(element['error'].textContent, 'Retained owner failure');
+    });
+  }
+
+  for (const operation of ['refresh', 'apply'] as const) for (const outcome of ['resolve', 'reject'] as const) {
+    it(`retains ${operation} through automatic reconnect and handles its ${outcome} only once after resume`, async t => {
+      const media = fakeOutput(t), { element, client, socket, sockets, tick, hello } = await socketJoinedWidget(t); await refresh(element); draft(element, 'private-output-a'); media.hold();
+      press(button(element, operation)); const original = owner(element), active = attempt(element), listed = options(element), seen: ReturnType<typeof observation>[] = [];
+      element.addEventListener('stage-status', () => { seen.push(observation(element)); force(element); }, { once: true });
+      socket.close(); await settle(); assert.equal(client.status, 'reconnecting');
+      assert.equal(seen.length, 1); assert.equal(seen[0]!.hidden, false); assert.deepEqual(seen[0]!.disabled, [true, true, true]);
+      assertPicker(element, { disabled: true, value: 'private-output-a', busy: operation }); assert.equal(owner(element), original); assert.equal(attempt(element), active); assert.deepEqual(options(element), listed);
+      await tick(500); const next = sockets[1]!, join = await hello(next); next.deliver({ type: 'room:state', ...roomState() }); next.deliver({ type: 'ok', requestId: join.requestId }); await settle();
+      force(element); assert.equal(media.sinks.length, operation === 'apply' ? 1 : 0); assert.equal(media.enumerations.length, operation === 'refresh' ? 2 : 1);
+      if (outcome === 'reject') (operation === 'refresh' ? media.enumerations.at(-1)! : media.sinks.at(-1)!).reject(new Error('Resumed operation failure'));
+      else if (operation === 'refresh') media.enumerations.at(-1)!.resolve([device('private-output-a')]); else media.sinks.at(-1)!.resolve();
+      await settle(); await settle(); assertPicker(element, { value: 'private-output-a' }); assert.equal(owner(element), original);
+      assert.equal(element['error'].hidden, outcome === 'resolve'); if (outcome === 'reject') assert.equal(element['error'].textContent, 'Resumed operation failure');
+    });
+  }
+
+  for (const transition of ['direct disconnect', 'ordinary close', 'kick', 'shutdown'] as const) for (const outcome of ['resolve', 'reject'] as const) {
+    it(`keeps the actual native sink call pending through ${transition} and same-client new-room/pid rejoin until ${outcome}, then admits a next choice and default`, async t => {
+      const media = fakeOutput(t), fixture = await socketJoinedWidget(t), { element, client, socket } = fixture;
+      await refresh(element); draft(element, 'private-output-a'); press(view(element).apply);
+      const original = owner(element), active = attempt(element), audio = client['audio'], listed = options(element), seen: ReturnType<typeof observation>[] = [];
+      const event = transition === 'direct disconnect' ? 'status' : terminalCases.find(item => item.title === transition)!.event;
+      element.addEventListener(`stage-${event}`, () => { seen.push(observation(element)); force(element); }, { once: true });
+      if (transition === 'direct disconnect') await client.disconnect(); else socket.deliver(terminalCases.find(item => item.title === transition)!.message);
+      await settle(); assert.equal(seen.length, 1); assert.equal(seen[0]!.hidden, true); assert.deepEqual(seen[0]!.disabled, [true, true, true]);
+      assertPicker(element, { hidden: true, value: 'private-output-a', busy: 'apply' }); assert.equal(owner(element), original); assert.equal(attempt(element), active); assert.deepEqual(options(element), listed);
+      const state = roomState(false, 'two'); state.me.participantId = 'new-audio-seat'; await rejoin(fixture, state);
+      assert.equal(element.client, client); assert.equal(client['audio'], audio); assert.equal(owner(element), original); assert.equal(attempt(element), active);
+      assertPicker(element, { disabled: true, value: 'private-output-a', busy: 'apply' }); force(element); assert.equal(media.sinks.length, 1);
+      if (outcome === 'resolve') media.sinks[0]!.resolve(); else media.sinks[0]!.reject(new DOMException('Old native operation failed', 'NotAllowedError'));
+      await settle(); await settle(); assertPicker(element, { value: 'private-output-a' });
+      assert.equal(media.actual(client), outcome === 'resolve' ? 'private-output-a' : '', 'disconnect does not cancel the same audio element native call');
+      if (outcome === 'reject') assert.equal(element['error'].textContent, 'Old native operation failed');
+      draft(element, 'private-output-b'); press(view(element).apply); assert.equal(media.sinks.length, 2); assert.equal(media.sinks[1]!.audio, audio); assert.equal(media.sinks[1]!.id, 'private-output-b');
+      media.sinks[1]!.resolve(); await settle(); await settle(); assert.equal(media.actual(client), 'private-output-b');
+      draft(element, ''); press(view(element).apply); assert.equal(media.sinks[2]!.id, ''); media.sinks[2]!.resolve(); await settle(); await settle(); assert.equal(media.actual(client), ''); assertPicker(element);
+    });
+  }
+
+  for (const operation of ['refresh', 'apply'] as const) for (const transition of ['disconnected', 'terminal', 'snapshot cleared'] as const) {
+    it(`suppresses ${operation} rejection while ${transition} without losing the same-client draft or inventing a retry`, async t => {
+      const media = fakeOutput(t), fixture = await socketJoinedWidget(t), { element, client, socket } = fixture;
+      await refresh(element); draft(element, 'private-output-a'); media.hold(); press(button(element, operation)); const original = owner(element);
+      if (transition === 'disconnected') await client.disconnect(); else if (transition === 'terminal') socket.deliver(terminalCases[0]!.message);
+      else { client['snapshot'] = null; client.dispatchEvent(new CustomEvent('micready', { detail: undefined })); }
+      error(element, 'Keep inactive error'); (operation === 'refresh' ? media.enumerations.at(-1)! : media.sinks.at(-1)!).reject(new Error('Inactive native failure'));
+      await settle(); await settle(); assertPicker(element, { hidden: true, value: 'private-output-a' }); assert.equal(owner(element), original);
+      assert.equal(element['error'].textContent, 'Keep inactive error'); force(element); assert.equal(media.sinks.length, operation === 'apply' ? 1 : 0);
+      if (transition === 'snapshot cleared') socket.deliver({ type: 'room:state', ...roomState() }); else await rejoin(fixture);
+      assertPicker(element, { value: 'private-output-a' }); assert.equal(owner(element), original); assert.equal(media.enumerations.length, operation === 'refresh' ? 2 : 1);
+    });
+  }
+
+  for (const operation of ['refresh', 'apply'] as const) for (const outcome of ['resolve', 'reject'] as const) {
+    it(`isolates old-client ${operation} ${outcome} from replacement pending state, errors, list and event callbacks`, async t => {
+      const media = fakeOutput(t), { element, client, socket, sockets, hello } = await socketJoinedWidget(t); await refresh(element); draft(element, 'private-output-a'); media.hold();
+      press(button(element, operation)); const oldOwner = owner(element), oldMessage = socket.onmessage, oldClose = socket.onclose;
+      const oldEnumeration = media.enumerations.at(-1)!, oldSink = media.sinks.at(-1);
+      element.setAttribute('room', 'two'); await settle(); await settle(); assertRetired(element);
+      const current = element.client!, next = sockets[1]!, request = await hello(next); assert.notEqual(current, client);
+      next.deliver({ type: 'room:state', ...roomState(false, 'two') }); next.deliver({ type: 'ok', requestId: request.requestId }); await settle();
+      assertPicker(element); assert.notEqual(owner(element), oldOwner); press(button(element, operation)); const active = attempt(element), currentOwner = owner(element);
+      error(element, 'Replacement client error');
+      if (outcome === 'reject') (operation === 'refresh' ? oldEnumeration : oldSink!).reject(new Error('Retired native failure'));
+      else if (operation === 'refresh') oldEnumeration.resolve([device('retired-output', 'Retired private output')]); else oldSink!.resolve();
+      oldMessage?.({ data: JSON.stringify({ type: 'room:state', ...roomState() }) }); oldClose?.(); client.dispatchEvent(new CustomEvent('micready', { detail: undefined }));
+      client.dispatchEvent(new CustomEvent('error', { detail: new Error('Retired event failure') })); await settle(); await settle();
+      assert.equal(attempt(element), active); assert.equal(owner(element), currentOwner); assertPicker(element, { disabled: true, busy: operation });
+      assert.equal(element['error'].textContent, 'Replacement client error'); assert.doesNotMatch(text(element), /Retired private output|retired-output/);
+      if (operation === 'refresh') media.enumerations.at(-1)!.resolve([device('fresh-output', 'Fresh output')]); else media.sinks.at(-1)!.resolve();
+      await settle(); await settle(); assertPicker(element); assert.equal(element['error'].textContent, 'Replacement client error');
+      if (operation === 'apply') assert.notEqual(oldSink!.audio, media.sinks.at(-1)!.audio);
+    });
+  }
+
+  for (const operation of ['refresh', 'apply'] as const) for (const transition of ['leave', 'detach', 'generation'] as const) {
+    it(`clears ${operation} ownership and device privacy state on widget ${transition}, ignoring late rejection and forced callbacks`, async t => {
+      const media = fakeOutput(t), { element, client } = await socketJoinedWidget(t); await refresh(element); draft(element, 'private-output-a'); media.hold();
+      press(button(element, operation));
+      if (transition === 'leave') click(element['roomAction']);
+      else if (transition === 'detach') { Object.assign(element, { isConnected: false }); element.disconnectedCallback(); }
+      else { ++element['generation']; element['current'] = null; element['render'](); }
+      await settle(); assertRetired(element); error(element, 'Current teardown error'); force(element);
+      (operation === 'refresh' ? media.enumerations.at(-1)! : media.sinks.at(-1)!).reject(new Error('Late teardown failure'));
+      await settle(); await settle(); assertRetired(element); assert.equal(element['error'].textContent, 'Current teardown error');
+      assert.equal(media.sinks.length, operation === 'apply' ? 1 : 0); assert.equal(media.enumerations.length, operation === 'refresh' ? 2 : 1);
+      await client.disconnect();
+    });
+  }
+
+  it('retains a pre-ACK sink operation through socket loss, silent disconnect and public rejoin of the same audio element', async t => {
+    const media = fakeOutput(t), fixture = socketJoiningWidget(t); await settle();
+    const { element, sockets, hello, tick, joinRequest } = fixture, socket = sockets[0]!, join = await hello(socket), client = element.client!;
+    socket.deliver({ type: 'room:state', ...roomState() }); assert.equal(client['session'], null); assert.equal(client['pending'].has(join.requestId), true);
+    await refresh(element); draft(element, 'private-output-a'); press(view(element).apply); const original = owner(element), active = attempt(element);
+    socket.close(); await settle(); assert.equal(client.status, 'disconnected'); assertPicker(element, { hidden: true, value: 'private-output-a', busy: 'apply' });
+    let statuses = 0; element.addEventListener('stage-status', () => { statuses++; }); await client.disconnect(); assert.equal(statuses, 0);
+    const connecting = client.connect(), next = sockets[1]!; next.hello(); await connecting;
+    const joining = client.join({ roomId: 'two', name: 'Fresh seat' }); await settle(); await tick(100); const request = joinRequest(next);
+    const state = roomState(false, 'two'); state.me.participantId = 'different-seat'; next.deliver({ type: 'room:state', ...state }); next.deliver({ type: 'ok', requestId: request.requestId }); await joining;
+    assert.equal(owner(element), original); assert.equal(attempt(element), active); force(element); assert.equal(media.sinks.length, 1);
+    media.sinks[0]!.resolve(); await settle(); await settle(); assertPicker(element, { value: 'private-output-a' }); assert.equal(media.actual(client), 'private-output-a');
+  });
+
+  it('rechecks after a forwarded micready callback silently removes the snapshot, and never admits another call before restoration', async t => {
+    const media = fakeOutput(t), { element, client, socket } = await socketJoinedWidget(t); await refresh(element); draft(element, 'private-output-a'); press(view(element).apply);
+    const original = owner(element), active = attempt(element); let calls = 0;
+    element.addEventListener('stage-micready', () => { calls++; client['snapshot'] = null; }, { once: true });
+    client.dispatchEvent(new CustomEvent('micready', { detail: undefined })); assert.equal(calls, 1);
+    assertPicker(element, { hidden: true, value: 'private-output-a', busy: 'apply' }); force(element); assert.equal(media.sinks.length, 1);
+    socket.deliver({ type: 'room:state', ...roomState(false, 'two') }); assert.equal(owner(element), original); assert.equal(attempt(element), active);
+    force(element); assert.equal(media.sinks.length, 1); media.sinks[0]!.resolve(); await settle(); await settle(); assertPicker(element, { value: 'private-output-a' });
+  });
+
+  for (const transition of ['direct disconnect', 'ordinary close', 'kick', 'shutdown'] as const) for (const outcome of ['resolve', 'reject'] as const) {
+    it(`retains enumeration ownership through ${transition} and same-client rejoin until ${outcome}`, async t => {
+      const media = fakeOutput(t), fixture = await socketJoinedWidget(t), { element, client, socket } = fixture;
+      await refresh(element); draft(element, 'private-output-a'); media.hold(); press(view(element).refresh);
+      const original = owner(element), active = attempt(element), listed = options(element);
+      if (transition === 'direct disconnect') await client.disconnect(); else socket.deliver(terminalCases.find(item => item.title === transition)!.message);
+      await settle(); assertPicker(element, { hidden: true, value: 'private-output-a', busy: 'refresh' });
+      assert.equal(owner(element), original); assert.equal(attempt(element), active); assert.deepEqual(options(element), listed);
+      await rejoin(fixture); force(element); assert.equal(media.enumerations.length, 2); assert.equal(media.sinks.length, 0);
+      if (outcome === 'resolve') media.enumerations[1]!.resolve([device('private-output-a', 'Same audio refreshed list')]);
+      else media.enumerations[1]!.reject(new Error('Current same-audio enumeration failure'));
+      await settle(); await settle(); assertPicker(element, { value: 'private-output-a' }); assert.equal(owner(element), original);
+      if (outcome === 'resolve') assert.match(text(element), /Same audio refreshed list/);
+      else assert.equal(element['error'].textContent, 'Current same-audio enumeration failure');
+      assert.equal(media.enumerations.length, 2);
+    });
+  }
+
+  for (const operation of ['refresh', 'apply'] as const) for (const outcome of ['resolve', 'reject'] as const) {
+    it(`settles ${operation} ${outcome} during reconnect without enabling controls, reporting inactive errors or replaying on resume`, async t => {
+      const media = fakeOutput(t), { element, client, socket, sockets, tick, hello } = await socketJoinedWidget(t);
+      await refresh(element); draft(element, 'private-output-a'); media.hold(); press(button(element, operation)); const original = owner(element);
+      socket.close(); await settle(); error(element, 'Keep reconnect error');
+      if (outcome === 'reject') (operation === 'refresh' ? media.enumerations.at(-1)! : media.sinks.at(-1)!).reject(new Error('Silent reconnect failure'));
+      else if (operation === 'refresh') media.enumerations.at(-1)!.resolve([device('private-output-a', 'Updated during reconnect')]); else media.sinks.at(-1)!.resolve();
+      await settle(); await settle(); assertPicker(element, { disabled: true, value: 'private-output-a' }); force(element);
+      assert.equal(element['error'].textContent, 'Keep reconnect error'); assert.equal(owner(element), original);
+      assert.equal(media.enumerations.length, operation === 'refresh' ? 2 : 1); assert.equal(media.sinks.length, operation === 'apply' ? 1 : 0);
+      await tick(500); const next = sockets[1]!, request = await hello(next); next.deliver({ type: 'room:state', ...roomState() }); next.deliver({ type: 'ok', requestId: request.requestId }); await settle();
+      assert.equal(client.status, 'live'); assertPicker(element, { value: 'private-output-a' }); assert.equal(owner(element), original);
+      assert.equal(media.enumerations.length, operation === 'refresh' ? 2 : 1); assert.equal(media.sinks.length, operation === 'apply' ? 1 : 0);
+    });
+  }
+
+  it('keeps an unresolved native operation reserved beyond control-request deadlines and requires its actual settlement', async t => {
+    const media = fakeOutput(t), fixture = await socketJoinedWidget(t), { element, client, tick } = fixture;
+    await refresh(element); draft(element, 'private-output-a'); press(view(element).apply); const active = attempt(element);
+    await client.disconnect(); await tick(60000); assert.equal(attempt(element), active); assertPicker(element, { hidden: true, value: 'private-output-a', busy: 'apply' });
+    await rejoin(fixture); force(element); assert.equal(media.sinks.length, 1); assert.equal(attempt(element), active);
+    media.sinks[0]!.resolve(); await settle(); await settle(); assertPicker(element, { value: 'private-output-a' });
+  });
+
+  it('uses the actual SDK generic fallback for a non-Error native rejection and retries only after a fresh explicit Apply', async t => {
+    const media = fakeOutput(t), { element } = await socketJoinedWidget(t); await refresh(element); draft(element, 'private-output-a'); press(view(element).apply);
+    media.sinks[0]!.reject('private native failure'); await settle(); await settle(); assert.equal(element['error'].textContent, '無法切換揚聲器。');
+    assert.doesNotMatch(element['error'].textContent ?? '', /private native/); assertPicker(element, { value: 'private-output-a' }); assert.equal(media.sinks.length, 1);
+    press(view(element).apply); assert.equal(media.sinks.length, 2); media.sinks[1]!.resolve(); await settle(); await settle(); assertPicker(element, { value: 'private-output-a' });
+  });
+
+  it('handles actual SDK unsupported rejection after admission and waits for restored support before explicit retry', async t => {
+    const media = fakeOutput(t), { element, client } = await socketJoinedWidget(t); await refresh(element); draft(element, 'private-output-a');
+    const original = client.setOutputDevice;
+    const wrapper = t.mock.method(client, 'setOutputDevice', function (this: StageClient, id: string) { media.support(false); return original.call(this, id); });
+    press(view(element).apply); await settle(); await settle(); assertPicker(element, { disabled: true, value: 'private-output-a' });
+    assert.equal(element['error'].textContent, '此瀏覽器不支援選擇揚聲器。'); force(element); assert.equal(wrapper.mock.callCount(), 1); assert.equal(media.sinks.length, 0);
+    wrapper.mock.restore(); media.support(true); element['render'](); press(view(element).apply); assert.equal(media.sinks.length, 1);
+    media.sinks[0]!.resolve(); await settle(); await settle(); assertPicker(element, { value: 'private-output-a' });
+  });
+
+  for (const policy of ['audience', 'unmuted', 'self-muted', 'force-muted'] as const) {
+    it(`preserves the real SDK ${policy} capture/peer resources and negotiation count during output refresh, apply and default`, async t => {
+      const media = fakeOutput(t), descriptors = new Map(['RTCPeerConnection', 'AudioContext'].map(name => [name, Object.getOwnPropertyDescriptor(globalThis, name)]));
+      const tracks: (EventTarget & { enabled: boolean; readyState: string; stops: number; stop(): void })[] = [];
+      const capture = t.mock.method(media.devices, 'getUserMedia', async () => {
+        const track = Object.assign(new EventTarget(), { enabled: true, readyState: 'live', stops: 0,
+          stop() { this.stops++; this.readyState = 'ended'; } }); tracks.push(track);
+        return { getTracks: () => [track], getAudioTracks: () => [track] } as unknown as MediaStream;
+      });
+      class Peer {
+        static instances: Peer[] = [];
+        connectionState = 'connected'; signalingState = 'stable'; localDescription = { type: 'offer', sdp: 'installed' }; closed = false;
+        readonly replacements: unknown[] = [];
+        readonly transceiver = { direction: 'recvonly', sender: { track: null as unknown,
+          replaceTrack: async (track: unknown) => { this.replacements.push(track); this.transceiver.sender.track = track; } } };
+        constructor() { Peer.instances.push(this); }
+        addTransceiver() { return this.transceiver; }
+        close(): void { this.closed = true; }
+      }
+      class Context {
+        createMediaStreamSource() { return { connect() {}, disconnect() {} }; }
+        createAnalyser() { return { fftSize: 2048, disconnect() {}, getFloatTimeDomainData() {} }; }
+        async resume() {} async close() {}
+      }
+      Object.defineProperty(globalThis, 'RTCPeerConnection', { configurable: true, value: Peer });
+      Object.defineProperty(globalThis, 'AudioContext', { configurable: true, value: Context });
+      t.after(() => { for (const [name, descriptor] of descriptors) { if (descriptor) Object.defineProperty(globalThis, name, descriptor); else Reflect.deleteProperty(globalThis, name); } });
+      const negotiate = t.mock.method(StageClient.prototype as unknown as { negotiate(): void }, 'negotiate', () => {});
+      const state = roomState(policy !== 'audience'); state.me.muted = policy === 'self-muted' || policy === 'force-muted'; state.me.forceMuted = policy === 'force-muted';
+      const { element, client, socket } = await socketJoinedWidget(t, state, true); await client['mediaTask'];
+      const peer = Peer.instances[0]!; assert.ok(peer); assert.equal(capture.mock.callCount(), policy === 'audience' ? 0 : 1);
+      const before = { captures: capture.mock.callCount(), tracks: [...tracks], replacements: [...peer.replacements], direction: peer.transceiver.direction,
+        track: peer.transceiver.sender.track, offers: negotiate.mock.callCount(), mic: client['mic'], input: client['inputDeviceId'], flags: structuredClone(client.me), frames: [...socket.sent] };
+      element.playbackVolume = .43; element.playbackMuted = true; await refresh(element); draft(element, 'private-output-a'); press(view(element).apply);
+      media.sinks[0]!.resolve(); await settle(); await settle(); draft(element, ''); press(view(element).apply); media.sinks[1]!.resolve(); await settle(); await settle();
+      assert.equal(capture.mock.callCount(), before.captures); assert.deepEqual(tracks, before.tracks); assert.deepEqual(peer.replacements, before.replacements);
+      assert.equal(peer.transceiver.sender.track, before.track); assert.equal(peer.transceiver.direction, before.direction); assert.equal(peer.closed, false); assert.equal(Peer.instances.length, 1);
+      assert.equal(negotiate.mock.callCount(), before.offers); assert.equal(client['mic'], before.mic); assert.equal(client['inputDeviceId'], before.input); assert.deepEqual(client.me, before.flags);
+      assert.ok(tracks.every(track => track.stops === 0)); if (tracks[0]) assert.equal(tracks[0].enabled, !state.me.muted);
+      assert.equal(client.playbackVolume, .43); assert.equal(client.playbackMuted, true); assert.deepEqual(socket.sent, before.frames); assertPicker(element);
+    });
+  }
+
+  for (const operation of ['refresh', 'apply'] as const) for (const first of ['output', 'microphone'] as const) {
+    it(`keeps input and output ${operation} lanes independent when ${first} starts first, including shared micready`, async t => {
+      const media = fakeOutput(t), { element, client } = await socketJoinedWidget(t);
+      media.list([device('private-output-a', 'Speaker'), device('private-input-a', 'Microphone', 'audioinput')]);
+      await refresh(element); click(element['microphoneRefresh']); await settle(); await settle();
+      draft(element, 'private-output-a'); element['microphoneSelect'].value = 'private-input-a';
+      const input = deferred(), setter = t.mock.method(client, 'setInputDevice', () => input.promise); media.hold();
+      const inputButton = operation === 'refresh' ? element['microphoneRefresh'] : element['microphoneApply'];
+      if (first === 'output') {
+        press(button(element, operation));
+        assert.equal(element['microphoneSelect'].disabled, false); assert.equal(element['microphoneRefresh'].disabled, false); assert.equal(element['microphoneApply'].disabled, false);
+        click(inputButton);
+      } else {
+        click(inputButton); assertPicker(element, { value: 'private-output-a' }); press(button(element, operation));
+      }
+      const outputAttempt = attempt(element), inputAttempt = operation === 'refresh' ? element['refreshAttempt'] : element['inputDeviceAttempt'];
+      assert.ok(outputAttempt && inputAttempt); assert.notEqual(outputAttempt, inputAttempt);
+      assertPicker(element, { disabled: true, value: 'private-output-a', busy: operation });
+      assert.equal(element['microphoneSelect'].disabled, true); assert.equal(inputButton.getAttribute('aria-busy'), 'true');
+      client.dispatchEvent(new CustomEvent('micready', { detail: undefined })); force(element); click(inputButton);
+      assert.equal(attempt(element), outputAttempt); assert.equal(operation === 'refresh' ? element['refreshAttempt'] : element['inputDeviceAttempt'], inputAttempt);
+      assert.equal(media.enumerations.length, operation === 'refresh' ? 4 : 2); assert.equal(media.sinks.length, operation === 'apply' ? 1 : 0); assert.equal(setter.mock.callCount(), operation === 'apply' ? 1 : 0);
+      const finishOutput = () => {
+        if (operation === 'apply') media.sinks[0]!.resolve();
+        else media.enumerations[first === 'output' ? 2 : 3]!.resolve([device('private-output-a', 'Refreshed speaker')]);
+      };
+      const finishInput = () => {
+        if (operation === 'apply') input.resolve();
+        else media.enumerations[first === 'microphone' ? 2 : 3]!.resolve([device('private-input-a', 'Refreshed microphone', 'audioinput')]);
+      };
+      if (first === 'output') {
+        finishOutput(); await settle(); await settle(); assertPicker(element, { value: 'private-output-a' });
+        assert.equal(operation === 'refresh' ? element['refreshAttempt'] : element['inputDeviceAttempt'], inputAttempt); assert.equal(inputButton.disabled, true);
+        finishInput();
+      } else {
+        finishInput(); await settle(); await settle(); assert.equal(element['microphoneSelect'].disabled, false);
+        assert.equal(attempt(element), outputAttempt); assertPicker(element, { disabled: true, value: 'private-output-a', busy: operation }); finishOutput();
+      }
+      await settle(); await settle(); assertPicker(element, { value: 'private-output-a' });
+      assert.equal(element['microphoneSelect'].disabled, false); assert.equal(element['microphoneSelect'].value, 'private-input-a');
+    });
+  }
+
+  it('does not claim to serialize direct host SDK calls or present its draft as the actual sink', async t => {
+    const media = fakeOutput(t), { element, client } = await socketJoinedWidget(t); await refresh(element); draft(element, 'private-output-a'); press(view(element).apply);
+    const active = attempt(element), host = client.setOutputDevice('private-output-b'); assert.equal(media.sinks.length, 2);
+    media.sinks[1]!.resolve(); await host; assert.equal(media.actual(client), 'private-output-b'); assert.equal(attempt(element), active);
+    assertPicker(element, { disabled: true, value: 'private-output-a', busy: 'apply' });
+    media.sinks[0]!.resolve(); await settle(); await settle(); assert.equal(media.actual(client), 'private-output-a'); assertPicker(element, { value: 'private-output-a' });
+    const hostDefault = client.setOutputDevice(''); media.sinks[2]!.resolve(); await hostDefault;
+    assert.equal(media.actual(client), ''); assertPicker(element, { value: 'private-output-a' });
+  });
+});

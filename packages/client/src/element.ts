@@ -34,6 +34,10 @@ const STYLE = `
 [part=microphone][hidden] { display: none; }
 [part=microphone] p { flex-basis: 100%; margin: 0; font-size: .875em; }
 [part=microphone] select { font: inherit; max-width: 100%; }
+[part=output-device] { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; }
+[part=output-device][hidden] { display: none; }
+[part=output-device] p { flex-basis: 100%; margin: 0; font-size: .875em; }
+[part=output-device] select { font: inherit; max-width: 100%; }
 input[type=range] { flex: 1; min-width: 5rem; max-width: 12rem; }
 button { font: inherit; padding: .4rem .8rem; border-radius: var(--stage-radius, .5rem); border: 1px solid var(--stage-border, #8884); background: var(--stage-button-bg, #fff1); color: inherit; cursor: pointer; }
 button[hidden] { display: none; }
@@ -58,7 +62,8 @@ button.primary { background: var(--stage-accent, #2563eb); border-color: transpa
  * A controller can explicitly approve or reject the snapshot's hand requests; the server owns admission.
  * Controllers can lock/unlock other speakers' mute or remove them from the stage without removing them from the room.
  * The microphone picker is an explicit draft, never an indicator of the actual capture device.
- * Style through `::part(panel|status|quality|speaking|hand-rejection|actions|name|room-name|hands|stage-management|playback|microphone)` and the
+ * The output picker is also a draft; explicit refresh and submission never imply audible playback.
+ * Style through `::part(panel|status|quality|speaking|hand-rejection|actions|name|room-name|hands|stage-management|playback|microphone|output-device)` and the
  * `--stage-*` custom properties.
  */
 export class StageElement extends HTMLElement {
@@ -120,6 +125,14 @@ export class StageElement extends HTMLElement {
   private microphoneTerminalClient: StageClient | undefined;
   private refreshAttempt: object | undefined;
   private inputDeviceAttempt: object | undefined;
+  private readonly outputDevicePanel: HTMLDivElement;
+  private readonly outputDeviceSelect: HTMLSelectElement;
+  private readonly outputDeviceRefresh: HTMLButtonElement;
+  private readonly outputDeviceApply: HTMLButtonElement;
+  private readonly outputDeviceUnsupported: HTMLParagraphElement;
+  private outputDeviceOwner: { client: StageClient; generation: number; draft: string } | undefined;
+  private outputDeviceTerminalClient: StageClient | undefined;
+  private outputDeviceAttempt: { kind: 'refresh' | 'apply' } | undefined;
   private errorRevision = 0;
   private readonly leaveStage: HTMLButtonElement;
   private readonly roomAction: HTMLButtonElement;
@@ -240,6 +253,35 @@ export class StageElement extends HTMLElement {
     microphoneNotice.id = 'microphone-draft-notice';
     microphoneNotice.textContent = '草稿不代表目前實際擷取裝置；麥克風失敗後需另按「重試麥克風」。重新整理清單不會開啟麥克風；預設選項沿用 SDK 設定。';
     this.microphonePanel.append(microphoneLabel, this.microphoneSelect, this.microphoneRefresh, this.microphoneApply, microphoneNotice);
+    this.outputDevicePanel = document.createElement('div');
+    this.outputDevicePanel.part.add('output-device');
+    const outputDeviceLabel = document.createElement('label');
+    outputDeviceLabel.textContent = '輸出裝置選擇（草稿）';
+    outputDeviceLabel.setAttribute('for', 'output-device');
+    this.outputDeviceSelect = document.createElement('select');
+    this.outputDeviceSelect.id = 'output-device';
+    this.outputDeviceSelect.setAttribute('aria-describedby', 'output-device-draft-notice output-device-unsupported');
+    this.outputDeviceSelect.onchange = () => {
+      const owner = this.outputDeviceOwner, draft = this.outputDeviceSelect.value;
+      this.syncOutputDeviceOwner();
+      if (!owner || this.outputDeviceOwner !== owner || this.outputDevicePanel.hidden
+        || this.outputDeviceSelect.disabled || this.outputDeviceAttempt) return;
+      owner.draft = draft; this.outputDeviceSelect.value = draft;
+    };
+    this.outputDeviceRefresh = document.createElement('button');
+    this.outputDeviceRefresh.type = 'button'; this.outputDeviceRefresh.textContent = '重新整理輸出裝置清單';
+    this.outputDeviceRefresh.onclick = () => this.refreshOutputDevices();
+    this.outputDeviceApply = document.createElement('button');
+    this.outputDeviceApply.type = 'button'; this.outputDeviceApply.textContent = '送出輸出裝置選擇';
+    this.outputDeviceApply.onclick = () => this.applyOutputDevice();
+    const outputDeviceNotice = document.createElement('p');
+    outputDeviceNotice.id = 'output-device-draft-notice';
+    outputDeviceNotice.textContent = '草稿不代表目前實際輸出裝置；送出不保證已聽到聲音。「系統預設」會要求使用系統預設輸出；重新整理清單不會開啟麥克風或播放音訊。';
+    this.outputDeviceUnsupported = document.createElement('p');
+    this.outputDeviceUnsupported.id = 'output-device-unsupported';
+    this.outputDeviceUnsupported.textContent = '此瀏覽器不支援選擇輸出裝置。';
+    this.outputDevicePanel.append(outputDeviceLabel, this.outputDeviceSelect, this.outputDeviceRefresh,
+      this.outputDeviceApply, outputDeviceNotice, this.outputDeviceUnsupported);
     this.leaveStage = this.button('離開舞台', () => {
       const client = this.current, me = client?.me;
       if (!client || !me || !this.canUseStage()) return;
@@ -270,7 +312,7 @@ export class StageElement extends HTMLElement {
     this.retry = this.button('重試加入', () => { if (this.canRetry()) this.rejoin(); });
     this.cancelJoin = this.button('取消加入', () => this.cancelInitial?.());
     actions.append(this.unlock, this.listen, this.hand, this.mic, this.micRetry, this.leaveStage, this.roomAction, this.retry, this.cancelJoin);
-    panel.append(this.status, this.quality, this.speaking, this.handRejection, this.error, this.errorDismiss, this.namePanel, this.roomNamePanel, this.handQueuePanel, this.stageManagementPanel, actions, this.microphonePanel, this.playback);
+    panel.append(this.status, this.quality, this.speaking, this.handRejection, this.error, this.errorDismiss, this.namePanel, this.roomNamePanel, this.handQueuePanel, this.stageManagementPanel, actions, this.microphonePanel, this.outputDevicePanel, this.playback);
     root.append(style, panel);
     this.render();
   }
@@ -362,10 +404,13 @@ export class StageElement extends HTMLElement {
           if (generation !== this.generation || this.current !== client) return;
           if (type === 'closed' || type === 'kicked') this.microphoneTerminalClient = client;
           else if (type === 'state') this.microphoneTerminalClient = undefined;
+          if (type === 'closed' || type === 'kicked') this.outputDeviceTerminalClient = client;
+          else if (type === 'state') this.outputDeviceTerminalClient = undefined;
           if (type === 'closed' || type === 'kicked') this.stageManagementTerminalClient = client;
           else if (type === 'state') this.stageManagementTerminalClient = undefined;
           // Revoke picker admission before any forwarded callback can click an old control.
           this.syncMicrophoneOwner();
+          this.syncOutputDeviceOwner();
           const micLifecycle = type === 'state' || type === 'status' || type === 'micerror' || type === 'micready'
             || type === 'closed' || type === 'kicked';
           if (micLifecycle) this.syncMicRetry();
@@ -419,6 +464,7 @@ export class StageElement extends HTMLElement {
           this.dispatchEvent(new CustomEvent(`stage-${type}`, { detail, bubbles: true, composed: true }));
           // Application callbacks may retire this seat or mutate its exposed snapshot.
           this.syncMicrophoneOwner();
+          this.syncOutputDeviceOwner();
           this.syncStageManagement();
           this.syncHandRejection();
           if (type === 'state' || type === 'status' || type === 'mic' || type === 'closed' || type === 'kicked') this.render();
@@ -477,6 +523,8 @@ export class StageElement extends HTMLElement {
     this.micFailure = undefined;
     this.microphoneTerminalClient = undefined;
     this.retireMicrophoneOwner();
+    this.outputDeviceTerminalClient = undefined;
+    this.retireOutputDeviceOwner();
     this.retireNameOwner();
     this.retireRoomNameOwner();
     this.retireHandQueue();
@@ -1043,6 +1091,111 @@ export class StageElement extends HTMLElement {
     })();
   }
 
+  private replaceOutputDeviceOptions(outputs: readonly MediaDeviceInfo[], draft: string): void {
+    const initial = document.createElement('option');
+    initial.value = ''; initial.textContent = '系統預設';
+    const options = [initial], seen = new Set<string>(['']);
+    for (const device of outputs) {
+      if (device.kind !== 'audiooutput' || !device.deviceId || seen.has(device.deviceId)) continue;
+      seen.add(device.deviceId);
+      const option = document.createElement('option');
+      option.value = device.deviceId;
+      option.textContent = device.label.trim() ? device.label : `輸出裝置 ${options.length}`;
+      options.push(option);
+    }
+    if (draft && !seen.has(draft)) {
+      const unavailable = document.createElement('option');
+      unavailable.value = draft; unavailable.textContent = '先前選擇（目前清單未提供）';
+      unavailable.disabled = true; options.push(unavailable);
+    }
+    this.outputDeviceSelect.replaceChildren(...options);
+    this.outputDeviceSelect.value = draft;
+  }
+
+  private retireOutputDeviceOwner(): void {
+    if (this.outputDeviceOwner || this.outputDeviceSelect.children.length !== 1 || this.outputDeviceSelect.value !== '') {
+      this.replaceOutputDeviceOptions([], '');
+    }
+    this.outputDeviceOwner = undefined; this.outputDeviceAttempt = undefined;
+    this.outputDevicePanel.hidden = this.outputDeviceUnsupported.hidden = true;
+    this.outputDeviceSelect.disabled = this.outputDeviceRefresh.disabled = this.outputDeviceApply.disabled = true;
+    this.outputDeviceRefresh.removeAttribute('aria-busy'); this.outputDeviceApply.removeAttribute('aria-busy');
+  }
+
+  private syncOutputDeviceOwner(): void {
+    const client = this.current, state = client?.state, me = client?.me;
+    const active = client?.status === 'waiting' || client?.status === 'live';
+    const owner = this.outputDeviceOwner;
+    if (!this.isConnected || !client || (owner && (owner.client !== client || owner.generation !== this.generation))) {
+      this.retireOutputDeviceOwner();
+    }
+    if (!this.isConnected || !client) return;
+    const joined = Boolean(state?.roomId && me?.participantId) && this.outputDeviceTerminalClient !== client;
+    if (!this.outputDeviceOwner && joined && active) {
+      this.outputDeviceOwner = { client, generation: this.generation, draft: '' };
+    }
+    // setSinkId targets this client's persistent audio and cannot be cancelled by losing a seat.
+    // Keep its draft, list and reservation until settlement or an actual client/generation replacement.
+    this.outputDevicePanel.hidden = !this.outputDeviceOwner || !joined || (!active && client.status !== 'reconnecting');
+    const supported = client.outputDeviceSupported;
+    this.outputDeviceUnsupported.hidden = supported;
+    const blocked = this.outputDevicePanel.hidden || !active || !supported || Boolean(this.outputDeviceAttempt);
+    this.outputDeviceSelect.disabled = this.outputDeviceRefresh.disabled = this.outputDeviceApply.disabled = blocked;
+    this.outputDeviceRefresh.setAttribute('aria-busy', String(this.outputDeviceAttempt?.kind === 'refresh'));
+    this.outputDeviceApply.setAttribute('aria-busy', String(this.outputDeviceAttempt?.kind === 'apply'));
+    this.outputDeviceSelect.value = this.outputDeviceOwner?.draft ?? '';
+  }
+
+  private refreshOutputDevices(): void {
+    this.syncOutputDeviceOwner();
+    const owner = this.outputDeviceOwner;
+    if (!owner || this.outputDevicePanel.hidden || this.outputDeviceRefresh.hidden || this.outputDeviceRefresh.disabled
+      || this.outputDeviceAttempt) return;
+    const attempt = this.outputDeviceAttempt = { kind: 'refresh' as const };
+    this.syncOutputDeviceOwner(); this.hideError();
+    const current = (): boolean => {
+      if (this.outputDeviceOwner !== owner || this.outputDeviceAttempt !== attempt) return false;
+      this.syncOutputDeviceOwner();
+      return this.outputDeviceOwner === owner && this.outputDeviceAttempt === attempt;
+    };
+    void (async () => {
+      try {
+        const devices = await owner.client.listAudioDevices();
+        if (current()) this.replaceOutputDeviceOptions(devices.outputs, owner.draft);
+      } catch (error) {
+        if (current() && !this.outputDevicePanel.hidden
+          && (owner.client.status === 'waiting' || owner.client.status === 'live')) this.show(error);
+      } finally {
+        if (current()) { this.outputDeviceAttempt = undefined; this.syncOutputDeviceOwner(); }
+      }
+    })();
+  }
+
+  private applyOutputDevice(): void {
+    this.syncOutputDeviceOwner();
+    const owner = this.outputDeviceOwner;
+    if (!owner || this.outputDevicePanel.hidden || this.outputDeviceApply.hidden || this.outputDeviceApply.disabled
+      || this.outputDeviceAttempt) return;
+    const draft = owner.draft;
+    const attempt = this.outputDeviceAttempt = { kind: 'apply' as const };
+    this.syncOutputDeviceOwner(); this.hideError();
+    const current = (): boolean => {
+      if (this.outputDeviceOwner !== owner || this.outputDeviceAttempt !== attempt) return false;
+      this.syncOutputDeviceOwner();
+      return this.outputDeviceOwner === owner && this.outputDeviceAttempt === attempt;
+    };
+    void (async () => {
+      try { await owner.client.setOutputDevice(draft); }
+      catch (error) {
+        if (current() && !this.outputDevicePanel.hidden
+          && (owner.client.status === 'waiting' || owner.client.status === 'live')) this.show(error);
+      } finally {
+        // Browser fulfillment is not evidence of playback or an authoritative hardware selection.
+        if (current()) { this.outputDeviceAttempt = undefined; this.syncOutputDeviceOwner(); }
+      }
+    })();
+  }
+
   private syncMicRetry(): void {
     const failure = this.micFailure, client = this.current, me = client?.me;
     if (failure && (failure.client !== client || failure.roomId !== client?.state?.roomId
@@ -1149,6 +1302,7 @@ export class StageElement extends HTMLElement {
     this.syncPlaybackOwner();
     this.syncMicRetry();
     this.syncMicrophoneOwner();
+    this.syncOutputDeviceOwner();
     this.syncNameOwner();
     this.syncRoomNameOwner();
     this.syncHandQueue();
