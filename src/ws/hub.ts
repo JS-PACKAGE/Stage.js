@@ -611,7 +611,7 @@ export class StageHub {
    * the room and outside its queue, like `speaking`; stops rescheduling once nobody publishes.
    */
   private async reportQuality(rt: RoomRuntime): Promise<void> {
-    if (rt.closed || !rt.publishers.size) return;
+    if (rt.closed) return;
     const { roomId } = rt.room;
     const publishers = [...rt.publishers];
     const stats = await Promise.allSettled(publishers.map(async ([id]) => this.deps.transport.getStats(roomId, id)));
@@ -638,7 +638,8 @@ export class StageHub {
       if (s.rttMs !== undefined) q.rttMs = Math.round(s.rttMs);
       participants.push(q);
     });
-    if (participants.length) {
+    // Clear stale reports only when nobody publishes, not when current publishers lack stats.
+    if (participants.length || !rt.publishers.size) {
       const msg: ServerMessage = { type: 'quality', participants };
       const encoded = JSON.stringify(msg);
       for (const [pid, session] of rt.sessions) {

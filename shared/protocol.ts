@@ -166,6 +166,7 @@ export interface ServerMessageMap {
   ok: { requestId: string };
   pong: Record<never, never>;
   kicked: { roomId: string };
+  /** Full replacement of available publisher reports; an empty set clears previous reports. */
   quality: { participants: ConnectionQuality[] };
 }
 

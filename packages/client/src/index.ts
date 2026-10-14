@@ -141,7 +141,7 @@ export interface StageEventMap {
   audioblocked: { message: string };
   /** Full audible set: seeded after create/join/resume state and before ACK, then updated on changes. */
   speaking: { participantIds: string[] };
-  /** Connection quality of everyone publishing (controller and on-stage participants only). */
+  /** Full replacement of available publisher reports, possibly empty; controller and stage only. */
   quality: ServerMessageMap['quality'];
 }
 interface StatsCounters { timestamp: number; bytes?: number; received?: number; lost?: number; bufferDelay?: number; emitted?: number }

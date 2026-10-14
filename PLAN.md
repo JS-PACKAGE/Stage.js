@@ -721,3 +721,6 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 
 
 180. **Web Component 本人連線品質摘要（2026-10-14）：** 基線 actual Hub→受控socket→公開SDK→widget 已收到本人8%上行/2%下行/37ms RTT，但DOM完全不顯示；使用現有quality full-set增加單一本人歷史摘要，不增加poll/API/media或品質閾值。只接受目前台上owner的participantId，複製primitive fields，百分有限0–100/一位小數、RTT有限非負/整數ms，缺失或異常顯示—，0保留。client/generation/room/pid綁定，state/status/quality在host forwarded callback前核對；reconnect/disconnected、下台、terminal/leave/detach/micerror清除，micready不復原，同席普通state不覆寫數字。owner變更不帶舊報告，新own報告才顯示，empty/missing own清除；原stage-quality detail與其他control/error/status不變。無timestamp/peer epoch，錯誤後到達的數字不能證恢復，無新事件不代表健康；明稱最近收到、RTT非端到端延遲。驗證限受控SDK/Hub/DOM與操作計數，不宣稱nativeAT/畫面/音訊或CPU改善。
+
+
+181. **最後一位停止發布後清空品質集合（2026-10-14）：** 基線 actual Hub 搭配完整範例受控 DOM，在最後 publisher 轉 recvonly 或 peer 關閉後，先前品質列持續保留且後續排程已停止。保留既有 quality cycle，僅允許其於執行／settle 時觀察到零 publisher 後，向當時 controller／onstage recipients 送一次既有 shape 的空 participants；這是明示新增事件，不是透明效能改動。仍有 publisher 而全部 stats rejected/null 不發空集合，維持下一輪與成功樣本差量；await 期間同／異 ID 新發布者與世代檢查不得被舊空結果誤清。關房不發，無 publisher 不再排程，不增加 timer、getStats、SDK API 或媒體操作。既有 SDK/full-set UI 可消費空陣列，普通觀眾不接收。清空依賴既有輪次執行和 pending stats settle，無 timeout 或 interval 內完成保證；不把缺少新數據解讀為健康或恢復，也不新增 peer epoch。證據限 actual Hub／SDK 與受控 timer、DOM、媒體，非原生音訊或 CPU 改善。
