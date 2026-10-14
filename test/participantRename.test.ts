@@ -157,9 +157,14 @@ test('every role can rename only itself with personalized state before ACK and n
     clear(sessions);
     await h.hub.handle(person.s, parseRename(`  新<&>${person.id}  `, { targetId: witness.id }));
     const name = `新&lt;&amp;&gt;${person.id}`;
+    const retainedStates = people.map((recipient, index) => {
+      const omitted = person === audience && recipient !== person && recipient !== host;
+      assert.deepEqual(recipient.s.inbox.map(message => message.type),
+        recipient === person ? ['room:state', 'ok'] : omitted ? [] : ['room:state']);
+      return structuredClone(recipient.s.last('room:state') ?? before[index]!);
+    });
     for (const [index, recipient] of people.entries()) {
-      assert.deepEqual(recipient.s.inbox.map(message => message.type), recipient === person ? ['room:state', 'ok'] : ['room:state']);
-      const state = recipient.s.last('room:state')!;
+      const state = retainedStates[index]!;
       assert.deepEqual(omitNames(state), omitNames(before[index]!));
       assertPrivate(state, recipient.id, before[index]!.resumeToken, host.id, host.code);
       assert.equal(state.me.name, recipient === person ? name : before[index]!.me.name);
@@ -171,8 +176,8 @@ test('every role can rename only itself with personalized state before ACK and n
       }
     }
     assert.equal(lines.length, logCount, 'rename does not log either old or new display names');
-    assert.equal(witness.s.last('room:state')!.me.name, 'Witness', 'extraneous targetId is never a rename target');
-    savedStates = sessions.map(session => structuredClone(session.last('room:state')!));
+    assert.equal(retainedStates[4]!.me.name, 'Witness', 'extraneous targetId is never a rename target');
+    savedStates = retainedStates;
     const ownState = structuredClone(person.s.last('room:state')!);
     clear(sessions);
     await h.hub.handle(person.s, parseRename(`  新<&>${person.id}  `, { targetId: witness.id }));

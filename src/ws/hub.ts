@@ -359,8 +359,15 @@ export class StageHub {
         this.deps.log.info('participant kicked', { roomId: room.roomId, byId: pid, participantId: msg.targetId });
         break;
       case 'participant:rename':
-        if (room.rename(pid, msg.name)) this.broadcastState(rt);
-        else session.send({ type: 'room:state', ...room.snapshot(pid) });
+        if (room.rename(pid, msg.name)) {
+          const participant = room.get(pid)!;
+          if (participant.role === 'audience' && !participant.onStage && !participant.handRaised &&
+              rt.stateTimer === undefined && rt.lastStatus === room.status) {
+            session.send({ type: 'room:state', ...room.snapshot(pid) });
+            const controller = rt.sessions.get(room.controllerId);
+            if (controller) controller.send({ type: 'room:state', ...room.snapshot(room.controllerId) });
+          } else this.broadcastState(rt);
+        } else session.send({ type: 'room:state', ...room.snapshot(pid) });
         session.send({ type: 'ok', requestId: msg.requestId });
         return;
       case 'mic:gain':

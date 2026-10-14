@@ -34,7 +34,7 @@
 
 ## 修改自己的顯示名稱
 
-`setName(name: string): Promise<void>` 只更新目前席位自己，沿用控制請求 pacing、容量上限、逾時與 generic 錯誤。不更換 participantId、角色、台位或舉手順位，也不重新進房；不提供修改他人的參數。伺服器沿用進房的名稱規則（NFC、移除不安全控制字元、trim、Unicode 字元數上限及 HTML 轉義），以個人化 `state` 更新可見名稱後才 ACK；相同名稱只回傳請求者的 state。沒有全房改名事件，因此不額外公開原本隱藏的觀眾名稱；名稱可重複，不能當作認證身分。
+`setName(name: string): Promise<void>` 只更新目前席位自己，沿用控制請求 pacing、容量上限、逾時與 generic 錯誤。不更換 participantId、角色、台位或舉手順位，也不重新進房；不提供修改他人的參數。伺服器沿用進房的名稱規則（NFC、移除不安全控制字元、trim、Unicode 字元數上限及 HTML 轉義），以個人化 `state` 更新可見名稱後才 ACK；相同名稱只回傳請求者的 state。一般未上台、未舉手觀眾改名，在沒有 pending 合併廣播或房間狀態轉換時，只刷新本人與目前主控，其他人不收到資料相同的 state，因此也不觸發該次既有 state callback／媒體同步流程；其他改名仍沿用全房個人化更新。沒有全房改名事件，因此不額外公開原本隱藏的觀眾名稱；名稱可重複，不能當作認證身分。
 
 SDK 不樂觀改寫 `me.name`，也不在較晚的 ACK continuation 寫回提案。收到同房間的有效個人狀態時，會在公開 status／state callback 前複製並解碼自己已被接受的名稱供自動回座使用；初次 create／join 的 ACK 晚到時也保留該次新收到的名稱。呼叫者改寫公開 snapshot 不會修改這份名稱紀錄。若操作已被接受但 ACK 遺失，已收到的 state 仍有效；若連新 state 都未收到，只有原席位仍可 resume 時才會從伺服器恢復新名稱，不保證席位過期後恢復未見過的改名。
 
