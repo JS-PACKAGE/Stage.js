@@ -108,6 +108,8 @@ Windows 用 `.\stage.ps1 <command>`，指令相同；Windows 無法對背景 nod
 | `rtc` | `iceServers`（下發給瀏覽器的靜態 STUN）、`serverIceServers`（伺服器端 ICE）、`portRange`（`[]` 或 `[min, max]`）、`mediaWorkerTimeoutMs`（worker RPC 逾時，預設／舊設定省略時 30000，1–300000 ms；不適用於 `mediaWorkers: 0`）、`mediaWorkers`（承載 PeerConnection 的 worker thread 數，預設 2 對應 300 聽眾；0＝主執行緒）、`turn.{urls,secret,ttlSeconds}`（coturn `use-auth-secret` 短期憑證，每次進房以 HMAC 簽發；`urls: []` 停用） |
 | `log` | `level`：`debug`／`info`／`warn`／`error`（房間代碼、token、憑證、SDP 一律不入日誌） |
 
+`rooms.createToken` 最多 256 個 UTF-16 code unit，與既有 `room:create.token` 的 wire 驗證上限一致；啟動及離線設定檢查會提早拒絕超限設定，錯誤只指出欄位與上限，不回顯權杖。舊版雖可載入更長值，正常控制訊息無法提交該值完成認證。此檢查不 trim、正規化或截斷：空字串維持停用建立權杖，非空值（含空白）仍須精確匹配；補充平面字元計兩個 code unit，UTF-8 位元組數不是此上限。設定仍必須提供字串；不變更其他認證、frame 限制或既有公開錯誤。
+
 ### 對外部署
 
 `allowInsecure: false`、`host: 0.0.0.0`、填 `tls`；開放 `rtc.portRange` 的 UDP；設定 `rtc.turn`（coturn 需 `use-auth-secret` 與相同的 `static-auth-secret`）。憑證檔更新（含 ACME 工具的改名／symlink 替換）後約 2 秒自動重載，不需重啟；新憑證載入失敗時沿用舊憑證並記 error。

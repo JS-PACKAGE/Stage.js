@@ -709,3 +709,6 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 
 
 176. **自訂房間代碼長度的手動輸入（2026-10-14）：** 第175項只調整名字欄；另以dummy24字設定實際驗證生成code、validator與Hub join皆合法，發現完整範例及embed兩個代碼欄仍設16。僅移除兩欄固定maxlength，保留optional、trim/空白省略、validator大小寫正規化、roomID128/token256與既有auth/rate/frame/錯誤隱私。原query-prefill直接設value，並不由maxlength截斷；問題是HTML標準的手動編輯限制，不能宣稱舊長邀請路徑普遍失敗。沒有新增協定/SDK API或在前端猜deployment上限，超長與錯誤代碼照原server政策拒絕，極大paste仍可能frame關閉。回歸區分DOM authored cap和actual SDK-validator-Hub語意，不冒充native keyboard/paste驗收；不使用真實code、不新增secret logging或自動重試。
+
+
+177. **建立權杖設定與控制訊息長度一致（2026-10-14）：** 合成設定證明舊 parseConfig／離線 checker 接受 257 UTF-16 units，但既有 room:create validator 最多 256，因此該部署無法經正常控制面送入匹配權杖。僅在 rooms 設定解析後新增 >256 的欄位錯誤，不回顯值；既有 required string、空字串停用、空白與非 ASCII 原樣匹配均保留，不 trim、normalize、truncate 或以 bytes/codepoints 猜限。啟動原本先 loadConfig 才建立 transport/listener，離線 checker 共用 parseConfig；不改 runtime wire、Hub 認證或公開錯誤。回歸對照實際 validator 與 Hub，涵蓋 ASCII、astral、BMP、NFD、空白及缺失型別，也以隔離 built checker 驗證拒絕；只使用合成值，不讀取實際憑證設定。
