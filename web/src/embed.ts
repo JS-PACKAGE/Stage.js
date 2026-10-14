@@ -5,6 +5,9 @@ function input(id: string): HTMLInputElement {
   return document.querySelector<HTMLInputElement>(`#${id}`)!;
 }
 const status = document.querySelector<HTMLParagraphElement>('#status')!;
+const errorNotice = document.querySelector<HTMLDivElement>('#error-notice')!;
+const lastError = document.querySelector<HTMLParagraphElement>('#last-error')!;
+const errorDismiss = document.querySelector<HTMLButtonElement>('#error-dismiss')!;
 const join = document.querySelector<HTMLFormElement>('#join')!;
 const submit = join.querySelector<HTMLButtonElement>('button')!;
 submit.setAttribute('aria-busy', 'false');
@@ -120,9 +123,16 @@ function scheduleHandCooldown(remaining: number): void {
     handTimer = timer; handTimerDue = due;
   }
 }
+function clearError(): void {
+  errorNotice.hidden = true; lastError.textContent = '';
+}
+errorDismiss.onclick = () => clearError();
 function report(error: unknown): void {
   feedbackRevision++;
-  status.textContent = error instanceof Error ? error.message : '操作失敗。';
+  const message = error instanceof Error ? error.message : '操作失敗。';
+  status.textContent = message;
+  // A later status can replace transient feedback without erasing the last operation failure.
+  lastError.textContent = `最近錯誤：${message}`; errorNotice.hidden = false;
 }
 function signalingUrl(host: URL, value: string): URL {
   const path = value.trim() || '/ws';
@@ -137,6 +147,7 @@ function signalingUrl(host: URL, value: string): URL {
 }
 join.onsubmit = (event) => {
   event.preventDefault();
+  clearError();
   const hostValue = input('host').value, pathValue = input('ws-path').value;
   const joinOptions = { roomId: input('room').value.trim(), code: input('code').value.trim() || undefined, name: input('name').value.trim() };
   playbackGeneration++; scheduleHandCooldown(0);
@@ -151,6 +162,7 @@ join.onsubmit = (event) => {
     if (generation !== entryGeneration || receivedState || entryClient?.state) return;
     cancelledEntry = true;
     const cancelled = retireEntry();
+    clearError();
     playbackGeneration++; scheduleHandCooldown(0); retireControls();
     hand.disabled = leave.disabled = true; hand.setAttribute('aria-busy', 'false');
     syncMic(); syncStage(); syncMicRetry();
@@ -209,10 +221,10 @@ join.onsubmit = (event) => {
         else if (detail === 'disconnected') { progress = false; playbackGeneration++; retireControls(); status.textContent = '未連線'; hand.disabled = leave.disabled = true; }
         syncHand(); syncMic(); syncStage(); syncMicRetry(); syncRename();
       });
-      client.on('error', ({ detail }) => { if (cancelledEntry) return; progress = false; report(detail); });
+      client.on('error', ({ detail }) => { if (client !== current || cancelledEntry || generation !== entryGeneration) return; progress = false; report(detail); });
       client.on('audioblocked', () => { if (cancelledEntry) return; progress = false; status.textContent = '請點擊啟用音訊。'; });
-      client.on('closed', () => { if (client !== current || cancelledEntry || generation !== entryGeneration) return; retireEntry(); playbackGeneration++; retireControls(); syncHand(); syncMic(); syncStage(); syncMicRetry(); syncRename(); status.textContent = '房間已關閉。'; hand.disabled = leave.disabled = true; });
-      client.on('kicked', () => { if (client !== current || cancelledEntry || generation !== entryGeneration) return; retireEntry(); playbackGeneration++; retireControls(); syncHand(); syncMic(); syncStage(); syncMicRetry(); syncRename(); status.textContent = '你已被主控移出房間。'; hand.disabled = leave.disabled = true; });
+      client.on('closed', () => { if (client !== current || cancelledEntry || generation !== entryGeneration) return; retireEntry(); clearError(); playbackGeneration++; retireControls(); syncHand(); syncMic(); syncStage(); syncMicRetry(); syncRename(); status.textContent = '房間已關閉。'; hand.disabled = leave.disabled = true; });
+      client.on('kicked', () => { if (client !== current || cancelledEntry || generation !== entryGeneration) return; retireEntry(); clearError(); playbackGeneration++; retireControls(); syncHand(); syncMic(); syncStage(); syncMicRetry(); syncRename(); status.textContent = '你已被主控移出房間。'; hand.disabled = leave.disabled = true; });
       showProgress('連線中…');
       await current.connect();
       if (generation !== entryGeneration) return;
@@ -309,6 +321,7 @@ micRetry.onclick = () => {
 };
 leave.onclick = () => {
   const generation = retireEntry(), current = client;
+  clearError();
   playbackGeneration++; scheduleHandCooldown(0);
   retireControls(); hand.setAttribute('aria-busy', 'false'); syncMic(); syncStage(); syncMicRetry();
   void current?.disconnect().then(() => {

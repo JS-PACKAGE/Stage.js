@@ -715,3 +715,6 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 
 
 178. **Web Component 留席更新本人名稱（2026-10-14）：** 原 widget 只有 name attribute 重入，無內建本人名編輯；新增 inline label/input/button 與 authoritative 目前名稱，以既有 SDK setName 送 raw draft。初次 owner 初始化 decoded 名稱，同席 snapshot/reconnect 不覆寫草稿；ACK-only 不發明 accepted name，失敗保留輸入。name attribute 不反射，明確 rejoin 仍用最新 attrs，自動 resume 沿用 SDK accepted name。專用 owner 綁 client/generation/room/pid，操作 token 在呼叫前預留，state/status/terminal 轉送前與 click 當下核對，避免公開 .client 在不改 widget generation 下 disconnect/join 的舊結果污染。pending 跨 state-before-ACK 與同席重連，退役清除草稿及操作；新席位重新初始化，無效隱藏操作不清錯誤或發送。僅本人功能，不擴大主控管理、SDK/protocol/media 或自動重試；受控 DOM/socket/Hub 證據不冒充原生鍵盤/IME/AT/音訊驗收。
+
+
+179. **最小 embed 保留最近的一般錯誤（2026-10-14）：** 基線 actual SDK 回座 unauthorized/not_found/room_full 三案，以及 actual Hub 換碼／離線關房兩案，均先顯示 generic error 再被 disconnected 覆寫成未連線；peer 正常清理且不再自動重試。公開 error 無 requestId，不能把任意最近錯誤歸因為斷線原因，因此新增獨立最近錯誤 alert 與 dismiss，report 保留原 status 寫法而另存安全文字。state/status/控制成功不清，新 entry/cancel/leave/closed/kicked 清理；clear 不動 feedbackRevision，維持進度優先序。error lane 核對 current client、entryGeneration 與 cancel，原 catch token/generation 沿用；當下新的合法操作仍可回報。micerror/ready 保持原獨立麥克風提示，不混成一般錯誤恢復證明。無 SDK/protocol/媒體或重連政策變更，僅受控 DOM/socket/Hub 證據，未原生 AT/音訊驗收。
