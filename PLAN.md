@@ -697,3 +697,6 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 
 
 172. **私人觀眾改名的必要收件者更新（2026-10-14）：** 第171項的全房snapshot對一般未舉手、未上台觀眾改名多數是冗餘：實際Room完整snapshot比較證實301席中的其他299人所有欄位逐byte不變。Room.rename與invariant仍先執行；僅role=audience、offstage、未舉手、無stateTimer且lastStatus等於目前room.status時，使用既有snapshot分別刷新本人及rt.sessions中的目前主控，ACK仍在本人state之後。主控離線不留新buffer，恢復時由正常snapshot取得名稱；其他changed場景保持原broadcastState，包含pending presence/hand的立即flush與status轉換，no-op仍不消耗timer。沒有新cache/event/periodicbroadcast或媒體層變更。受控301席/20hands profile（256MiB heap限額）stateframes301→2；1台上席bytes1319402→62426，9席1746570→63834，均不含ACK/framing/壓縮。兩次target snapshot使shared view構造1→2，但personal構造301→2；只主張JSON與工作計數，不推論CPU/網路容量/音訊效能。省略冗餘state也省略其他SDK接收callback與既有媒體同步觸發，不能稱所有可觀測callback數完全不變；正常目前狀態、隱私與requester ACK契約維持。
+
+
+173. **嵌入頁明確更新本人名稱（2026-10-14）：** 第171項已有 SDK setName，但嵌入頁的名稱欄只在新加入時讀取，無法透過畫面留席改名。新增 form 外的 type=button 更新名稱，不改 join submit 選取與表單行為；僅當 controlsClient 對應目前快照時顯示，所有角色允許，重連與自有 pending 停用。點擊同步擷取原始字串，沿用伺服器驗證與 authoritative snapshot 顯示，不樂觀改名、不覆寫輸入草稿。pending 綁 client、entry generation、room/pid，狀態先於 ACK 不解鎖，同席重連保留；retireControls 在 disconnect 前撤銷，晚到 Promise 不覆蓋新操作。舊server錯誤正常保留，不以重新加入作fallback；不更改協定、SDK、server政策或媒體流程。受控DOM／SDK／Hub測試不代表原生鍵盤、輔助科技或硬體音訊驗收。

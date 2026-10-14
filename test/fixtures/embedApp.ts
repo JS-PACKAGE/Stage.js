@@ -6,7 +6,7 @@ import type { ParticipantView } from '../../shared/protocol.ts';
 
 type Status = 'waiting' | 'live' | 'reconnecting' | 'disconnected';
 type Me = Pick<ParticipantView, 'participantId' | 'name' | 'role' | 'onStage' | 'handRaised' | 'muted' | 'forceMuted'>;
-interface State { roomId: string; name: string; me: Me }
+interface State { roomId: string; name: string; me: Me; hands: ParticipantView[] }
 interface JoinOptions { roomId: string; code?: string; name: string }
 interface ClientOptions { url: string; audioElement: EmbedNode }
 type Action = 'raise' | 'withdraw' | 'mute' | 'unmute' | 'leaveStage' | 'returnToStage';
@@ -58,6 +58,7 @@ export class EmbedNode {
 export class EmbedSdk {
   status: Status = 'disconnected';
   me: Me | null = null;
+  state: State | null = null;
   private cooldownUntil = 0;
   private readonly now: () => number;
   get handCooldownMs(): number { return Math.max(0, this.cooldownUntil - this.now()); }
@@ -68,6 +69,8 @@ export class EmbedSdk {
   retryAdmission: () => boolean = () => true;
   retryMicrophone(): boolean { this.retryCalls++; return this.retryAdmission(); }
   readonly actions: { type: Action; work: Deferred }[] = [];
+  readonly renames: { name: string; work: Deferred }[] = [];
+  setName(name: string): Promise<void> { const work = new Deferred(); this.renames.push({ name, work }); return work.promise; }
   private readonly listeners = new Map<string, ((event: { detail: unknown }) => void)[]>();
   constructor(options: ClientOptions, now: () => number = () => 0) { this.options = options; this.now = now; }
   on(type: string, listener: (event: { detail: unknown }) => void): void {
@@ -79,14 +82,14 @@ export class EmbedSdk {
   setStatus(status: Status): void { this.status = status; this.emit('status', status); }
   snapshot(overrides: Partial<Me> = {}): void {
     this.me = { participantId: 'listener', name: '測試聽眾', role: 'audience', onStage: false, handRaised: false, muted: false, forceMuted: false, ...this.me, ...overrides };
-    const state: State = { roomId: 'same-room', name: '測試舞台', me: this.me };
-    this.emit('state', state);
+    this.state = { roomId: 'same-room', name: '測試舞台', me: this.me, hands: [] };
+    this.emit('state', this.state);
   }
   async connect(): Promise<void> { this.setStatus('waiting'); }
   async join(options: JoinOptions): Promise<void> { this.joins.push(options); }
   async disconnect(): Promise<void> {
     // Keep command promises deferred so tests can deliver adversarial late settlements explicitly.
-    this.me = null; this.handCooldownMs = 0; this.setStatus('disconnected');
+    this.me = null; this.state = null; this.handCooldownMs = 0; this.setStatus('disconnected');
   }
   async unlockAudio(): Promise<void> {}
   private request(type: Action): Promise<void> {
@@ -102,7 +105,7 @@ export class EmbedSdk {
 export const flush = async (): Promise<void> => { for (let i = 0; i < 16; i++) await Promise.resolve(); };
 
 export function embedApp(options: { libraryLoad?: Promise<void> | ((url: string, attempt: number) => Promise<void>); source?: string; search?: string } = {}) {
-  const nodes = new Map(['host', 'ws-path', 'room', 'code', 'name', 'status', 'join', 'hand', 'mic', 'stage', 'mic-retry', 'cancel-join', 'leave', 'audio', 'unlock'].map(id => [id, new EmbedNode()]));
+  const nodes = new Map(['host', 'ws-path', 'room', 'code', 'name', 'status', 'join', 'hand', 'mic', 'rename', 'stage', 'mic-retry', 'cancel-join', 'leave', 'audio', 'unlock'].map(id => [id, new EmbedNode()]));
   const node = (id: string): EmbedNode => { const found = nodes.get(id); assert.ok(found, `unmodeled node: ${id}`); return found; };
   const cancel = node('cancel-join'); cancel.hidden = cancel.disabled = true; cancel.textContent = '取消連線';
   const hand = node('hand'), mic = node('mic'), stage = node('stage'), micRetry = node('mic-retry'), leave = node('leave'), form = node('join'), status = node('status');
@@ -191,9 +194,9 @@ export function embedApp(options: { libraryLoad?: Promise<void> | ((url: string,
       assert.equal(sdk.joins.length, 1); sdk.snapshot(overrides); assert.equal(submit.disabled, false); return sdk;
     },
     async cleanup(): Promise<void> {
-      for (const sdk of clients) for (const action of sdk.actions) if (!action.work.settled) action.work.resolve();
+      for (const sdk of clients) for (const action of [...sdk.actions, ...sdk.renames]) if (!action.work.settled) action.work.resolve();
       await flush(); timers.clear(); retired.clear();
-      assert.ok(clients.every(sdk => sdk.actions.every(action => action.work.settled)), 'all command promises must settle');
+      assert.ok(clients.every(sdk => [...sdk.actions, ...sdk.renames].every(action => action.work.settled)), 'all command promises must settle');
       assert.equal(timers.size, 0);
     },
   };

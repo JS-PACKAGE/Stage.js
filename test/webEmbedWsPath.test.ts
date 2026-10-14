@@ -213,7 +213,7 @@ for (const wsPath of ['/custom/stage', '/ws']) {
     } });
     const { StageClient, decodeName } = await import(new URL('../packages/client/src/index.ts', import.meta.url).href);
     const joined = Promise.withResolvers<RoomStatePayload>();
-    const nodes = new Map(['host', 'ws-path', 'room', 'code', 'name', 'status', 'join', 'hand', 'mic', 'stage', 'mic-retry', 'cancel-join', 'leave', 'audio', 'unlock'].map(id => [id, new EmbedNode()]));
+    const nodes = new Map(['host', 'ws-path', 'room', 'code', 'name', 'status', 'join', 'hand', 'mic', 'rename', 'stage', 'mic-retry', 'cancel-join', 'leave', 'audio', 'unlock'].map(id => [id, new EmbedNode()]));
     const node = (id: string): EmbedNode => { const value = nodes.get(id); assert.ok(value, `unmodeled node: ${id}`); return value; };
     node('join').submitButton = new EmbedNode(); node('name').value = '嵌入聽眾';
     Object.assign(node('audio'), { pause() {} });

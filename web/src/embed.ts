@@ -12,6 +12,7 @@ const hand = document.querySelector<HTMLButtonElement>('#hand')!;
 const leave = document.querySelector<HTMLButtonElement>('#leave')!;
 const cancelJoin = document.querySelector<HTMLButtonElement>('#cancel-join')!;
 const mic = document.querySelector<HTMLButtonElement>('#mic')!;
+const rename = document.querySelector<HTMLButtonElement>('#rename')!;
 const stage = document.querySelector<HTMLButtonElement>('#stage')!;
 const micRetry = document.querySelector<HTMLButtonElement>('#mic-retry')!;
 const audio = document.querySelector<HTMLAudioElement>('#audio')!;
@@ -25,6 +26,7 @@ let pendingHand: { client: Client } | undefined;
 let pendingMic: { client: Client } | undefined;
 let pendingStage: { client: Client } | undefined;
 let controlsClient: Client | undefined;
+let pendingRename: { client: Client; roomId: string; participantId: string; generation: number } | undefined;
 let micRetryParticipant: string | undefined;
 let pendingMicRetry: { client: Client } | undefined;
 let playbackGeneration = 0;
@@ -37,6 +39,7 @@ function hideCancel(): void {
 function retireControls(): void {
   pendingHand = undefined; pendingMic = undefined; pendingStage = undefined;
   controlsClient = undefined; micRetryParticipant = undefined; pendingMicRetry = undefined;
+  pendingRename = undefined; syncRename();
 }
 /** Retire initial-join feedback before user or terminal callbacks can start another entry. */
 function retireEntry(): number {
@@ -60,6 +63,18 @@ function syncHand(): void {
     : `收回舉手（${client?.status === 'reconnecting' ? '上次' : ''}佇列第 ${position + 1} 位）`;
   hand.textContent = me?.handRaised ? withdraw : seconds ? `舉手發言（${seconds} 秒）` : '舉手發言';
   scheduleHandCooldown(me && !me.handRaised ? remaining : 0);
+}
+function ownsRename(operation: NonNullable<typeof pendingRename>): boolean {
+  const state = client?.state;
+  return client === operation.client && controlsClient === operation.client && operation.generation === entryGeneration
+    && state?.roomId === operation.roomId && state.me.participantId === operation.participantId;
+}
+function syncRename(): void {
+  if (pendingRename && !ownsRename(pendingRename)) pendingRename = undefined;
+  const state = client === controlsClient ? client?.state : undefined;
+  rename.hidden = !state?.me;
+  rename.disabled = rename.hidden || client?.status === 'reconnecting' || Boolean(pendingRename);
+  rename.setAttribute('aria-busy', String(Boolean(pendingRename)));
 }
 function syncMic(): void {
   const me = client === controlsClient ? client?.me : undefined;
@@ -172,7 +187,7 @@ join.onsubmit = (event) => {
         if (generation === entryGeneration) hideCancel();
         progress = false;
         status.textContent = `${library.decodeName(detail.name)} · ${library.decodeName(detail.me.name)} · ${detail.me.onStage ? '已上台' : '收聽中'}`;
-        syncHand(); syncMic(); syncStage(); syncMicRetry();
+        syncHand(); syncMic(); syncStage(); syncMicRetry(); syncRename();
         leave.disabled = false;
       });
       client.on('micerror', ({ detail }) => {
@@ -192,12 +207,12 @@ join.onsubmit = (event) => {
         if (current.state) { receivedState = true; if (generation === entryGeneration) hideCancel(); }
         if (detail === 'reconnecting') { progress = false; status.textContent = '重新連線中'; hand.disabled = true; }
         else if (detail === 'disconnected') { progress = false; playbackGeneration++; retireControls(); status.textContent = '未連線'; hand.disabled = leave.disabled = true; }
-        syncHand(); syncMic(); syncStage(); syncMicRetry();
+        syncHand(); syncMic(); syncStage(); syncMicRetry(); syncRename();
       });
       client.on('error', ({ detail }) => { if (cancelledEntry) return; progress = false; report(detail); });
       client.on('audioblocked', () => { if (cancelledEntry) return; progress = false; status.textContent = '請點擊啟用音訊。'; });
-      client.on('closed', () => { if (client !== current || cancelledEntry || generation !== entryGeneration) return; retireEntry(); playbackGeneration++; retireControls(); syncHand(); syncMic(); syncStage(); syncMicRetry(); status.textContent = '房間已關閉。'; hand.disabled = leave.disabled = true; });
-      client.on('kicked', () => { if (client !== current || cancelledEntry || generation !== entryGeneration) return; retireEntry(); playbackGeneration++; retireControls(); syncHand(); syncMic(); syncStage(); syncMicRetry(); status.textContent = '你已被主控移出房間。'; hand.disabled = leave.disabled = true; });
+      client.on('closed', () => { if (client !== current || cancelledEntry || generation !== entryGeneration) return; retireEntry(); playbackGeneration++; retireControls(); syncHand(); syncMic(); syncStage(); syncMicRetry(); syncRename(); status.textContent = '房間已關閉。'; hand.disabled = leave.disabled = true; });
+      client.on('kicked', () => { if (client !== current || cancelledEntry || generation !== entryGeneration) return; retireEntry(); playbackGeneration++; retireControls(); syncHand(); syncMic(); syncStage(); syncMicRetry(); syncRename(); status.textContent = '你已被主控移出房間。'; hand.disabled = leave.disabled = true; });
       showProgress('連線中…');
       await current.connect();
       if (generation !== entryGeneration) return;
@@ -233,6 +248,21 @@ hand.onclick = () => {
     catch (error) { if (pendingHand === operation && client === operation.client) report(error); }
     finally {
       if (pendingHand === operation && client === operation.client) { pendingHand = undefined; syncHand(); }
+    }
+  })();
+};
+rename.onclick = () => {
+  syncRename();
+  const current = client, state = current?.state;
+  if (!current || !state || rename.hidden || rename.disabled) return;
+  const name = input('name').value;
+  const operation = { client: current, roomId: state.roomId, participantId: state.me.participantId, generation: entryGeneration };
+  pendingRename = operation; syncRename();
+  void (async () => {
+    try { await current.setName(name); }
+    catch (error) { if (pendingRename === operation && ownsRename(operation)) report(error); }
+    finally {
+      if (pendingRename === operation) { pendingRename = undefined; syncRename(); }
     }
   })();
 };
@@ -286,4 +316,4 @@ leave.onclick = () => {
     status.textContent = '已離開。'; hand.disabled = leave.disabled = true;
   });
 };
-syncHand(); syncMic(); syncStage(); syncMicRetry();
+syncHand(); syncMic(); syncStage(); syncMicRetry(); syncRename();
