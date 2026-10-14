@@ -47,6 +47,12 @@ export class SampleNode {
     if (name === 'class') this.className = value;
     if (name.startsWith('data-')) this.dataset[name.slice(5).replace(/-([a-z])/g, (_match, letter: string) => letter.toUpperCase())] = value;
   }
+  removeAttribute(name: string): void {
+    delete this.attributes[name];
+    if (name === 'id') this.id = '';
+    if (name === 'class') this.className = '';
+    if (name.startsWith('data-')) delete this.dataset[name.slice(5).replace(/-([a-z])/g, (_match, letter: string) => letter.toUpperCase())];
+  }
   readonly classList = {
     contains: (name: string): boolean => this.className.split(/\s+/).includes(name),
     toggle: (name: string, force?: boolean): boolean => {

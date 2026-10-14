@@ -348,7 +348,7 @@ for (const overlay of ['speaking', 'quality'] as const) {
   });
 }
 
-it('whole sample retains 100 seats through 100 alternating overlay and snapshot iterations with one badge allocation', async t => {
+it('whole sample retains 100 seats through 100 alternating overlay and snapshot iterations with one badge and one details-row allocation', async t => {
   const h = await setup(t), state = managementState(0, 91, 8); h.sdk.snapshot(clone(state));
   const people = rows(h), slider = gain(h); assert.equal(people.length, 100); h.reset();
   for (let index = 0; index < 100; index++) {
@@ -360,7 +360,7 @@ it('whole sample retains 100 seats through 100 alternating overlay and snapshot 
     assert.equal(people.find(row => row.dataset.participantId === 'speaker-0')!.querySelector('.badge.quality')?.textContent,
       `連線不穩 ${10 + index % 2}%`);
   }
-  assert.deepEqual({ ...h.counts }, { created: 1, replacements: 0, rows: 0 });
+  assert.deepEqual({ ...h.counts }, { created: 2, replacements: 0, rows: 0 });
   t.diagnostic(`100 seats / 100 alternating speaking+quality+snapshot iterations: ${JSON.stringify(h.counts)}; fake-node operations only, not browser CPU/layout/paint`);
 });
 

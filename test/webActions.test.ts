@@ -65,6 +65,8 @@ function setup(): Harness {
     const button = () => element(), field = () => element(), gainSlider = () => element();
     const window = { confirm: () => true };
     function applyQuality() {}
+    function resetQualityDetails() {}
+    function syncQualityDetails() {}
     const params = { get: () => null }, document = { createTextNode: () => element() };
     function renderNotices() {}
     function resetMicSettings() {}

@@ -126,6 +126,69 @@ audienceFilterClear.onclick = () => {
 };
 const content = element('main');
 app.append(header, notices, errorBox, audienceFilter, content);
+const stageQuality = element('details', 'panel stage-quality');
+stageQuality.id = 'stage-quality'; stageQuality.hidden = true;
+const stageQualitySummary = element('summary', '', '舞台連線品質');
+const stageQualityStatus = element('p', 'muted stage-quality-status');
+const stageQualityList = element('ul', 'stage-quality-list');
+stageQuality.append(stageQualitySummary, stageQualityStatus, stageQualityList);
+app.append(stageQuality);
+let stageQualityIdentity = '';
+let stageQualityReconnecting = false;
+let stageQualityReports = new Map<string, ConnectionQuality>();
+const stageQualityRows = new Map<string, HTMLLIElement>();
+let stageQualityOrder: string[] = [];
+function clearQualityDetailsReports(): void {
+  stageQualityReports.clear(); stageQualityRows.clear(); stageQualityOrder = [];
+  stageQualityList.replaceChildren();
+}
+function resetQualityDetails(): void {
+  stageQualityIdentity = ''; stageQualityReconnecting = false;
+  stageQuality.hidden = true; stageQuality.removeAttribute('open');
+  stageQualityStatus.textContent = ''; clearQualityDetailsReports();
+}
+/** Reports have no timestamp or room epoch; accept them only in the current eligible view. */
+function syncQualityDetails(reports?: readonly ConnectionQuality[]): void {
+  const state = client.state, me = state?.me;
+  if (!state || !me || (me.role !== 'controller' && !me.onStage)) { resetQualityDetails(); return; }
+  const identity = JSON.stringify([state.roomId, me.participantId]);
+  if (identity !== stageQualityIdentity) { resetQualityDetails(); stageQualityIdentity = identity; }
+  stageQuality.hidden = false;
+  const reconnecting = client.status === 'reconnecting';
+  if (reconnecting && !stageQualityReconnecting) clearQualityDetailsReports();
+  stageQualityReconnecting = reconnecting;
+  const speakers = state.speakers.filter(person => person.onStage);
+  const ids = new Set(speakers.map(person => person.participantId));
+  if (reports !== undefined && !reconnecting) {
+    // Copy primitive fields rather than retaining mutable event objects; each report replaces the last.
+    stageQualityReports = new Map(reports.filter(report => ids.has(report.participantId)).map(report => [report.participantId, {
+      participantId: report.participantId, uplinkLossPercent: report.uplinkLossPercent,
+      downlinkLossPercent: report.downlinkLossPercent, rttMs: report.rttMs,
+    }]));
+  }
+  for (const id of stageQualityReports.keys()) if (!ids.has(id)) stageQualityReports.delete(id);
+  const percent = (value: number | undefined) => typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 100 ? `${value.toFixed(1)}%` : '—';
+  const rtt = (value: number | undefined) => typeof value === 'number' && Number.isFinite(value) && value >= 0 ? `${Math.round(value)} ms` : '—';
+  const order: string[] = [];
+  for (const person of speakers) {
+    const report = stageQualityReports.get(person.participantId);
+    if (!report) continue;
+    order.push(person.participantId);
+    let row = stageQualityRows.get(person.participantId);
+    if (!row) { row = element('li'); row.dataset.participantId = person.participantId; stageQualityRows.set(person.participantId, row); }
+    const text = `${decodeName(person.name)}：上行掉包 ${percent(report.uplinkLossPercent)} · 下行掉包 ${percent(report.downlinkLossPercent)} · RTT ${rtt(report.rttMs)}`;
+    if (row.textContent !== text) row.textContent = text;
+  }
+  for (const id of stageQualityRows.keys()) if (!order.includes(id)) stageQualityRows.delete(id);
+  if (order.length !== stageQualityOrder.length || order.some((id, index) => id !== stageQualityOrder[index])) {
+    stageQualityList.replaceChildren(...order.map(id => stageQualityRows.get(id)!));
+    stageQualityOrder = order;
+  }
+  stageQualityStatus.textContent = order.length
+    ? '最近收到的伺服器回報；RTT 不是端到端音訊延遲。'
+    : `${reconnecting ? '重新連線中；' : ''}尚未收到目前發言者的品質回報。`;
+}
+
 const settings = element('section', 'panel audio-settings');
 settings.append(element('h2', '', '音訊設定'));
 const micSelect = element('select');
@@ -443,6 +506,7 @@ function field(form: HTMLFormElement, label: string, name: string, value = '', r
   return input;
 }
 function landing(): void {
+  resetQualityDetails();
   stagePermissionOwner = undefined;
   landingRevision += 1;
   ownHandPosition.hidden = true; ownHandPosition.textContent = '';
@@ -586,6 +650,7 @@ function syncAudienceFilter(state: RoomStatePayload): void {
   applyAudienceFilter();
 }
 function renderRoom(state: RoomStatePayload): void {
+  syncQualityDetails();
   resetRoomActions(JSON.stringify([state.roomId, state.me.participantId]));
   if (!state.me.onStage) {
     if (micRetryPending) micNotice = '';
@@ -822,7 +887,7 @@ client.on('status', ({ detail }) => {
     quality.clear();
     syncMeter(); landing();
   }
-  updateCooldown(); syncMicRetry();
+  updateCooldown(); syncMicRetry(); syncQualityDetails();
 });
 client.on('created', ({ detail }) => { createdRoom = detail; });
 client.on('closed', ({ detail }) => { if (landingEntry) landingEntry.entered = true; createdRoom = null; micNotice = ''; invitation = detail.reason === 'shutdown' ? '伺服器維護或重新啟動，房間已關閉；請稍後重新建立或加入。' : '房間已關閉，歡迎建立或加入其他舞台。'; audioBlocked = false; landing(); });
@@ -853,6 +918,7 @@ client.on('speaking', ({ detail }) => {
   renderedSpeakingSignature = JSON.stringify([...ids]);
 });
 client.on('quality', ({ detail }) => {
+  syncQualityDetails(detail.participants);
   const previous = quality;
   quality = new Map(detail.participants.map((q) => [q.participantId, q]));
   // Omitted IDs still need their old warnings removed, including duplicate rows.
