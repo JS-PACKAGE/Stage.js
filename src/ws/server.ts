@@ -121,7 +121,7 @@ export function createStageServer(deps: StageServerDeps): StageServer {
         log.error('TLS certificate reload failed, keeping the previous one', { error: String(err) });
       }
     };
-    const names: Record<string, string[]> = {};
+    const names: Record<string, string[]> = Object.create(null);
     for (const file of [certFile, keyFile]) (names[dirname(file)] ??= []).push(basename(file));
     for (const [dir, files] of Object.entries(names)) {
       try {

@@ -685,3 +685,6 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 
 
 168. **獨立麥克風預覽的自然結束清理（2026-10-14）：** actual SDK 搭配 EventTarget track／受控 AudioContext 證明 preview natural ended 後原本保留 SDK 記錄、abort listener 與開啟 graph，後續 100 次 level 仍讀取 analyser；已 ended grant 或 meter construction 中結束亦可能發出 micready。只在 startMicTest 為取得的第一條 audio track 加入預覽專屬 ended cleanup，沿既有 idempotent stop 移除 listener、停止 graph／tracks 與自身記錄，不影響其他預覽或 room capture。保留先檢查 abort／revision 的次序，再於 meter 前後與 ready 前檢查 ended；setup 失敗以 promise 拒絕並清理，不發房間 micerror 或自動擷取。ready listener 內自然結束或直接 track.stop（不派發 ended）後，回傳已停止的 level-zero handle；取消／disconnect 仍沿原 promise 拒絕優先序。公開 shape 不變，沒有新完成事件；第一音軌假設與現有 getUserMedia／room capture 一致，不聲稱任意多軌串流支援。僅主張 graph／listener／ownership 清理與停止 analyser 呼叫，不主張仍被呼叫者保留之 handle 的 sample buffer GC、原生 CPU／硬體或可聽音訊效果。
+
+
+169. **TLS 憑證監看目錄的原型名稱隔離（2026-10-14）：** parseConfig 接受的相對路徑 __proto__/cert.pem、constructor/cert.pem、toString/cert.pem，在真實 createStageServer 載入有效測試憑證後，原本因一般物件繼承屬性而於分組 .push 拋 TypeError。只將分組字典改為 Object.create(null)，保留 Object.entries 的既有數字鍵順序、同／不同目錄分組、filename 過濾、2 秒 debounce、reload 失敗保留 context、watch 失敗記錄與 shutdown 清理。這是可信設定路徑的啟動健全性修正，不主張遠端可利用性。原生 factory 測試以已安裝 werift helper 產生暫存 synthetic 憑證，僅建立／關閉，無 listen；受控 whole-factory 測試驗證 watcher／timer 語意。不新增依賴、不修改 TLS 政策或使用真實私鑰，不宣稱原生 TLS handshake、ACME 更新或部署驗收。
