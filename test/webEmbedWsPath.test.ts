@@ -213,7 +213,7 @@ for (const wsPath of ['/custom/stage', '/ws']) {
     } });
     const { StageClient, decodeName } = await import(new URL('../packages/client/src/index.ts', import.meta.url).href);
     const joined = Promise.withResolvers<RoomStatePayload>();
-    const nodes = new Map(['host', 'ws-path', 'room', 'code', 'name', 'status', 'hand-rejected', 'error-notice', 'last-error', 'error-dismiss', 'join', 'hand', 'mic', 'rename', 'room-name-panel', 'room-name-current', 'room-name-draft', 'room-name-update', 'stage', 'mic-retry', 'cancel-join', 'leave', 'audio', 'unlock'].map(id => [id, new EmbedNode()]));
+    const nodes = new Map(['host', 'ws-path', 'room', 'code', 'name', 'status', 'hand-rejected', 'error-notice', 'last-error', 'error-dismiss', 'join', 'hand', 'mic', 'rename', 'room-name-panel', 'room-name-current', 'room-name-draft', 'room-name-update', 'stage', 'mic-retry', 'microphone-panel', 'microphone-device', 'microphone-refresh', 'microphone-apply', 'microphone-draft-notice', 'cancel-join', 'leave', 'audio', 'unlock'].map(id => [id, new EmbedNode()]));
     const node = (id: string): EmbedNode => { const value = nodes.get(id); assert.ok(value, `unmodeled node: ${id}`); return value; };
     node('error-notice').hidden = true; node('hand-rejected').hidden = true;
     node('join').submitButton = new EmbedNode(); node('name').value = '嵌入聽眾';
@@ -226,7 +226,7 @@ for (const wsPath of ['/custom/stage', '/ws']) {
     const params = new URLSearchParams({ host: `${origin}/ignored`, room: room.roomId });
     if (wsPath !== '/ws') params.set('wsPath', wsPath);
     runInNewContext(executable, {
-      document: { querySelector(selector: string) { assert.match(selector, /^#[a-z-]+$/); return node(selector.slice(1)); } },
+      document: { createElement(tag: string) { assert.equal(tag, 'option'); return new EmbedNode(); }, querySelector(selector: string) { assert.match(selector, /^#[a-z-]+$/); return node(selector.slice(1)); } },
       location: { search: `?${params}`, origin }, URL, URLSearchParams, Error, Promise, performance, setTimeout, clearTimeout,
       loadLibrary: async (moduleUrl: string) => {
         moduleUrls.push(moduleUrl); assert.equal(moduleUrl, `${origin}/lib/stage-client.js`);
