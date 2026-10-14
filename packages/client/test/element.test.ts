@@ -14,6 +14,7 @@ class Node extends EventTarget {
   readonly part = new Set<string>();
   readonly attributes = new Map<string, string>();
   hidden = false;
+  open = false;
   disabled = false;
   textContent = '';
   className = '';
@@ -28,6 +29,7 @@ class Node extends EventTarget {
   onclick?: () => void;
   oninput?: (event: Event) => void;
   append(...nodes: Node[]): void { this.children.push(...nodes); }
+  replaceChildren(...nodes: Node[]): void { this.children.splice(0, this.children.length, ...nodes); }
   remove(): void { this.isConnected = false; }
   attachShadow(): Node { const root = new Node(); this.children.push(root); return root; }
   setAttribute(name: string, value: string): void { const previous = this.getAttribute(name); this.attributes.set(name, value); this.changed(name, previous, value); }
@@ -6875,6 +6877,506 @@ describe('widget explicit error dismissal', () => {
       else if (action === 'microphone retry') { t.mock.method(client, 'retryMicrophone', () => true); click(element['micRetry']); }
       else client.dispatchEvent(new CustomEvent('micready', { detail: undefined }));
       await settle(); assertHidden(element, true); assert.equal(element['error'].textContent, text); assert.equal(element['errorRevision'], revision);
+    });
+  }
+});
+
+describe('widget controller hand request panel', () => {
+  type Widget = InstanceType<typeof StageElement>;
+  type ModerationRequest = Extract<ClientMessage, { type: 'stage:approve' | 'stage:reject' }>;
+  const nodes = (node: Node): Node[] => [node, ...node.children.flatMap(nodes)];
+  const text = (node: Node): string => [node.textContent, ...node.children.map(text)].join(' ');
+  const visibleText = (node: Node): string => node.hidden ? '' : [node.textContent, ...node.children.map(visibleText)].join(' ');
+  function panel(element: Widget): Node {
+    const matches = nodes(element as unknown as Node).filter(node => node.part.has('hands'));
+    assert.equal(matches.length, 1, 'one native disclosure is exposed through ::part(hands)');
+    assert.equal(matches[0]!.tagName, 'DETAILS');
+    return matches[0]!;
+  }
+  function queue(element: Widget) {
+    const disclosure = panel(element);
+    const summary = disclosure.children.find(node => node.tagName === 'SUMMARY');
+    const list = disclosure.children.find(node => node.tagName === 'UL');
+    const empty = disclosure.children.find(node => node.tagName === 'P');
+    assert.ok(summary && list && empty, 'native summary, list and ordinary empty paragraph');
+    assert.equal(empty.getAttribute('aria-live'), null);
+    assert.equal(empty.getAttribute('role'), null);
+    return { disclosure, summary, list, empty, rows: list.children };
+  }
+  function buttons(row: Node) {
+    assert.equal(row.tagName, 'LI');
+    const found = nodes(row).filter(node => node.tagName === 'BUTTON');
+    assert.equal(found.length, 2, 'each request has only approve and reject');
+    for (const button of found) assert.equal(button.type, 'button');
+    const approve = found.find(button => /核准|同意|批准/.test(button.textContent));
+    const reject = found.find(button => /拒/.test(button.textContent));
+    assert.ok(approve && reject);
+    return { approve, reject };
+  }
+  function press(button: Node): void { button.onclick?.(); }
+  function force(button: Node): void { const disabled = button.disabled; button.disabled = false; press(button); button.disabled = disabled; }
+  function busy(row: Node, expected: boolean, disabled = expected): void {
+    for (const button of Object.values(buttons(row))) {
+      assert.equal(button.disabled, disabled);
+      assert.equal(button.getAttribute('aria-busy') === 'true', expected);
+    }
+  }
+  function retired(element: Widget): void {
+    const { disclosure, list } = queue(element);
+    assert.equal(disclosure.hidden, true); assert.equal(disclosure.open, false);
+    assert.deepEqual(list.children, [], 'retirement clears private request rows');
+    assert.doesNotMatch(text(disclosure), /Private queued|Unraised secret/);
+  }
+  function state(ids = ['first', 'second'], onStage = false, roomId = 'one'): RoomStatePayload {
+    const snapshot = controllerState(onStage, roomId);
+    snapshot.hands = ids.map((participantId, index) => ({ ...roomState().me, participantId,
+      name: `Private queued ${participantId}`, handRaised: true, joinedAt: 100 - index }));
+    return snapshot;
+  }
+  function request(socket: { sent: ClientMessage[] }, type?: ModerationRequest['type']): ModerationRequest {
+    const message = socket.sent.filter((message): message is ModerationRequest =>
+      (message.type === 'stage:approve' || message.type === 'stage:reject') && (!type || message.type === type)).at(-1);
+    assert.ok(message); return message;
+  }
+  function error(socket: { deliver(message: ServerMessage): void }, message = 'Existing widget error'): void {
+    socket.deliver({ type: 'error', code: 'conflict', message });
+  }
+
+  it('keeps audience and speakers private, then exposes a collapsed onstage/offstage controller queue and ordinary empty state', async t => {
+    const unjoined = new StageElement(); widgets.push(unjoined); retired(unjoined);
+    const { element, client } = await subscribedWidget(t);
+    retired(element);
+    for (const role of ['audience', 'speaker'] as const) {
+      const next = state(); next.me.role = role; next.me.onStage = role === 'speaker'; next.controllerId = 'host';
+      await client['receive']({ type: 'room:state', ...next }); retired(element);
+      assert.doesNotMatch(visibleText(element as unknown as Node), /Private queued/);
+    }
+    const stable = panel(element);
+    for (const onStage of [false, true]) {
+      await client['receive']({ type: 'room:state', ...state([], onStage) });
+      const view = queue(element);
+      assert.equal(view.disclosure, stable); assert.equal(stable.hidden, false); assert.equal(stable.open, false);
+      assert.match(view.summary.textContent, /0/); assert.equal(view.empty.hidden, false); assert.ok(view.empty.textContent);
+      assert.equal(element['hand'].hidden, true);
+    }
+    await client.disconnect(); retired(element);
+  });
+
+  it('preserves snapshot order and same-order row identity, safely decodes names, and never renders the controller audience roster or code', async t => {
+    const initial = state(['z', 'a', 'same-name']);
+    initial.hands[0]!.name = '&lt;img src=x onerror=alert(1)&gt; &amp; &quot;Q&quot; &#39;S&#39; &amp;lt;';
+    initial.hands[1]!.name = initial.hands[2]!.name = 'Same display name';
+    initial.hands[2]!.connected = false;
+    initial.audience = [{ ...roomState().me, participantId: 'private', name: 'Unraised secret' }];
+    initial.code = 'SECRET-ROOM-CODE';
+    const { element, socket } = await socketJoinedWidget(t, initial);
+    const view = queue(element), first = [...view.rows], firstButtons = first.map(buttons);
+    const replaceRows = t.mock.method(view.list, 'replaceChildren');
+    assert.match(view.summary.textContent, /3/); assert.doesNotMatch(view.empty.textContent, /沒有舉手/); assert.equal(view.disclosure.open, false);
+    assert.match(text(first[0]!), /<img src=x onerror=alert\(1\)> & "Q" 'S' &lt;/);
+    assert.match(text(first[2]!), /未連線|離線|斷線/);
+    assert.doesNotMatch(visibleText(element as unknown as Node), /Unraised secret|SECRET-ROOM-CODE/);
+    for (const node of nodes(view.disclosure)) {
+      assert.equal(Reflect.get(node, 'innerHTML'), undefined, 'names are plain text, never parsed HTML');
+      assert.ok(!['IMG', 'SCRIPT'].includes(node.tagName));
+    }
+    view.disclosure.open = true;
+    const renamed = structuredClone(initial); renamed.hands[1]!.name = 'Renamed &amp; safe';
+    socket.deliver({ type: 'room:state', ...renamed });
+    const updated = queue(element);
+    assert.deepEqual(updated.rows, first); assert.equal(updated.disclosure.open, true);
+    assert.deepEqual(updated.rows.map(buttons), firstButtons); assert.match(text(updated.rows[1]!), /Renamed & safe/);
+    assert.equal(replaceRows.mock.callCount(), 0, 'unchanged order does not detach focused or expanded row controls');
+    const reordered = structuredClone(renamed); reordered.hands.reverse();
+    socket.deliver({ type: 'room:state', ...reordered });
+    assert.deepEqual(queue(element).rows, [...first].reverse(), 'keys follow authoritative order without replacing surviving nodes');
+    assert.deepEqual(initial.hands.map(person => person.participantId), ['z', 'a', 'same-name']);
+  });
+
+  for (const action of ['approve', 'reject'] as const) {
+    it(`holds a target-wide ${action} lock through state-before-ACK removal and same-ID reappearance, without trusting the retired row callback`, async t => {
+      const { element, socket, tick } = await socketJoinedWidget(t, state());
+      const original = queue(element).rows[0]!, old = buttons(original);
+      error(socket); press(old[action]); force(old.approve); force(old.reject); busy(original, true);
+      assert.equal(element['error'].hidden, true); await tick(100);
+      const first = request(socket); assert.equal(first.type, `stage:${action}`); assert.equal(first.targetId, 'first');
+      socket.deliver({ type: 'room:state', ...state(['second']) });
+      socket.deliver({ type: 'room:state', ...state() });
+      const replacement = queue(element).rows[0]!; assert.notEqual(replacement, original); busy(replacement, true);
+      error(socket, 'Keep pending error'); force(old.approve); force(old.reject);
+      force(buttons(replacement).approve); force(buttons(replacement).reject); await tick(100);
+      assert.equal(socket.sent.filter(message => message.type.startsWith('stage:')).length, 1);
+      assert.equal(element['error'].textContent, 'Keep pending error'); assert.equal(element['error'].hidden, false);
+      socket.deliver({ type: 'ok', requestId: first.requestId }); await settle(); busy(replacement, false);
+      force(old.approve); force(old.reject); assert.equal(element['error'].hidden, false, 'stale row cannot clear current errors after ACK');
+      press(buttons(replacement)[action]); await tick(100); const second = request(socket);
+      assert.notEqual(second.requestId, first.requestId); assert.equal(second.targetId, first.targetId);
+      socket.deliver({ type: 'ok', requestId: first.requestId }); await settle(); busy(replacement, true);
+      socket.deliver({ type: 'ok', requestId: second.requestId }); await settle(); busy(replacement, false);
+    });
+  }
+
+  it('uses exact participant IDs for duplicate display names, shares each target lock across both actions, and permits a different target concurrently', async t => {
+    const initial = state(); initial.hands.forEach(person => { person.name = 'Same name'; });
+    const { element, socket, tick } = await socketJoinedWidget(t, initial);
+    const [first, second] = queue(element).rows; assert.ok(first && second);
+    press(buttons(first).approve); press(buttons(first).reject); press(buttons(second).reject); press(buttons(second).approve);
+    busy(first, true); busy(second, true); await tick(200);
+    const sent = socket.sent.filter((message): message is ModerationRequest => message.type === 'stage:approve' || message.type === 'stage:reject');
+    assert.deepEqual(sent.map(message => [message.type, message.targetId]), [['stage:approve', 'first'], ['stage:reject', 'second']]);
+    socket.deliver({ type: 'ok', requestId: sent[1]!.requestId }); await settle(); busy(second, false); busy(first, true);
+    socket.deliver({ type: 'error', code: 'conflict', message: 'Target withdrew', requestId: sent[0]!.requestId });
+    await settle(); busy(first, false); assert.equal(element['error'].textContent, 'Target withdrew');
+  });
+
+  for (const callback of ['stage-status', 'stage-state'] as const) {
+    it(`prepares current rows before forwarded ${callback} and reserves a single reentrant request before join ACK`, async t => {
+      const { element, sockets, hello, tick } = socketJoiningWidget(t); await settle();
+      const socket = sockets[0]!, join = await hello(socket); let callbacks = 0;
+      element.addEventListener(callback, () => {
+        callbacks++; assert.equal(panel(element).hidden, false);
+        const row = queue(element).rows[0]!; press(buttons(row).approve); force(buttons(row).reject); busy(row, true);
+      }, { once: true });
+      socket.deliver({ type: 'room:state', ...state() }); await tick(100);
+      assert.equal(callbacks, 1); const sent = request(socket); assert.equal(sent.targetId, 'first');
+      assert.equal(socket.sent.filter(message => message.type.startsWith('stage:')).length, 1);
+      socket.deliver({ type: 'ok', requestId: join.requestId }); await settle(); busy(queue(element).rows[0]!, true);
+      socket.deliver({ type: 'ok', requestId: sent.requestId }); await settle(); busy(queue(element).rows[0]!, false);
+    });
+  }
+
+  it('reserves the target before synchronous SDK callbacks can forward newer state and resubmit either action', async t => {
+    const { element, client, socket } = await socketJoinedWidget(t, state());
+    const pending = deferred(); let callbacks = 0;
+    element.addEventListener('stage-state', () => {
+      callbacks++; const row = queue(element).rows[0]!; busy(row, true); force(buttons(row).approve); force(buttons(row).reject);
+    }, { once: true });
+    const approve = t.mock.method(client, 'approve', () => { socket.deliver({ type: 'room:state', ...state() }); return pending.promise; });
+    const reject = t.mock.method(client, 'reject', async () => {});
+    press(buttons(queue(element).rows[0]!).approve);
+    assert.equal(callbacks, 1); assert.equal(approve.mock.callCount(), 1); assert.equal(reject.mock.callCount(), 0);
+    pending.resolve(); await settle(); busy(queue(element).rows[0]!, false);
+  });
+
+  it('rechecks target membership, hand, role and offstage authority even when a snapshot is changed without rendering', async t => {
+    const { element, client, socket } = await socketJoinedWidget(t, state());
+    const approve = t.mock.method(client, 'approve', async () => {}), reject = t.mock.method(client, 'reject', async () => {});
+    for (const invalid of ['missing', 'withdrawn', 'speaker', 'controller', 'onstage'] as const) {
+      socket.deliver({ type: 'room:state', ...state() }); const row = queue(element).rows[0]!, actions = buttons(row);
+      error(socket, `Keep ${invalid}`);
+      if (invalid === 'missing') client.state!.hands.splice(0, 1);
+      else if (invalid === 'withdrawn') client.state!.hands[0]!.handRaised = false;
+      else if (invalid === 'onstage') client.state!.hands[0]!.onStage = true;
+      else client.state!.hands[0]!.role = invalid;
+      force(actions.approve); force(actions.reject); await settle();
+      assert.equal(approve.mock.callCount(), 0); assert.equal(reject.mock.callCount(), 0);
+      assert.equal(element['error'].hidden, false); assert.equal(element['error'].textContent, `Keep ${invalid}`);
+    }
+  });
+
+  for (const transition of ['role', 'room', 'participant', 'generation'] as const) {
+    it(`retires ${transition} ownership before forwarded reentry, then isolates old callbacks and promise rejection from a fresh same-target pending action`, async t => {
+      const { element, client, socket } = await socketJoinedWidget(t, state());
+      const old = deferred(), active = deferred(); let calls = 0;
+      t.mock.method(client, 'approve', () => (++calls === 1 ? old : active).promise);
+      const oldRow = queue(element).rows[0]!, oldActions = buttons(oldRow); panel(element).open = true; press(oldActions.approve);
+      let callbacks = 0; element.addEventListener('stage-state', () => {
+        callbacks++; error(socket, 'Keep owner change error'); force(oldActions.approve); force(oldActions.reject);
+        assert.equal(calls, 1); assert.equal(element['error'].hidden, false);
+      }, { once: true });
+      const next = state();
+      if (transition === 'role') { next.me.role = 'audience'; next.controllerId = 'someone-else'; }
+      else if (transition === 'room') next.roomId = 'two';
+      else if (transition === 'participant') { next.me.participantId = 'new-controller'; next.controllerId = 'new-controller'; }
+      else ++element['generation'];
+      if (transition === 'generation') { element['render'](); } else socket.deliver({ type: 'room:state', ...next });
+      if (transition === 'role') retired(element);
+      // A generation-only change intentionally retires the old event lane; use its public snapshot and render seam.
+      if (transition === 'generation') { element['render'](); } else socket.deliver({ type: 'room:state', ...state() });
+      const fresh = queue(element).rows[0]!; assert.notEqual(fresh, oldRow); assert.equal(panel(element).open, false);
+      press(buttons(fresh).approve); assert.equal(calls, 2); busy(fresh, true);
+      element['show'](new Error('Fresh owner error')); old.reject(new Error('Obsolete moderation error')); await settle();
+      busy(fresh, true); assert.equal(element['error'].textContent, 'Fresh owner error');
+      force(oldActions.approve); force(oldActions.reject); assert.equal(calls, 2); assert.equal(element['error'].hidden, false);
+      active.resolve(); await settle(); busy(fresh, false);
+      if (transition !== 'generation') assert.equal(callbacks, 1);
+    });
+  }
+
+  it('retains rows, expansion and a deferred lock through reconnect, blocks forwarded status reentry, and never replays moderation automatically', async t => {
+    const { element, client, socket, sockets, tick, hello } = await socketJoinedWidget(t, state());
+    const pending = deferred(), approve = t.mock.method(client, 'approve', () => pending.promise);
+    const row = queue(element).rows[0]!, actions = buttons(row); panel(element).open = true; press(actions.approve);
+    error(socket, 'Keep reconnect error'); let callbacks = 0;
+    element.addEventListener('stage-status', () => {
+      callbacks++; force(actions.approve); force(actions.reject); force(buttons(queue(element).rows[1]!).approve);
+      assert.equal(element['error'].hidden, false);
+    }, { once: true });
+    socket.close(); await settle();
+    assert.equal(callbacks, 1); assert.equal(queue(element).rows[0], row); assert.equal(panel(element).open, true);
+    assert.match(text(panel(element)), /重新連線|重連/); assert.match(queue(element).summary.textContent, /最近|上次|最後|先前/);
+    busy(row, true); busy(queue(element).rows[1]!, false, true); assert.equal(approve.mock.callCount(), 1);
+    await tick(500); const next = sockets[1]!, resume = await hello(next);
+    next.deliver({ type: 'room:state', ...state() }); next.deliver({ type: 'ok', requestId: resume.requestId }); await settle();
+    assert.equal(queue(element).rows[0], row); assert.equal(panel(element).open, true); busy(row, true);
+    assert.doesNotMatch(text(panel(element)), /重新連線|重連/);
+    assert.equal(next.sent.some(message => message.type.startsWith('stage:')), false);
+    pending.resolve(); await settle(); busy(row, false); assert.equal(element['error'].textContent, 'Keep reconnect error');
+  });
+
+  it('shows actual socket-loss rejection, then ignores old-wire state, error and ACK during a fresh request', async t => {
+    const { element, socket, sockets, tick, hello } = await socketJoinedWidget(t, state());
+    panel(element).open = true; press(buttons(queue(element).rows[0]!).approve); await tick(100);
+    const old = request(socket), oldMessage = socket.onmessage; socket.close(); await settle();
+    assert.equal(element['error'].textContent, '連線已中斷。'); busy(queue(element).rows[0]!, false, true);
+    await tick(500); const next = sockets[1]!, resume = await hello(next);
+    next.deliver({ type: 'room:state', ...state() }); next.deliver({ type: 'ok', requestId: resume.requestId }); await settle();
+    const row = queue(element).rows[0]!; press(buttons(row).reject); await tick(100); const active = request(next);
+    for (const message of [
+      { type: 'ok', requestId: old.requestId },
+      { type: 'error', code: 'conflict', message: 'Old wire error', requestId: old.requestId },
+      { type: 'room:state', ...state([]) },
+    ] satisfies ServerMessage[]) oldMessage?.({ data: JSON.stringify(message) });
+    await settle(); busy(row, true); assert.equal(queue(element).rows[0], row); assert.equal(element['error'].hidden, true);
+    next.deliver({ type: 'ok', requestId: active.requestId }); await settle(); busy(row, false);
+  });
+
+  it('retires a pre-ACK disconnected snapshot and silent public disconnect, then admits a new same-ID owner without stale promise effects', async t => {
+    const { element, sockets, hello, tick, joinRequest } = socketJoiningWidget(t); await settle();
+    const socket = sockets[0]!, join = await hello(socket), client = element.client!;
+    socket.deliver({ type: 'room:state', ...state() }); assert.equal(client['session'], null); assert.ok(client['pending'].has(join.requestId));
+    const old = deferred(), active = deferred(); let calls = 0;
+    t.mock.method(client, 'approve', () => (++calls === 1 ? old : active).promise);
+    const oldRow = queue(element).rows[0]!, oldActions = buttons(oldRow); panel(element).open = true; press(oldActions.approve);
+    socket.close(); await settle(); assert.equal(client.status, 'disconnected'); assert.ok(client.state); retired(element);
+    let statuses = 0; element.addEventListener('stage-status', () => { statuses++; });
+    await client.disconnect(); assert.equal(statuses, 0); retired(element);
+    const connecting = client.connect(), next = sockets[1]!; next.hello(); await connecting;
+    const joining = client.join({ roomId: 'one', name: 'Listener' }); await settle(); await tick(100);
+    const freshJoin = joinRequest(next); next.deliver({ type: 'room:state', ...state() });
+    next.deliver({ type: 'ok', requestId: freshJoin.requestId }); await joining;
+    const fresh = queue(element).rows[0]!; assert.notEqual(fresh, oldRow); assert.equal(panel(element).open, false);
+    press(buttons(fresh).approve); error(next, 'Fresh same-ID error'); old.reject(new Error('Obsolete pre-ACK error')); await settle();
+    busy(fresh, true); force(oldActions.approve); force(oldActions.reject); assert.equal(calls, 2);
+    assert.equal(element['error'].textContent, 'Fresh same-ID error'); active.resolve(); await settle(); busy(fresh, false);
+  });
+
+  for (const transition of ['leave', 'detach', 'direct disconnect', 'ordinary close', 'kick', 'shutdown'] as const) {
+    it(`clears rows, expansion and pending ownership on ${transition} before stale callbacks can clear current errors`, async t => {
+      const { element, client, socket } = await socketJoinedWidget(t, state());
+      const pending = deferred(), approve = t.mock.method(client, 'approve', () => pending.promise);
+      const old = buttons(queue(element).rows[0]!); panel(element).open = true; press(old.approve);
+      if (transition === 'leave') press(element['roomAction'] as unknown as Node);
+      else if (transition === 'detach') { Object.assign(element, { isConnected: false }); element.disconnectedCallback(); }
+      else if (transition === 'direct disconnect') await client.disconnect();
+      else socket.deliver(terminalCases.find(item => item.title === transition)!.message);
+      await settle(); retired(element); element['show'](new Error('Current terminal error'));
+      force(old.approve); force(old.reject); pending.reject(new Error('Obsolete terminal error')); await settle();
+      assert.equal(approve.mock.callCount(), 1); assert.equal(element['error'].textContent, 'Current terminal error');
+      assert.equal(element['error'].hidden, false); retired(element);
+    });
+  }
+
+  it('isolates a retired client across attribute rejoin and suppresses its delayed rejection while the replacement owns a pending request', async t => {
+    const { element, client, socket, sockets, hello } = await socketJoinedWidget(t, state());
+    const old = deferred(); t.mock.method(client, 'approve', () => old.promise);
+    const oldActions = buttons(queue(element).rows[0]!); press(oldActions.approve); panel(element).open = true;
+    const oldMessage = socket.onmessage, oldClose = socket.onclose;
+    element.setAttribute('room', 'two'); await settle(); await settle(); retired(element);
+    const replacement = element.client!; assert.notEqual(replacement, client);
+    const next = sockets[1]!, join = await hello(next); next.deliver({ type: 'room:state', ...state(['first'], false, 'two') });
+    next.deliver({ type: 'ok', requestId: join.requestId }); await settle();
+    const pending = deferred(), approve = t.mock.method(replacement, 'approve', () => pending.promise);
+    const row = queue(element).rows[0]!; press(buttons(row).approve); error(next, 'Replacement error');
+    old.reject(new Error('Retired client error')); oldMessage?.({ data: JSON.stringify({ type: 'room:state', ...state([]) }) }); oldClose?.(); await settle();
+    force(oldActions.approve); force(oldActions.reject); busy(row, true);
+    assert.equal(approve.mock.callCount(), 1); assert.equal(element['error'].textContent, 'Replacement error');
+    pending.resolve(); await settle(); busy(row, false);
+  });
+
+  it('suppresses an obsolete settlement after silent role loss, but keeps the SDK global error event contract', async t => {
+    const { element, client, socket, tick } = await socketJoinedWidget(t, state());
+    const pending = deferred(); const approve = t.mock.method(client, 'approve', () => pending.promise);
+    press(buttons(queue(element).rows[0]!).approve); error(socket, 'Unrelated current error');
+    client.state!.me.role = 'audience'; client.state!.controllerId = 'other';
+    pending.reject(new Error('Late unauthorized error')); await settle(); retired(element);
+    assert.equal(element['error'].textContent, 'Unrelated current error'); approve.mock.restore();
+    socket.deliver({ type: 'room:state', ...state() }); press(buttons(queue(element).rows[0]!).approve); await tick(100);
+    const sent = request(socket); socket.deliver({ type: 'room:state', ...roomState() }); retired(element);
+    socket.deliver({ type: 'room:state', ...state() }); const fresh = queue(element).rows[0]!;
+    press(buttons(fresh).reject); await tick(100); const current = request(socket); busy(fresh, true);
+    let forwarded = 0; element.addEventListener('stage-error', () => { forwarded++; });
+    socket.deliver({ type: 'error', code: 'forbidden', message: 'Server denied old request', requestId: sent.requestId }); await settle();
+    assert.equal(forwarded, 1); assert.equal(element['error'].textContent, 'Server denied old request');
+    busy(fresh, true); assert.equal(client['pending'].size, 1, 'old promise cannot settle the new tenure target lock');
+    socket.deliver({ type: 'ok', requestId: current.requestId }); await settle(); busy(fresh, false);
+    assert.equal(element['error'].textContent, 'Server denied old request');
+  });
+
+  it('shows synchronous SDK failure and real local queue_full without a frame, unlocking only the affected target for an explicit retry', async t => {
+    const { element, client, socket, tick } = await socketJoinedWidget(t, state());
+    const row = queue(element).rows[0]!;
+    const throwing = t.mock.method(client, 'approve', () => { throw new Error('Synchronous failure'); });
+    press(buttons(row).approve); await settle(); busy(row, false); assert.equal(element['error'].textContent, 'Synchronous failure'); throwing.mock.restore();
+    Object.defineProperty(client, 'maxPendingControlRequests', { value: 1 });
+    const unrelated = client.reject('unlisted').catch(() => {});
+    press(buttons(row).approve); await settle(); busy(row, false); assert.match(element['error'].textContent ?? '', /佇列|請求/);
+    await tick(100); assert.deepEqual(socket.sent.filter(message => message.type.startsWith('stage:')).map(message => (message as ModerationRequest).targetId), ['unlisted']);
+    socket.deliver({ type: 'ok', requestId: request(socket).requestId }); await unrelated;
+    press(buttons(row).approve); await tick(100); const accepted = request(socket); assert.equal(accepted.targetId, 'first');
+    socket.deliver({ type: 'ok', requestId: accepted.requestId }); await settle(); busy(row, false);
+  });
+
+  /** Relay real SDK frames through validation and Hub, delivering authoritative state before the request ACK. */
+  async function hubWidget(t: TestContext, maxSpeakers = 8) {
+    const config = testConfig(c => { c.limits.maxSpeakersPerRoom = maxSpeakers; c.limits.handRaiseIntervalMs = 0;
+      c.rooms.presenceBroadcastMs = 0; c.rooms.qualityIntervalMs = 0; });
+    const h = harness(config); t.after(async () => { await h.hub.shutdown(); await h.transport.close(); });
+    const host = await h.create('Original host'), successor = await h.join(host.roomId, host.code, 'Next controller');
+    const first = await h.join(host.roomId, host.code, 'Same & <request>');
+    const second = await h.join(host.roomId, host.code, 'Same & <request>');
+    const privateAudience = await h.join(host.roomId, host.code, 'Unraised secret');
+    assert.equal(await h.req(first.s, { type: 'hand:raise' }), 'ok');
+    assert.equal(await h.req(second.s, { type: 'hand:raise' }), 'ok');
+    const fixture = await socketJoinedWidget(t, successor.s.last('room:state')!);
+    const deliver = () => {
+      // Hub presence snapshots use the harness timer queue, independently of SDK timers.
+      for (const timer of h.timers.filter(timer => !timer.cleared && timer.ms === 0)) { timer.cleared = true; timer.fn(); }
+      fixture.socket.deliver(successor.s.last('room:state')!);
+    };
+    const relay = async (message: ModerationRequest) => {
+      const parsed = parseClientMessage(JSON.stringify(message), config.limits), start = successor.s.inbox.length;
+      await h.hub.handle(successor.s, parsed);
+      const replies = successor.s.inbox.slice(start);
+      for (const event of replies) if (event.type !== 'ok' && event.type !== 'error') fixture.socket.deliver(event);
+      await settle();
+      const reply = replies.find(event => (event.type === 'ok' || event.type === 'error') && event.requestId === message.requestId);
+      assert.ok(reply && (reply.type === 'ok' || reply.type === 'error')); return reply;
+    };
+    const promote = async () => {
+      assert.equal(await h.req(host.s, { type: 'control:transfer', targetId: successor.id }), 'ok'); deliver();
+      assert.equal(fixture.client.me!.role, 'controller'); assert.equal(fixture.client.me!.onStage, false);
+    };
+    return { ...fixture, h, host, successor, first, second, privateAudience, deliver, relay, promote, config };
+  }
+
+  it('handles a real Hub controller transfer entirely offstage, approving and rejecting only hand requests via validated SDK frames and state-before-ACK', async t => {
+    const { element, client, socket, tick, h, host, first, second, privateAudience, promote, relay } = await hubWidget(t);
+    retired(element); assert.equal(client.state!.audience, undefined); assert.equal(client.state!.code, undefined);
+    await promote(); const view = queue(element);
+    assert.deepEqual(client.state!.hands.map(person => person.participantId), [first.id, second.id]);
+    assert.equal(client.state!.audience!.some(person => person.participantId === privateAudience.id), true);
+    assert.doesNotMatch(visibleText(element as unknown as Node), /Unraised secret/);
+    assert.equal(visibleText(element as unknown as Node).includes(host.code), false);
+    assert.match(text(view.rows[0]!), /Same & <request>/); assert.match(text(view.rows[1]!), /Same & <request>/);
+    const old = buttons(view.rows[0]!); press(old.approve); await tick(100);
+    const approving = request(socket); assert.equal(approving.targetId, first.id);
+    const approved = await relay(approving); assert.equal(approved.type, 'ok');
+    assert.deepEqual(client.state!.hands.map(person => person.participantId), [second.id]);
+    assert.equal(client.state!.speakers.some(person => person.participantId === first.id), true);
+    force(old.approve); force(old.reject); await tick(100); assert.equal(socket.sent.filter(message => message.type.startsWith('stage:')).length, 1);
+    // A different target remains actionable while the first successful request is waiting for ACK.
+    press(buttons(queue(element).rows[0]!).reject); await tick(100);
+    const rejecting = request(socket); assert.equal(rejecting.targetId, second.id); assert.equal(rejecting.type, 'stage:reject');
+    const rejected = await relay(rejecting); assert.equal(rejected.type, 'ok'); assert.deepEqual(client.state!.hands, []);
+    socket.deliver(rejected); socket.deliver(approved); await settle();
+    assert.equal(queue(element).rows.length, 0); assert.match(queue(element).summary.textContent, /0/);
+    assert.equal(client.me!.onStage, false); assert.equal(client.me!.role, 'controller');
+    assert.equal(await h.req(second.s, { type: 'stage:approve', targetId: second.id }), 'forbidden');
+    assert.deepEqual(socket.sent.filter(message => message.type.startsWith('stage:')).map(message => message.type), ['stage:approve', 'stage:reject']);
+  });
+
+  it('defers real stage capacity and disconnected-target decisions to Hub, leaving reject available and showing current server failures', async t => {
+    const { element, client, socket, tick, h, first, second, deliver, promote, relay } = await hubWidget(t, 1);
+    await promote(); assert.equal(client.state!.speakers.length, 1, 'former controller occupies the ordinary stage slot');
+    let row = queue(element).rows[0]!; busy(row, false); press(buttons(row).approve); await tick(100);
+    const full = await relay(request(socket)); assert.equal(full.type, 'error'); if (full.type === 'error') assert.equal(full.code, 'stage_full');
+    socket.deliver(full); await settle(); busy(row, false); assert.equal(element['error'].hidden, false);
+    press(buttons(row).reject); await tick(100); const rejected = await relay(request(socket)); assert.equal(rejected.type, 'ok');
+    socket.deliver(rejected); await settle(); assert.equal(client.state!.hands.some(person => person.participantId === first.id), false);
+    await h.hub.detach(second.s);
+    for (const timer of h.timers.filter(timer => !timer.cleared && timer.ms === 0)) { timer.cleared = true; timer.fn(); }
+    deliver(); row = queue(element).rows[0]!; assert.match(text(row), /未連線|離線|斷線/); busy(row, false);
+    press(buttons(row).approve); await tick(100); const offline = await relay(request(socket));
+    assert.equal(offline.type, 'error'); if (offline.type === 'error') assert.equal(offline.code, 'conflict');
+    socket.deliver(offline); await settle(); busy(row, false);
+    press(buttons(row).reject); await tick(100); const cleared = await relay(request(socket)); assert.equal(cleared.type, 'ok');
+    socket.deliver(cleared); await settle(); assert.deepEqual(client.state!.hands, []);
+    assert.equal(client.me!.onStage, false); assert.equal(client['pending'].size, 0);
+  });
+
+  it('reports the actual Hub withdrawal conflict after a valid click without reviving the removed request or accepting its stale callback', async t => {
+    const { element, client, socket, tick, h, first, deliver, promote, relay } = await hubWidget(t);
+    await promote(); const old = buttons(queue(element).rows[0]!); press(old.approve); await tick(100);
+    const sent = request(socket); assert.equal(sent.targetId, first.id);
+    assert.equal(await h.req(first.s, { type: 'hand:withdraw' }), 'ok'); deliver();
+    assert.equal(client.state!.hands.some(person => person.participantId === first.id), false);
+    const result = await relay(sent); assert.equal(result.type, 'error'); if (result.type === 'error') assert.equal(result.code, 'conflict');
+    socket.deliver(result); await settle(); const currentError = element['error'].textContent;
+    assert.equal(element['error'].hidden, false); force(old.approve); force(old.reject); await tick(100);
+    assert.equal(element['error'].textContent, currentError); assert.equal(element['error'].hidden, false);
+    assert.equal(socket.sent.filter(message => message.type.startsWith('stage:')).length, 1);
+    assert.equal(client.state!.hands.length, 1); assert.equal(client['pending'].size, 0);
+  });
+
+  it('shows automatically promoted offstage controller requests after actual Hub controller expiry', async t => {
+    const { element, client, socket, tick, h, host, config, first, second, deliver, relay } = await hubWidget(t);
+    await h.hub.detach(host.s);
+    const expiry = h.timers.find(timer => !timer.cleared && timer.ms === config.rooms.controllerGraceMs); assert.ok(expiry);
+    h.clock.now += expiry.ms; expiry.cleared = true; expiry.fn(); await nextTurn(); deliver();
+    assert.equal(client.me!.role, 'controller'); assert.equal(client.me!.onStage, false); assert.equal(panel(element).hidden, false);
+    assert.deepEqual(client.state!.hands.map(person => person.participantId), [first.id, second.id]);
+    press(buttons(queue(element).rows[0]!).approve); await tick(100); const result = await relay(request(socket));
+    assert.equal(result.type, 'ok'); socket.deliver(result); await settle();
+    assert.equal(client.state!.speakers.some(person => person.participantId === first.id), true); assert.equal(client.me!.onStage, false);
+  });
+
+  for (const onStage of [false, true]) {
+    it(`does not create or replace ${onStage ? 'an active' : 'an offstage'} controller microphone when moderating another participant with actual SDK fake-media ownership`, async t => {
+      const originals = new Map(['navigator', 'RTCPeerConnection', 'AudioContext'].map(name => [name, Object.getOwnPropertyDescriptor(globalThis, name)]));
+      const tracks: (EventTarget & { enabled: boolean; readyState: string; stops: number; stop(): void })[] = [];
+      class Peer {
+        static instances: Peer[] = [];
+        connectionState = 'connected'; signalingState = 'stable'; localDescription = { type: 'offer', sdp: 'fake-installed-description' }; closed = false;
+        readonly installs: unknown[] = [];
+        readonly transceiver = { direction: 'recvonly', sender: { track: null as unknown, replaceTrack: async (track: unknown) => {
+          this.installs.push(track); this.transceiver.sender.track = track;
+        } } };
+        constructor() { Peer.instances.push(this); }
+        addTransceiver() { return this.transceiver; }
+        close(): void { this.closed = true; }
+      }
+      class Context {
+        createMediaStreamSource() { return { connect() {}, disconnect() {} }; }
+        createAnalyser() { return { fftSize: 2048, disconnect() {}, getFloatTimeDomainData() {} }; }
+        async resume() {} async close() {}
+      }
+      Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { mediaDevices: { getUserMedia: async () => {
+        const track = Object.assign(new EventTarget(), { enabled: true, readyState: 'live', stops: 0,
+          stop() { this.stops++; this.readyState = 'ended'; } }); tracks.push(track);
+        return { getTracks: () => [track], getAudioTracks: () => [track] } as unknown as MediaStream;
+      } } } });
+      Object.defineProperty(globalThis, 'RTCPeerConnection', { configurable: true, value: Peer });
+      Object.defineProperty(globalThis, 'AudioContext', { configurable: true, value: Context });
+      const negotiate = t.mock.method(StageClient.prototype as unknown as { negotiate(): void }, 'negotiate', () => {});
+      t.after(() => { for (const [name, descriptor] of originals) { if (descriptor) Object.defineProperty(globalThis, name, descriptor); else Reflect.deleteProperty(globalThis, name); } });
+      const { element, client, socket, tick } = await socketJoinedWidget(t, state(['first'], onStage), true);
+      await client['mediaTask']; const peer = Peer.instances[0]!; assert.ok(peer);
+      const before = { tracks: tracks.length, installed: [...peer.installs], track: peer.transceiver.sender.track,
+        direction: peer.transceiver.direction, negotiations: negotiate.mock.callCount() };
+      assert.equal(before.tracks, onStage ? 1 : 0);
+      press(buttons(queue(element).rows[0]!).approve); await tick(100);
+      assert.equal(tracks.length, before.tracks); assert.deepEqual(peer.installs, before.installed, 'the action itself has no media side effects');
+      const sent = request(socket), next = state([], onStage);
+      next.speakers = [{ ...roomState(true).me, participantId: 'first', name: 'Promoted request' }];
+      socket.deliver({ type: 'room:state', ...next }); await client['mediaTask'];
+      socket.deliver({ type: 'ok', requestId: sent.requestId }); await settle();
+      assert.equal(tracks.length, before.tracks); assert.equal(peer.transceiver.sender.track, before.track);
+      assert.ok(peer.installs.every(track => track === before.track), 'normal snapshot reconciliation only reasserts the same owned track');
+      assert.equal(peer.transceiver.direction, before.direction);
+      assert.equal(negotiate.mock.callCount(), before.negotiations); assert.equal(Peer.instances.length, 1);
+      assert.ok(tracks.every(track => track.stops === 0)); assert.equal(client.me!.onStage, onStage);
+      assert.equal(socket.sent.some(message => message.type === 'rtc:offer'), false);
     });
   }
 });

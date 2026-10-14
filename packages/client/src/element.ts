@@ -19,6 +19,10 @@ const STYLE = `
 [part=name][hidden] { display: none; }
 [part=room-name] { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; }
 [part=room-name][hidden] { display: none; }
+[part=hands][hidden] { display: none; }
+[part=hands] ul { display: grid; gap: .5rem; padding-left: 1.25rem; }
+[part=hands] li { overflow-wrap: anywhere; }
+[part=hands] button { margin-left: .5rem; }
 [part=playback] { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; }
 [part=playback][hidden] { display: none; }
 input[type=range] { flex: 1; min-width: 5rem; max-width: 12rem; }
@@ -29,7 +33,7 @@ button.primary { background: var(--stage-accent, #2563eb); border-color: transpa
 `;
 
 /**
- * `<stage-client url room code name>`: a self-contained listener / speaker widget over StageClient.
+ * `<stage-client url room code name>`: a self-contained stage widget with controller hand moderation over StageClient.
  *
  * Joins when it is in the document and has `room` and `name`; leaves when removed. Changing
  * `url`, `room`, `code` or `name` rejoins, except after the user explicitly leaves: the same
@@ -42,7 +46,8 @@ button.primary { background: var(--stage-accent, #2563eb); border-color: transpa
  * composed) with the same `detail`. The inline name draft starts from each new seat's name;
  * later snapshots update its accepted-name display, not the draft or the `name` attribute.
  * The controller's room-name draft follows the same rule while control is retained.
- * Style through `::part(panel|status|quality|speaking|actions|name|room-name|playback)` and the
+ * A controller can explicitly approve or reject the snapshot's hand requests; the server owns admission.
+ * Style through `::part(panel|status|quality|speaking|actions|name|room-name|hands|playback)` and the
  * `--stage-*` custom properties.
  */
 export class StageElement extends HTMLElement {
@@ -70,6 +75,14 @@ export class StageElement extends HTMLElement {
   private readonly roomNameUpdate: HTMLButtonElement;
   private roomNameOwner: { client: StageClient; roomId: string; participantId: string; generation: number } | undefined;
   private roomNameAttempt: object | undefined;
+  private readonly handQueuePanel: HTMLDetailsElement;
+  private readonly handQueueSummary: HTMLElement;
+  private readonly handQueueNotice: HTMLParagraphElement;
+  private readonly handQueueList: HTMLUListElement;
+  private handQueueOwner: { client: StageClient; roomId: string; participantId: string; generation: number } | undefined;
+  private readonly handQueuePending = new Map<string, object>();
+  private readonly handQueueRows = new Map<string, { node: HTMLLIElement; name: HTMLSpanElement; approve: HTMLButtonElement; reject: HTMLButtonElement }>();
+  private handQueueOrder: string[] = [];
   private readonly unlock: HTMLButtonElement;
   private playbackOwner: { client: StageClient; roomId: string; participantId: string; notice: number } | undefined;
   private unlockAttempt: object | undefined;
@@ -149,6 +162,12 @@ export class StageElement extends HTMLElement {
     this.roomNameUpdate.type = 'button'; this.roomNameUpdate.textContent = '更新房間名稱';
     this.roomNameUpdate.onclick = () => this.updateRoomName();
     this.roomNamePanel.append(this.acceptedRoomName, roomNameLabel, this.roomNameInput, this.roomNameUpdate);
+    this.handQueuePanel = document.createElement('details');
+    this.handQueuePanel.part.add('hands');
+    this.handQueueSummary = document.createElement('summary');
+    this.handQueueNotice = document.createElement('p');
+    this.handQueueList = document.createElement('ul');
+    this.handQueuePanel.append(this.handQueueSummary, this.handQueueNotice, this.handQueueList);
     const actions = document.createElement('div');
     actions.part.add('actions');
     this.unlock = document.createElement('button');
@@ -192,7 +211,7 @@ export class StageElement extends HTMLElement {
     this.retry = this.button('重試加入', () => { if (this.canRetry()) this.rejoin(); });
     this.cancelJoin = this.button('取消加入', () => this.cancelInitial?.());
     actions.append(this.unlock, this.listen, this.hand, this.mic, this.micRetry, this.leaveStage, this.roomAction, this.retry, this.cancelJoin);
-    panel.append(this.status, this.quality, this.speaking, this.error, this.errorDismiss, this.namePanel, this.roomNamePanel, actions, this.playback);
+    panel.append(this.status, this.quality, this.speaking, this.error, this.errorDismiss, this.namePanel, this.roomNamePanel, this.handQueuePanel, actions, this.playback);
     root.append(style, panel);
     this.render();
   }
@@ -288,6 +307,7 @@ export class StageElement extends HTMLElement {
           if (type === 'state' || type === 'status' || type === 'closed' || type === 'kicked' || type === 'audioblocked') this.syncPlaybackOwner();
           if (type === 'state' || type === 'status' || type === 'closed' || type === 'kicked') this.syncNameOwner();
           if (type === 'state' || type === 'status' || type === 'closed' || type === 'kicked') this.syncRoomNameOwner();
+          if (type === 'state' || type === 'status' || type === 'closed' || type === 'kicked') this.syncHandQueue();
           if (type === 'closed' || type === 'kicked' || type === 'micerror'
             || (type === 'status' && (detail === 'reconnecting' || detail === 'disconnected'))
             || (type === 'stageleft' && (detail as StageEventMap['stageleft']).participantId === client.state?.me.participantId)) this.retireQualityOwner();
@@ -379,6 +399,7 @@ export class StageElement extends HTMLElement {
     this.micFailure = undefined;
     this.retireNameOwner();
     this.retireRoomNameOwner();
+    this.retireHandQueue();
     this.retireQualityOwner();
     this.retireSpeakingOwner();
     this.hideCancel();
@@ -521,6 +542,90 @@ export class StageElement extends HTMLElement {
           this.syncNameOwner();
         }
       }
+    })();
+  }
+
+  private retireHandQueue(): void {
+    this.handQueueOwner = undefined; this.handQueuePending.clear();
+    for (const row of this.handQueueRows.values()) {
+      for (const control of [row.approve, row.reject]) { control.disabled = true; control.setAttribute('aria-busy', 'false'); }
+    }
+    if (this.handQueueRows.size) this.handQueueList.replaceChildren();
+    this.handQueueRows.clear(); this.handQueueOrder = [];
+    this.handQueuePanel.hidden = true; this.handQueuePanel.open = false;
+    this.handQueueSummary.textContent = ''; this.handQueueNotice.textContent = '';
+  }
+
+  private syncHandQueue(): void {
+    const client = this.current, state = client?.state, me = client?.me;
+    if (!this.isConnected || !client || !state || me?.role !== 'controller' || client.status === 'disconnected') {
+      this.retireHandQueue(); return;
+    }
+    const owner = this.handQueueOwner;
+    if (!owner || owner.client !== client || owner.generation !== this.generation
+      || owner.roomId !== state.roomId || owner.participantId !== me.participantId) {
+      this.retireHandQueue();
+      this.handQueueOwner = { client, roomId: state.roomId, participantId: me.participantId, generation: this.generation };
+    }
+    const seen = new Set<string>();
+    const people = state.hands.filter(person => {
+      if (seen.has(person.participantId) || person.role !== 'audience' || !person.handRaised || person.onStage) return false;
+      seen.add(person.participantId); return true;
+    });
+    const reconnecting = client.status === 'reconnecting';
+    this.handQueuePanel.hidden = false;
+    this.handQueueSummary.textContent = `舉手申請（${people.length}）${reconnecting ? ' · 上次收到' : ''}`;
+    this.handQueueNotice.textContent = reconnecting ? '重新連線中，暫時不能處理申請。'
+      : people.length ? '請選擇要核准上台或婉拒的申請；是否可上台仍由伺服器決定。' : '目前沒有舉手申請。';
+    for (const person of people) {
+      const id = person.participantId;
+      let row = this.handQueueRows.get(id);
+      if (!row) {
+        const node = document.createElement('li'), name = document.createElement('span');
+        const approve = document.createElement('button'), reject = document.createElement('button');
+        approve.type = reject.type = 'button'; approve.textContent = '核准上台'; reject.textContent = '婉拒';
+        row = { node, name, approve, reject };
+        const currentRow = row;
+        approve.onclick = () => this.moderateHand(id, currentRow.node, true);
+        reject.onclick = () => this.moderateHand(id, currentRow.node, false);
+        node.append(name, approve, reject); this.handQueueRows.set(id, row);
+      }
+      const name = decodeName(person.name);
+      row.name.textContent = `${name}${person.connected ? '' : '（暫時離線）'}`;
+      row.approve.setAttribute('aria-label', `核准 ${name} 上台`);
+      row.reject.setAttribute('aria-label', `婉拒 ${name} 的舉手申請`);
+      const pending = this.handQueuePending.has(id);
+      for (const control of [row.approve, row.reject]) {
+        control.disabled = reconnecting || pending; control.setAttribute('aria-busy', String(pending));
+      }
+    }
+    for (const [id, row] of this.handQueueRows) if (!seen.has(id)) {
+      for (const control of [row.approve, row.reject]) { control.disabled = true; control.setAttribute('aria-busy', 'false'); }
+      this.handQueueRows.delete(id);
+    }
+    const order = people.map(person => person.participantId);
+    if (order.length !== this.handQueueOrder.length || order.some((id, index) => id !== this.handQueueOrder[index])) {
+      this.handQueueList.replaceChildren(...order.map(id => this.handQueueRows.get(id)!.node));
+      this.handQueueOrder = order;
+    }
+  }
+
+  private moderateHand(id: string, node: HTMLLIElement, approve: boolean): void {
+    this.syncHandQueue();
+    const owner = this.handQueueOwner, row = this.handQueueRows.get(id);
+    if (!owner || !row || row.node !== node || this.handQueuePanel.hidden
+      || owner.client.status === 'reconnecting' || this.handQueuePending.has(id)) return;
+    const attempt = {};
+    this.handQueuePending.set(id, attempt); this.syncHandQueue(); this.hideError();
+    const current = (): boolean => {
+      if (this.handQueueOwner !== owner || this.handQueuePending.get(id) !== attempt) return false;
+      this.syncHandQueue();
+      return this.handQueueOwner === owner && this.handQueuePending.get(id) === attempt;
+    };
+    void (async () => {
+      try { await (approve ? owner.client.approve(id) : owner.client.reject(id)); }
+      catch (error) { if (current()) this.show(error); }
+      finally { if (current()) { this.handQueuePending.delete(id); this.syncHandQueue(); } }
     })();
   }
 
@@ -739,6 +844,7 @@ export class StageElement extends HTMLElement {
     this.syncMicRetry();
     this.syncNameOwner();
     this.syncRoomNameOwner();
+    this.syncHandQueue();
     this.syncQualityOwner();
     this.syncSpeakingOwner();
     const client = this.current;
