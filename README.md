@@ -234,6 +234,8 @@ JSON frame，型別定義在 [`shared/protocol.ts`](shared/protocol.ts)。每個
 
 不想寫 JavaScript 的頁面可改用 Web Component：`<script type="module" src="https://stage.example.com/lib/stage-element.js"></script>` 後放 `<stage-client room="…" code="…" name="…"></stage-client>`（內建狀態列、啟用音訊、舉手、台上靜音／下台與失敗後手動重試麥克風、離開房間／手動重新加入；事件以 `stage-<type>` 派發，`element.client` 取得底層 `StageClient`）。
 
+Web Component 已進房後也可用內建名稱欄與「更新名稱」留席更正本人名稱，所有角色皆可操作；目前名稱依伺服器快照，草稿在同席更新／重連時保留。待回覆或重連時不能重複送出，離房／換席會退役舊操作。此編輯不反寫 `name` attribute，明確重新加入仍使用最新屬性；自動重連則沿用 SDK 已接受的名稱。沒有新增擷取、儲存空間或名稱日誌；原生輸入與輔助科技仍需實際驗收。
+
 Web Component 的「離開房間」會停止本機收聽／擷取及自動重連，保留屬性與音量／收聽靜音偏好；同一元素更換屬性或移除再掛載後仍等待手動「重新加入」。重入採用最新屬性，不保證原台位／主控身分；關房／被踢不提供這個重入操作。離房先退休 client，因此與元件移除一樣不轉送其晚到事件（含 disconnect status），也不新增合成 SDK 狀態。此 UI 使用既有 disconnect，不代表伺服器房間立即關閉；受控 DOM／SDK 假媒體測試仍不等於真實瀏覽器音訊驗收。
 
 連線中取消、關房與被踢會完整停止麥克風／麥克風測試並清除待回覆請求；同一個 client 可在取消後重用。Web Component 快速移除／重掛載時只接受最新一次連線的事件，音訊解鎖失敗可重試，成功後隱藏按鈕。

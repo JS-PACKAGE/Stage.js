@@ -712,3 +712,6 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 
 
 177. **建立權杖設定與控制訊息長度一致（2026-10-14）：** 合成設定證明舊 parseConfig／離線 checker 接受 257 UTF-16 units，但既有 room:create validator 最多 256，因此該部署無法經正常控制面送入匹配權杖。僅在 rooms 設定解析後新增 >256 的欄位錯誤，不回顯值；既有 required string、空字串停用、空白與非 ASCII 原樣匹配均保留，不 trim、normalize、truncate 或以 bytes/codepoints 猜限。啟動原本先 loadConfig 才建立 transport/listener，離線 checker 共用 parseConfig；不改 runtime wire、Hub 認證或公開錯誤。回歸對照實際 validator 與 Hub，涵蓋 ASCII、astral、BMP、NFD、空白及缺失型別，也以隔離 built checker 驗證拒絕；只使用合成值，不讀取實際憑證設定。
+
+
+178. **Web Component 留席更新本人名稱（2026-10-14）：** 原 widget 只有 name attribute 重入，無內建本人名編輯；新增 inline label/input/button 與 authoritative 目前名稱，以既有 SDK setName 送 raw draft。初次 owner 初始化 decoded 名稱，同席 snapshot/reconnect 不覆寫草稿；ACK-only 不發明 accepted name，失敗保留輸入。name attribute 不反射，明確 rejoin 仍用最新 attrs，自動 resume 沿用 SDK accepted name。專用 owner 綁 client/generation/room/pid，操作 token 在呼叫前預留，state/status/terminal 轉送前與 click 當下核對，避免公開 .client 在不改 widget generation 下 disconnect/join 的舊結果污染。pending 跨 state-before-ACK 與同席重連，退役清除草稿及操作；新席位重新初始化，無效隱藏操作不清錯誤或發送。僅本人功能，不擴大主控管理、SDK/protocol/media 或自動重試；受控 DOM/socket/Hub 證據不冒充原生鍵盤/IME/AT/音訊驗收。

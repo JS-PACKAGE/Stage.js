@@ -13,6 +13,8 @@ const STYLE = `
 [part=status] { margin: 0; }
 [part=error] { margin: 0; color: var(--stage-error, #dc2626); }
 [part=actions] { display: flex; flex-wrap: wrap; gap: .5rem; }
+[part=name] { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; }
+[part=name][hidden] { display: none; }
 [part=playback] { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; }
 [part=playback][hidden] { display: none; }
 input[type=range] { flex: 1; min-width: 5rem; max-width: 12rem; }
@@ -33,7 +35,9 @@ button.primary { background: var(--stage-accent, #2563eb); border-color: transpa
  * offer. `playback-muted` / `.playbackMuted` and `playback-volume` / `.playbackVolume`
  * control local listening without rejoining,
  * and every client event is re-dispatched from the element as `stage-<type>` (bubbling,
- * composed) with the same `detail`. Style through `::part(panel|status|actions|playback)` and the
+ * composed) with the same `detail`. The inline name draft starts from each new seat's name;
+ * later snapshots update its accepted-name display, not the draft or the `name` attribute.
+ * Style through `::part(panel|status|actions|name|playback)` and the
  * `--stage-*` custom properties.
  */
 export class StageElement extends HTMLElement {
@@ -42,6 +46,12 @@ export class StageElement extends HTMLElement {
   private readonly status: HTMLParagraphElement;
   /** Last failure (request rejected, mic denied…); stays until the next action or join. */
   private readonly error: HTMLParagraphElement;
+  private readonly namePanel: HTMLDivElement;
+  private readonly acceptedName: HTMLSpanElement;
+  private readonly nameInput: HTMLInputElement;
+  private readonly nameUpdate: HTMLButtonElement;
+  private nameOwner: { client: StageClient; roomId: string; participantId: string; generation: number } | undefined;
+  private nameAttempt: object | undefined;
   private readonly unlock: HTMLButtonElement;
   private playbackOwner: { client: StageClient; roomId: string; participantId: string; notice: number } | undefined;
   private unlockAttempt: object | undefined;
@@ -84,6 +94,18 @@ export class StageElement extends HTMLElement {
     this.error.part.add('error');
     this.error.setAttribute('role', 'alert');
     this.error.hidden = true;
+    this.namePanel = document.createElement('div');
+    this.namePanel.part.add('name');
+    this.acceptedName = document.createElement('span');
+    const nameLabel = document.createElement('label');
+    nameLabel.textContent = '顯示名稱';
+    nameLabel.setAttribute('for', 'participant-name');
+    this.nameInput = document.createElement('input');
+    this.nameInput.id = 'participant-name'; this.nameInput.type = 'text';
+    this.nameUpdate = document.createElement('button');
+    this.nameUpdate.type = 'button'; this.nameUpdate.textContent = '更新名稱';
+    this.nameUpdate.onclick = () => this.updateName();
+    this.namePanel.append(this.acceptedName, nameLabel, this.nameInput, this.nameUpdate);
     const actions = document.createElement('div');
     actions.part.add('actions');
     this.unlock = document.createElement('button');
@@ -129,7 +151,7 @@ export class StageElement extends HTMLElement {
     this.retry = this.button('重試加入', () => { if (this.canRetry()) this.rejoin(); });
     this.cancelJoin = this.button('取消加入', () => this.cancelInitial?.());
     actions.append(this.unlock, this.listen, this.hand, this.mic, this.micRetry, this.leaveStage, this.roomAction, this.retry, this.cancelJoin);
-    panel.append(this.status, this.error, actions, this.playback);
+    panel.append(this.status, this.error, this.namePanel, actions, this.playback);
     root.append(style, panel);
     this.render();
   }
@@ -223,6 +245,7 @@ export class StageElement extends HTMLElement {
             || type === 'closed' || type === 'kicked';
           if (micLifecycle) this.syncMicRetry();
           if (type === 'state' || type === 'status' || type === 'closed' || type === 'kicked' || type === 'audioblocked') this.syncPlaybackOwner();
+          if (type === 'state' || type === 'status' || type === 'closed' || type === 'kicked') this.syncNameOwner();
           // SDK status precedes state; a forwarded status listener may disconnect immediately.
           if (type === 'state' || client.state) { receivedState = true; this.hideRetry(); this.hideCancel(); }
           if (type === 'closed' || type === 'kicked') { terminal = true; this.micFailure = undefined; this.hideRetry(); this.hideCancel(); }
@@ -303,6 +326,7 @@ export class StageElement extends HTMLElement {
   private async leave(): Promise<void> {
     this.joinPhase = undefined;
     this.micFailure = undefined;
+    this.retireNameOwner();
     this.hideCancel();
     this.hideRetry();
     for (const button of this.pendingActions) button.removeAttribute('aria-busy');
@@ -314,6 +338,59 @@ export class StageElement extends HTMLElement {
     this.unlock.hidden = true;
     this.render();
     await client?.disconnect();
+  }
+
+  private retireNameOwner(): void {
+    this.nameOwner = undefined; this.nameAttempt = undefined;
+    this.nameInput.value = ''; this.acceptedName.textContent = '';
+    this.namePanel.hidden = true;
+    this.nameInput.disabled = this.nameUpdate.disabled = true;
+    this.nameUpdate.removeAttribute('aria-busy');
+  }
+
+  private syncNameOwner(): void {
+    const client = this.current, state = client?.state, me = client?.me;
+    if (!this.isConnected || !client || !state || !me || client.status === 'disconnected') {
+      this.retireNameOwner(); return;
+    }
+    const owner = this.nameOwner;
+    if (!owner || owner.client !== client || owner.generation !== this.generation
+      || owner.roomId !== state.roomId || owner.participantId !== me.participantId) {
+      this.retireNameOwner();
+      this.nameOwner = { client, roomId: state.roomId, participantId: me.participantId, generation: this.generation };
+      this.nameInput.value = decodeName(me.name);
+    }
+    // A same-seat snapshot (including resume) must not replace an unsent or rejected draft.
+    this.acceptedName.textContent = `目前名稱：${decodeName(me.name)}`;
+    this.namePanel.hidden = false; this.nameInput.disabled = false;
+    this.nameUpdate.disabled = client.status === 'reconnecting' || Boolean(this.nameAttempt);
+    this.nameUpdate.setAttribute('aria-busy', String(Boolean(this.nameAttempt)));
+  }
+
+  private updateName(): void {
+    this.syncNameOwner();
+    const owner = this.nameOwner;
+    if (!owner || this.namePanel.hidden || this.nameUpdate.hidden || this.nameUpdate.disabled || this.nameAttempt) return;
+    const raw = this.nameInput.value;
+    // Reserve before invoking the public SDK: a synchronous state callback may click again.
+    const attempt = this.nameAttempt = {};
+    this.syncNameOwner(); this.error.hidden = true;
+    const current = () => {
+      if (this.nameOwner !== owner || this.nameAttempt !== attempt) return false;
+      // The public client can retire a snapshot without another status transition.
+      this.syncNameOwner();
+      return this.nameOwner === owner && this.nameAttempt === attempt;
+    };
+    void (async () => {
+      try { await owner.client.setName(raw); }
+      catch (error) { if (current()) this.show(error); }
+      finally {
+        if (current()) {
+          this.nameAttempt = undefined;
+          this.syncNameOwner();
+        }
+      }
+    })();
   }
 
   /** Signaling reconnect retains the seat/audio; explicit disconnect retires both synchronously. */
@@ -463,6 +540,7 @@ export class StageElement extends HTMLElement {
   private render(): void {
     this.syncPlaybackOwner();
     this.syncMicRetry();
+    this.syncNameOwner();
     const client = this.current;
     const me = client?.me ?? null;
     const state = client?.state ?? null;
