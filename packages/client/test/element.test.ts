@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { getEventListeners } from 'node:events';
 import { setImmediate as nextTurn } from 'node:timers/promises';
-import { harness, RECVONLY_OFFER, SENDRECV_OFFER, testConfig, type Harness } from '../../../test/helpers.ts';
+import { FakeSession, harness, sine, RECVONLY_OFFER, SENDRECV_OFFER, testConfig, type Harness } from '../../../test/helpers.ts';
 import { after, afterEach, describe, it } from 'node:test';
 import type { TestContext } from 'node:test';
 import { StageClient } from '../src/index.ts';
@@ -6141,5 +6141,434 @@ describe('widget latest own connection quality', () => {
     assert.equal(ready, 1); assert.equal(media.tracks.length, 2); assertQuality(element);
     assert.equal(client['mic']!.getAudioTracks()[0], media.tracks[1]);
     socket.deliver(report()); assertQuality(element, summary());
+  });
+});
+
+/** Controlled DOM/SDK/Hub evidence only; this does not validate native assistive technology or audible output. */
+describe('widget latest room speaking report', () => {
+  type Widget = InstanceType<typeof StageElement>;
+  const nodes = (node: Node): Node[] => [node, ...node.children.flatMap(nodes)];
+  const unknown = '發言偵測：等待伺服器回報。';
+  const empty = '最近收到的發言回報：未偵測到發言。';
+  const unmatched = '最近收到的發言回報：沒有可對應的台上成員。';
+  const names = (...values: string[]) => `最近收到的發言回報：${values.join('、')}（${values.length} 人）。`;
+  const report = (...participantIds: string[]) => ({ type: 'speaking' as const, participantIds });
+  function speakingNode(element: Widget): Node {
+    const matches = nodes(element as unknown as Node).filter(node => node.part.has('speaking'));
+    assert.equal(matches.length, 1, 'one persistent paragraph is exposed through ::part(speaking)');
+    return matches[0]!;
+  }
+  function assertSpeaking(element: Widget, text?: string): void {
+    const node = speakingNode(element);
+    assert.equal(node.hidden, text === undefined);
+    assert.equal(node.textContent, text ?? '');
+    assert.equal(node.tagName, 'P');
+    assert.equal(node.getAttribute('aria-live'), null);
+    assert.equal(node.getAttribute('role'), null);
+    assert.deepEqual(node.children, [], 'server names remain ordinary text, never parsed markup');
+    assert.equal(Reflect.get(node, 'innerHTML'), undefined);
+  }
+  function speakingState(): RoomStatePayload {
+    const state = roomState();
+    state.speakers = [
+      { ...state.me, participantId: 'host', name: '甲', role: 'controller', onStage: true },
+      { ...state.me, participantId: 'speaker', name: '乙', role: 'speaker', onStage: true },
+    ];
+    return state;
+  }
+  const nonSpeaking = (element: Widget) => nodes(element as unknown as Node)
+    .filter(node => !node.part.has('speaking') && node.tagName !== 'STYLE')
+    .map(node => [node.tagName, node.hidden, node.disabled, node.textContent, node.value, [...node.attributes]]);
+  const view = (element: Widget) => {
+    const node = nodes(element as unknown as Node).find(node => node.part.has('speaking'));
+    return { hidden: node?.hidden, text: node?.textContent };
+  };
+  const visible = (text: string) => ({ hidden: false, text });
+  const hidden = { hidden: true, text: '' };
+
+  it('starts hidden and keeps the ordinary paragraph outside every live-region ancestor', () => {
+    const element = new StageElement(); widgets.push(element);
+    assertSpeaking(element);
+    const target = speakingNode(element);
+    const ancestors = (node: Node): Node[] | undefined => node === target ? []
+      : node.children.map(child => ancestors(child)).find(path => path !== undefined)?.concat(node);
+    const path = ancestors(element as unknown as Node); assert.ok(path);
+    assert.ok(path.every(node => !node.hasAttribute('aria-live') && !['status', 'alert', 'log'].includes(node.getAttribute('role') ?? '')));
+    assert.equal(element['status'].getAttribute('aria-live'), 'polite');
+    assert.equal(element['error'].getAttribute('role'), 'alert');
+  });
+
+  for (const activeSeed of [true, false]) {
+    it(`projects a real Hub ${activeSeed ? 'active grace-speaker' : 'explicit empty'} seed before the public widget join ACK`, async t => {
+      const config = testConfig(c => { c.rooms.presenceBroadcastMs = 250; c.rooms.qualityIntervalMs = 0; });
+      const h = harness(config), sockets: BridgeSocket[] = [];
+      class BridgeSocket {
+        static OPEN = 1;
+        readyState = 1;
+        onmessage: ((event: { data: string }) => void) | null = null;
+        onclose: (() => void) | null = null;
+        chain = Promise.resolve();
+        readonly session = new FakeSession();
+        readonly sent: ClientMessage[] = [];
+        constructor() {
+          sockets.push(this);
+          const record = this.session.send.bind(this.session);
+          this.session.send = (message: ServerMessage, encoded?: string) => {
+            record(message, encoded);
+            if (this.readyState === BridgeSocket.OPEN) this.onmessage?.({ data: encoded ?? JSON.stringify(message) });
+          };
+          queueMicrotask(() => h.hub.attach(this.session));
+        }
+        send(data: string): void {
+          const message = parseClientMessage(data, config.limits); this.sent.push(message);
+          this.chain = this.chain.then(() => h.hub.handle(this.session, message));
+        }
+        close(code = 1006): void {
+          if (this.readyState !== BridgeSocket.OPEN) return;
+          this.readyState = 3;
+          this.chain = this.chain.then(() => h.hub.detach(this.session, code === 1000)).then(() => this.onclose?.());
+        }
+      }
+      const original = Object.getOwnPropertyDescriptor(globalThis, 'WebSocket');
+      Object.defineProperty(globalThis, 'WebSocket', { configurable: true, value: BridgeSocket });
+      const media = t.mock.method(StageClient.prototype as unknown as { createMedia(): void }, 'createMedia', () => {});
+      let now = 1000; t.mock.method(performance, 'now', () => now);
+      t.mock.timers.enable({ apis: ['setTimeout', 'setInterval'] });
+      const flush = async () => { for (let i = 0; i < 40; i++) await Promise.resolve(); };
+      let element: Widget | undefined;
+      t.after(async () => {
+        element?.disconnectedCallback(); await flush(); await Promise.all(sockets.map(socket => socket.chain));
+        await h.hub.shutdown(); await h.transport.close();
+        if (original) Object.defineProperty(globalThis, 'WebSocket', original); else Reflect.deleteProperty(globalThis, 'WebSocket');
+      });
+      const host = await h.create('Private host'), speaker = await h.join(host.roomId, host.code, 'Grace & Speaker');
+      assert.equal(await h.req(speaker.s, { type: 'hand:raise' }), 'ok');
+      assert.equal(await h.req(host.s, { type: 'stage:approve', targetId: speaker.id }), 'ok');
+      assert.equal(await h.req(speaker.s, { type: 'rtc:offer', payload: SENDRECV_OFFER }), 'ok');
+      if (activeSeed) {
+        assert.equal(h.transport.emitUplink(host.roomId, speaker.id, sine(960, 0.5)), true);
+        h.mixers.get(host.roomId)!.tick();
+      }
+      await h.hub.detach(speaker.s);
+      element = mountJoiningWidget({ room: host.roomId, code: host.code });
+      const e = element, node = speakingNode(e), trace: string[] = [], raw: unknown[] = [], forwarded: CustomEvent[] = [];
+      const observations: { view: ReturnType<typeof view>; pending: number }[] = [];
+      e.addEventListener('stage-state', () => {
+        trace.push('state'); observations.push({ view: view(e), pending: e.client!['pending'].size });
+      });
+      e.addEventListener('stage-speaking', event => {
+        trace.push('speaking'); forwarded.push(event as CustomEvent);
+        observations.push({ view: view(e), pending: e.client!['pending'].size });
+      });
+      for (let i = 0; i < 100 && !(e.client?.me && e.client['pending'].size === 0); i++) {
+        await flush();
+        now += 20; t.mock.timers.tick(20); await flush();
+      }
+      assert.ok(e.client?.me); assert.equal(e.client['pending'].size, 0);
+      assert.equal(sockets.length, 1);
+      const socket = sockets[0]!, client = e.client;
+      assert.equal(h.hub.isJoined(socket.session), true);
+      assert.deepEqual(socket.session.inbox.slice(0, 5).map(message => message.type), ['hello', 'rtc:config', 'room:state', 'speaking', 'ok']);
+      assert.deepEqual(trace, ['state', 'speaking']);
+      assert.deepEqual(observations, [
+        { view: visible(unknown), pending: 1 },
+        { view: visible(activeSeed ? names('Grace & Speaker') : empty), pending: 1 },
+      ], 'both the unknown snapshot and the actual Hub seed are visible before the join ACK');
+      const member = client.state!.speakers.find(person => person.participantId === speaker.id)!;
+      assert.equal(member.connected, false); assert.equal(member.onStage, true);
+      assert.deepEqual(socket.session.last('speaking')!.participantIds, activeSeed ? [speaker.id] : []);
+      assert.equal(forwarded[0]!.bubbles, true); assert.equal(forwarded[0]!.composed, true);
+      assert.deepEqual(Object.keys(forwarded[0]!.detail), ['participantIds']);
+      const before = nonSpeaking(e), frames = [...socket.sent], mediaCalls = media.mock.callCount();
+      const timeout = t.mock.method(globalThis, 'setTimeout'), interval = t.mock.method(globalThis, 'setInterval');
+      client.on('speaking', ({ detail }) => raw.push(detail));
+      if (!activeSeed) {
+        assert.equal(h.transport.emitUplink(host.roomId, speaker.id, sine(960, 0.5)), true);
+        h.mixers.get(host.roomId)!.tick(); assertSpeaking(e, names('Grace & Speaker'));
+      }
+      h.mixers.get(host.roomId)!.tick(); h.mixers.get(host.roomId)!.tick(); assertSpeaking(e, empty);
+      assert.equal(h.transport.emitUplink(host.roomId, speaker.id, sine(960, 0.5)), true, 'control grace retains the media publisher');
+      h.mixers.get(host.roomId)!.tick(); assertSpeaking(e, names('Grace & Speaker'));
+      assert.equal(forwarded.at(-1)!.detail, raw.at(-1), 'the original SDK detail is forwarded unchanged');
+      assert.equal(speakingNode(e), node); assert.deepEqual(nonSpeaking(e), before); assert.deepEqual(socket.sent, frames);
+      assert.equal(timeout.mock.callCount(), 0); assert.equal(interval.mock.callCount(), 0);
+      assert.equal(media.mock.callCount(), mediaCalls, 'reports never create media');
+    });
+  }
+
+  it('makes the same room-wide report available to audience, speaker, onstage controller and offstage controller', async t => {
+    const { element, client } = await subscribedWidget(t);
+    for (const role of ['audience', 'speaker', 'onstage controller', 'offstage controller'] as const) {
+      const state = speakingState();
+      state.me.role = role.includes('controller') ? 'controller' : role === 'speaker' ? 'speaker' : 'audience';
+      state.me.onStage = role === 'speaker' || role === 'onstage controller';
+      await client['receive']({ type: 'room:state', ...state });
+      await client['receive'](report('speaker', 'host'));
+      assertSpeaking(element, names('甲', '乙'));
+    }
+  });
+
+  it('projects unique eligible IDs in current stage order, keeps equal names and grace, and decodes only into text', async t => {
+    const state = speakingState(), first = state.speakers[0]!;
+    state.speakers = [
+      { ...first, name: '&lt;img src=x onerror=alert(1)&gt;&amp;&quot;&#39;&amp;lt;', connected: false },
+      { ...first, participantId: 'same-a', name: '同名', role: 'speaker' },
+      { ...first, participantId: 'same-b', name: '同名', role: 'speaker' },
+      { ...first, participantId: 'same-b', name: 'DUPLICATE ROW' },
+      { ...first, participantId: 'offstage-id', name: 'OFFSTAGE PRIVATE', onStage: false },
+      { ...first, participantId: 'audience-id', name: 'AUDIENCE PRIVATE', role: 'audience' },
+    ];
+    state.hands = [{ ...state.me, participantId: 'hand-id', name: 'HAND PRIVATE' }];
+    const { element, socket } = await socketJoinedWidget(t, state), node = speakingNode(element);
+    assertSpeaking(element, unknown);
+    socket.deliver(report('same-b', 'unknown-private-id', 'audience-id', 'offstage-id', 'same-a', 'host', 'same-b', 'hand-id'));
+    assertSpeaking(element, names('<img src=x onerror=alert(1)>&"\'&lt;', '同名', '同名'));
+    assert.doesNotMatch(node.textContent, /PRIVATE|unknown-private-id|DUPLICATE ROW/);
+    socket.deliver(report('same-b')); assertSpeaking(element, names('同名'));
+    socket.deliver(report('unknown-private-id', 'audience-id', 'offstage-id', 'hand-id')); assertSpeaking(element, unmatched);
+    socket.deliver(report()); assertSpeaking(element, empty);
+    socket.deliver(report('host', 'same-a')); assertSpeaking(element, names('<img src=x onerror=alert(1)>&"\'&lt;', '同名'));
+    const renamed = structuredClone(state); renamed.speakers[0]!.name = '已改名 &amp; 安全';
+    renamed.speakers[1]!.onStage = false;
+    let forwardedView: ReturnType<typeof view> | undefined;
+    element.addEventListener('stage-state', () => { forwardedView = view(element); }, { once: true });
+    socket.deliver({ type: 'room:state', ...renamed }); assertSpeaking(element, names('已改名 & 安全'));
+    assert.deepEqual(forwardedView, visible(names('已改名 & 安全')));
+    assert.equal(speakingNode(element), node);
+  });
+
+  it('forwards pre-snapshot reports without adopting them or bootstrapping the initial SDK getter', async t => {
+    const { element, sockets, hello } = socketJoiningWidget(t); await settle();
+    const socket = sockets[0]!, request = await hello(socket), client = element.client!;
+    const seen: unknown[] = []; element.addEventListener('stage-speaking', event => seen.push((event as CustomEvent).detail));
+    socket.deliver(report('host')); assertSpeaking(element); assert.deepEqual([...client.speaking], ['host']);
+    socket.deliver({ type: 'room:state', ...speakingState() }); assertSpeaking(element, unknown);
+    socket.deliver({ type: 'ok', requestId: request.requestId }); await settle(); assertSpeaking(element, unknown);
+    socket.deliver(report()); assertSpeaking(element, empty); assert.equal(seen.length, 2);
+  });
+
+  it('permanently prunes lost membership and initially unmatched IDs until another complete report arrives', async t => {
+    const state = speakingState(), { element, socket } = await socketJoinedWidget(t, state);
+    for (const removal of ['missing', 'offstage', 'audience'] as const) {
+      socket.deliver(report('host', 'speaker')); assertSpeaking(element, names('甲', '乙'));
+      const changed = speakingState();
+      if (removal === 'missing') changed.speakers.splice(1);
+      else if (removal === 'offstage') changed.speakers[1]!.onStage = false;
+      else changed.speakers[1]!.role = 'audience';
+      socket.deliver({ type: 'room:state', ...changed }); assertSpeaking(element, names('甲'));
+      socket.deliver({ type: 'room:state', ...state }); assertSpeaking(element, names('甲'));
+      socket.deliver(report('speaker')); assertSpeaking(element, names('乙'));
+      socket.deliver({ type: 'room:state', ...changed }); assertSpeaking(element, unmatched);
+      socket.deliver({ type: 'room:state', ...state }); assertSpeaking(element, unmatched);
+    }
+    const offstage = speakingState(); offstage.speakers[1]!.role = 'audience'; offstage.speakers[1]!.onStage = false;
+    socket.deliver({ type: 'room:state', ...offstage });
+    socket.deliver(report('speaker', 'previously-unknown')); assertSpeaking(element, unmatched);
+    const promoted = speakingState();
+    promoted.speakers.push({ ...promoted.speakers[1]!, participantId: 'previously-unknown', name: '丙' });
+    socket.deliver({ type: 'room:state', ...promoted }); assertSpeaking(element, unmatched);
+    socket.deliver(report('speaker', 'previously-unknown')); assertSpeaking(element, names('乙', '丙'));
+    socket.deliver(report()); socket.deliver({ type: 'room:state', ...state }); assertSpeaking(element, empty);
+  });
+
+  it('treats malformed synthetic reports as unknown rather than silence and leaves their forwarded detail untouched', async t => {
+    const { element, client, socket } = await socketJoinedWidget(t, speakingState());
+    for (const detail of [undefined, null, {}, { participantIds: 'host' }, { participantIds: null },
+      { participantIds: ['host', 1] }, { participantIds: [null] }, { participantIds: Array(1) }]) {
+      socket.deliver(report('host')); assertSpeaking(element, names('甲'));
+      const event = new CustomEvent('speaking', { detail });
+      const observations: { detail: unknown; view: ReturnType<typeof view> }[] = [];
+      element.addEventListener('stage-speaking', event => {
+        observations.push({ detail: (event as CustomEvent).detail, view: view(element) });
+      }, { once: true });
+      client.dispatchEvent(event);
+      assert.equal(observations.length, 1); assert.equal(observations[0]!.detail, event.detail);
+      assert.deepEqual(observations[0]!.view, visible(unknown)); assertSpeaking(element, unknown);
+      socket.deliver({ type: 'room:state', ...speakingState() }); assertSpeaking(element, unknown);
+    }
+    const detail = Object.freeze({ participantIds: Object.freeze(['host']) });
+    client.dispatchEvent(new CustomEvent('speaking', { detail })); assertSpeaking(element, names('甲'));
+  });
+
+  it('keeps a copied report across own role, stage, waiting/live, microphone failure and local playback changes', async t => {
+    const { element, client, socket } = await socketJoinedWidget(t, speakingState());
+    socket.deliver(report('speaker')); assertSpeaking(element, names('乙'));
+    for (const onStage of [true, false]) {
+      const state = speakingState(); state.me.role = 'controller'; state.me.onStage = onStage;
+      state.me.muted = true; state.status = onStage ? 'waiting' : 'live';
+      socket.deliver({ type: 'room:state', ...state }); assertSpeaking(element, names('乙'));
+      client.dispatchEvent(new CustomEvent('micerror', { detail: { name: 'NotAllowedError', message: 'Mic denied' } }));
+      assertSpeaking(element, names('乙'));
+      client.dispatchEvent(new CustomEvent('micready', { detail: undefined }));
+      element.playbackMuted = !element.playbackMuted; element.playbackVolume = 0;
+      assertSpeaking(element, names('乙'));
+    }
+    socket.deliver({ type: 'stage:left', participantId: 'me', role: 'controller', reason: 'leave' });
+    assertSpeaking(element, names('乙'));
+  });
+
+  it('copies complete primitive IDs before forwarding mutation and never changes raw detail identity', async t => {
+    const { element, client, socket } = await socketJoinedWidget(t, speakingState());
+    const detail = { participantIds: ['speaker', 'host'] }, sdk: unknown[] = [];
+    const observations: { detail: unknown; view: ReturnType<typeof view>; bubbles: boolean; composed: boolean }[] = [];
+    client.on('speaking', event => sdk.push(event.detail));
+    element.addEventListener('stage-speaking', event => {
+      observations.push({ detail: (event as CustomEvent).detail, view: view(element), bubbles: event.bubbles, composed: event.composed });
+      detail.participantIds.splice(0, 2, 'mutated-private-id');
+    }, { once: true });
+    client.dispatchEvent(new CustomEvent('speaking', { detail }));
+    assert.equal(observations.length, 1); assert.equal(observations[0]!.detail, detail);
+    assert.deepEqual(observations[0]!.view, visible(names('甲', '乙')));
+    assert.equal(observations[0]!.bubbles, true); assert.equal(observations[0]!.composed, true);
+    assert.equal(sdk[0], detail); assertSpeaking(element, names('甲', '乙'));
+    socket.deliver({ type: 'room:state', ...speakingState() }); element.playbackMuted = true;
+    assertSpeaking(element, names('甲', '乙')); assert.deepEqual(detail.participantIds, ['mutated-private-id']);
+  });
+
+  it('preserves a nested newer full report rather than restoring the outer speaking event', async t => {
+    const { element, socket } = await socketJoinedWidget(t, speakingState());
+    const observations: ReturnType<typeof view>[] = [];
+    element.addEventListener('stage-speaking', () => {
+      observations.push(view(element));
+      if (observations.length === 1) socket.deliver(report('speaker'));
+    });
+    socket.deliver(report('host')); assert.deepEqual(observations, [visible(names('甲')), visible(names('乙'))]); assertSpeaking(element, names('乙'));
+    socket.deliver({ type: 'room:state', ...speakingState() }); assertSpeaking(element, names('乙'));
+  });
+
+  it('projects authoritative state before host callbacks and preserves their nested newer report after the outer render', async t => {
+    const { element, socket } = await socketJoinedWidget(t, speakingState());
+    socket.deliver(report('host'));
+    const renamed = speakingState(); renamed.speakers[0]!.name = '已改名'; renamed.status = 'waiting';
+    const observations: ReturnType<typeof view>[] = [];
+    element.addEventListener('stage-status', () => {
+      observations.push(view(element)); socket.deliver(report('speaker')); observations.push(view(element));
+    }, { once: true });
+    element.addEventListener('stage-state', () => {
+      observations.push(view(element)); socket.deliver(report()); observations.push(view(element));
+    }, { once: true });
+    socket.deliver({ type: 'room:state', ...renamed }); assertSpeaking(element, empty);
+    assert.deepEqual(observations, [visible(names('已改名')), visible(names('乙')), visible(names('乙')), visible(empty)]);
+  });
+
+  it('clears before forwarding reconnect, ignores retired wire messages, and waits for a new seed despite the stale SDK getter', async t => {
+    const state = speakingState(), { element, client, socket, sockets, hello, tick } = await socketJoinedWidget(t, state);
+    socket.deliver(report('host')); const oldMessage = socket.onmessage;
+    let reconnectingView: ReturnType<typeof view> | undefined;
+    element.addEventListener('stage-status', event => { if ((event as CustomEvent).detail === 'reconnecting') reconnectingView = view(element); });
+    socket.close(); assert.equal(client.status, 'reconnecting'); assertSpeaking(element);
+    assert.deepEqual(reconnectingView, hidden);
+    assert.deepEqual([...client.speaking], ['host']);
+    let reports = 0; element.addEventListener('stage-speaking', () => { reports++; });
+    oldMessage?.({ data: JSON.stringify(report('speaker')) }); assert.equal(reports, 0);
+    await tick(500); const next = sockets[1]!, request = await hello(next);
+    next.deliver({ type: 'room:state', ...state, resumeToken: 'resume-me' }); assertSpeaking(element, unknown);
+    assert.deepEqual([...client.speaking], ['host'], 'resumed snapshot does not refresh the SDK speaking getter');
+    next.deliver({ type: 'ok', requestId: request.requestId }); await settle(); assertSpeaking(element, unknown);
+    next.deliver(report()); assertSpeaking(element, empty);
+    oldMessage?.({ data: JSON.stringify(report('host')) }); assert.equal(reports, 1); assertSpeaking(element, empty);
+  });
+
+  for (const initialBeforeAck of [false, true]) {
+    it(`requires a new report after public same-client same-ID disconnect/reentry${initialBeforeAck ? ' following pre-ACK loss and silent disconnect' : ''}`, async t => {
+      const { element, sockets, hello, tick, joinRequest } = socketJoiningWidget(t); await settle();
+      const socket = sockets[0]!, initial = await hello(socket), client = element.client!;
+      socket.deliver({ type: 'room:state', ...speakingState() });
+      if (!initialBeforeAck) { socket.deliver({ type: 'ok', requestId: initial.requestId }); await settle(); }
+      socket.deliver(report('host')); assertSpeaking(element, names('甲'));
+      if (initialBeforeAck) {
+        assert.equal(client['session'], null); socket.close(); await settle();
+        assert.equal(client.status, 'disconnected'); assert.ok(client.state); assertSpeaking(element);
+      }
+      const statuses: ReturnType<typeof view>[] = [];
+      const disconnected = () => { statuses.push(view(element)); };
+      element.addEventListener('stage-status', disconnected);
+      await client.disconnect(); assert.equal(client.state, null); assertSpeaking(element);
+      element.removeEventListener('stage-status', disconnected);
+      assert.deepEqual(statuses, initialBeforeAck ? [] : [hidden], 'a duplicate disconnected status is silent');
+      const connecting = client.connect(), next = sockets[1]!; next.hello(); await connecting;
+      const joining = client.join({ roomId: 'one', name: 'Listener' }); await settle(); await tick(100);
+      const request = joinRequest(next);
+      next.deliver({ type: 'room:state', ...speakingState() }); assertSpeaking(element, unknown);
+      next.deliver({ type: 'ok', requestId: request.requestId }); await joining; assertSpeaking(element, unknown);
+      assert.equal(element.client, client); next.deliver(report('speaker')); assertSpeaking(element, names('乙'));
+    });
+  }
+
+  for (const terminal of terminalCases) {
+    it(`retires before ${terminal.title} callbacks and does not revive through same-client terminal reentry`, async t => {
+      const { element, client, socket, sockets, tick, joinRequest } = await socketJoinedWidget(t, speakingState());
+      socket.deliver(report('host')); const oldMessage = socket.onmessage;
+      const callbacks: ReturnType<typeof view>[] = [];
+      element.addEventListener('stage-status', event => { if ((event as CustomEvent).detail === 'disconnected') callbacks.push(view(element)); });
+      element.addEventListener(`stage-${terminal.event}`, () => { callbacks.push(view(element)); });
+      socket.deliver(terminal.message); await settle(); assert.deepEqual(callbacks, [hidden, hidden]); assertSpeaking(element);
+      assert.equal(element['status'].textContent, terminal.text);
+      const connecting = client.connect(), next = sockets[1]!; next.hello(); await connecting;
+      const joining = client.join({ roomId: 'one', name: 'Listener' }); await settle(); await tick(100);
+      const request = joinRequest(next); next.deliver({ type: 'room:state', ...speakingState() }); assertSpeaking(element, unknown);
+      next.deliver({ type: 'ok', requestId: request.requestId }); await joining;
+      next.deliver(report('speaker')); assertSpeaking(element, names('乙'));
+      oldMessage?.({ data: JSON.stringify(report('host')) }); assertSpeaking(element, names('乙'));
+    });
+  }
+
+  it('replaces ownership on room or self identity changes before forwarded status/state and never revives old reports', async t => {
+    const { element, socket } = await socketJoinedWidget(t, speakingState());
+    for (const identity of ['room', 'self'] as const) {
+      socket.deliver(report('host')); assertSpeaking(element, names('甲'));
+      const state = speakingState(); state.status = 'waiting';
+      if (identity === 'room') state.roomId = 'different'; else state.me.participantId = 'different';
+      const callbacks: ReturnType<typeof view>[] = [];
+      for (const event of ['stage-status', 'stage-state']) element.addEventListener(event, () => { callbacks.push(view(element)); }, { once: true });
+      socket.deliver({ type: 'room:state', ...state }); assert.deepEqual(callbacks, [visible(unknown), visible(unknown)]); assertSpeaking(element, unknown);
+      socket.deliver({ type: 'room:state', ...speakingState() }); assertSpeaking(element, unknown);
+    }
+  });
+
+  for (const action of ['attribute replacement', 'detach/remount', 'manual leave/rejoin'] as const) {
+    it(`retires synchronously during ${action} from a forwarded report and rejects the old client lane`, async t => {
+      const { element, client, socket, sockets, hello } = await socketJoinedWidget(t, speakingState());
+      const node = speakingNode(element), oldMessage = socket.onmessage;
+      const observations: ReturnType<typeof view>[] = [];
+      element.addEventListener('stage-speaking', () => {
+        observations.push(view(element));
+        if (action === 'attribute replacement') element.setAttribute('room', 'two');
+        else if (action === 'detach/remount') { Object.assign(element, { isConnected: false }); element.disconnectedCallback(); }
+        else click(element['roomAction']);
+        observations.push(view(element));
+      }, { once: true });
+      socket.deliver(report('host')); await settle(); assertSpeaking(element);
+      assert.deepEqual(observations, [visible(names('甲')), hidden]);
+      if (action === 'detach/remount') { Object.assign(element, { isConnected: true }); element.connectedCallback(); }
+      else if (action === 'manual leave/rejoin') { assert.equal(element['status'].textContent, '已離開房間。'); click(element['roomAction']); }
+      await settle(); const next = sockets[1]!, request = await hello(next), state = speakingState();
+      if (action === 'attribute replacement') state.roomId = 'two';
+      next.deliver({ type: 'room:state', ...state }); assertSpeaking(element, unknown);
+      next.deliver({ type: 'ok', requestId: request.requestId }); await settle(); next.deliver(report('speaker'));
+      assertSpeaking(element, names('乙')); assert.notEqual(element.client, client); assert.equal(speakingNode(element), node);
+      let callbacks = 0; element.addEventListener('stage-speaking', () => { callbacks++; });
+      oldMessage?.({ data: JSON.stringify(report('host')) });
+      client.dispatchEvent(new CustomEvent('speaking', { detail: { participantIds: ['host'] } }));
+      assert.equal(callbacks, 0); assertSpeaking(element, names('乙'));
+    });
+  }
+
+  it('does not affect pending controls, drafts, unrelated errors, requests, media or timers as reports replace each other', async t => {
+    const state = speakingState(); state.me.role = 'speaker'; state.me.onStage = true;
+    const { element, client, socket, tick } = await socketJoinedWidget(t, state);
+    element['nameInput'].value = 'Unsent draft'; click(element['nameUpdate']); click(element['mic']); await tick(200);
+    const rename = socket.sent.find(message => message.type === 'participant:rename');
+    const mute = socket.sent.find(message => message.type === 'mic:mute'); assert.ok(rename); assert.ok(mute);
+    socket.deliver({ type: 'error', code: 'conflict', message: 'Existing unrelated error' });
+    const before = nonSpeaking(element), frames = [...socket.sent], pending = client['pending'].size, attempt = element['nameAttempt'];
+    const timeout = t.mock.method(globalThis, 'setTimeout'), interval = t.mock.method(globalThis, 'setInterval');
+    const media = t.mock.method(client as unknown as { createMedia(): void }, 'createMedia', () => assert.fail('speaking must not start media'));
+    for (const message of [report('host'), report(), report('unknown'), report('speaker')]) socket.deliver(message);
+    assertSpeaking(element, names('乙')); assert.deepEqual(nonSpeaking(element), before);
+    assert.deepEqual(socket.sent, frames); assert.equal(client['pending'].size, pending); assert.equal(element['nameAttempt'], attempt);
+    assert.equal(timeout.mock.callCount(), 0); assert.equal(interval.mock.callCount(), 0); assert.equal(media.mock.callCount(), 0);
+    socket.deliver({ type: 'ok', requestId: rename.requestId }); socket.deliver({ type: 'ok', requestId: mute.requestId }); await settle();
+    assert.equal(client['pending'].size, 0); assertSpeaking(element, names('乙'));
   });
 });

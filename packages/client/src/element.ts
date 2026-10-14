@@ -12,6 +12,7 @@ const STYLE = `
 [part=panel] { display: grid; gap: .5rem; padding: .75rem; border: 1px solid var(--stage-border, #8884); border-radius: var(--stage-radius, .5rem); background: var(--stage-bg, transparent); }
 [part=status] { margin: 0; }
 [part=quality] { margin: 0; font-size: .875em; }
+[part=speaking] { margin: 0; font-size: .875em; }
 [part=error] { margin: 0; color: var(--stage-error, #dc2626); }
 [part=actions] { display: flex; flex-wrap: wrap; gap: .5rem; }
 [part=name] { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; }
@@ -41,7 +42,7 @@ button.primary { background: var(--stage-accent, #2563eb); border-color: transpa
  * composed) with the same `detail`. The inline name draft starts from each new seat's name;
  * later snapshots update its accepted-name display, not the draft or the `name` attribute.
  * The controller's room-name draft follows the same rule while control is retained.
- * Style through `::part(panel|status|quality|actions|name|room-name|playback)` and the
+ * Style through `::part(panel|status|quality|speaking|actions|name|room-name|playback)` and the
  * `--stage-*` custom properties.
  */
 export class StageElement extends HTMLElement {
@@ -51,6 +52,9 @@ export class StageElement extends HTMLElement {
   private readonly quality: HTMLParagraphElement;
   private qualityOwner: { client: StageClient; roomId: string; participantId: string; generation: number } | undefined;
   private qualityReport: Omit<ConnectionQuality, 'participantId'> | undefined;
+  private readonly speaking: HTMLParagraphElement;
+  private speakingOwner: { client: StageClient; roomId: string; participantId: string; generation: number } | undefined;
+  private speakingReport: { ids: Set<string>; empty: boolean } | undefined;
   /** Last failure (request rejected, mic denied…); stays until the next action or join. */
   private readonly error: HTMLParagraphElement;
   private readonly namePanel: HTMLDivElement;
@@ -106,6 +110,9 @@ export class StageElement extends HTMLElement {
     this.quality = document.createElement('p');
     this.quality.part.add('quality');
     this.quality.hidden = true;
+    this.speaking = document.createElement('p');
+    this.speaking.part.add('speaking');
+    this.speaking.hidden = true;
     this.error = document.createElement('p');
     this.error.part.add('error');
     this.error.setAttribute('role', 'alert');
@@ -177,7 +184,7 @@ export class StageElement extends HTMLElement {
     this.retry = this.button('重試加入', () => { if (this.canRetry()) this.rejoin(); });
     this.cancelJoin = this.button('取消加入', () => this.cancelInitial?.());
     actions.append(this.unlock, this.listen, this.hand, this.mic, this.micRetry, this.leaveStage, this.roomAction, this.retry, this.cancelJoin);
-    panel.append(this.status, this.quality, this.error, this.namePanel, this.roomNamePanel, actions, this.playback);
+    panel.append(this.status, this.quality, this.speaking, this.error, this.namePanel, this.roomNamePanel, actions, this.playback);
     root.append(style, panel);
     this.render();
   }
@@ -278,6 +285,10 @@ export class StageElement extends HTMLElement {
             || (type === 'stageleft' && (detail as StageEventMap['stageleft']).participantId === client.state?.me.participantId)) this.retireQualityOwner();
           else if (type === 'quality') this.syncQualityOwner((detail as StageEventMap['quality']).participants);
           else if (type === 'state' || type === 'status') this.syncQualityOwner();
+          if (type === 'closed' || type === 'kicked'
+            || (type === 'status' && (detail === 'reconnecting' || detail === 'disconnected'))) this.retireSpeakingOwner();
+          else if (type === 'speaking') this.syncSpeakingOwner({ participantIds: (detail as StageEventMap['speaking'] | null | undefined)?.participantIds });
+          else if (type === 'state' || type === 'status') this.syncSpeakingOwner();
           // SDK status precedes state; a forwarded status listener may disconnect immediately.
           if (type === 'state' || client.state) { receivedState = true; this.hideRetry(); this.hideCancel(); }
           if (type === 'closed' || type === 'kicked') { terminal = true; this.micFailure = undefined; this.hideRetry(); this.hideCancel(); }
@@ -361,6 +372,7 @@ export class StageElement extends HTMLElement {
     this.retireNameOwner();
     this.retireRoomNameOwner();
     this.retireQualityOwner();
+    this.retireSpeakingOwner();
     this.hideCancel();
     this.hideRetry();
     for (const button of this.pendingActions) button.removeAttribute('aria-busy');
@@ -377,6 +389,47 @@ export class StageElement extends HTMLElement {
   private retireQualityOwner(): void {
     this.qualityOwner = undefined; this.qualityReport = undefined;
     this.quality.textContent = ''; this.quality.hidden = true;
+  }
+
+  private retireSpeakingOwner(): void {
+    this.speakingOwner = undefined; this.speakingReport = undefined;
+    this.speaking.textContent = ''; this.speaking.hidden = true;
+  }
+
+  /** A resumed SDK getter can retain the old report; only a new event establishes this owner's set. */
+  private syncSpeakingOwner(report?: { participantIds: unknown }): void {
+    const client = this.current, state = client?.state, me = state?.me;
+    if (!this.isConnected || !client || !state || !me
+      || (client.status !== 'waiting' && client.status !== 'live')) {
+      this.retireSpeakingOwner(); return;
+    }
+    const owner = this.speakingOwner;
+    if (!owner || owner.client !== client || owner.generation !== this.generation
+      || owner.roomId !== state.roomId || owner.participantId !== me.participantId) {
+      this.retireSpeakingOwner();
+      this.speakingOwner = { client, roomId: state.roomId, participantId: me.participantId, generation: this.generation };
+    }
+    if (report) {
+      const ids = Array.isArray(report.participantIds) ? [...report.participantIds] : undefined;
+      // Copy before forwarding the mutable event; malformed synthetic reports are not evidence of silence.
+      this.speakingReport = ids?.every(id => typeof id === 'string') ? { ids: new Set(ids), empty: !ids.length } : undefined;
+    }
+    const current = this.speakingReport;
+    this.speaking.hidden = false;
+    if (!current) { this.speaking.textContent = '發言偵測：等待伺服器回報。'; return; }
+    if (current.empty) { this.speaking.textContent = '最近收到的發言回報：未偵測到發言。'; return; }
+    const seen = new Set<string>(), names: string[] = [];
+    for (const person of state.speakers) {
+      if (!person.onStage || (person.role !== 'speaker' && person.role !== 'controller')
+        || !current.ids.has(person.participantId) || seen.has(person.participantId)) continue;
+      seen.add(person.participantId);
+      // Control-socket grace can retain media, so connected is deliberately not an eligibility test.
+      names.push(decodeName(person.name));
+    }
+    // A later stage entry must not revive an ID from an earlier, unmatched or removed seat.
+    current.ids = seen;
+    this.speaking.textContent = names.length ? `最近收到的發言回報：${names.join('、')}（${names.length} 人）。`
+      : '最近收到的發言回報：沒有可對應的台上成員。';
   }
 
   /** Reports have no timestamp or media epoch; only a new event may supply this seat's values. */
@@ -675,6 +728,7 @@ export class StageElement extends HTMLElement {
     this.syncNameOwner();
     this.syncRoomNameOwner();
     this.syncQualityOwner();
+    this.syncSpeakingOwner();
     const client = this.current;
     const me = client?.me ?? null;
     const state = client?.state ?? null;

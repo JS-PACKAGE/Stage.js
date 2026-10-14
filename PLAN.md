@@ -739,3 +739,6 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 
 
 186. **個人診斷採已成功完成的最高請求序號（2026-10-14）：** 受控 whole sample＋公開 SDK＋fake peer 固定5秒統計延遲，既有2秒輪詢於60秒啟動30次、完成27次，但latest-started guard使畫面更新0次。拒絕single-inflight gate，因永不settle的舊請求會阻擋新peer／恢復取樣，且改變既有刷新頻率。新增顯示watermark，只接受目前room generation／可見生命週期內序號高於已套用界線的fulfilled結果，含empty；較新pending或reject不阻擋較早成功，較新成功或empty已套用則拒絕舊結果。stopRoomTimers與每次visibility通知同時推進失效界線，保留離房／同ID重入／隱藏隔離、SDK差量基準與原輪詢排程。相同受控60秒工作量仍30次要求、3個pending，畫面可更新27次；這是明示UI結果接納契約改變，不是CPU／記憶體優化，也不新增timeout、底層取消或pending上限。資料為最近成功取樣結果，不保證即時或可聽音訊；未重現原生瀏覽器慢getStats，證據限受控時鐘／DOM／公開SDK與fake peer。
+
+
+187. **Web Component 發言者摘要（2026-10-14）：** actual widget→SDK→Hub受控bridge證實state→speaking→ACK與mixer active／empty轉換已到達，但基線只有stage-speaking轉送、可見DOM不顯示發言者。新增固定普通段落part=speaking，私下複製完整ID集合並按目前snapshot.speakers順序投影，僅台上speaker/controller，ID去重但同名不同人不合併；保留connected=false寬限席位，不列未知／觀眾ID。名稱單次decode後textContent，快照改名／移出台上同步更新；採納時只保留當下合法ID，後續移除永久prune，避免同ID重新上台復活舊活動，必須新speaking事件才可加回。owner綁client/generation/room/pid，事件轉送前整理；nested新事件／離房不得被外層回呼覆寫。重連／disconnected／terminal／離房／換席退役，不從SDK可能保留的speaking getter復活，尚未收到、明確empty、非空但無對應成員分開；普通同席更新與本人micerror不清其他人的房間回報。無timestamp／epoch，文案只稱最近收到，VAD不是實際可聽音訊或健康保證；不新增live region、API、timer、媒體或儲存，保留原事件detail。驗證限受控DOM/socket、公開SDK與Hub／mock媒體，原生畫面、AT與硬體音訊未驗收。
