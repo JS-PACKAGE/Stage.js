@@ -22,7 +22,7 @@
 
 ## 房間操作
 
-`createRoom({name, roomName?, codeRequired?, token?})` 回傳 `{roomId, code?}`；伺服器設定 `rooms.createToken` 時須傳入 `token`。加入後用 `raiseHand` / `withdrawHand`，在台用 `mute` / `unmute` / `leaveStage`；主控用 `approve(id)`、`reject(id)`、`returnToStage()`、`transferControl(id)`、`forceMute(id)`、`forceUnmute(id)`、`setGain(id, gainDb)`（調整此人在混音中的音量，±`MAX_GAIN_DB` dB，0 還原；目前值見 `ParticipantView.gainDb`）、`removeFromStage(id)`、`kick(id)`（踢出房間）、`rotateCode()`（更換房間代碼，新代碼見主控的 `state.code`）、`closeRoom()`。`disconnect()` 停止自動重連。請求在伺服器 `ok` 後完成，失敗拋出有 `code` 的 `StageError`；逾時預設為 15 秒（可用 `requestTimeoutMs` 調整；另加本機排程等待）。舉手間隔依伺服器設定（`rateLimits.handRaiseIntervalMs`，預設 10 秒），`handCooldownMs` 可供倒數 UI 使用。
+`createRoom({name, roomName?, codeRequired?, token?})` 回傳 `{roomId, code?}`；伺服器設定 `rooms.createToken` 時須傳入 `token`。加入後用 `raiseHand` / `withdrawHand`，在台用 `mute` / `unmute` / `leaveStage`；主控用 `approve(id)`、`reject(id)`、`returnToStage()`、`transferControl(id)`、`forceMute(id)`、`forceUnmute(id)`、`setGain(id, gainDb)`（調整此人在混音中的音量，±`MAX_GAIN_DB` dB，0 還原；目前值見 `ParticipantView.gainDb`）、`removeFromStage(id)`、`kick(id)`（踢出房間）、`setRoomName(name)`（修改房間名稱）、`rotateCode()`（更換房間代碼，新代碼見主控的 `state.code`）、`closeRoom()`。`disconnect()` 停止自動重連。請求在伺服器 `ok` 後完成，失敗拋出有 `code` 的 `StageError`；逾時預設為 15 秒（可用 `requestTimeoutMs` 調整；另加本機排程等待）。舉手間隔依伺服器設定（`rateLimits.handRaiseIntervalMs`，預設 10 秒），`handCooldownMs` 可供倒數 UI 使用。
 
 `createRoom`／`join` 在通過即時本機容量檢查後、任何等待前複製該次參數。hello、pacing 或 ACK 等待期間修改原物件，不會改變這次送出的欄位或成功後保存的回座 roomId／code／name；下一次明確呼叫會讀取新的值。支援的參數皆為字串／布林等基本值，採淺層複製，不凍結或修改呼叫端物件，也不更改驗證、修剪或錯誤順序。主控已收到的權威房間代碼仍依下述規則更新。
 
@@ -31,6 +31,10 @@
 重疊呼叫 createRoom（包含在 created／state 事件內再次呼叫）不會清空先前呼叫已收到、仍在等待 ACK 的房間結果。伺服器仍決定是否允許操作；同一連線已進房時，後續開房仍回 already_joined，第一個成功呼叫保留自己的結果與自動回座 session。沒有新的 room:created 卻只有 ACK 時仍視為 internal 錯誤，不以先前房間的資訊冒充成功。
 
 舉手冷卻屬於目前參與者：明確 disconnect（包含被踢／關房）或收到不同 participantId 的新身分時清除，同一個 StageClient 可立即在新房間舉手；同席位的自動恢復與一般 state 更新保留原本冷卻。伺服器的速率限制仍會獨立檢查請求。 `raiseHand()` 仍先依序檢查既有冷卻與 `queue_full`；接著若沒有 socket 或 socket 非 OPEN，則以 `disconnected` 拒絕且不新占用冷卻。通過本機准入後，即使後續送出失敗、逾時或伺服器拒絕，冷卻仍保留；這不是一般錯誤 rollback，也不代表 OPEN socket 已完成回座或伺服器必然可用。
+
+## 修改房間名稱
+
+`setRoomName(name: string): Promise<void>` 由目前主控更新房間名稱（台上／台下皆可）；伺服器在房間佇列執行時驗證主控權限，同名操作也不能繞過權限。名稱沿用 `roomName` 的伺服器清洗與設定長度；改變後各成員收到既有個人化 `state`，請求者先收到 state 再 ACK，相同名稱只刷新請求者並保留待送的合併廣播。SDK 沿用控制請求容量、排程與逾時，不快取或樂觀改寫房間標題；顯示應讀取 `decodeName(client.state.name)` 並使用 textContent。既有房間 ID、代碼、席位、排序與媒體保持原流程；舊伺服器可能回 `unknown_type`，不自動關房／重建。完整範例提供主控專用「修改房間名稱」按鈕；embed／widget 會依正常 state 顯示新標題，未新增它們的管理操作。
 
 ## 修改自己的顯示名稱
 

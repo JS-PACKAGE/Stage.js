@@ -60,7 +60,8 @@ export type RoomEvent = Extract<
  */
 export class Room {
   readonly roomId: string;
-  readonly name: string;
+  /** Already HTML-escaped (AGENTS.md §S3/§S8). */
+  name: string;
   code: string;
   readonly codeRequired: boolean;
   readonly createdAt: number;
@@ -175,6 +176,15 @@ export class Room {
     const p = this.require(participantId);
     const changed = p.name !== name;
     p.name = name;
+    this.assertInvariants();
+    return changed;
+  }
+
+  /** Controller updates the room title, already sanitized by input validation. */
+  renameRoom(byId: string, name: string): boolean {
+    this.requireController(byId);
+    const changed = this.name !== name;
+    this.name = name;
     this.assertInvariants();
     return changed;
   }

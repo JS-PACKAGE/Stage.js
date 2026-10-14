@@ -114,6 +114,7 @@ export function parseClientMessage(text: string, limits: ValidationLimits): Clie
     case 'mic:unmute':
       return { type: t, requestId: rid };
     case 'participant:rename':
+    case 'room:rename':
       return { type: t, requestId: rid, name: sanitizeName(m.name, limits.nameMaxLength) ?? bad('name') };
     case 'stage:approve':
     case 'stage:reject':

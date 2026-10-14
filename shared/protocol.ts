@@ -22,6 +22,8 @@
  *     `room:rotate-code`, to keep them out.
  *   - C→S `participant:rename {name}`: updates the bound participant's own display name;
  *     the requester receives its authoritative `room:state` before the acknowledgement.
+ *   - C→S `room:rename {name}` (controller): updates the room display name; changed names
+ *     are broadcast in personalized `room:state` snapshots before the acknowledgement.
  *   - C→S `room:rotate-code` (controller, code-protected rooms): replaces the room code;
  *     participants already inside stay. The controller's next `room:state` carries the new code.
  *   - S→C `quality`   : connection quality of everyone publishing audio, every
@@ -178,6 +180,7 @@ export type ServerMessage = {
 export interface ClientMessageMap {
   'room:create': { requestId: string; name?: string; roomName?: string; codeRequired?: boolean; token?: string };
   'room:close': { requestId: string };
+  'room:rename': { requestId: string; name: string };
   join: { requestId: string; roomId: string; code?: string; name: string; resumeToken?: string };
   'hand:raise': { requestId: string };
   'hand:withdraw': { requestId: string };
@@ -209,6 +212,7 @@ export type ClientMessage = {
 export const CLIENT_MESSAGE_TYPES: readonly ClientMessageType[] = [
   'room:create',
   'room:close',
+  'room:rename',
   'join',
   'hand:raise',
   'hand:withdraw',

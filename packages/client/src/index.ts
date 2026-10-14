@@ -610,6 +610,8 @@ export class StageClient extends EventTarget {
   }
   /** Change only your own display name; the server sanitizes it and publishes authoritative state. */
   setName(name: string): Promise<void> { return this.request('participant:rename', { name }); }
+  /** Update the room display name (controller only); the server snapshot is authoritative. */
+  setRoomName(name: string): Promise<void> { return this.request('room:rename', { name }); }
   withdrawHand(): Promise<void> { return this.request('hand:withdraw', {}); }
   approve(id: string): Promise<void> { return this.request('stage:approve', { targetId: id }); }
   reject(id: string): Promise<void> { return this.request('stage:reject', { targetId: id }); }

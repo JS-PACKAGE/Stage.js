@@ -709,6 +709,16 @@ function renderRoom(state: RoomStatePayload): void {
   summary.append(element('h2', '', '房間資訊'), element('p', '', `房間 ID：${state.roomId}`));
   if (controller) {
     summary.append(element('p', '', state.codeRequired ? `房間代碼：${roomCode ?? '未提供'}` : '不需要房間代碼'));
+    const titleRoomId = state.roomId, titleParticipantId = state.me.participantId;
+    const canRenameRoom = () => generation === roomActionGeneration && client.status !== 'reconnecting'
+      && client.state?.roomId === titleRoomId && client.me?.participantId === titleParticipantId
+      && client.me.role === 'controller';
+    const renameRoom = roomButton('room-rename', '修改房間名稱', async () => {
+      const name = window.prompt('輸入新的房間名稱', decodeName(client.state!.name));
+      if (name === null || !canRenameRoom()) return;
+      await client.setRoomName(name);
+    }, '', () => renameRoom.isConnected && canRenameRoom());
+    summary.append(renameRoom);
     const link = new URL(location.origin);
     link.pathname = location.pathname;
     link.searchParams.set('room', state.roomId);

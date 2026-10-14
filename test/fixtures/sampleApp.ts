@@ -213,6 +213,7 @@ export class SampleSdk {
   async setInputDevice(id: string): Promise<void> { this.inputDevices.push(id); }
   async setOutputDevice(id: string): Promise<void> { this.outputDevices.push(id); }
   async setName(_name: string): Promise<void> {}
+  async setRoomName(_name: string): Promise<void> {}
   setPlaybackVolume(value: number): void { assert.ok(value >= 0 && value <= 1); this.playbackVolume = value; }
   setPlaybackMuted(value: boolean): void { this.playbackMuted = value; }
   startMicTest(options: { signal?: AbortSignal } = {}): Promise<SamplePreview> {

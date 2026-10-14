@@ -700,3 +700,6 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 
 
 173. **嵌入頁明確更新本人名稱（2026-10-14）：** 第171項已有 SDK setName，但嵌入頁的名稱欄只在新加入時讀取，無法透過畫面留席改名。新增 form 外的 type=button 更新名稱，不改 join submit 選取與表單行為；僅當 controlsClient 對應目前快照時顯示，所有角色允許，重連與自有 pending 停用。點擊同步擷取原始字串，沿用伺服器驗證與 authoritative snapshot 顯示，不樂觀改名、不覆寫輸入草稿。pending 綁 client、entry generation、room/pid，狀態先於 ACK 不解鎖，同席重連保留；retireControls 在 disconnect 前撤銷，晚到 Promise 不覆蓋新操作。舊server錯誤正常保留，不以重新加入作fallback；不更改協定、SDK、server政策或媒體流程。受控DOM／SDK／Hub測試不代表原生鍵盤、輔助科技或硬體音訊驗收。
+
+
+174. **主控留房更新房間名稱（2026-10-14）：** 原name僅constructor設定，room:rename/set-name/update均unknown_type；增加v1 additive room:rename{name}、既有sanitizeName/config長度與白名單。Room.renameRoom先requireController再比對與assign，changed/no-op均assertInvariants；Hub沿用room queue與stale binding，changed broadcastState更新所有可見標題並flushpending，noop僅requester snapshot且保留timer，兩者state先於ACK，無新event/name日誌或apply媒體操作。SDK setRoomName純request，無title cache或ACK回寫，初次entry晚ACK不覆蓋新snapshot。完整範例在room summary提供主控prompt，動作前檢查目前node，前後均核room/pid/generation/role/reconnecting，同席redraw可繼續；pending跨state-beforeACK，退役結果不影響新操作。邀請URL/code/席位/排序維持，server執行時授權覆蓋transfer/grace/succession競態；舊版錯誤無close/recreate fallback。名稱只以decodeName+textContent顯示，沒有額外client長度政策。驗證為受控模型/SDK/DOM與本機控制面，非原生prompt/AT/硬體音訊。
