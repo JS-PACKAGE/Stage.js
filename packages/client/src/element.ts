@@ -24,6 +24,10 @@ const STYLE = `
 [part=hands] ul { display: grid; gap: .5rem; padding-left: 1.25rem; }
 [part=hands] li { overflow-wrap: anywhere; }
 [part=hands] button { margin-left: .5rem; }
+[part=stage-management][hidden] { display: none; }
+[part=stage-management] ul { display: grid; gap: .5rem; padding-left: 1.25rem; }
+[part=stage-management] li { overflow-wrap: anywhere; }
+[part=stage-management] button { margin-left: .5rem; }
 [part=playback] { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; }
 [part=playback][hidden] { display: none; }
 [part=microphone] { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; }
@@ -38,7 +42,7 @@ button.primary { background: var(--stage-accent, #2563eb); border-color: transpa
 `;
 
 /**
- * `<stage-client url room code name>`: a self-contained stage widget with controller hand moderation over StageClient.
+ * `<stage-client url room code name>`: a self-contained stage widget with controller hand and stage moderation over StageClient.
  *
  * Joins when it is in the document and has `room` and `name`; leaves when removed. Changing
  * `url`, `room`, `code` or `name` rejoins, except after the user explicitly leaves: the same
@@ -52,8 +56,9 @@ button.primary { background: var(--stage-accent, #2563eb); border-color: transpa
  * later snapshots update its accepted-name display, not the draft or the `name` attribute.
  * The controller's room-name draft follows the same rule while control is retained.
  * A controller can explicitly approve or reject the snapshot's hand requests; the server owns admission.
+ * Controllers can lock/unlock other speakers' mute or remove them from the stage without removing them from the room.
  * The microphone picker is an explicit draft, never an indicator of the actual capture device.
- * Style through `::part(panel|status|quality|speaking|hand-rejection|actions|name|room-name|hands|playback|microphone)` and the
+ * Style through `::part(panel|status|quality|speaking|hand-rejection|actions|name|room-name|hands|stage-management|playback|microphone)` and the
  * `--stage-*` custom properties.
  */
 export class StageElement extends HTMLElement {
@@ -91,6 +96,15 @@ export class StageElement extends HTMLElement {
   private readonly handQueuePending = new Map<string, object>();
   private readonly handQueueRows = new Map<string, { node: HTMLLIElement; name: HTMLSpanElement; approve: HTMLButtonElement; reject: HTMLButtonElement }>();
   private handQueueOrder: string[] = [];
+  private readonly stageManagementPanel: HTMLDetailsElement;
+  private readonly stageManagementSummary: HTMLElement;
+  private readonly stageManagementNotice: HTMLParagraphElement;
+  private readonly stageManagementList: HTMLUListElement;
+  private stageManagementOwner: { client: StageClient; roomId: string; participantId: string; generation: number } | undefined;
+  private stageManagementTerminalClient: StageClient | undefined;
+  private readonly stageManagementPending = new Map<string, object>();
+  private readonly stageManagementRows = new Map<string, { node: HTMLLIElement; name: HTMLSpanElement; mute: HTMLButtonElement; remove: HTMLButtonElement }>();
+  private stageManagementOrder: string[] = [];
   private readonly unlock: HTMLButtonElement;
   private playbackOwner: { client: StageClient; roomId: string; participantId: string; notice: number } | undefined;
   private unlockAttempt: object | undefined;
@@ -189,6 +203,12 @@ export class StageElement extends HTMLElement {
     this.handQueueNotice = document.createElement('p');
     this.handQueueList = document.createElement('ul');
     this.handQueuePanel.append(this.handQueueSummary, this.handQueueNotice, this.handQueueList);
+    this.stageManagementPanel = document.createElement('details');
+    this.stageManagementPanel.part.add('stage-management');
+    this.stageManagementSummary = document.createElement('summary');
+    this.stageManagementNotice = document.createElement('p');
+    this.stageManagementList = document.createElement('ul');
+    this.stageManagementPanel.append(this.stageManagementSummary, this.stageManagementNotice, this.stageManagementList);
     const actions = document.createElement('div');
     actions.part.add('actions');
     this.unlock = document.createElement('button');
@@ -250,7 +270,7 @@ export class StageElement extends HTMLElement {
     this.retry = this.button('重試加入', () => { if (this.canRetry()) this.rejoin(); });
     this.cancelJoin = this.button('取消加入', () => this.cancelInitial?.());
     actions.append(this.unlock, this.listen, this.hand, this.mic, this.micRetry, this.leaveStage, this.roomAction, this.retry, this.cancelJoin);
-    panel.append(this.status, this.quality, this.speaking, this.handRejection, this.error, this.errorDismiss, this.namePanel, this.roomNamePanel, this.handQueuePanel, actions, this.microphonePanel, this.playback);
+    panel.append(this.status, this.quality, this.speaking, this.handRejection, this.error, this.errorDismiss, this.namePanel, this.roomNamePanel, this.handQueuePanel, this.stageManagementPanel, actions, this.microphonePanel, this.playback);
     root.append(style, panel);
     this.render();
   }
@@ -342,6 +362,8 @@ export class StageElement extends HTMLElement {
           if (generation !== this.generation || this.current !== client) return;
           if (type === 'closed' || type === 'kicked') this.microphoneTerminalClient = client;
           else if (type === 'state') this.microphoneTerminalClient = undefined;
+          if (type === 'closed' || type === 'kicked') this.stageManagementTerminalClient = client;
+          else if (type === 'state') this.stageManagementTerminalClient = undefined;
           // Revoke picker admission before any forwarded callback can click an old control.
           this.syncMicrophoneOwner();
           const micLifecycle = type === 'state' || type === 'status' || type === 'micerror' || type === 'micready'
@@ -351,6 +373,7 @@ export class StageElement extends HTMLElement {
           if (type === 'state' || type === 'status' || type === 'closed' || type === 'kicked') this.syncNameOwner();
           if (type === 'state' || type === 'status' || type === 'closed' || type === 'kicked') this.syncRoomNameOwner();
           if (type === 'state' || type === 'status' || type === 'closed' || type === 'kicked') this.syncHandQueue();
+          this.syncStageManagement();
           const ownId = client.me?.participantId;
           if (type === 'closed' || type === 'kicked'
             || (type === 'status' && (detail === 'reconnecting' || detail === 'disconnected'))
@@ -396,6 +419,7 @@ export class StageElement extends HTMLElement {
           this.dispatchEvent(new CustomEvent(`stage-${type}`, { detail, bubbles: true, composed: true }));
           // Application callbacks may retire this seat or mutate its exposed snapshot.
           this.syncMicrophoneOwner();
+          this.syncStageManagement();
           this.syncHandRejection();
           if (type === 'state' || type === 'status' || type === 'mic' || type === 'closed' || type === 'kicked') this.render();
         });
@@ -456,6 +480,8 @@ export class StageElement extends HTMLElement {
     this.retireNameOwner();
     this.retireRoomNameOwner();
     this.retireHandQueue();
+    this.stageManagementTerminalClient = undefined;
+    this.retireStageManagement();
     this.retireQualityOwner();
     this.retireSpeakingOwner();
     this.retireHandRejection();
@@ -706,6 +732,102 @@ export class StageElement extends HTMLElement {
       try { await (approve ? owner.client.approve(id) : owner.client.reject(id)); }
       catch (error) { if (current()) this.show(error); }
       finally { if (current()) { this.handQueuePending.delete(id); this.syncHandQueue(); } }
+    })();
+  }
+
+  private retireStageManagement(): void {
+    this.stageManagementOwner = undefined; this.stageManagementPending.clear();
+    for (const row of this.stageManagementRows.values()) {
+      for (const control of [row.mute, row.remove]) { control.disabled = true; control.setAttribute('aria-busy', 'false'); }
+    }
+    if (this.stageManagementRows.size) this.stageManagementList.replaceChildren();
+    this.stageManagementRows.clear(); this.stageManagementOrder = [];
+    this.stageManagementPanel.hidden = true; this.stageManagementPanel.open = false;
+    this.stageManagementSummary.textContent = ''; this.stageManagementNotice.textContent = '';
+  }
+
+  private syncStageManagement(): void {
+    const client = this.current, state = client?.state, me = client?.me;
+    const active = client?.status === 'waiting' || client?.status === 'live';
+    if (!this.isConnected || !client || !state || me?.role !== 'controller' || this.stageManagementTerminalClient === client
+      || (!active && client.status !== 'reconnecting')) {
+      this.retireStageManagement(); return;
+    }
+    const owner = this.stageManagementOwner;
+    if (!owner || owner.client !== client || owner.generation !== this.generation
+      || owner.roomId !== state.roomId || owner.participantId !== me.participantId) {
+      this.retireStageManagement();
+      // Reconnecting retains an existing controller tenure, never establishes a different one.
+      if (!active) return;
+      this.stageManagementOwner = { client, roomId: state.roomId, participantId: me.participantId, generation: this.generation };
+    }
+    const seen = new Set<string>();
+    const people = (state.speakers ?? []).filter(person => {
+      if (!person.participantId || seen.has(person.participantId) || person.participantId === me.participantId
+        || person.role !== 'speaker' || !person.onStage) return false;
+      seen.add(person.participantId); return true;
+    });
+    const reconnecting = client.status === 'reconnecting';
+    this.stageManagementPanel.hidden = false;
+    this.stageManagementSummary.textContent = `舞台管理（${people.length}）${reconnecting ? ' · 上次收到' : ''}`;
+    this.stageManagementNotice.textContent = `${reconnecting ? '重新連線中，暫時不能管理舞台。'
+      : people.length ? '僅管理其他台上發言者。' : '目前沒有其他台上發言者。'}解除靜音鎖定會保留對方自行靜音設定；移下台後仍留在房間。`;
+    for (const person of people) {
+      const id = person.participantId;
+      let row = this.stageManagementRows.get(id);
+      if (!row) {
+        const node = document.createElement('li'), name = document.createElement('span');
+        const mute = document.createElement('button'), remove = document.createElement('button');
+        mute.type = remove.type = 'button'; remove.textContent = '移下台';
+        row = { node, name, mute, remove };
+        const currentRow = row;
+        mute.onclick = () => this.moderateStage(id, currentRow.node, false);
+        remove.onclick = () => this.moderateStage(id, currentRow.node, true);
+        node.append(name, mute, remove); this.stageManagementRows.set(id, row);
+      }
+      const name = decodeName(person.name);
+      row.name.textContent = `${name} · ${person.muted ? '已靜音' : '未靜音'}${person.forceMuted ? ' · 已鎖定靜音' : ''}${person.connected ? '' : ' · 暫時離線（席位保留中）'}`;
+      row.mute.textContent = person.forceMuted ? '解除靜音鎖定' : '鎖定靜音';
+      row.mute.setAttribute('aria-label', person.forceMuted ? `解除 ${name} 的靜音鎖定` : `鎖定 ${name} 靜音`);
+      row.remove.setAttribute('aria-label', `將 ${name} 移下台`);
+      const pending = this.stageManagementPending.has(id);
+      // A retained offline seat can still be moderated; the server decides whether it remains valid.
+      for (const control of [row.mute, row.remove]) {
+        control.disabled = reconnecting || pending; control.setAttribute('aria-busy', String(pending));
+      }
+    }
+    for (const [id, row] of this.stageManagementRows) if (!seen.has(id)) {
+      for (const control of [row.mute, row.remove]) { control.disabled = true; control.setAttribute('aria-busy', 'false'); }
+      this.stageManagementRows.delete(id);
+      // Keep an admitted operation reserved until settlement, even if this ID returns on stage.
+    }
+    const order = people.map(person => person.participantId);
+    if (order.length !== this.stageManagementOrder.length || order.some((id, index) => id !== this.stageManagementOrder[index])) {
+      this.stageManagementList.replaceChildren(...order.map(id => this.stageManagementRows.get(id)!.node));
+      this.stageManagementOrder = order;
+    }
+  }
+
+  private moderateStage(id: string, node: HTMLLIElement, remove: boolean): void {
+    this.syncStageManagement();
+    const owner = this.stageManagementOwner, row = this.stageManagementRows.get(id);
+    if (!owner || !row || row.node !== node || this.stageManagementPanel.hidden
+      || (owner.client.status !== 'waiting' && owner.client.status !== 'live') || this.stageManagementPending.has(id)) return;
+    const target = owner.client.state?.speakers.find(person => person.participantId === id && person.role === 'speaker' && person.onStage);
+    if (!target) return;
+    // Resolve the branch from the authoritative snapshot, not the label of a retained button.
+    const forceMuted = target.forceMuted;
+    const attempt = {};
+    this.stageManagementPending.set(id, attempt); this.syncStageManagement(); this.hideError();
+    const current = (): boolean => {
+      if (this.stageManagementOwner !== owner || this.stageManagementPending.get(id) !== attempt) return false;
+      this.syncStageManagement();
+      return this.stageManagementOwner === owner && this.stageManagementPending.get(id) === attempt;
+    };
+    void (async () => {
+      try { await (remove ? owner.client.removeFromStage(id) : forceMuted ? owner.client.forceUnmute(id) : owner.client.forceMute(id)); }
+      catch (error) { if (current() && this.stageManagementRows.get(id)?.node === node) this.show(error); }
+      finally { if (current()) { this.stageManagementPending.delete(id); this.syncStageManagement(); } }
     })();
   }
 
@@ -1030,6 +1152,7 @@ export class StageElement extends HTMLElement {
     this.syncNameOwner();
     this.syncRoomNameOwner();
     this.syncHandQueue();
+    this.syncStageManagement();
     this.syncQualityOwner();
     this.syncSpeakingOwner();
     this.syncHandRejection();
