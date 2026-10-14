@@ -727,3 +727,6 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 
 
 182. **Web Component 主控房名編輯（2026-10-14）：** 基線 widget 已安全顯示房名並隨 rename snapshot 更新，故拒絕重複資訊列；實際缺少的是既有公開 setRoomName 的內建編輯入口。增加獨立 room-name panel，僅目前 controller（含台下）顯示，原始草稿由既有 server規則驗證，accepted房名只取snapshot，不把ACK當名稱資料。owner綁client/generation/room/pid與主控資格，失去主控或disconnected即退役，即使SDK仍保留初次state-before-ACK的snapshot；重新取得資格從當前房名初始化。同席普通state與reconnecting保留draft/pending，重連暫停送出；呼叫SDK前reserve，事件轉送前及click/settlement重查，舊結果不能污染新owner。此處不抽象重構本人名稱editor，不新增protocol、SDKAPI、storage、attribute reflection、媒體或自動重試。驗證以公開SDK／Hub與受控DOM/socket為界，原生鍵盤/IME/AT及實體音訊未驗收。
+
+
+183. **Widget 殘留快照的失聯操作 admission（2026-10-14）：** actual SDK 初次 join 收到 state、未 ACK 即 socketLost，會留下 snapshot、session=null 並切 disconnected。基線7種舉手/收回、mute/unmute、speaker/controller離台及controller返回仍enabled；一般點擊與forwarded status舊DOM皆會進widget pending、清錯誤再被SDK拒絕，SDK本身未送frame／占容量／消耗冷卻。另personal stage於forwarded reconnecting callback雖被action內guard擋SDK，wrapper已清錯誤。窄修hand/mic predicate排除disconnected，新增共用canUseStage供button admission（pending/error之前）與renderdisabled，handler仍重查。保留waiting/live有效操作、正常重連後恢復及room leave本機清理；不改SDK/session/媒體或其他controls，不擴大既有pending settlement政策。驗證限公開SDK與受控DOM/socket，非原生輸入/媒體驗收。

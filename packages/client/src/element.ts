@@ -149,11 +149,9 @@ export class StageElement extends HTMLElement {
     this.micRetry.onclick = () => this.retryMic();
     this.leaveStage = this.button('離開舞台', () => {
       const client = this.current, me = client?.me;
-      // Forwarded events can reenter before render updates the old button's visibility.
-      if (!this.isConnected || !client || !me || client.status === 'reconnecting'
-        || (!me.onStage && me.role !== 'controller')) return;
+      if (!client || !me || !this.canUseStage()) return;
       return me.onStage ? client.leaveStage() : client.returnToStage();
-    });
+    }, '', () => this.canUseStage());
     this.roomAction = document.createElement('button');
     this.roomAction.type = 'button';
     this.roomAction.onclick = () => this.changeRoomPresence();
@@ -617,12 +615,21 @@ export class StageElement extends HTMLElement {
   private canUseHand(): boolean {
     const client = this.current, me = client?.me;
     return this.isConnected && Boolean(me && !me.onStage && me.role !== 'controller'
-      && client!.status !== 'reconnecting' && (me.handRaised || client!.handCooldownMs <= 0));
+      && client!.status !== 'reconnecting' && client!.status !== 'disconnected'
+      && (me.handRaised || client!.handCooldownMs <= 0));
   }
 
   private canUseMic(): boolean {
     const client = this.current, me = client?.me;
-    return this.isConnected && Boolean(me?.onStage && !me.forceMuted && client!.status !== 'reconnecting');
+    return this.isConnected && Boolean(me?.onStage && !me.forceMuted
+      && client!.status !== 'reconnecting' && client!.status !== 'disconnected');
+  }
+
+  private canUseStage(): boolean {
+    const client = this.current, me = client?.me;
+    // Initial entry can retain a snapshot after socket loss before its join ACK.
+    return this.isConnected && Boolean(me && (me.onStage || me.role === 'controller')
+      && client!.status !== 'reconnecting' && client!.status !== 'disconnected');
   }
 
   private wsUrl(): string {
@@ -715,7 +722,7 @@ export class StageElement extends HTMLElement {
     this.mic.textContent = me?.forceMuted ? '麥克風已被主控靜音' : me?.muted ? '取消靜音' : '靜音';
     this.mic.setAttribute('aria-pressed', String(Boolean(me?.muted)));
     this.leaveStage.textContent = me?.onStage ? '離開舞台' : '返回舞台';
-    this.leaveStage.disabled = this.leaveStage.hidden || reconnecting || this.pendingActions.has(this.leaveStage);
+    this.leaveStage.disabled = !this.canUseStage() || this.pendingActions.has(this.leaveStage);
   }
 }
 

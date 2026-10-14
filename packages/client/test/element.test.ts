@@ -1054,6 +1054,185 @@ describe('widget hand and microphone current-state admission', () => {
   });
 });
 
+describe('widget disconnected snapshot control admission', () => {
+  const actions = [
+    ...reconnectActions.map(action => ({ ...action, controller: false })),
+    { title: 'controller leave stage', key: 'leaveStage', method: 'leaveStage', type: 'stage:leave', onStage: true, raised: false, muted: false, controller: true },
+    { title: 'controller return to stage', key: 'leaveStage', method: 'returnToStage', type: 'stage:approve', onStage: false, raised: false, muted: false, controller: true },
+  ] as const;
+
+  function actionState(action: typeof actions[number], status: 'waiting' | 'live' = 'live'): RoomStatePayload {
+    const state = roomState(action.onStage);
+    state.status = status;
+    Object.assign(state.me, { handRaised: action.raised, muted: action.muted });
+    if (action.controller) { state.me.role = 'controller'; state.controllerId = state.me.participantId; }
+    return state;
+  }
+
+  async function beforeJoinAck(t: TestContext, state: RoomStatePayload) {
+    const fixture = socketJoiningWidget(t);
+    await settle();
+    const socket = fixture.sockets[0]!;
+    const join = await fixture.hello(socket);
+    socket.deliver({ type: 'room:state', ...state, resumeToken: 'resume-me' }); await settle();
+    const client = fixture.element.client; assert.ok(client);
+    assert.equal(client.status, state.status);
+    assert.equal(client['session'], null, 'an initial snapshot does not install the session before its join ACK');
+    assert.equal(client['pending'].has(join.requestId), true);
+    return { ...fixture, socket, client, join };
+  }
+
+  function assertUnadmitted(element: InstanceType<typeof StageElement>, client: StageClient, button: HTMLButtonElement, error: string | null): void {
+    assert.equal(element['pendingActions'].size, 0);
+    assert.equal(button.getAttribute('aria-busy'), null);
+    assert.equal(client['pending'].size, 0);
+    assert.equal(client['pendingControlRequests'], 0);
+    assert.equal(client.handCooldownMs, 0);
+    assert.equal(element['error'].hidden, false);
+    assert.equal(element['error'].textContent, error);
+  }
+
+  for (const action of actions) {
+    it(`disables ${action.title} after real initial socket loss retains the pre-ACK snapshot`, async t => {
+      const { element, client, socket, sockets, tick } = await beforeJoinAck(t, actionState(action));
+      const button = element[action.key], retained = client.state;
+      const selected = t.mock.method(client, action.method);
+      assert.equal(button.hidden, false); assert.equal(button.disabled, false);
+      socket.close(); await settle(); await settle();
+      assert.equal(client.status, 'disconnected'); assert.equal(client.state, retained);
+      assert.equal(client.me?.connected, true, 'the accepted snapshot still describes a connected participant');
+      assert.equal(client['session'], null); assert.equal(client['reconnectTimer'], undefined);
+      assert.equal(button.hidden, false); assert.equal(button.disabled, true);
+      assert.equal(element['error'].hidden, false, 'the real initial join rejection remains visible');
+      const error = element['error'].textContent, frames = [...socket.sent], mediaRevision = client['mediaRevision'];
+      click(button); click(button);
+      assert.equal(selected.mock.callCount(), 0); assertUnadmitted(element, client, button, error);
+      await tick(100);
+      assert.equal(selected.mock.callCount(), 0); assertUnadmitted(element, client, button, error);
+      assert.equal(button.disabled, true); assert.equal(element.client, client); assert.equal(client.state, retained);
+      assert.equal(client['mediaRevision'], mediaRevision); assert.equal(client['pc'], null);
+      assert.deepEqual(socket.sent, frames); assert.equal(sockets.length, 1);
+    });
+
+    it(`rejects ${action.title} synchronously in the forwarded disconnected callback before the old DOM is repainted`, async t => {
+      const { element, client, socket, sockets, join } = await beforeJoinAck(t, actionState(action));
+      const button = element[action.key], retained = client.state;
+      const selected = t.mock.method(client, action.method);
+      socket.deliver({ type: 'error', code: 'conflict', message: 'Existing control error' });
+      const frames = [...socket.sent];
+      let callbacks = 0;
+      element.addEventListener('stage-status', event => {
+        callbacks++; assert.equal((event as CustomEvent).detail, 'disconnected');
+        assert.equal(client.status, 'disconnected'); assert.equal(client.state, retained);
+        assert.equal(button.hidden, false); assert.equal(button.disabled, false, 'the old enabled DOM is still callable');
+        const mediaRevision = client['mediaRevision'];
+        // This invokes onclick directly through the minimal DOM; it is not a native browser click.
+        click(button); click(button);
+        assert.equal(selected.mock.callCount(), 0); assertUnadmitted(element, client, button, 'Existing control error');
+        assert.equal(button.disabled, false, 'rejected admission does not mutate the stale button');
+        assert.equal(client['mediaRevision'], mediaRevision); assert.deepEqual(socket.sent, frames);
+      }, { once: true });
+      socket.close();
+      assert.equal(callbacks, 1); assert.equal(button.disabled, true, 'post-forward rendering disables the control');
+      assertUnadmitted(element, client, button, 'Existing control error');
+      await settle(); await settle();
+      assert.equal(selected.mock.callCount(), 0); assert.equal(client['pending'].has(join.requestId), false);
+      assertUnadmitted(element, client, button, '連線已中斷。');
+      assert.equal(client.state, retained); assert.equal(client['session'], null);
+      assert.deepEqual(socket.sent, frames); assert.equal(sockets.length, 1);
+    });
+
+    for (const status of ['waiting', 'live'] as const) {
+      it(`keeps valid ${status} ${action.title} admission, wire shape and request ownership`, async t => {
+        const { element, client, socket, tick } = await socketJoinedWidget(t, actionState(action, status));
+        const button = element[action.key], retained = client.state, frames = socket.sent.length;
+        const selected = t.mock.method(client, action.method);
+        socket.deliver({ type: 'error', code: 'conflict', message: 'Earlier control error' });
+        assert.equal(button.hidden, false); assert.equal(button.disabled, false);
+        click(button); click(button);
+        assert.equal(selected.mock.callCount(), 1);
+        assert.equal(element['pendingActions'].has(button), true); assert.equal(button.getAttribute('aria-busy'), 'true');
+        assert.equal(button.disabled, true); assert.equal(element['error'].hidden, true);
+        assert.equal(client['pendingControlRequests'], 1); assert.equal(client['pending'].size, 1);
+        await tick(100);
+        const commands = socket.sent.slice(frames); assert.equal(commands.length, 1);
+        const command = commands[0]!; assert.ok('requestId' in command);
+        assert.deepEqual(command, action.method === 'returnToStage'
+          ? { type: action.type, requestId: command.requestId, targetId: retained!.me.participantId }
+          : { type: action.type, requestId: command.requestId });
+        assert.equal(client.state, retained, 'the control does not optimistically change authoritative membership');
+        assert.equal(client.status, status); assert.equal(client['pc'], null, 'the media seam stays stubbed');
+        assert.equal(client.handCooldownMs, action.method === 'raiseHand' ? 9900 : 0);
+        socket.deliver({ type: 'ok', requestId: command.requestId }); await settle();
+        assert.equal(element['pendingActions'].size, 0); assert.equal(button.getAttribute('aria-busy'), null);
+        assert.equal(client['pendingControlRequests'], 0); assert.equal(client['pending'].size, 0);
+        assert.equal(button.disabled, action.method === 'raiseHand'); assert.equal(element['error'].hidden, true);
+      });
+    }
+
+    it(`rejects stale-DOM and rendered ${action.title} during reconnect, then restores it on resume state`, async t => {
+      const state = actionState(action);
+      const { element, client, socket, sockets, tick, hello } = await socketJoinedWidget(t, state);
+      const button = element[action.key], retained = client.state;
+      const selected = t.mock.method(client, action.method);
+      socket.deliver({ type: 'error', code: 'conflict', message: 'Existing control error' });
+      const frames = [...socket.sent], mediaRevision = client['mediaRevision'];
+      let callbacks = 0;
+      element.addEventListener('stage-status', event => {
+        callbacks++; assert.equal((event as CustomEvent).detail, 'reconnecting');
+        assert.equal(client.status, 'reconnecting'); assert.equal(button.disabled, false);
+        click(button); click(button);
+        assert.equal(selected.mock.callCount(), 0); assertUnadmitted(element, client, button, 'Existing control error');
+        assert.equal(button.disabled, false);
+      }, { once: true });
+      socket.close(); await settle();
+      assert.equal(callbacks, 1); assert.equal(client.state, retained);
+      assert.equal(button.hidden, false); assert.equal(button.disabled, true);
+      click(button); await settle();
+      assert.equal(selected.mock.callCount(), 0); assertUnadmitted(element, client, button, 'Existing control error');
+      assert.deepEqual(socket.sent, frames); assert.equal(client['mediaRevision'], mediaRevision);
+      await tick(500);
+      const replacement = sockets[1]!;
+      const resume = await hello(replacement);
+      assert.equal(resume.resumeToken, 'resume-me'); assert.equal(button.disabled, true);
+      replacement.deliver({ type: 'room:state', ...state, resumeToken: 'resume-me' }); await settle();
+      assert.equal(client['pending'].has(resume.requestId), true, 'resume state restores admission before its ACK');
+      assert.equal(client.status, 'live'); assert.equal(element[action.key], button); assert.equal(button.disabled, false);
+      click(button); click(button); await tick(100);
+      assert.equal(selected.mock.callCount(), 1); assert.equal(button.getAttribute('aria-busy'), 'true');
+      const commands = replacement.sent.filter(message => message.type === action.type); assert.equal(commands.length, 1);
+      const command = commands[0]!; assert.ok('requestId' in command);
+      if (command.type === 'stage:approve') assert.equal(command.targetId, state.me.participantId);
+      replacement.deliver({ type: 'ok', requestId: command.requestId });
+      replacement.deliver({ type: 'ok', requestId: resume.requestId }); await settle();
+      assert.equal(element['pendingActions'].size, 0); assert.equal(button.getAttribute('aria-busy'), null);
+      assert.equal(client['pending'].size, 0); assert.equal(client['pendingControlRequests'], 0);
+      assert.equal(element['error'].hidden, true);
+    });
+  }
+
+  for (const phase of ['live', 'reconnecting', 'pre-ACK disconnected'] as const) {
+    it(`keeps explicit room leave cleanup available with a ${phase} snapshot`, async t => {
+      const fixture = phase === 'pre-ACK disconnected' ? await beforeJoinAck(t, roomState()) : await socketJoinedWidget(t);
+      const { element, client, socket, sockets, tick } = fixture;
+      if (phase !== 'live') { socket.close(); await settle(); await settle(); }
+      assert.equal(client.status, phase === 'pre-ACK disconnected' ? 'disconnected' : phase);
+      assert.ok(client.state); assert.equal(element['roomAction'].hidden, false); assert.equal(element['roomAction'].disabled, false);
+      const frames = [...socket.sent], disconnect = t.mock.method(client, 'disconnect');
+      click(element['roomAction']); await settle(); await settle();
+      assert.equal(disconnect.mock.callCount(), 1); assert.equal(element.client, null);
+      assert.equal(client.status, 'disconnected'); assert.equal(client.state, null); assert.equal(client['session'], null);
+      assert.equal(client['pending'].size, 0); assert.equal(client['pendingControlRequests'], 0);
+      assert.equal(client['reconnectTimer'], undefined); assert.equal(element['pendingActions'].size, 0);
+      assertRoomControlsHidden(element); assert.equal(element['leftRoom'], true);
+      assert.equal(element['roomAction'].textContent, '重新加入'); assert.equal(element['roomAction'].disabled, false);
+      await tick(1000);
+      assert.equal(sockets.length, 1, 'room leave cancels any reconnect instead of autojoining');
+      assert.deepEqual(socket.sent, frames, 'room cleanup never substitutes a personal stage command');
+    });
+  }
+});
+
 describe('widget initial connection feedback', () => {
   it('shows connect and join progress without changing SDK statuses, events or accessibility state', async t => {
     const { element, sockets, hello } = socketJoiningWidget(t);
@@ -3411,8 +3590,10 @@ function assertPersonalStage(element: InstanceType<typeof StageElement>, expecte
 
 /** Direct invocation also models stale or application-mutated button DOM, not a browser click. */
 function forcePersonalStage(element: InstanceType<typeof StageElement>): void {
-  element['leaveStage'].disabled = false;
-  click(element['leaveStage']);
+  const button = element['leaveStage'], disabled = button.disabled;
+  button.disabled = false;
+  // Restore the test's DOM mutation; rejected admission intentionally has no render/finally side effect.
+  try { click(button); } finally { button.disabled = disabled; }
 }
 
 const personalStageActions = [
