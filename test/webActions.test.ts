@@ -192,13 +192,13 @@ it('schedules only displayed countdown boundaries without postponing an existing
   h.advance(100); h.render(audienceState()); h.tick(); assert.deepEqual([...h.delays()], [401]);
   h.advance(401); assert.deepEqual([...h.delays()], [1000]);
   h.advance(1000); assert.deepEqual([...h.delays()], []); assert.equal(h.callbacks(), 2);
-  assert.equal(h.nodes[0]!.disabled, false);
+  assert.equal(h.nodes.find(node => node.dataset.roomAction === 'hand')!.disabled, false);
 });
 
 it('a late countdown callback recomputes current state without replaying missed ticks', () => {
   const h = setup(); h.client.handCooldownMs = 5500; h.render(audienceState());
   h.advance(6000); assert.equal(h.callbacks(), 1); assert.deepEqual([...h.delays()], []);
-  assert.equal(h.nodes[0]!.disabled, false);
+  assert.equal(h.nodes.find(node => node.dataset.roomAction === 'hand')!.disabled, false);
 });
 
 it('cancels countdowns on raised hand or stage changes and keeps pending expiry disabled', async () => {
@@ -208,10 +208,10 @@ it('cancels countdowns on raised hand or stage changes and keeps pending expiry 
   h.render(audienceState(false, true)); assert.deepEqual([...h.delays()], []);
   h.client.handCooldownMs = 0; const work = Promise.withResolvers<void>();
   Object.assign(h.client, { raiseHand: () => { h.client.handCooldownMs = 1500; return work.promise; } });
-  h.render(audienceState()); h.nodes[0]!.onclick();
+  h.render(audienceState()); h.nodes.find(node => node.dataset.roomAction === 'hand')!.onclick();
   assert.deepEqual([...h.delays()], [500], 'local cooldown schedules before the ACK'); h.advance(1500);
-  assert.equal(h.nodes[0]!.disabled, true); assert.equal(h.delays().length, 0);
-  work.resolve(); await flush(); assert.equal(h.nodes[0]!.disabled, false);
+  assert.equal(h.nodes.find(node => node.dataset.roomAction === 'hand')!.disabled, true); assert.equal(h.delays().length, 0);
+  work.resolve(); await flush(); assert.equal(h.nodes.find(node => node.dataset.roomAction === 'hand')!.disabled, false);
 });
 
 it('production room scheduler keeps stats cadence with zero idle cooldown polling', () => {

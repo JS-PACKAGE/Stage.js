@@ -150,6 +150,7 @@ const nonnegative = (value: unknown): number | undefined => { const n = finite(v
 
 interface Pending { control: boolean; resolve: () => void; reject: (error: StageError) => void; timer: ReturnType<typeof setTimeout>; sendTimer?: ReturnType<typeof setTimeout> }
 type JoinOptions = { roomId: string; code?: string; name: string; resumeToken?: string };
+type AcceptedName = { readonly roomId: string; readonly participantId: string; readonly revision: number; readonly name: string };
 const DEFAULT_REQUEST_TIMEOUT = 15000;
 /** Until the server's `hello` says otherwise: the config.example.yaml defaults. */
 const DEFAULT_LIMITS: RateLimits = { controlPerSecond: 20, icePerSecond: 30, handRaiseIntervalMs: 10000 };
@@ -177,6 +178,7 @@ export class StageClient extends EventTarget {
   private snapshot: RoomStatePayload | null = null;
   private currentStatus: ClientStatus = 'disconnected';
   private session: JoinOptions | null = null;
+  private acceptedName: AcceptedName | undefined;
   private created: ServerMessageMap['room:created'] | null = null;
   private intentional = false;
   private sessionRevision = 0;
@@ -551,6 +553,7 @@ export class StageClient extends EventTarget {
     if (admissionError) throw admissionError;
     // Keep the submitted primitive fields consistent through hello, pacing and the final ACK.
     options = { ...options };
+    const acceptedBefore = this.acceptedName;
     const revision = this.sessionRevision;
     await this.connect();
     if (revision !== this.sessionRevision) throw new StageError('disconnected', '連線已中斷。');
@@ -562,25 +565,31 @@ export class StageClient extends EventTarget {
     if (revision !== this.sessionRevision) throw new StageError('disconnected', '連線已中斷。');
     if (!this.created || this.created === previousCreated) throw new StageError('internal', '伺服器未回傳房間資訊。');
     const result = this.created as ServerMessageMap['room:created'];
-    this.installSession({ roomId: result.roomId, code: result.code, name: options.name });
+    this.installSession({ roomId: result.roomId, code: result.code, name: options.name }, acceptedBefore);
     return result;
   }
   async join(options: { roomId: string; code?: string; name: string }): Promise<void> {
     const admissionError = this.controlCapacityError();
     if (admissionError) throw admissionError;
     options = { ...options };
+    const acceptedBefore = this.acceptedName;
     const revision = this.sessionRevision;
     await this.connect();
     if (revision !== this.sessionRevision) throw new StageError('disconnected', '連線已中斷。');
     await this.request('join', options);
     if (revision !== this.sessionRevision) throw new StageError('disconnected', '連線已中斷。');
-    this.installSession({ ...options });
+    this.installSession({ ...options }, acceptedBefore);
   }
-  private installSession(session: JoinOptions): void {
+  private installSession(session: JoinOptions, acceptedBefore: AcceptedName | undefined): void {
     // An explicit successful join/create may replace a dropped session before its retry fires.
     clearTimeout(this.reconnectTimer);
     this.reconnectTimer = undefined;
     this.refreshSessionCode(session, this.snapshot);
+    // Initial state may be followed by a rename before this entry's ACK. Never read mutable
+    // public snapshot names here, or carry an earlier entry's record into an ACK-only result.
+    const accepted = this.acceptedName;
+    if (accepted && accepted !== acceptedBefore && accepted.revision === this.sessionRevision
+      && accepted.roomId === session.roomId) session.name = accepted.name;
     this.session = session;
   }
   private refreshSessionCode(session: JoinOptions, state: RoomStatePayload | null): void {
@@ -599,6 +608,8 @@ export class StageClient extends EventTarget {
     this.lastHandAt = performance.now();
     return this.request('hand:raise', {});
   }
+  /** Change only your own display name; the server sanitizes it and publishes authoritative state. */
+  setName(name: string): Promise<void> { return this.request('participant:rename', { name }); }
   withdrawHand(): Promise<void> { return this.request('hand:withdraw', {}); }
   approve(id: string): Promise<void> { return this.request('stage:approve', { targetId: id }); }
   reject(id: string): Promise<void> { return this.request('stage:reject', { targetId: id }); }
@@ -624,6 +635,7 @@ export class StageClient extends EventTarget {
   async disconnect(): Promise<void> {
     this.intentional = true;
     ++this.sessionRevision;
+    this.acceptedName = undefined;
     this.connecting = null;
     // An explicit cancellation must not wait for a stalled transport's close handshake.
     this.helloWait?.cancel();
@@ -719,6 +731,11 @@ export class StageClient extends EventTarget {
         const previousId = this.snapshot?.me.participantId;
         if (previousId !== state.me.participantId) this.lastHandAt = -Infinity;
         this.snapshot = state;
+        // Capture primitives before status/state listeners can mutate the public snapshot.
+        const accepted: AcceptedName = { roomId: state.roomId, participantId: state.me.participantId,
+          revision: this.sessionRevision, name: decodeName(state.me.name) };
+        this.acceptedName = accepted;
+        if (this.session?.roomId === accepted.roomId) this.session.name = accepted.name;
         if (!state.me.onStage) { this.micFailed = false; this.stopRoomMic(); }
         if (this.session) {
           this.session.resumeToken = state.resumeToken;

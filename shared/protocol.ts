@@ -20,6 +20,8 @@
  *   - C→S `participant:kick` (controller): removes a participant from the room; the target
  *     gets S→C `kicked` and its connection is closed (it must not auto-rejoin). Kick, then
  *     `room:rotate-code`, to keep them out.
+ *   - C→S `participant:rename {name}`: updates the bound participant's own display name;
+ *     the requester receives its authoritative `room:state` before the acknowledgement.
  *   - C→S `room:rotate-code` (controller, code-protected rooms): replaces the room code;
  *     participants already inside stay. The controller's next `room:state` carries the new code.
  *   - S→C `quality`   : connection quality of everyone publishing audio, every
@@ -189,6 +191,7 @@ export interface ClientMessageMap {
   'mic:force-unmute': { requestId: string; targetId: string };
   'stage:remove': { requestId: string; targetId: string };
   'participant:kick': { requestId: string; targetId: string };
+  'participant:rename': { requestId: string; name: string };
   'mic:gain': { requestId: string; targetId: string; gainDb: number };
   'room:rotate-code': { requestId: string };
   'rtc:offer': { requestId: string; payload: SessionDescriptionPayload };
@@ -219,6 +222,7 @@ export const CLIENT_MESSAGE_TYPES: readonly ClientMessageType[] = [
   'mic:force-unmute',
   'stage:remove',
   'participant:kick',
+  'participant:rename',
   'mic:gain',
   'room:rotate-code',
   'rtc:offer',

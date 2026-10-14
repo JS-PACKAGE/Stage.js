@@ -212,6 +212,7 @@ export class SampleSdk {
   }
   async setInputDevice(id: string): Promise<void> { this.inputDevices.push(id); }
   async setOutputDevice(id: string): Promise<void> { this.outputDevices.push(id); }
+  async setName(_name: string): Promise<void> {}
   setPlaybackVolume(value: number): void { assert.ok(value >= 0 && value <= 1); this.playbackVolume = value; }
   setPlaybackMuted(value: boolean): void { this.playbackMuted = value; }
   startMicTest(options: { signal?: AbortSignal } = {}): Promise<SamplePreview> {
@@ -273,6 +274,7 @@ interface SampleAppOptions {
   deferAudioDevices?: boolean;
   clipboard?: { writeText(text: string): Promise<void> };
   confirm?: (message: string) => boolean;
+  prompt?: (message: string, defaultValue: string) => string | null;
   localStorage?: { getItem(key: string): string | null; setItem(key: string, value: string): void };
 }
 type SampleClient = { disconnect(): Promise<void> };
@@ -311,7 +313,8 @@ function mountSampleApp<Client extends SampleClient = SampleSdk>(options: Sample
     navigator: { clipboard: options.clipboard, mediaDevices: { addEventListener(type: string, listener: () => void) {
       assert.equal(type, 'devicechange'); deviceChangeListeners.push(listener);
     } } },
-    window: { confirm: options.confirm ?? (() => { throw new Error('Unexpected confirmation dialog in lifecycle test'); }) },
+    window: { confirm: options.confirm ?? (() => { throw new Error('Unexpected confirmation dialog in lifecycle test'); }),
+      prompt: options.prompt ?? (() => null) },
     StageClient: function (clientOptions: { url: string }) {
       constructions++; assert.equal(clientOptions.url, options.expectedSdkUrl ?? 'wss://sample.test/ws'); return sdk;
     },

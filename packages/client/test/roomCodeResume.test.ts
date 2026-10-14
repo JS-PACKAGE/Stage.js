@@ -257,7 +257,9 @@ it('does not install the code from an initial join whose state callback replaces
   deliverState(old, state({ code: 'abandoned-pre-ack' }));
   acknowledge(old, oldRequest); await rejected;
   const socket = await f.ready(); assert.ok(next);
-  deliverState(socket, state({ code: 'new-before-ack' }));
+  const replacement = state({ code: 'new-before-ack' });
+  replacement.me.name = 'New';
+  deliverState(socket, replacement);
   acknowledge(socket, request(socket, 'join')); await next;
   const { message } = await f.resume(socket);
   assert.equal(message.code, 'new-before-ack'); assert.equal(message.name, 'New');

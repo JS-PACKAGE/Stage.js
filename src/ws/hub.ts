@@ -358,6 +358,11 @@ export class StageHub {
         this.evict(rt, msg.targetId);
         this.deps.log.info('participant kicked', { roomId: room.roomId, byId: pid, participantId: msg.targetId });
         break;
+      case 'participant:rename':
+        if (room.rename(pid, msg.name)) this.broadcastState(rt);
+        else session.send({ type: 'room:state', ...room.snapshot(pid) });
+        session.send({ type: 'ok', requestId: msg.requestId });
+        return;
       case 'mic:gain':
         unchangedMic = room.get(msg.targetId)?.gainDb === msg.gainDb;
         room.setGain(pid, msg.targetId, msg.gainDb);

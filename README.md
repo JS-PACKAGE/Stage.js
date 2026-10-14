@@ -150,6 +150,8 @@ CLI 停機依序嘗試 server 與 media transport 清理；任何一段同步拋
 
 logger 會遞迴遮蔽物件／陣列中的 `code`、`resumeToken`、`token`、`credential`、`password`、`username`、`secret`、`sdp`、`payload` 欄位（不分大小寫），不修改原物件。循環、深度 8 或超過 1000 個欄位／元素的結構使用標記截斷；getter、toJSON 與 Proxy 不執行。深度／欄位上限限制遞迴複製與輸出結構，不限制 Object.keys 列舉成本或任意字串的位元組數，呼叫端仍應使用精簡欄位。Error 的資料型 name／message／stack／cause 保留並遞迴處理，accessor 型 stack 以標記表示；Date 與 bigint 安全轉成字串。這只是欄位名稱防護，不會辨識任意訊息／字串裡的秘密，呼叫端仍不得把憑證或原始 SDP 混進 log message。
 
+完整範例進房後提供「修改我的名稱」，以目前自己的名稱預填對話框，取消不送出請求。主控、發言者與觀眾都能改自己，不必離房或失去台位、舉手順位；等待回覆與重連期間停用，對話框返回後也重新檢查目前房間與身分。名稱依伺服器設定清洗，不作唯一性或身分驗證；空白／過長仍回既有 generic 錯誤。這是 protocol v1 的新增指令，舊伺服器可回 `unknown_type`，範例不自動離房降級。
+
 ## WebSocket 協定摘要
 
 無法解析的 WebSocket upgrade request target 會收到固定、空內容的 HTTP 400 並關閉該 socket，不建立 session，也不把原始 target 或 parser error 寫入診斷／回應。合法 URL 仍沿用既有 path、連線容量與握手檢查；停機中的 upgrade 仍優先回 503。這是輸入邊界的解析失敗隔離，不新增 Origin／認證政策或遠端服務驗證。
@@ -167,6 +169,7 @@ JSON frame，型別定義在 [`shared/protocol.ts`](shared/protocol.ts)。每個
 | `control:transfer {targetId}` | 主控移交控制權 |
 | `mic:mute`／`mic:unmute`、`mic:force-mute`／`mic:force-unmute {targetId}` | 自我靜音；主控強制靜音（解除時保留本人的自我靜音） |
 | `room:close` | 主控關房 |
+| `participant:rename {name}` | 更改目前連線所綁定席位的顯示名稱；只能改自己，沿用進房名稱清洗與長度限制，先收到個人化 state 再 ACK |
 | `participant:kick {targetId}` | 主控把人踢出房間（對方收到 `kicked` 後連線被關閉、不會自動重連）；要防止對方再進來，接著更換代碼 |
 | `mic:gain {targetId, gainDb}` | 主控調整某人在混音中的音量（±20 dB，0＝不調整；疊加在自動音量正規化之上），離開舞台後再上台仍保留；所有人在 `room:state` 的 `gainDb` 看到 |
 | `room:rotate-code` | 主控更換房間代碼（限需代碼的房間）；舊代碼／邀請連結立即失效，既有連線保留。重連仍驗證代碼；主控 SDK 更新已收到的新代碼，其他成員未取得新代碼時無法以舊代碼重連 |

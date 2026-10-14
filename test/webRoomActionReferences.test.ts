@@ -95,12 +95,12 @@ it('whole sample reuses current control references for identical 301-seat snapsh
   const h = await setup(t), state = controllerState(292, 8, 20);
   assert.equal(state.speakers.length + state.audience!.length, 301);
   h.sdk.snapshot(clone(state)); const initial = { ...h.counts };
-  const nodes = actions(h), writes = watchWrites(nodes); assert.equal(nodes.length, 707); h.reset();
+  const nodes = actions(h), writes = watchWrites(nodes); assert.equal(nodes.length, 708); h.reset();
   for (let index = 0; index < 10; index++) h.sdk.snapshot(clone(state));
   sameNodes(actions(h), nodes);
   assert.deepEqual({ ...h.counts }, { actionQueries: 0, returnQueries: 0, replacements: 0 });
   assert.deepEqual(initial, { actionQueries: 1, returnQueries: 1, replacements: 1 });
-  assert.deepEqual(writes, { disabled: 7070, busy: 7070 });
+  assert.deepEqual(writes, { disabled: 7080, busy: 7080 });
   assert.ok(nodes.every(node => !node.disabled && node.attributes['aria-busy'] === 'false'));
   const work = new Deferred<void>(); let calls = 0;
   Object.assign(h.sdk, { transferControl: () => { calls++; return work.promise; } });
@@ -112,9 +112,9 @@ it('whole sample reuses current control references for identical 301-seat snapsh
   assert.ok(nodes.filter(node => node.dataset.roomAction !== 'transfer').every(node => !node.disabled));
   work.resolve(undefined); await flushSample();
   assert.ok(nodes.every(node => !node.disabled && node.attributes['aria-busy'] === 'false'));
-  assert.deepEqual(writes, { disabled: 5656, busy: 5656 }, 'entry, synchronous action, five snapshots and settlement still synchronize every control');
+  assert.deepEqual(writes, { disabled: 5664, busy: 5664 }, 'entry, synchronous action, five snapshots and settlement still synchronize every control');
   assert.deepEqual({ ...h.counts }, { actionQueries: 0, returnQueries: 0, replacements: 0 });
-  t.diagnostic('Bounded synthetic sample: 301 seats, 20 raised hands, 707 controls; 10 identical snapshots perform 0 targeted selector queries and 7,070 disabled plus 7,070 aria-busy writes.');
+  t.diagnostic('Bounded synthetic sample: 301 seats, 20 raised hands, 708 controls; 10 identical snapshots perform 0 targeted selector queries and 7,080 disabled plus 7,080 aria-busy writes.');
 });
 
 it('whole sample synchronizes shared and filter-hidden controls and repairs current dataset policy and DOM state', async t => {

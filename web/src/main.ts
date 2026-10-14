@@ -741,6 +741,16 @@ function renderRoom(state: RoomStatePayload): void {
   const controls = element('section', 'panel');
   controls.append(element('h2', '', `你好，${decodeName(state.me.name)}`), element('p', '', `${roleLabels[state.me.role]}${state.me.forceMuted ? ' · 主控已鎖定靜音' : ''}`), connectionLine, ownHandPosition);
   const actions = element('div', 'actions');
+  const ownRoomId = state.roomId, ownParticipantId = state.me.participantId;
+  const canRename = () => generation === roomActionGeneration && client.status !== 'reconnecting'
+    && client.state?.roomId === ownRoomId && client.me?.participantId === ownParticipantId;
+  const rename = roomButton('rename', '修改我的名稱', async () => {
+    const name = window.prompt('輸入新的顯示名稱', decodeName(client.me!.name));
+    // A dialog may outlive a snapshot, reconnect or room exit. Same-seat redraws are harmless.
+    if (name === null || !canRename()) return;
+    await client.setName(name);
+  }, '', () => rename.isConnected && canRename());
+  actions.append(rename);
   if (state.me.onStage) {
     const muted = state.me.muted;
     const mute = roomButton('mute', muted ? '取消靜音' : '靜音', () => muted ? client.unmute() : client.mute());

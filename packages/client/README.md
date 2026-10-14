@@ -32,6 +32,14 @@
 
 舉手冷卻屬於目前參與者：明確 disconnect（包含被踢／關房）或收到不同 participantId 的新身分時清除，同一個 StageClient 可立即在新房間舉手；同席位的自動恢復與一般 state 更新保留原本冷卻。伺服器的速率限制仍會獨立檢查請求。 `raiseHand()` 仍先依序檢查既有冷卻與 `queue_full`；接著若沒有 socket 或 socket 非 OPEN，則以 `disconnected` 拒絕且不新占用冷卻。通過本機准入後，即使後續送出失敗、逾時或伺服器拒絕，冷卻仍保留；這不是一般錯誤 rollback，也不代表 OPEN socket 已完成回座或伺服器必然可用。
 
+## 修改自己的顯示名稱
+
+`setName(name: string): Promise<void>` 只更新目前席位自己，沿用控制請求 pacing、容量上限、逾時與 generic 錯誤。不更換 participantId、角色、台位或舉手順位，也不重新進房；不提供修改他人的參數。伺服器沿用進房的名稱規則（NFC、移除不安全控制字元、trim、Unicode 字元數上限及 HTML 轉義），以個人化 `state` 更新可見名稱後才 ACK；相同名稱只回傳請求者的 state。沒有全房改名事件，因此不額外公開原本隱藏的觀眾名稱；名稱可重複，不能當作認證身分。
+
+SDK 不樂觀改寫 `me.name`，也不在較晚的 ACK continuation 寫回提案。收到同房間的有效個人狀態時，會在公開 status／state callback 前複製並解碼自己已被接受的名稱供自動回座使用；初次 create／join 的 ACK 晚到時也保留該次新收到的名稱。呼叫者改寫公開 snapshot 不會修改這份名稱紀錄。若操作已被接受但 ACK 遺失，已收到的 state 仍有效；若連新 state 都未收到，只有原席位仍可 resume 時才會從伺服器恢復新名稱，不保證席位過期後恢復未見過的改名。
+
+舊伺服器可能以 `unknown_type` 拒絕此新增指令；呼叫端應顯示錯誤，不會自動離房／重入。Web Component 的 `name` attribute 仍維持原本重入語意；需要原地改名的整合可明確呼叫 `element.client.setName()`，並以 state 顯示結果。完整範例提供「修改我的名稱」對話框；文字以 decodeName 後的 textContent 顯示，不寫入 URL、儲存空間或新增名稱日誌。
+
 ## 請求期限
 
 `new StageClient({ url, requestTimeoutMs: 30000 })` 可調整等待伺服器 hello、請求 ACK 及 SDP answer 的期限。省略時維持 15000 ms；接受 1–300000 的整數毫秒，其他值在建構時拋 `RangeError`，尚未修改／建立 audio。
@@ -44,7 +52,7 @@
 
 `new StageClient({ url, maxPendingControlRequests: 128 })` 可限制呼叫端同時等待送出或 ACK 的控制請求數；省略時維持不設上限。值須為正安全整數，無效值在建構時拋 `RangeError`，尚未修改／建立 audio。
 
-上限包含公開 `join`／`createRoom`、舉手／收回、上下台、麥克風靜音、增益、移交、踢人、換碼與關房操作。已送出但未 ACK 的請求仍占名額；收到 ACK／錯誤、逾時、送出失敗或斷線即釋放。超限的新呼叫立即以本機 `StageError` 的 `code: 'queue_full'` 拒絕，不送到伺服器、不額外派發 error event、不保留 pacing 時段／timer；舉手不開始冷卻，開房不清除先前待完成的結果。請等待既有 promise 完成後重試，避免持續產生已過時的操作。
+上限包含公開 `join`／`createRoom`、舉手／收回、上下台、麥克風靜音、增益、移交、踢人、改自己的名稱、換碼與關房操作。已送出但未 ACK 的請求仍占名額；收到 ACK／錯誤、逾時、送出失敗或斷線即釋放。超限的新呼叫立即以本機 `StageError` 的 `code: 'queue_full'` 拒絕，不送到伺服器、不額外派發 error event、不保留 pacing 時段／timer；舉手不開始冷卻，開房不清除先前待完成的結果。請等待既有 promise 完成後重試，避免持續產生已過時的操作。
 
 hello、內部 SDP／ICE 信令及自動回座不占用此上限，仍遵守原本的 pacing 與 offer／ICE 順序，因此 `maxPendingControlRequests: 1` 不會因未 ACK 的 join 阻擋初始媒體協商。`disconnect()`、本機音訊／裝置設定也不占名額。這只限制 SDK 已接納的呼叫端控制請求數，不是總記憶體／payload 位元組／瀏覽器待送緩衝上限，也不限制 hello 前等待共用 connect 的呼叫者數；不改變伺服器限流或包含 pacing 的等待期限，不取消已送達的操作。自動回座與信令仍可能等待已接納請求的 pacing 時段，並非優先插隊。
 
