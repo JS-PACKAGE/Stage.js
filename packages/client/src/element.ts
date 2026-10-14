@@ -26,6 +26,10 @@ const STYLE = `
 [part=hands] button { margin-left: .5rem; }
 [part=playback] { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; }
 [part=playback][hidden] { display: none; }
+[part=microphone] { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; }
+[part=microphone][hidden] { display: none; }
+[part=microphone] p { flex-basis: 100%; margin: 0; font-size: .875em; }
+[part=microphone] select { font: inherit; max-width: 100%; }
 input[type=range] { flex: 1; min-width: 5rem; max-width: 12rem; }
 button { font: inherit; padding: .4rem .8rem; border-radius: var(--stage-radius, .5rem); border: 1px solid var(--stage-border, #8884); background: var(--stage-button-bg, #fff1); color: inherit; cursor: pointer; }
 button[hidden] { display: none; }
@@ -48,7 +52,8 @@ button.primary { background: var(--stage-accent, #2563eb); border-color: transpa
  * later snapshots update its accepted-name display, not the draft or the `name` attribute.
  * The controller's room-name draft follows the same rule while control is retained.
  * A controller can explicitly approve or reject the snapshot's hand requests; the server owns admission.
- * Style through `::part(panel|status|quality|speaking|hand-rejection|actions|name|room-name|hands|playback)` and the
+ * The microphone picker is an explicit draft, never an indicator of the actual capture device.
+ * Style through `::part(panel|status|quality|speaking|hand-rejection|actions|name|room-name|hands|playback|microphone)` and the
  * `--stage-*` custom properties.
  */
 export class StageElement extends HTMLElement {
@@ -93,6 +98,14 @@ export class StageElement extends HTMLElement {
   private readonly mic: HTMLButtonElement;
   private readonly micRetry: HTMLButtonElement;
   private micFailure: { client: StageClient; roomId: string; participantId: string; errorRevision: number; pending: boolean } | undefined;
+  private readonly microphonePanel: HTMLDivElement;
+  private readonly microphoneSelect: HTMLSelectElement;
+  private readonly microphoneRefresh: HTMLButtonElement;
+  private readonly microphoneApply: HTMLButtonElement;
+  private microphoneOwner: { client: StageClient; roomId: string; participantId: string; generation: number } | undefined;
+  private microphoneTerminalClient: StageClient | undefined;
+  private refreshAttempt: object | undefined;
+  private inputDeviceAttempt: object | undefined;
   private errorRevision = 0;
   private readonly leaveStage: HTMLButtonElement;
   private readonly roomAction: HTMLButtonElement;
@@ -189,6 +202,24 @@ export class StageElement extends HTMLElement {
     this.micRetry.type = 'button';
     this.micRetry.setAttribute('aria-label', '重試麥克風');
     this.micRetry.onclick = () => this.retryMic();
+    this.microphonePanel = document.createElement('div');
+    this.microphonePanel.part.add('microphone');
+    const microphoneLabel = document.createElement('label');
+    microphoneLabel.textContent = '麥克風選擇（草稿）';
+    microphoneLabel.setAttribute('for', 'microphone-device');
+    this.microphoneSelect = document.createElement('select');
+    this.microphoneSelect.id = 'microphone-device';
+    this.microphoneSelect.setAttribute('aria-describedby', 'microphone-draft-notice');
+    this.microphoneRefresh = document.createElement('button');
+    this.microphoneRefresh.type = 'button'; this.microphoneRefresh.textContent = '重新整理麥克風清單';
+    this.microphoneRefresh.onclick = () => this.refreshMicrophones();
+    this.microphoneApply = document.createElement('button');
+    this.microphoneApply.type = 'button'; this.microphoneApply.textContent = '送出麥克風選擇';
+    this.microphoneApply.onclick = () => this.applyMicrophone();
+    const microphoneNotice = document.createElement('p');
+    microphoneNotice.id = 'microphone-draft-notice';
+    microphoneNotice.textContent = '草稿不代表目前實際擷取裝置；麥克風失敗後需另按「重試麥克風」。重新整理清單不會開啟麥克風；預設選項沿用 SDK 設定。';
+    this.microphonePanel.append(microphoneLabel, this.microphoneSelect, this.microphoneRefresh, this.microphoneApply, microphoneNotice);
     this.leaveStage = this.button('離開舞台', () => {
       const client = this.current, me = client?.me;
       if (!client || !me || !this.canUseStage()) return;
@@ -219,7 +250,7 @@ export class StageElement extends HTMLElement {
     this.retry = this.button('重試加入', () => { if (this.canRetry()) this.rejoin(); });
     this.cancelJoin = this.button('取消加入', () => this.cancelInitial?.());
     actions.append(this.unlock, this.listen, this.hand, this.mic, this.micRetry, this.leaveStage, this.roomAction, this.retry, this.cancelJoin);
-    panel.append(this.status, this.quality, this.speaking, this.handRejection, this.error, this.errorDismiss, this.namePanel, this.roomNamePanel, this.handQueuePanel, actions, this.playback);
+    panel.append(this.status, this.quality, this.speaking, this.handRejection, this.error, this.errorDismiss, this.namePanel, this.roomNamePanel, this.handQueuePanel, actions, this.microphonePanel, this.playback);
     root.append(style, panel);
     this.render();
   }
@@ -309,6 +340,10 @@ export class StageElement extends HTMLElement {
       for (const type of EVENTS) {
         client.on(type, ({ detail }) => {
           if (generation !== this.generation || this.current !== client) return;
+          if (type === 'closed' || type === 'kicked') this.microphoneTerminalClient = client;
+          else if (type === 'state') this.microphoneTerminalClient = undefined;
+          // Revoke picker admission before any forwarded callback can click an old control.
+          this.syncMicrophoneOwner();
           const micLifecycle = type === 'state' || type === 'status' || type === 'micerror' || type === 'micready'
             || type === 'closed' || type === 'kicked';
           if (micLifecycle) this.syncMicRetry();
@@ -360,6 +395,7 @@ export class StageElement extends HTMLElement {
           if (micLifecycle) this.syncMicRetry();
           this.dispatchEvent(new CustomEvent(`stage-${type}`, { detail, bubbles: true, composed: true }));
           // Application callbacks may retire this seat or mutate its exposed snapshot.
+          this.syncMicrophoneOwner();
           this.syncHandRejection();
           if (type === 'state' || type === 'status' || type === 'mic' || type === 'closed' || type === 'kicked') this.render();
         });
@@ -415,6 +451,8 @@ export class StageElement extends HTMLElement {
   private async leave(): Promise<void> {
     this.joinPhase = undefined;
     this.micFailure = undefined;
+    this.microphoneTerminalClient = undefined;
+    this.retireMicrophoneOwner();
     this.retireNameOwner();
     this.retireRoomNameOwner();
     this.retireHandQueue();
@@ -779,6 +817,110 @@ export class StageElement extends HTMLElement {
       && !this.current?.state && this.current?.status !== 'reconnecting';
   }
 
+  private replaceMicrophoneOptions(inputs: readonly MediaDeviceInfo[], draft: string): void {
+    const initial = document.createElement('option');
+    initial.value = ''; initial.textContent = '預設（依 SDK 設定）';
+    const options = [initial], seen = new Set<string>(['']);
+    for (const device of inputs) {
+      // Empty IDs cannot identify a choice. The empty draft always retains SDK default semantics.
+      if (device.kind !== 'audioinput' || !device.deviceId || seen.has(device.deviceId)) continue;
+      seen.add(device.deviceId);
+      const option = document.createElement('option');
+      option.value = device.deviceId;
+      option.textContent = device.label.trim() ? device.label : `麥克風 ${options.length}`;
+      options.push(option);
+    }
+    if (draft && !seen.has(draft)) {
+      // Enumeration can omit a still-wanted device. Preserve the draft without exposing its ID.
+      const unavailable = document.createElement('option');
+      unavailable.value = draft; unavailable.textContent = '先前選擇（目前清單未提供）';
+      unavailable.disabled = true; options.push(unavailable);
+    }
+    this.microphoneSelect.replaceChildren(...options);
+    this.microphoneSelect.value = draft;
+  }
+
+  private retireMicrophoneOwner(): void {
+    if (this.microphoneOwner || this.microphoneSelect.children.length !== 1 || this.microphoneSelect.value !== '') {
+      this.replaceMicrophoneOptions([], '');
+    }
+    this.microphoneOwner = undefined;
+    this.refreshAttempt = this.inputDeviceAttempt = undefined;
+    this.microphonePanel.hidden = true;
+    this.microphoneSelect.disabled = this.microphoneRefresh.disabled = this.microphoneApply.disabled = true;
+    this.microphoneRefresh.removeAttribute('aria-busy'); this.microphoneApply.removeAttribute('aria-busy');
+  }
+
+  private syncMicrophoneOwner(): void {
+    const client = this.current, state = client?.state, me = client?.me;
+    const active = client?.status === 'waiting' || client?.status === 'live';
+    if (!this.isConnected || !client || !state || !me || this.microphoneTerminalClient === client
+      || (!active && client.status !== 'reconnecting')) {
+      this.retireMicrophoneOwner(); return;
+    }
+    const owner = this.microphoneOwner;
+    if (!owner || owner.client !== client || owner.generation !== this.generation
+      || owner.roomId !== state.roomId || owner.participantId !== me.participantId) {
+      this.retireMicrophoneOwner();
+      // Reconnect may retain an existing owner, but cannot establish a different joined seat.
+      if (!active) return;
+      this.microphoneOwner = { client, roomId: state.roomId, participantId: me.participantId, generation: this.generation };
+    }
+    // Same-seat stage transitions never imply a new capture epoch or replace the unsent draft.
+    this.microphonePanel.hidden = false;
+    const blocked = !active || Boolean(this.refreshAttempt || this.inputDeviceAttempt);
+    this.microphoneSelect.disabled = this.microphoneRefresh.disabled = this.microphoneApply.disabled = blocked;
+    this.microphoneRefresh.setAttribute('aria-busy', String(Boolean(this.refreshAttempt)));
+    this.microphoneApply.setAttribute('aria-busy', String(Boolean(this.inputDeviceAttempt)));
+  }
+
+  private refreshMicrophones(): void {
+    this.syncMicrophoneOwner();
+    const owner = this.microphoneOwner;
+    if (!owner || this.microphonePanel.hidden || this.microphoneRefresh.hidden || this.microphoneRefresh.disabled
+      || this.refreshAttempt || this.inputDeviceAttempt) return;
+    // Reserve before the public SDK can synchronously emit or invoke application callbacks.
+    const attempt = this.refreshAttempt = {};
+    this.syncMicrophoneOwner(); this.hideError();
+    const current = () => {
+      if (this.microphoneOwner !== owner || this.refreshAttempt !== attempt) return false;
+      this.syncMicrophoneOwner();
+      return this.microphoneOwner === owner && this.refreshAttempt === attempt;
+    };
+    void (async () => {
+      try {
+        const devices = await owner.client.listAudioDevices();
+        if (current()) this.replaceMicrophoneOptions(devices.inputs, this.microphoneSelect.value);
+      } catch (error) { if (current()) this.show(error); }
+      finally { if (current()) { this.refreshAttempt = undefined; this.syncMicrophoneOwner(); } }
+    })();
+  }
+
+  private applyMicrophone(): void {
+    this.syncMicrophoneOwner();
+    const owner = this.microphoneOwner;
+    if (!owner || this.microphonePanel.hidden || this.microphoneApply.hidden || this.microphoneApply.disabled
+      || this.refreshAttempt || this.inputDeviceAttempt) return;
+    const draft = this.microphoneSelect.value;
+    const attempt = this.inputDeviceAttempt = {};
+    this.syncMicrophoneOwner(); this.hideError();
+    const current = () => {
+      if (this.microphoneOwner !== owner || this.inputDeviceAttempt !== attempt) return false;
+      this.syncMicrophoneOwner();
+      return this.microphoneOwner === owner && this.inputDeviceAttempt === attempt;
+    };
+    void (async () => {
+      try { await owner.client.setInputDevice(draft); }
+      catch (error) { if (current()) this.show(error); }
+      finally {
+        if (current()) {
+          // Fulfillment can be a stage-transition no-op. Neither it nor shared micready proves capture.
+          this.inputDeviceAttempt = undefined; this.syncMicrophoneOwner();
+        }
+      }
+    })();
+  }
+
   private syncMicRetry(): void {
     const failure = this.micFailure, client = this.current, me = client?.me;
     if (failure && (failure.client !== client || failure.roomId !== client?.state?.roomId
@@ -884,6 +1026,7 @@ export class StageElement extends HTMLElement {
   private render(): void {
     this.syncPlaybackOwner();
     this.syncMicRetry();
+    this.syncMicrophoneOwner();
     this.syncNameOwner();
     this.syncRoomNameOwner();
     this.syncHandQueue();

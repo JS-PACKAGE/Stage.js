@@ -20,7 +20,10 @@ class Node extends EventTarget {
   className = '';
   type = '';
   id = '';
-  value = '';
+  private storedValue = '';
+  get value(): string { return this.storedValue; }
+  set value(value: string) { this.storedValue = String(value); }
+  selected = false;
   min = '';
   max = '';
   step = '';
@@ -28,6 +31,7 @@ class Node extends EventTarget {
   isConnected = true;
   onclick?: () => void;
   oninput?: (event: Event) => void;
+  onchange?: (event: Event) => void;
   append(...nodes: Node[]): void { this.children.push(...nodes); }
   replaceChildren(...nodes: Node[]): void { this.children.splice(0, this.children.length, ...nodes); }
   remove(): void { this.isConnected = false; }
@@ -43,6 +47,20 @@ class Node extends EventTarget {
     if (previous !== next && type.observedAttributes?.includes(name)) element.attributeChangedCallback?.(name, previous, next);
   }
 }
+/** Single-select value/option behavior only; no native focus, keyboard, IME, or accessibility simulation. */
+class Select extends Node {
+  get options(): Node[] { return this.children.filter(node => node.tagName === 'OPTION'); }
+  get selectedIndex(): number { return this.options.findIndex(option => option.selected); }
+  set selectedIndex(index: number) { this.options.forEach((option, position) => { option.selected = position === index; }); }
+  override get value(): string { return this.options[this.selectedIndex]?.value ?? ''; }
+  override set value(value: string) { this.selectedIndex = this.options.findIndex(option => option.value === String(value)); }
+  override append(...nodes: Node[]): void { super.append(...nodes); this.resetSelection(); }
+  override replaceChildren(...nodes: Node[]): void { super.replaceChildren(...nodes); this.resetSelection(); }
+  private resetSelection(): void {
+    const selected = this.options.reduce((last, option, index) => option.selected ? index : last, -1);
+    this.selectedIndex = selected >= 0 ? selected : this.options.findIndex(option => !option.disabled);
+  }
+}
 class Audio extends Node {
   volume = 1;
   muted = false;
@@ -51,7 +69,7 @@ class Audio extends Node {
 }
 const originals = new Map(['HTMLElement', 'document', 'customElements', 'window'].map(name => [name, Object.getOwnPropertyDescriptor(globalThis, name)]));
 Object.defineProperty(globalThis, 'HTMLElement', { configurable: true, value: Node });
-Object.defineProperty(globalThis, 'document', { configurable: true, value: { createElement: (tag: string) => Object.assign(tag === 'audio' ? new Audio() : new Node(), { tagName: tag.toUpperCase() }), body: { append() {} } } });
+Object.defineProperty(globalThis, 'document', { configurable: true, value: { createElement: (tag: string) => Object.assign(tag === 'audio' ? new Audio() : tag === 'select' ? new Select() : new Node(), { tagName: tag.toUpperCase() }), body: { append() {} } } });
 Object.defineProperty(globalThis, 'window', { configurable: true, value: new EventTarget() });
 const { StageElement, defineStageElement } = await import('../src/element.ts');
 after(() => { for (const [name, descriptor] of originals) { if (descriptor) Object.defineProperty(globalThis, name, descriptor); else Reflect.deleteProperty(globalThis, name); } });
@@ -7658,4 +7676,655 @@ describe('widget controller hand request panel', () => {
       assert.equal(socket.sent.some(message => message.type === 'rtc:offer'), false);
     });
   }
+});
+
+/**
+ * Stage172 microphone picker: real SDK enumeration, capture ownership, media replacement and
+ * signaling over controlled DOM/navigator/peer/socket fixtures. These tests do not prove native
+ * keyboard/IME, assistive technology, permission UI, device availability, or audible hardware.
+ */
+describe('widget explicit microphone selection', () => {
+  type Widget = InstanceType<typeof StageElement>;
+  type Track = EventTarget & { enabled: boolean; readyState: string; stops: number; stop(): void; end(): void };
+  const nodes = (node: Node): Node[] => [node, ...node.children.flatMap(nodes)];
+  const visibleText = (element: Widget): string => nodes(element['microphonePanel'] as unknown as Node).map(node => node.textContent).join('\n');
+  function pending<T>() {
+    let resolve!: (value: T) => void, reject!: (error: unknown) => void;
+    const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; });
+    return { promise, resolve, reject };
+  }
+  function device(deviceId: string, label = '', kind: MediaDeviceKind = 'audioinput'): MediaDeviceInfo {
+    return { deviceId, label, kind, groupId: 'private-group', toJSON() { return {}; } };
+  }
+  function options(element: Widget): { value: string; label: string; disabled: boolean }[] {
+    return Array.from(element['microphoneSelect'].options, option => ({ value: option.value, label: option.textContent ?? '', disabled: option.disabled }));
+  }
+  function draft(element: Widget, value: string): void {
+    element['microphoneSelect'].value = value;
+    assert.equal(element['microphoneSelect'].value, value, 'the native-like select must actually contain the requested option');
+  }
+  function force(button: HTMLButtonElement): void { button.disabled = false; click(button); }
+  function assertPicker(element: Widget, { hidden = false, disabled = hidden, refresh = false, apply = false, value = '' }:
+    { hidden?: boolean; disabled?: boolean; refresh?: boolean; apply?: boolean; value?: string } = {}): void {
+    assert.equal(element['microphonePanel'].hidden, hidden, 'picker owner visibility');
+    assert.equal(element['microphoneSelect'].disabled, disabled, 'select admission');
+    assert.equal(element['microphoneRefresh'].disabled, disabled, 'refresh admission');
+    assert.equal(element['microphoneApply'].disabled, disabled, 'apply admission');
+    assert.equal(element['microphoneSelect'].value, value, 'selection remains a draft');
+    assert.equal(element['microphoneRefresh'].getAttribute('aria-busy'), hidden ? null : String(refresh));
+    assert.equal(element['microphoneApply'].getAttribute('aria-busy'), hidden ? null : String(apply));
+    assert.equal(Boolean(element['refreshAttempt']), refresh); assert.equal(Boolean(element['inputDeviceAttempt']), apply);
+  }
+  function assertRetired(element: Widget): void {
+    assertPicker(element, { hidden: true });
+    assert.equal(element['microphoneOwner'], undefined);
+    assert.ok(options(element).every(option => option.value === ''), 'retired devices and identifiers are removed');
+  }
+  async function until(predicate: () => boolean, label: string): Promise<void> {
+    for (let attempt = 0; attempt < 50; attempt++) { if (predicate()) return; await settle(); }
+    assert.fail(label);
+  }
+  function fakeMedia(t: TestContext, denyInitial = false) {
+    const originals = new Map(['navigator', 'RTCPeerConnection', 'AudioContext'].map(name => [name, Object.getOwnPropertyDescriptor(globalThis, name)]));
+    const captures: (ReturnType<typeof pending<MediaStream>> & { constraints: MediaStreamConstraints })[] = [];
+    const enumerations: ReturnType<typeof pending<MediaDeviceInfo[]>>[] = [], tracks: Track[] = [];
+    let holdCapture = false, holdEnumeration = false;
+    let available = [device('private-mic-a', 'USB microphone'), device('private-mic-b')];
+    function source(): MediaStream {
+      const track = Object.assign(new EventTarget(), { enabled: true, readyState: 'live', stops: 0,
+        stop() { this.stops++; this.readyState = 'ended'; },
+        end(this: Track) { this.readyState = 'ended'; this.dispatchEvent(new Event('ended')); },
+      });
+      tracks.push(track);
+      return { getTracks: () => [track], getAudioTracks: () => [track] } as unknown as MediaStream;
+    }
+    class Peer {
+      static instances: Peer[] = [];
+      connectionState = 'connected'; signalingState = 'stable'; closed = false;
+      localDescription: RTCSessionDescriptionInit | null = null;
+      readonly offers: RTCSessionDescriptionInit[] = [];
+      readonly gates: (ReturnType<typeof pending<void>> & { entered: boolean })[] = [];
+      readonly replacements: unknown[] = [];
+      readonly transceiver = { direction: 'recvonly', sender: { track: null as unknown,
+        replaceTrack: async (track: unknown) => {
+          this.replacements.push(track);
+          const gate = this.gates.find(gate => !gate.entered);
+          if (gate) { gate.entered = true; await gate.promise; }
+          this.transceiver.sender.track = track;
+        },
+      } };
+      constructor() { Peer.instances.push(this); }
+      addTransceiver() { return this.transceiver; }
+      hold() { const gate = { ...pending<void>(), entered: false }; this.gates.push(gate); return gate; }
+      async createOffer(): Promise<RTCSessionDescriptionInit> {
+        const offer: RTCSessionDescriptionInit = { type: 'offer', sdp: `v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=${this.transceiver.direction}\r\n` };
+        this.offers.push(offer); return offer;
+      }
+      async setLocalDescription(description: RTCSessionDescriptionInit) { this.localDescription = description; this.signalingState = 'have-local-offer'; }
+      async setRemoteDescription() { this.signalingState = 'stable'; }
+      async addIceCandidate() {}
+      close(): void { this.closed = true; this.connectionState = 'closed'; }
+    }
+    class Context {
+      createMediaStreamSource() { return { connect() {}, disconnect() {} }; }
+      createAnalyser() { return { fftSize: 2048, disconnect() {}, getFloatTimeDomainData() {} }; }
+      async resume() {} async close() {}
+    }
+    const devices = Object.assign(new EventTarget(), {
+      enumerateDevices: () => {
+        const request = pending<MediaDeviceInfo[]>(); enumerations.push(request);
+        if (!holdEnumeration) request.resolve(available);
+        return request.promise;
+      },
+      getUserMedia: (constraints: MediaStreamConstraints) => {
+        const request = { ...pending<MediaStream>(), constraints }; captures.push(request);
+        if (captures.length === 1 && denyInitial) request.reject(new DOMException('controlled initial denial', 'NotAllowedError'));
+        else if (!holdCapture) request.resolve(source());
+        return request.promise;
+      },
+    });
+    Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { mediaDevices: devices } });
+    Object.defineProperty(globalThis, 'RTCPeerConnection', { configurable: true, value: Peer });
+    Object.defineProperty(globalThis, 'AudioContext', { configurable: true, value: Context });
+    t.after(async () => {
+      for (const request of captures) request.reject(new DOMException('test cleanup', 'AbortError'));
+      for (const request of enumerations) request.reject(new Error('test cleanup'));
+      for (const peer of Peer.instances) for (const gate of peer.gates) gate.resolve();
+      await settle();
+      for (const [name, descriptor] of originals) { if (descriptor) Object.defineProperty(globalThis, name, descriptor); else Reflect.deleteProperty(globalThis, name); }
+    });
+    return { captures, enumerations, tracks, devices, Peer, source,
+      holdCapture(value = true) { holdCapture = value; }, holdEnumeration(value = true) { holdEnumeration = value; },
+      list(value: MediaDeviceInfo[]) { available = value; },
+    };
+  }
+  async function refresh(element: Widget): Promise<void> { click(element['microphoneRefresh']); await settle(); await settle(); }
+  async function seed(t: TestContext, element: Widget, client: StageClient): Promise<void> {
+    t.mock.method(client, 'listAudioDevices', async () => ({ inputs: [device('private-mic-a', 'USB microphone'), device('private-mic-b')], outputs: [] }));
+    await refresh(element);
+  }
+  async function mediaJoinedWidget(t: TestContext, state: RoomStatePayload) {
+    const fixture = socketJoiningWidget(t, { room: state.roomId }, true); await settle();
+    const socket = fixture.sockets[0]!, request = await fixture.hello(socket);
+    socket.deliver({ type: 'room:state', ...state, resumeToken: 'resume-me' });
+    socket.deliver({ type: 'ok', requestId: request.requestId }); await settle(); await settle();
+    const client = fixture.element.client!;
+    assert.equal(client.status, state.status);
+    assert.equal(client['pending'].has(request.requestId), false, 'join is acknowledged even when real SDP negotiation is pending');
+    return { ...fixture, socket, client };
+  }
+  async function negotiate(fixture: Awaited<ReturnType<typeof socketJoinedWidget>>): Promise<void> {
+    const answered = new Set<string>();
+    for (let attempt = 0; attempt < 20; attempt++) {
+      await fixture.tick(100);
+      for (const message of fixture.socket.sent) if (message.type === 'rtc:offer' && !answered.has(message.requestId)) {
+        answered.add(message.requestId);
+        fixture.socket.deliver({ type: 'rtc:answer', fromId: 'server', payload: { type: 'answer', sdp: 'v=0\r\n' } });
+        fixture.socket.deliver({ type: 'ok', requestId: message.requestId });
+      }
+      await settle(); await settle();
+      if (!fixture.client['negotiating'] && fixture.client['pc']?.localDescription) return;
+    }
+    assert.fail('real SDK negotiation settles through controlled socket ACK and answer');
+  }
+
+  it('uses labeled native draft controls and stays inert before state, including an ACK-only join', async t => {
+    const media = fakeMedia(t), fixture = socketJoiningWidget(t);
+    const { element, sockets, hello } = fixture; assertRetired(element);
+    await settle(); const socket = sockets[0]!, request = await hello(socket), client = element.client!;
+    const list = t.mock.method(client, 'listAudioDevices'), apply = t.mock.method(client, 'setInputDevice');
+    socket.deliver({ type: 'ok', requestId: request.requestId }); await settle();
+    force(element['microphoneRefresh']); force(element['microphoneApply']); assertRetired(element);
+    assert.equal(list.mock.callCount(), 0); assert.equal(apply.mock.callCount(), 0);
+    assert.equal(media.enumerations.length, 0); assert.equal(media.captures.length, 0);
+    socket.deliver({ type: 'room:state', ...roomState() }); assertPicker(element);
+    const select = element['microphoneSelect'], panelNodes = nodes(element['microphonePanel'] as unknown as Node);
+    assert.equal(select.tagName, 'SELECT'); assert.equal(select.id, 'microphone-device');
+    const label = panelNodes.find(node => node.tagName === 'LABEL' && node.getAttribute('for') === select.id);
+    assert.equal(label?.textContent, '麥克風選擇（草稿）');
+    assert.equal(select.getAttribute('aria-describedby'), 'microphone-draft-notice');
+    assert.ok(panelNodes.some(node => node.id === 'microphone-draft-notice' && /草稿不代表目前實際擷取裝置/.test(node.textContent)));
+    assert.equal(element['microphonePanel'].part.contains?.('microphone') ?? (element['microphonePanel'].part as unknown as Set<string>).has('microphone'), true);
+    assert.equal(element['microphoneRefresh'].type, 'button'); assert.equal(element['microphoneApply'].type, 'button');
+    assert.equal(element['microphoneRefresh'].textContent, '重新整理麥克風清單'); assert.equal(element['microphoneApply'].textContent, '送出麥克風選擇');
+    assert.deepEqual(options(element), [{ value: '', label: '預設（依 SDK 設定）', disabled: false }]);
+    assert.match(visibleText(element), /草稿不代表目前實際擷取裝置/); assert.match(visibleText(element), /麥克風失敗後需另按「重試麥克風」/);
+    assert.match(visibleText(element), /重試麥克風/); assert.equal(media.enumerations.length, 0);
+  });
+
+  it('explicitly enumerates only audio inputs without capture, preview, devicechange listeners, or displayed identifiers', async t => {
+    const media = fakeMedia(t), { element, client, socket } = await socketJoinedWidget(t);
+    media.list([device('', ''), device('private-mic-a', ''), device('private-mic-b', '<img src=x onerror=alert(1)> &amp; mic'),
+      device('private-output', 'Output name', 'audiooutput'), device('private-camera', 'Camera name', 'videoinput')]);
+    const preview = t.mock.method(client, 'startMicTest'), setter = t.mock.method(client, 'setInputDevice');
+    const frames = [...socket.sent]; assert.equal(media.enumerations.length, 0);
+    await refresh(element); assert.equal(media.enumerations.length, 1);
+    const listed = options(element); assert.equal(listed[0]!.value, '');
+    assert.ok(listed.some(option => option.value === 'private-mic-a' && /麥克風/.test(option.label)));
+    assert.ok(listed.some(option => option.value === 'private-mic-b' && option.label.includes('<img')));
+    assert.equal(listed.filter(option => option.value === '').length, 1, 'unselectable empty IDs do not duplicate the default');
+    assert.ok(listed.every(option => option.value !== 'private-output' && option.value !== 'private-camera'));
+    assert.doesNotMatch(visibleText(element), /private-mic|private-output|private-camera|private-group|Output name|Camera name/);
+    assert.ok(nodes(element['microphonePanel'] as unknown as Node).every(node => node.tagName !== 'IMG'), 'labels remain text nodes');
+    assert.equal(media.captures.length, 0); assert.equal(preview.mock.callCount(), 0); assert.equal(setter.mock.callCount(), 0);
+    assert.equal(getEventListeners(media.devices, 'devicechange').length, 0);
+    media.devices.dispatchEvent(new Event('devicechange')); socket.deliver({ type: 'room:state', ...roomState() }); await settle();
+    assert.equal(media.enumerations.length, 1); assert.deepEqual(socket.sent, frames);
+    draft(element, 'private-mic-a'); assert.equal(media.captures.length, 0); assert.equal(setter.mock.callCount(), 0);
+  });
+
+  it('stores an audience preference only on Apply and captures that choice on a later stage snapshot', async t => {
+    const media = fakeMedia(t), fixture = await mediaJoinedWidget(t, roomState());
+    const { element, client, socket } = fixture; await client['mediaTask']; await negotiate(fixture);
+    const peer = media.Peer.instances[0]!, frames = [...socket.sent];
+    await refresh(element); draft(element, 'private-mic-a'); assert.equal(client['inputDeviceId'], '');
+    click(element['microphoneApply']); assertPicker(element, { value: 'private-mic-a', disabled: true, apply: true });
+    await client['mediaTask']; await settle(); assertPicker(element, { value: 'private-mic-a' });
+    assert.equal(client['inputDeviceId'], 'private-mic-a'); assert.equal(media.captures.length, 0); assert.deepEqual(socket.sent, frames);
+    socket.deliver({ type: 'room:state', ...roomState(true) }); await client['mediaTask']; await negotiate(fixture);
+    assert.equal(media.captures.length, 1); assert.deepEqual((media.captures[0]!.constraints.audio as MediaTrackConstraints).deviceId, { exact: 'private-mic-a' });
+    assert.equal(peer.transceiver.sender.track, media.tracks[0]); assert.equal(media.Peer.instances.length, 1);
+    const count = media.enumerations.length; await client.setInputDevice('private-mic-b'); await settle();
+    assertPicker(element, { value: 'private-mic-a' }); assert.equal(media.enumerations.length, count);
+    assert.match(visibleText(element), /草稿不代表目前實際擷取裝置/, 'public SDK setters do not establish widget hardware truth');
+  });
+
+  for (const policy of ['unmuted', 'muted', 'force-muted'] as const) {
+    it(`switches a healthy ${policy} microphone on its existing peer without a new offer or mute-policy change`, async t => {
+      const media = fakeMedia(t), state = roomState(true); state.me.muted = policy !== 'unmuted'; state.me.forceMuted = policy === 'force-muted';
+      const fixture = await mediaJoinedWidget(t, state), { element, client, socket, sockets } = fixture;
+      await client['mediaTask']; await negotiate(fixture); await refresh(element); draft(element, 'private-mic-a');
+      const peer = media.Peer.instances[0]!, prior = media.tracks[0]!, frames = [...socket.sent], offers = peer.offers.length;
+      const mute = t.mock.method(client, 'mute'), unmute = t.mock.method(client, 'unmute');
+      click(element['microphoneApply']); await client['mediaTask']; await settle();
+      assertPicker(element, { value: 'private-mic-a' }); assert.equal(media.captures.length, 2);
+      assert.equal(peer.transceiver.sender.track, media.tracks[1]); assert.equal(prior.stops, 1);
+      assert.equal(media.tracks[1]!.enabled, !state.me.muted); assert.equal(client.me!.muted, state.me.muted); assert.equal(client.me!.forceMuted, state.me.forceMuted);
+      assert.equal(client['inputDeviceId'], 'private-mic-a'); assert.equal(peer.closed, false); assert.equal(media.Peer.instances.length, 1); assert.equal(sockets.length, 1);
+      assert.equal(peer.offers.length, offers); assert.deepEqual(socket.sent, frames); assert.equal(mute.mock.callCount(), 0); assert.equal(unmute.mock.callCount(), 0);
+      draft(element, ''); click(element['microphoneApply']); await client['mediaTask']; await settle();
+      assert.equal((media.captures.at(-1)!.constraints.audio as MediaTrackConstraints).deviceId, undefined);
+      assert.equal(client['inputDeviceId'], ''); assert.equal(peer.offers.length, offers); assertPicker(element);
+    });
+  }
+
+  it('passes an empty draft through to the SDK original constraints rather than claiming an OS default', async t => {
+    const media = fakeMedia(t), { element, client } = await socketJoinedWidget(t);
+    // Existing SDK options are controlled here because the widget exposes no constraints attribute.
+    client['options'].micConstraints = { deviceId: { exact: 'configured-sdk-input' }, echoCancellation: false };
+    await refresh(element); draft(element, 'private-mic-a'); click(element['microphoneApply']); await client['mediaTask']; await settle();
+    draft(element, ''); click(element['microphoneApply']); await client['mediaTask']; await settle();
+    assert.equal(media.captures.length, 0);
+    const preview = await client.startMicTest();
+    assert.deepEqual((media.captures[0]!.constraints.audio as MediaTrackConstraints).deviceId, { exact: 'configured-sdk-input' });
+    assert.equal((media.captures[0]!.constraints.audio as MediaTrackConstraints).echoCancellation, false); preview.stop();
+    assert.equal(options(element)[0]!.label, '預設（依 SDK 設定）'); assertPicker(element);
+  });
+
+  for (const failure of ['permission denial', 'sender rejection'] as const) {
+    it(`retains the working microphone and draft after ${failure}, then admits a separate Apply retry`, async t => {
+      const media = fakeMedia(t), fixture = await mediaJoinedWidget(t, roomState(true)), { element, client, socket } = fixture;
+      await client['mediaTask']; await negotiate(fixture); await refresh(element); draft(element, 'private-mic-a');
+      const peer = media.Peer.instances[0]!, prior = media.tracks[0]!, frames = [...socket.sent];
+      let micErrors = 0; element.addEventListener('stage-micerror', () => { micErrors++; });
+      const gate = failure === 'sender rejection' ? peer.hold() : undefined;
+      media.holdCapture(failure === 'permission denial');
+      click(element['microphoneApply']);
+      await until(() => gate ? gate.entered : media.captures.length === 2, 'explicit replacement reaches its controlled failure');
+      if (gate) gate.reject(new Error('controlled sender rejection'));
+      else media.captures[1]!.reject(new DOMException('controlled permission denial', 'NotAllowedError'));
+      await client['mediaTask']; await settle();
+      assertPicker(element, { value: 'private-mic-a' }); assert.equal(element['error'].hidden, false);
+      assert.match(element['error'].textContent ?? '', failure === 'sender rejection' ? /controlled sender rejection/ : /controlled permission denial/);
+      assert.equal(peer.transceiver.sender.track, prior); assert.equal(prior.stops, 0); assert.equal(client['inputDeviceId'], '');
+      assert.equal(micErrors, 0); assert.equal(element['micRetry'].hidden, true); assert.deepEqual(socket.sent, frames);
+      media.holdCapture(false); click(element['microphoneApply']); await client['mediaTask']; await settle();
+      assert.equal(peer.transceiver.sender.track, media.tracks.at(-1)); assert.equal(prior.stops, 1);
+      assert.equal(client['inputDeviceId'], 'private-mic-a'); assert.equal(element['error'].hidden, true); assertPicker(element, { value: 'private-mic-a' });
+    });
+  }
+
+  for (const cause of ['initial denial', 'natural track end'] as const) {
+    it(`after ${cause}, changing and applying a draft only saves preference; the existing retry performs capture`, async t => {
+      const media = fakeMedia(t, cause === 'initial denial'), fixture = await mediaJoinedWidget(t, roomState(true));
+      const { element, client, socket } = fixture; await client['mediaTask']; await negotiate(fixture);
+      if (cause === 'natural track end') { media.tracks[0]!.end(); await client['mediaTask']; await negotiate(fixture); }
+      assert.equal(client['mic'], null); assert.equal(client['micFailed'], true); assert.equal(element['micRetry'].hidden, false);
+      await refresh(element); const count = media.captures.length, frames = [...socket.sent];
+      draft(element, 'private-mic-b'); await settle(); assert.equal(media.captures.length, count);
+      click(element['microphoneApply']); await client['mediaTask']; await settle();
+      assert.equal(media.captures.length, count); assert.equal(client['inputDeviceId'], 'private-mic-b');
+      assert.equal(client['micFailed'], true); assert.equal(element['micRetry'].hidden, false);
+      assertPicker(element, { value: 'private-mic-b' }); assert.match(visibleText(element), /麥克風失敗後需另按「重試麥克風」/);
+      socket.deliver({ type: 'room:state', ...roomState(true) }); await client['mediaTask']; assert.equal(media.captures.length, count);
+      click(element['micRetry']); await client['mediaTask']; await settle();
+      assert.equal(media.captures.length, count + 1); assert.deepEqual((media.captures.at(-1)!.constraints.audio as MediaTrackConstraints).deviceId, { exact: 'private-mic-b' });
+      assert.equal(client['micFailed'], false); assert.equal(element['micRetry'].hidden, true);
+      assert.equal(media.Peer.instances[0]!.transceiver.sender.track, media.tracks.at(-1));
+      assert.equal(socket.sent.filter(message => message.type !== 'rtc:offer').length, frames.filter(message => message.type !== 'rtc:offer').length);
+    });
+  }
+
+  it('serializes an immediately following existing microphone retry behind a failed-seat Apply and captures the new preference', async t => {
+    const media = fakeMedia(t, true), fixture = await mediaJoinedWidget(t, roomState(true)), { element, client } = fixture;
+    await client['mediaTask']; await negotiate(fixture); await refresh(element); draft(element, 'private-mic-b'); media.holdCapture();
+    const apply = t.mock.method(client, 'setInputDevice'), retry = t.mock.method(client, 'retryMicrophone');
+    click(element['microphoneApply']); assertPicker(element, { value: 'private-mic-b', disabled: true, apply: true });
+    assert.equal(element['micRetry'].disabled, false, 'the existing retry keeps its own SDK admission');
+    click(element['micRetry']); assert.equal(retry.mock.callCount(), 1); assert.equal(apply.mock.callCount(), 1);
+    await until(() => media.captures.length === 2, 'retry executes after queued input preference');
+    assert.deepEqual((media.captures[1]!.constraints.audio as MediaTrackConstraints).deviceId, { exact: 'private-mic-b' });
+    assert.equal(client['inputDeviceId'], 'private-mic-b'); assert.equal(client['mic'], null);
+    media.captures[1]!.resolve(media.source()); await client['mediaTask']; await settle();
+    assert.equal(media.Peer.instances[0]!.transceiver.sender.track, media.tracks.at(-1)); assertPicker(element, { value: 'private-mic-b' });
+  });
+
+  it('does not release Apply on an independent real preview micready, snapshots, or forced duplicate clicks', async t => {
+    const media = fakeMedia(t), fixture = await mediaJoinedWidget(t, roomState(true)), { element, client, socket } = fixture;
+    await client['mediaTask']; await negotiate(fixture); await refresh(element); draft(element, 'private-mic-a');
+    const peer = media.Peer.instances[0]!, gate = peer.hold(), apply = t.mock.method(client, 'setInputDevice');
+    click(element['microphoneApply']); await until(() => gate.entered, 'replacement waits for sender install');
+    const attempt = element['inputDeviceAttempt'];
+    const observations: { attempt: object | undefined; value: string; disabled: boolean[]; busy: string | null }[] = [];
+    element.addEventListener('stage-micready', () => {
+      observations.push({ attempt: element['inputDeviceAttempt'], value: element['microphoneSelect'].value,
+        disabled: [element['microphoneSelect'].disabled, element['microphoneRefresh'].disabled, element['microphoneApply'].disabled],
+        busy: element['microphoneApply'].getAttribute('aria-busy') });
+      force(element['microphoneApply']); force(element['microphoneRefresh']);
+    });
+    const expected = { attempt, value: 'private-mic-a', disabled: [true, true, true], busy: 'true' };
+    const preview = await client.startMicTest(); assert.deepEqual(observations, [expected]);
+    socket.deliver({ type: 'room:state', ...roomState(true) });
+    assertPicker(element, { value: 'private-mic-a', disabled: true, apply: true });
+    assert.equal(apply.mock.callCount(), 1); assert.equal(media.enumerations.length, 1); assert.equal(client['inputDeviceId'], '');
+    preview.stop(); gate.resolve(); await client['mediaTask']; await settle();
+    assert.deepEqual(observations, [expected, expected]); assert.equal(apply.mock.callCount(), 1); assert.equal(client['inputDeviceId'], 'private-mic-a');
+    assertPicker(element, { value: 'private-mic-a' });
+  });
+
+  it('makes no applied-device or audio-success claim when a stage-exit/re-entry setter fulfills without committing its choice', async t => {
+    const media = fakeMedia(t), fixture = await mediaJoinedWidget(t, roomState(true)), { element, client, socket } = fixture;
+    await client['mediaTask']; await negotiate(fixture); await refresh(element); draft(element, 'private-mic-a');
+    const peer = media.Peer.instances[0]!, gate = peer.hold(), setter = t.mock.method(client, 'setInputDevice');
+    const text = visibleText(element), owner = element['microphoneOwner'];
+    click(element['microphoneApply']); await until(() => gate.entered, 'replacement is pending before stage exit');
+    const attempt = element['inputDeviceAttempt'];
+    socket.deliver({ type: 'room:state', ...roomState() }); socket.deliver({ type: 'room:state', ...roomState(true) });
+    assert.equal(element['microphoneOwner'], owner); assert.equal(element['inputDeviceAttempt'], attempt);
+    assertPicker(element, { value: 'private-mic-a', disabled: true, apply: true });
+    gate.resolve(); await setter.mock.calls[0]!.result; await client['mediaTask']; await settle();
+    assert.equal(client['inputDeviceId'], '', 'the real SDK fulfilled without storing the retired replacement');
+    assert.equal(media.tracks[1]!.stops, 1); assert.equal(peer.transceiver.sender.track, media.tracks[2]);
+    assert.equal((media.captures[2]!.constraints.audio as MediaTrackConstraints).deviceId, undefined);
+    assertPicker(element, { value: 'private-mic-a' }); assert.equal(visibleText(element), text);
+    assert.doesNotMatch(visibleText(element), /已套用|切換成功|音訊已恢復|目前裝置：/);
+  });
+
+  it('preserves a healthy admitted replacement across signaling reconnect, but blocks further picker actions until resume', async t => {
+    const media = fakeMedia(t), fixture = await mediaJoinedWidget(t, roomState(true));
+    const { element, client, socket, sockets, tick, hello } = fixture;
+    await client['mediaTask']; await negotiate(fixture); await refresh(element); draft(element, 'private-mic-a');
+    const peer = media.Peer.instances[0]!, gate = peer.hold(), setter = t.mock.method(client, 'setInputDevice');
+    click(element['microphoneApply']); await until(() => gate.entered, 'live switch admitted before socket loss');
+    const owner = element['microphoneOwner'], attempt = element['inputDeviceAttempt'], listed = options(element);
+    socket.close(); await settle();
+    assert.equal(client.status, 'reconnecting'); assert.equal(element['microphoneOwner'], owner); assert.equal(element['inputDeviceAttempt'], attempt);
+    assertPicker(element, { value: 'private-mic-a', disabled: true, apply: true }); assert.deepEqual(options(element), listed);
+    force(element['microphoneApply']); force(element['microphoneRefresh']); assert.equal(setter.mock.callCount(), 1);
+    gate.resolve(); await client['mediaTask']; await settle();
+    assert.equal(client['inputDeviceId'], 'private-mic-a'); assert.equal(peer.transceiver.sender.track, media.tracks[1]);
+    assertPicker(element, { value: 'private-mic-a', disabled: true }); assert.equal(media.Peer.instances.length, 1);
+    await tick(500); const next = sockets[1]!, resume = await hello(next);
+    next.deliver({ type: 'room:state', ...roomState(true) }); next.deliver({ type: 'ok', requestId: resume.requestId }); await settle();
+    assertPicker(element, { value: 'private-mic-a' }); assert.equal(element['microphoneOwner'], owner); assert.deepEqual(options(element), listed);
+    assert.equal(media.enumerations.length, 1); assert.equal(media.captures.length, 2);
+  });
+
+  it('retains a missing draft as an explicit unavailable choice and allows an intentional retry or default reset', async t => {
+    const media = fakeMedia(t), { element, client } = await socketJoinedWidget(t);
+    await refresh(element); draft(element, 'private-mic-a');
+    media.list([device('private-mic-b', 'Available'), device('private-mic-b', 'Duplicate')]); await refresh(element);
+    assertPicker(element, { value: 'private-mic-a' });
+    assert.deepEqual(options(element).filter(option => option.value === 'private-mic-a'), [{ value: 'private-mic-a', label: '先前選擇（目前清單未提供）', disabled: true }]);
+    assert.equal(options(element).filter(option => option.value === 'private-mic-b').length, 1);
+    assert.doesNotMatch(visibleText(element), /private-mic/);
+    const setter = t.mock.method(client, 'setInputDevice'); click(element['microphoneApply']); await client['mediaTask']; await settle();
+    assert.deepEqual(setter.mock.calls[0]!.arguments, ['private-mic-a']); assert.equal(media.captures.length, 0);
+    draft(element, ''); click(element['microphoneApply']); await client['mediaTask']; await settle();
+    media.list([]); await refresh(element); assertPicker(element);
+    assert.deepEqual(options(element), [{ value: '', label: '預設（依 SDK 設定）', disabled: false }]);
+    assert.deepEqual(setter.mock.calls[1]!.arguments, ['']);
+  });
+
+  type Operation = 'refresh' | 'apply';
+  const operationButton = (element: Widget, operation: Operation) => operation === 'refresh' ? element['microphoneRefresh'] : element['microphoneApply'];
+  const operationAttempt = (element: Widget, operation: Operation) => operation === 'refresh' ? element['refreshAttempt'] : element['inputDeviceAttempt'];
+  const operationBusy = (operation: Operation) => operation === 'refresh' ? { refresh: true } : { apply: true };
+  function holdOperations(t: TestContext, client: StageClient, operation: Operation, callback?: () => void) {
+    const requests: ReturnType<typeof pending<{ inputs: MediaDeviceInfo[]; outputs: MediaDeviceInfo[] }>>[] = [];
+    const invoke = () => { const request = pending<{ inputs: MediaDeviceInfo[]; outputs: MediaDeviceInfo[] }>(); requests.push(request); callback?.(); return request.promise; };
+    if (operation === 'refresh') t.mock.method(client, 'listAudioDevices', invoke);
+    else t.mock.method(client, 'setInputDevice', () => invoke().then(() => {}));
+    return requests;
+  }
+  const result = (label = 'Current list') => ({ inputs: [device('private-mic-a', label), device('private-mic-b')], outputs: [] });
+
+  for (const operation of ['refresh', 'apply'] as const) {
+    it(`reserves ${operation} before a synchronous public-SDK callback and blocks both forced duplicate handlers`, async t => {
+      const { element, client, socket } = await socketJoinedWidget(t); await seed(t, element, client); draft(element, 'private-mic-a');
+      const listed = options(element); let callbacks = 0;
+      element.addEventListener('stage-state', () => {
+        callbacks++; assertPicker(element, { value: 'private-mic-a', disabled: true, ...operationBusy(operation) });
+        force(element['microphoneRefresh']); force(element['microphoneApply']);
+      }, { once: true });
+      const requests = holdOperations(t, client, operation, () => socket.deliver({ type: 'room:state', ...roomState() }));
+      click(operationButton(element, operation)); assert.equal(callbacks, 1); assert.equal(requests.length, 1);
+      assert.deepEqual(options(element), listed); assert.equal(element['pendingActions'].has(operationButton(element, operation)), false);
+      force(element['microphoneRefresh']); force(element['microphoneApply']); assert.equal(requests.length, 1);
+      client.dispatchEvent(new CustomEvent('micready', { detail: undefined }));
+      assertPicker(element, { value: 'private-mic-a', disabled: true, ...operationBusy(operation) });
+      socket.deliver({ type: 'error', code: 'conflict', message: 'Independent current failure' });
+      requests[0]!.resolve(result()); await settle(); await settle();
+      assertPicker(element, { value: 'private-mic-a' }); assert.equal(element['error'].hidden, false); assert.equal(element['error'].textContent, 'Independent current failure');
+    });
+
+    for (const outcome of ['throw', 'reject'] as const) {
+      it(`shows a current ${operation} ${outcome}, keeps its list/draft, and permits an explicit new attempt`, async t => {
+        const { element, client } = await socketJoinedWidget(t); await seed(t, element, client); draft(element, 'private-mic-b');
+        const listed = options(element), failure = new Error(`current ${operation} ${outcome}`);
+        const run = () => { if (outcome === 'throw') throw failure; return Promise.reject(failure); };
+        if (operation === 'refresh') t.mock.method(client, 'listAudioDevices', run); else t.mock.method(client, 'setInputDevice', run);
+        click(operationButton(element, operation)); await settle();
+        assertPicker(element, { value: 'private-mic-b' }); assert.deepEqual(options(element), listed);
+        assert.equal(element['error'].hidden, false); assert.equal(element['error'].textContent, failure.message);
+        const requests = holdOperations(t, client, operation); click(operationButton(element, operation));
+        assert.equal(requests.length, 1); assert.equal(element['error'].hidden, true);
+        requests[0]!.resolve(result()); await settle(); await settle(); assertPicker(element, { value: 'private-mic-b' });
+      });
+    }
+
+    for (const outcome of ['resolve', 'reject'] as const) {
+      it(`retains ${operation} ownership through reconnect and its ${outcome} without allowing a second operation`, async t => {
+        const { element, client, socket, sockets, tick, hello } = await socketJoinedWidget(t); await seed(t, element, client); draft(element, 'private-mic-a');
+        const requests = holdOperations(t, client, operation); click(operationButton(element, operation));
+        const owner = element['microphoneOwner'], attempt = operationAttempt(element, operation), listed = options(element);
+        element.addEventListener('stage-status', () => {
+          assertPicker(element, { value: 'private-mic-a', disabled: true, ...operationBusy(operation) });
+          force(element['microphoneRefresh']); force(element['microphoneApply']);
+        }, { once: true });
+        socket.close(); await settle(); assert.equal(element['microphoneOwner'], owner); assert.equal(operationAttempt(element, operation), attempt);
+        assert.deepEqual(options(element), listed); assert.equal(requests.length, 1);
+        await tick(500); const next = sockets[1]!, resume = await hello(next);
+        next.deliver({ type: 'room:state', ...roomState() }); next.deliver({ type: 'ok', requestId: resume.requestId }); await settle();
+        assertPicker(element, { value: 'private-mic-a', disabled: true, ...operationBusy(operation) });
+        force(element['microphoneRefresh']); force(element['microphoneApply']); assert.equal(requests.length, 1);
+        if (outcome === 'resolve') requests[0]!.resolve(result()); else requests[0]!.reject(new Error('current reconnect operation failure'));
+        await settle(); await settle(); assertPicker(element, { value: 'private-mic-a' });
+        assert.equal(element['microphoneOwner'], owner); assert.equal(element['error'].hidden, outcome === 'resolve');
+        if (outcome === 'reject') assert.equal(element['error'].textContent, 'current reconnect operation failure');
+      });
+    }
+
+    for (const transition of ['room', 'participant'] as const) for (const outcome of ['resolve', 'reject'] as const) {
+      it(`isolates retired ${operation} ${outcome} from a new ${transition} owner's operation, including nested state callbacks`, async t => {
+        const { element, client, socket } = await socketJoinedWidget(t); await seed(t, element, client); draft(element, 'private-mic-a');
+        const requests = holdOperations(t, client, operation); click(operationButton(element, operation));
+        const oldOwner = element['microphoneOwner'];
+        const next = roomState(false, transition === 'room' ? 'two' : 'one'); if (transition === 'participant') next.me.participantId = 'fresh-seat';
+        let forwards = 0;
+        element.addEventListener('stage-state', () => {
+          forwards++; assertPicker(element); assert.notEqual(element['microphoneOwner'], oldOwner);
+          click(operationButton(element, operation));
+        }, { once: true });
+        socket.deliver({ type: 'room:state', ...next }); assert.equal(forwards, 1); assert.equal(requests.length, 2);
+        const owner = element['microphoneOwner'], attempt = operationAttempt(element, operation);
+        socket.deliver({ type: 'error', code: 'conflict', message: 'New owner failure' });
+        if (outcome === 'resolve') requests[0]!.resolve(result('Retired private label')); else requests[0]!.reject(new Error('Retired operation failure'));
+        await settle(); await settle();
+        assert.equal(element['microphoneOwner'], owner); assert.equal(operationAttempt(element, operation), attempt);
+        assertPicker(element, { disabled: true, ...operationBusy(operation) }); assert.doesNotMatch(visibleText(element), /Retired private label/);
+        assert.equal(element['error'].hidden, false); assert.equal(element['error'].textContent, 'New owner failure');
+        requests[1]!.resolve(result()); await settle(); await settle(); assertPicker(element);
+      });
+    }
+
+    for (const transition of ['leave', 'detach', 'direct disconnect', 'ordinary close', 'kick', 'shutdown'] as const) {
+      it(`retires pending ${operation}, list and draft immediately on ${transition} and rejects stale forced buttons`, async t => {
+        const { element, client, socket } = await socketJoinedWidget(t); await seed(t, element, client); draft(element, 'private-mic-a');
+        const requests = holdOperations(t, client, operation); click(operationButton(element, operation));
+        if (transition === 'leave') click(element['roomAction']);
+        else if (transition === 'detach') { Object.assign(element, { isConnected: false }); element.disconnectedCallback(); }
+        else if (transition === 'direct disconnect') await client.disconnect();
+        else {
+          const terminal = terminalCases.find(item => item.title === transition)!;
+          element.addEventListener(`stage-${terminal.event}`, () => {
+            assertRetired(element); force(element['microphoneRefresh']); force(element['microphoneApply']); assertRetired(element);
+          }, { once: true });
+          socket.deliver(terminal.message);
+        }
+        await settle(); assertRetired(element); const message = element['error'].textContent, hidden = element['error'].hidden;
+        force(element['microphoneRefresh']); force(element['microphoneApply']); assert.equal(requests.length, 1); assertRetired(element);
+        requests[0]!.reject(new Error('retired late failure')); await settle(); await settle();
+        assertRetired(element); assert.equal(element['error'].textContent, message); assert.equal(element['error'].hidden, hidden);
+      });
+    }
+
+    for (const guard of ['detached', 'current cleared', 'snapshot cleared', 'unknown status'] as const) {
+      it(`rejects still-callable ${operation} when ${guard}, without clearing an independent alert`, async t => {
+        const { element, client, socket } = await socketJoinedWidget(t); await seed(t, element, client);
+        const requests = holdOperations(t, client, operation);
+        socket.deliver({ type: 'error', code: 'conflict', message: 'Existing guarded failure' });
+        if (guard === 'detached') Object.assign(element, { isConnected: false });
+        else if (guard === 'current cleared') element['current'] = null;
+        else if (guard === 'snapshot cleared') client['snapshot'] = null;
+        else client['currentStatus'] = 'unknown' as typeof client.status;
+        force(operationButton(element, operation)); assert.equal(requests.length, 0); assertRetired(element);
+        assert.equal(element['error'].hidden, false); assert.equal(element['error'].textContent, 'Existing guarded failure');
+        await client.disconnect();
+      });
+    }
+  }
+
+  for (const operation of ['refresh', 'apply'] as const) for (const outcome of ['resolve', 'reject'] as const) {
+    it(`isolates ${operation} late ${outcome} after attribute client replacement and a new pending operation`, async t => {
+      const { element, client, socket, sockets, hello } = await socketJoinedWidget(t); await seed(t, element, client); draft(element, 'private-mic-a');
+      const oldRequests = holdOperations(t, client, operation); click(operationButton(element, operation));
+      const oldMessage = socket.onmessage, oldClose = socket.onclose;
+      element.setAttribute('room', 'two'); await settle(); await settle(); assertRetired(element);
+      const current = element.client!, next = sockets[1]!, join = await hello(next);
+      assert.notEqual(current, client);
+      next.deliver({ type: 'room:state', ...roomState(false, 'two') }); next.deliver({ type: 'ok', requestId: join.requestId }); await settle();
+      assertPicker(element); const requests = holdOperations(t, current, operation); click(operationButton(element, operation));
+      const owner = element['microphoneOwner'], attempt = operationAttempt(element, operation);
+      next.deliver({ type: 'error', code: 'conflict', message: 'Current client failure' });
+      if (outcome === 'resolve') oldRequests[0]!.resolve(result('Retired label')); else oldRequests[0]!.reject(new Error('Retired client failure'));
+      oldMessage?.({ data: JSON.stringify({ type: 'room:state', ...roomState() }) }); oldClose?.();
+      client.dispatchEvent(new CustomEvent('micready', { detail: undefined })); await settle(); await settle();
+      assert.equal(element['microphoneOwner'], owner); assert.equal(operationAttempt(element, operation), attempt);
+      assertPicker(element, { disabled: true, ...operationBusy(operation) }); assert.doesNotMatch(visibleText(element), /Retired label/);
+      assert.equal(element['error'].textContent, 'Current client failure'); assert.equal(element['error'].hidden, false);
+      requests[0]!.resolve(result()); await settle(); await settle(); assertPicker(element);
+    });
+  }
+
+  for (const operation of ['refresh', 'apply'] as const) {
+    it(`retires a pre-ACK ${operation} snapshot on socket loss and survives public same-client silent disconnect/rejoin`, async t => {
+      const { element, sockets, hello, tick, joinRequest } = socketJoiningWidget(t); await settle();
+      const socket = sockets[0]!, initial = await hello(socket), client = element.client!;
+      socket.deliver({ type: 'room:state', ...roomState() });
+      assert.equal(client['session'], null); assert.equal(client['pending'].has(initial.requestId), true);
+      await seed(t, element, client); draft(element, 'private-mic-a');
+      const requests = holdOperations(t, client, operation); click(operationButton(element, operation)); const retired = element['microphoneOwner'];
+      socket.close(); await settle(); assert.equal(client.status, 'disconnected'); assert.ok(client.state); assertRetired(element);
+      let statuses = 0; element.addEventListener('stage-status', () => { statuses++; });
+      await client.disconnect(); assert.equal(statuses, 0, 'silent repeat disconnect has no status transition'); assert.equal(client.state, null);
+      const connecting = client.connect(), next = sockets[1]!; next.hello(); await connecting;
+      const joining = client.join({ roomId: 'one', name: 'Fresh same seat' }); await settle(); await tick(100);
+      const request = joinRequest(next);
+      next.deliver({ type: 'room:state', ...roomState() }); next.deliver({ type: 'ok', requestId: request.requestId }); await joining;
+      assertPicker(element); assert.notEqual(element['microphoneOwner'], retired);
+      click(operationButton(element, operation)); assert.equal(requests.length, 2); const attempt = operationAttempt(element, operation);
+      next.deliver({ type: 'error', code: 'conflict', message: 'Fresh same-seat failure' });
+      requests[0]!.reject(new Error('Retired pre-ACK failure')); await settle(); await settle();
+      assert.equal(operationAttempt(element, operation), attempt); assertPicker(element, { disabled: true, ...operationBusy(operation) });
+      assert.equal(element['error'].textContent, 'Fresh same-seat failure'); requests[1]!.resolve(result()); await settle(); await settle(); assertPicker(element);
+    });
+  }
+
+  for (const terminal of terminalCases) for (const identity of ['same', 'new'] as const) {
+    it(`allows public same-client ${terminal.title} rejoin with a ${identity} identity and isolates a retired refresh result`, async t => {
+      const { element, client, socket, sockets, tick, joinRequest } = await socketJoinedWidget(t);
+      await seed(t, element, client); draft(element, 'private-mic-a'); const requests = holdOperations(t, client, 'refresh');
+      click(element['microphoneRefresh']); const retired = element['microphoneOwner'];
+      socket.deliver(terminal.message); await settle(); assertRetired(element);
+      const connecting = client.connect(), next = sockets[1]!; next.hello(); await connecting;
+      const joining = client.join({ roomId: 'one', name: 'New join' }); await settle(); await tick(100);
+      const request = joinRequest(next), state = roomState(); if (identity === 'new') state.me.participantId = 'fresh-participant';
+      next.deliver({ type: 'room:state', ...state }); next.deliver({ type: 'ok', requestId: request.requestId }); await joining;
+      assertPicker(element); assert.notEqual(element['microphoneOwner'], retired); assert.equal(element.client, client);
+      click(element['microphoneRefresh']); assert.equal(requests.length, 2); const attempt = element['refreshAttempt'];
+      requests[0]!.resolve(result('Old terminal list')); await settle(); await settle();
+      assert.equal(element['refreshAttempt'], attempt); assertPicker(element, { disabled: true, refresh: true });
+      assert.doesNotMatch(visibleText(element), /Old terminal list/);
+      requests[1]!.resolve(result('Fresh terminal list')); await settle(); await settle(); assertPicker(element);
+      assert.match(visibleText(element), /Fresh terminal list/);
+    });
+  }
+
+  it('clears device privacy state on remount, retains explicit room-leave consent, and starts a fresh owner only after manual rejoin', async t => {
+    const { element, client, sockets, hello } = await socketJoinedWidget(t);
+    await seed(t, element, client); draft(element, 'private-mic-a'); const requests = holdOperations(t, client, 'refresh'); click(element['microphoneRefresh']);
+    click(element['roomAction']); await settle(); assertRetired(element);
+    Object.assign(element, { isConnected: false }); element.disconnectedCallback();
+    Object.assign(element, { isConnected: true }); element.connectedCallback(); await settle();
+    assertRetired(element); assert.equal(element.client, null); assert.equal(sockets.length, 1);
+    requests[0]!.resolve(result('Retired remount list')); await settle(); assertRetired(element);
+    click(element['roomAction']); await settle(); const current = element.client!, next = sockets[1]!, join = await hello(next);
+    next.deliver({ type: 'room:state', ...roomState() }); next.deliver({ type: 'ok', requestId: join.requestId }); await settle();
+    assert.notEqual(current, client); assertPicker(element); assert.equal(options(element).length, 1); assert.doesNotMatch(visibleText(element), /Retired remount list/);
+  });
+
+  for (const outcome of ['resolve', 'reject'] as const) {
+    it(`checks real enumeration ${outcome} against silent public snapshot retirement before updating any UI`, async t => {
+      const media = fakeMedia(t), { element, client, socket } = await socketJoinedWidget(t);
+      await refresh(element); draft(element, 'private-mic-a'); media.holdEnumeration(); click(element['microphoneRefresh']);
+      assert.equal(media.enumerations.length, 2); socket.deliver({ type: 'error', code: 'conflict', message: 'Unrelated visible failure' });
+      // An already-disconnected public client can clear its retained snapshot without another event.
+      client['currentStatus'] = 'disconnected'; await client.disconnect();
+      assert.equal(client.state, null);
+      if (outcome === 'resolve') media.enumerations[1]!.resolve([device('retired-id', 'Retired enumeration label')]);
+      else media.enumerations[1]!.reject(new Error('Retired enumeration rejection'));
+      await settle(); await settle(); assertRetired(element); assert.doesNotMatch(visibleText(element), /Retired enumeration label/);
+      assert.equal(element['error'].hidden, false); assert.equal(element['error'].textContent, 'Unrelated visible failure'); assert.equal(media.captures.length, 0);
+    });
+  }
+
+  for (const outcome of ['resolve', 'reject'] as const) {
+    it(`ignores real late enumeration ${outcome} while a replacement seat's enumeration is pending`, async t => {
+      const media = fakeMedia(t), { element, client, socket } = await socketJoinedWidget(t);
+      await refresh(element); draft(element, 'private-mic-a'); media.holdEnumeration(); click(element['microphoneRefresh']);
+      const next = roomState(); next.me.participantId = 'replacement-seat'; socket.deliver({ type: 'room:state', ...next });
+      assertPicker(element); click(element['microphoneRefresh']); const attempt = element['refreshAttempt'];
+      assert.equal(media.enumerations.length, 3);
+      socket.deliver({ type: 'error', code: 'conflict', message: 'Replacement-seat current failure' });
+      if (outcome === 'resolve') media.enumerations[1]!.resolve([device('retired-input', 'Retired native enumeration label')]);
+      else media.enumerations[1]!.reject(new Error('Retired native enumeration failure'));
+      await settle(); await settle(); assertPicker(element, { disabled: true, refresh: true });
+      assert.equal(element['refreshAttempt'], attempt); assert.doesNotMatch(visibleText(element), /Retired native/);
+      assert.equal(element['error'].hidden, false); assert.equal(element['error'].textContent, 'Replacement-seat current failure');
+      media.enumerations[2]!.resolve([device('new-input', 'Fresh enumeration')]); await settle(); await settle();
+      assertPicker(element); assert.match(visibleText(element), /Fresh enumeration/); assert.equal(media.captures.length, 0);
+      assert.equal(client.me!.participantId, 'replacement-seat');
+    });
+
+    it(`allows an admitted enumeration to ${outcome} during reconnect while keeping all picker controls disabled until resume`, async t => {
+      const media = fakeMedia(t), { element, socket, sockets, tick, hello } = await socketJoinedWidget(t);
+      await refresh(element); draft(element, 'private-mic-a'); media.holdEnumeration(); click(element['microphoneRefresh']);
+      const owner = element['microphoneOwner']; socket.close(); await settle();
+      assertPicker(element, { value: 'private-mic-a', disabled: true, refresh: true });
+      if (outcome === 'resolve') media.enumerations[1]!.resolve([device('private-mic-a', 'Updated during reconnect')]);
+      else media.enumerations[1]!.reject(new Error('Enumeration failed during reconnect'));
+      await settle(); await settle(); assertPicker(element, { value: 'private-mic-a', disabled: true });
+      force(element['microphoneRefresh']); force(element['microphoneApply']); assert.equal(media.enumerations.length, 2);
+      assert.equal(element['microphoneOwner'], owner); assert.equal(media.captures.length, 0);
+      if (outcome === 'resolve') assert.match(visibleText(element), /Updated during reconnect/);
+      else assert.equal(element['error'].textContent, 'Enumeration failed during reconnect');
+      await tick(500); const next = sockets[1]!, resume = await hello(next);
+      next.deliver({ type: 'room:state', ...roomState() }); next.deliver({ type: 'ok', requestId: resume.requestId }); await settle();
+      assertPicker(element, { value: 'private-mic-a' }); assert.equal(element['microphoneOwner'], owner); assert.equal(media.enumerations.length, 2);
+    });
+  }
+
+  it('retires a draft after a nested forwarded callback clears the public snapshot, and does not create an owner from a new reconnect-only identity', async t => {
+    const { element, client, socket } = await socketJoinedWidget(t); await seed(t, element, client); draft(element, 'private-mic-a');
+    const requests = holdOperations(t, client, 'refresh'); click(element['microphoneRefresh']);
+    element.addEventListener('stage-micready', () => { client['snapshot'] = null; }, { once: true });
+    client.dispatchEvent(new CustomEvent('micready', { detail: undefined })); assertRetired(element);
+    requests[0]!.resolve(result('Nested retired list')); await settle(); assertRetired(element);
+    const next = roomState(); next.me.participantId = 'different-reconnecting-seat';
+    client['snapshot'] = next; client['currentStatus'] = 'reconnecting';
+    client.dispatchEvent(new CustomEvent('status', { detail: 'reconnecting' })); assertRetired(element);
+    force(element['microphoneRefresh']); force(element['microphoneApply']); assert.equal(requests.length, 1); assertRetired(element);
+    socket.deliver({ type: 'room:state', ...next }); assertPicker(element); assert.equal(options(element).length, 1);
+  });
 });

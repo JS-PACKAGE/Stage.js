@@ -761,3 +761,6 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 
 
 194. **完整舉手婉拒回饋流程（2026-10-14）：** actual validator／Hub→公開SDK→三個完整UI模組的基線四例證明，成功婉拒僅有與自行收回相同的hand:withdraw/state，使用者只見按鈕或身分默默復原。新增target-only hand:rejected帶roomId/pid，在既有apply/state後、主控ACK前送當前有效session；不修改Room的全房事件、權限、離線拒絕政策或快照排程，不保存歷史／重連補發。SDK新增typed handrejected並驗目前room/pid、waiting/live及台下非舉手觀眾資格；原hand形狀與state保持。三UI獨立安全普通提示，綁當前身份與生命週期，伺服器接受新舉手／上台／主控／重連／退役即清，不在pending click時假設新申請成立。Widget先同步再轉送事件，保持原detail與錯誤通道；無新增timer、storage、auto raise/retry或media操作。舊官方SDK忽略新事件已有實證；第三方嚴格解析器未保證。無per-raise epoch，不能辨識任意重排同房同人通知；證據限受控DOM/socket、actualSDK/Hub，原生AT/瀏覽器/硬體音訊未驗收。
+
+
+195. **Widget 明確麥克風選擇流程（2026-10-14）：** 基線公開SDK／受控DOM/media十二例確認完整範例已有選擇功能，但widget僅有靜音與失敗重試，宿主必須另寫裝置入口。僅widget加label/select、手動listAudioDevices與明確setInputDevice，沒有SDK/server API擴充、auto enumeration/devicechange、預覽、storage或自動capture。空字串依既有micConstraints；匿名安全label、缺失草稿保留不偷偷fallback。有效client/generation/room/pid owner，refresh/apply互斥reserve，重連保留draft/list/pending但停新操作，退役與晚到結果隔離，current失敗可再次明確按鈕。實證台下僅存偏好、健康台上同peer replaceTrack保留mute；失敗擷取仍需既有retry，shared preview micready不能解鎖pending。另已重現離台→回台使setter fulfilled但未採新ID，因此只顯示草稿／等待與錯誤，完成不宣稱套用／目前硬體；不為顯示另加epoch或getter。控制面與媒體契約不改，證據限公開SDK與受控DOM/socket/media，原生選單、AT、權限與硬體音訊未驗收。
