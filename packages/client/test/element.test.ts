@@ -395,6 +395,161 @@ describe('widget hand queue position', () => {
   });
 });
 
+describe('widget force-mute feedback', () => {
+  function assertFeedback(element: InstanceType<typeof StageElement>, muted: boolean, locked: boolean,
+    { pending = false, reconnecting = false, name = 'Room' } = {}): void {
+    const where = locked ? '台上（主控已鎖定靜音）' : muted ? '台上（已靜音）' : '台上';
+    assert.equal(element['status'].textContent, `${name} · ${reconnecting ? '重新連線中' : '直播中'} · ${where}`);
+    assert.equal(element['mic'].textContent, locked ? '麥克風已被主控靜音' : muted ? '取消靜音' : '靜音');
+    assert.equal(element['mic'].hidden, false);
+    assert.equal(element['mic'].disabled, locked || pending || reconnecting);
+    assert.equal(element['mic'].getAttribute('aria-pressed'), String(muted));
+    assert.equal(element['mic'].getAttribute('aria-busy'), pending ? 'true' : null);
+    assert.equal(element['mic'].getAttribute('aria-label'), null);
+  }
+
+  async function hubWidget(t: TestContext, selfMuted: boolean) {
+    const h = harness(); t.after(async () => { await h.hub.shutdown(); });
+    const host = await h.create();
+    const speaker = await h.join(host.roomId, host.code, 'Speaker');
+    assert.equal(await h.req(speaker.s, { type: 'hand:raise' }), 'ok');
+    assert.equal(await h.req(host.s, { type: 'stage:approve', targetId: speaker.id }), 'ok');
+    if (selfMuted) assert.equal(await h.req(speaker.s, { type: 'mic:mute' }), 'ok');
+    const snapshot = () => { const state = speaker.s.last('room:state'); assert.ok(state); return state; };
+    const fixture = await socketJoinedWidget(t, snapshot());
+    const deliver = async () => { fixture.socket.deliver(snapshot()); await settle(); };
+    const lock = async (locked: boolean) => {
+      assert.equal(await h.req(host.s, { type: locked ? 'mic:force-mute' : 'mic:force-unmute', targetId: speaker.id }), 'ok');
+      await deliver();
+    };
+    return { ...fixture, h, host, speaker, snapshot, deliver, lock };
+  }
+
+  for (const selfMuted of [false, true]) {
+    it(`distinguishes actual Hub lock/unlock with selfMuted=${selfMuted} and clears it offstage`, async t => {
+      const { element, client, socket, tick, h, speaker, deliver, lock } = await hubWidget(t, selfMuted);
+      const status = element['status'], mic = element['mic'];
+      assert.equal(status.getAttribute('role'), 'status');
+      assert.equal(status.getAttribute('aria-live'), 'polite');
+      assertFeedback(element, selfMuted, false);
+      await lock(true);
+      assert.equal(client.me?.forceMuted, true); assert.equal(client.me?.muted, true);
+      assertFeedback(element, true, true);
+      assert.equal(element['status'], status); assert.equal(element['mic'], mic);
+      assert.equal(element['leaveStage'].disabled, false); assert.equal(element['leaveStage'].textContent, '離開舞台');
+      assert.equal(element['listen'].disabled, false); assert.equal(element['listen'].textContent, '靜音收聽');
+      const mute = t.mock.method(client, 'mute'), unmute = t.mock.method(client, 'unmute');
+      const frames = [...socket.sent];
+      click(mic); click(mic); await tick(100);
+      assert.equal(mute.mock.callCount(), 0); assert.equal(unmute.mock.callCount(), 0);
+      assert.deepEqual(socket.sent, frames); assert.equal(client['pending'].size, 0);
+      assert.equal(element['pendingActions'].size, 0); assert.equal(element['error'].hidden, true);
+      assert.equal(await h.req(speaker.s, { type: 'mic:unmute' }), 'forbidden');
+      await lock(false);
+      assert.equal(client.me?.forceMuted, false); assert.equal(client.me?.muted, selfMuted);
+      assertFeedback(element, selfMuted, false);
+      await lock(true);
+      assert.equal(await h.req(speaker.s, { type: 'stage:leave' }), 'ok'); await deliver();
+      assert.equal(client.me?.onStage, false); assert.equal(client.me?.forceMuted, false);
+      assert.equal(element['status'].textContent, 'Room · 直播中 · 收聽中');
+      assert.equal(mic.hidden, true); assert.equal(mic.disabled, true);
+      assert.equal(mic.textContent, '靜音'); assert.equal(mic.getAttribute('aria-pressed'), 'false');
+      assert.equal(element['hand'].hidden, false); assert.equal(element['hand'].textContent, '舉手發言');
+    });
+  }
+
+  for (const selfMuted of [false, true]) {
+    for (const unlockBeforeAck of [false, true]) {
+      it(`updates a pending ${selfMuted ? 'unmute' : 'mute'} before ACK with unlockBeforeAck=${unlockBeforeAck}`, async t => {
+        const { element, client, socket, tick, h, speaker, lock } = await hubWidget(t, selfMuted);
+        click(element['mic']); await tick(100);
+        const command = socket.sent.find(message => message.type === (selfMuted ? 'mic:unmute' : 'mic:mute'));
+        assert.ok(command && 'requestId' in command);
+        const start = speaker.s.inbox.length;
+        await h.hub.handle(speaker.s, command);
+        const replies = speaker.s.inbox.slice(start);
+        const ack = replies.find(message => message.type === 'ok' && message.requestId === command.requestId);
+        assert.ok(ack);
+        for (const message of replies.filter(message => message.type !== 'ok' && message.type !== 'error')) socket.deliver(message);
+        await settle();
+        assert.equal(client['pending'].has(command.requestId), true);
+        assertFeedback(element, !selfMuted, false, { pending: true });
+        await lock(true);
+        assertFeedback(element, true, true, { pending: true });
+        const frames = [...socket.sent]; click(element['mic']); await tick(100);
+        assert.deepEqual(socket.sent, frames);
+        if (unlockBeforeAck) {
+          await lock(false);
+          assertFeedback(element, !selfMuted, false, { pending: true });
+        }
+        assert.equal(client['pending'].has(command.requestId), true);
+        socket.deliver(ack); await settle();
+        assert.equal(client['pending'].size, 0); assert.equal(element['pendingActions'].size, 0);
+        assertFeedback(element, unlockBeforeAck ? !selfMuted : true, !unlockBeforeAck);
+        if (!unlockBeforeAck) await lock(false);
+        assertFeedback(element, !selfMuted, false);
+        assert.equal(element['error'].hidden, true);
+      });
+    }
+  }
+
+  for (const selfMuted of [false, true]) {
+    it(`retains lock wording while reconnecting and accepts fresh state before resume ACK with selfMuted=${selfMuted}`, async t => {
+      const { element, client, socket, sockets, tick, hello, h, host, speaker, snapshot } = await hubWidget(t, selfMuted);
+      assert.equal(await h.req(host.s, { type: 'mic:force-mute', targetId: speaker.id }), 'ok');
+      socket.deliver(snapshot()); await settle();
+      const retained = client.state;
+      socket.close(); await settle();
+      assert.equal(client.state, retained);
+      assertFeedback(element, true, true, { reconnecting: true });
+      click(element['mic']); await tick(500);
+      const replacement = sockets[1]!;
+      const resume = await hello(replacement);
+      assertFeedback(element, true, true, { reconnecting: true });
+      if (!selfMuted) assert.equal(await h.req(host.s, { type: 'mic:force-unmute', targetId: speaker.id }), 'ok');
+      replacement.deliver(snapshot()); await settle();
+      assert.equal(client['pending'].has(resume.requestId), true);
+      assertFeedback(element, selfMuted, selfMuted);
+      assert.equal(replacement.sent.some(message => message.type === 'mic:mute' || message.type === 'mic:unmute'), false);
+      replacement.deliver({ type: 'ok', requestId: resume.requestId }); await settle();
+      assertFeedback(element, selfMuted, selfMuted);
+      if (selfMuted) {
+        assert.equal(await h.req(host.s, { type: 'mic:force-unmute', targetId: speaker.id }), 'ok');
+        replacement.deliver(snapshot()); await settle();
+        assertFeedback(element, true, false);
+      }
+    });
+  }
+
+  it('uses the same feedback for an onstage controller without changing ordinary microphone labels', async t => {
+    const { element, client } = await subscribedWidget(t, true);
+    const state = roomState(true); state.me.role = 'controller'; state.controllerId = state.me.participantId;
+    for (const [muted, forceMuted] of [[false, false], [true, false], [true, true], [true, false], [false, false]] as const) {
+      Object.assign(state.me, { muted, forceMuted });
+      await client['receive']({ type: 'room:state', ...state });
+      assertFeedback(element, muted, forceMuted, { name: 'Room & Hall' });
+      assert.equal(element['hand'].hidden, true);
+    }
+  });
+
+  for (const terminal of [null, ...terminalCases]) {
+    it(`clears force-mute wording after ${terminal?.title ?? 'exposed-client disconnect'}`, async t => {
+      const { element, client } = await subscribedWidget(t, true);
+      const state = roomState(true); Object.assign(state.me, { muted: true, forceMuted: true });
+      await client['receive']({ type: 'room:state', ...state });
+      assertFeedback(element, true, true, { name: 'Room & Hall' });
+      if (terminal) await client['receive'](terminal.message); else await client.disconnect();
+      assertRoomControlsHidden(element);
+      assert.equal(element['status'].textContent, terminal?.text ?? '未連線');
+      assert.equal(element['mic'].textContent, '靜音'); assert.equal(element['mic'].disabled, true);
+      assert.equal(element['mic'].getAttribute('aria-pressed'), 'false');
+      element.playbackMuted = true;
+      assert.equal(element['status'].textContent, terminal?.text ?? '未連線');
+      assert.doesNotMatch(element['mic'].textContent ?? '', /主控|鎖定/);
+    });
+  }
+});
+
 const reconnectActions = [
   { title: 'raise hand', key: 'hand', method: 'raiseHand', type: 'hand:raise', onStage: false, raised: false, muted: false },
   { title: 'withdraw hand', key: 'hand', method: 'withdrawHand', type: 'hand:withdraw', onStage: false, raised: true, muted: false },

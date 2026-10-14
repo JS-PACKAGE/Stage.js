@@ -471,7 +471,7 @@ export class StageElement extends HTMLElement {
         ? state.hands.findIndex(person => person.participantId === me.participantId) : -1;
       const raised = handIndex < 0 ? '已舉手'
         : `已舉手（${client!.status === 'reconnecting' ? '上次' : ''}佇列第 ${handIndex + 1} 位）`;
-      const where = me.onStage ? (me.muted ? '台上（已靜音）' : '台上') : me.handRaised ? raised : '收聽中';
+      const where = me.onStage ? (me.forceMuted ? '台上（主控已鎖定靜音）' : me.muted ? '台上（已靜音）' : '台上') : me.handRaised ? raised : '收聽中';
       this.status.textContent = `${decodeName(state.name)} · ${STATUS_LABELS[client!.status]} · ${where}`;
     } else if (this.joinPhase) {
       this.status.textContent = this.joinPhase === 'connecting' ? '連線中…' : '正在加入房間…';
@@ -507,7 +507,7 @@ export class StageElement extends HTMLElement {
     this.mic.hidden = !me?.onStage;
     this.leaveStage.hidden = !me || (!me.onStage && me.role !== 'controller');
     this.mic.disabled = !this.canUseMic() || this.pendingActions.has(this.mic);
-    this.mic.textContent = me?.muted ? '取消靜音' : '靜音';
+    this.mic.textContent = me?.forceMuted ? '麥克風已被主控靜音' : me?.muted ? '取消靜音' : '靜音';
     this.mic.setAttribute('aria-pressed', String(Boolean(me?.muted)));
     this.leaveStage.textContent = me?.onStage ? '離開舞台' : '返回舞台';
     this.leaveStage.disabled = this.leaveStage.hidden || reconnecting || this.pendingActions.has(this.leaveStage);
