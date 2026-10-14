@@ -4051,6 +4051,43 @@ describe('widget explicit microphone retry', () => {
     return fixture;
   }
 
+  it('keeps real failed and pending capture ownership when explicitly dismissing the widget error', async t => {
+    const media = fakeCapture(t);
+    const { element, client, socket, sockets } = await socketJoinedWidget(t, roomState(true), true);
+    await client['mediaTask']; assertRetry(element);
+    assert.equal(element['errorDismiss'].hidden, false);
+    const failure = element['micFailure'], revision = element['errorRevision'], message = element['error'].textContent;
+    const peer = media.Peer.instances[0]!, frames = [...socket.sent], status = element['status'].textContent;
+    const retry = t.mock.method(client, 'retryMicrophone');
+    const timeout = t.mock.method(globalThis, 'setTimeout'), interval = t.mock.method(globalThis, 'setInterval');
+    click(element['errorDismiss']);
+    assert.equal(element['error'].hidden, true); assert.equal(element['errorDismiss'].hidden, true);
+    assert.equal(element['error'].textContent, message); assert.equal(element['errorRevision'], revision);
+    assert.equal(element['micFailure'], failure); assertRetry(element);
+    assert.equal(client['micFailed'], true); assert.equal(client['mic'], null); assert.equal(peer.transceiver.sender.track, null);
+    assert.equal(media.requests.length, 1); assert.equal(retry.mock.callCount(), 0);
+    assert.equal(timeout.mock.callCount(), 0); assert.equal(interval.mock.callCount(), 0);
+    assert.deepEqual(socket.sent, frames); assert.equal(sockets.length, 1); assert.equal(media.Peer.instances.length, 1);
+    assert.equal(element['status'].textContent, status); assert.equal(element.client, client);
+    media.hold();
+    t.after(async () => { for (const request of media.requests) request.reject(new DOMException('test cleanup', 'AbortError')); await client['mediaTask']; });
+    click(element['micRetry']); await until(() => media.requests.length === 2, 'explicit retry starts controlled capture');
+    const attempt = element['micFailure'], pendingMicFailed = client['micFailed']; assertRetry(element, { disabled: true, busy: true });
+    await client['receive']({ type: 'error', code: 'conflict', message: 'Error during pending capture' });
+    click(element['errorDismiss']);
+    assert.equal(element['micFailure'], attempt); assertRetry(element, { disabled: true, busy: true });
+    assert.equal(media.requests.length, 2); assert.equal(retry.mock.callCount(), 1); assert.equal(client['micFailed'], pendingMicFailed);
+    media.requests[1]!.reject(new DOMException('controlled missing device', 'NotFoundError')); await client['mediaTask'];
+    assertRetry(element); assert.equal(element['error'].hidden, false); assert.equal(element['errorDismiss'].hidden, false);
+    assert.match(element['error'].textContent ?? '', /找不到麥克風/);
+    click(element['errorDismiss']); click(element['micRetry']);
+    await until(() => media.requests.length === 3, 'only another explicit retry requests capture');
+    media.requests[2]!.resolve(media.source()); await client['mediaTask'];
+    assertRetry(element, { hidden: true }); assert.equal(element['error'].hidden, true); assert.equal(element['errorDismiss'].hidden, true);
+    assert.equal(client['micFailed'], false); assert.equal(peer.transceiver.sender.track, media.tracks[0]);
+    assert.equal(retry.mock.callCount(), 2); assert.deepEqual(socket.sent, frames); assert.equal(peer.closed, false);
+  });
+
   for (const cause of ['initial denial', 'natural end'] as const) {
     it(`offers ${cause} recovery only on an explicit click and retains one peer and participant`, async t => {
       const media = fakeCapture(t, cause === 'initial denial');
@@ -6571,4 +6608,273 @@ describe('widget latest room speaking report', () => {
     socket.deliver({ type: 'ok', requestId: rename.requestId }); socket.deliver({ type: 'ok', requestId: mute.requestId }); await settle();
     assert.equal(client['pending'].size, 0); assertSpeaking(element, names('乙'));
   });
+});
+
+describe('widget explicit error dismissal', () => {
+  type Widget = InstanceType<typeof StageElement>;
+  const nodes = (node: Node): Node[] => [node, ...node.children.flatMap(nodes)];
+  function view(element: Widget) {
+    return { hidden: element['error'].hidden, dismissHidden: element['errorDismiss'].hidden,
+      dismissDisabled: element['errorDismiss'].disabled, text: element['error'].textContent, revision: element['errorRevision'] };
+  }
+  function assertHidden(element: Widget, hidden: boolean): void {
+    assert.equal(element['error'].hidden, hidden, 'error visibility');
+    assert.equal(element['errorDismiss'].hidden, hidden, 'dismiss visibility follows the error');
+    assert.equal(element['errorDismiss'].disabled, hidden, 'only a visible dismissal is enabled');
+    assert.equal(element['errorDismiss'].getAttribute('aria-busy'), null, 'dismissal has no pending operation');
+  }
+  function otherView(element: Widget) {
+    return nodes(element as unknown as Node).filter(node => node !== (element['error'] as unknown as Node)
+      && node !== (element['errorDismiss'] as unknown as Node) && node.tagName !== 'STYLE')
+      .map(node => [node.tagName, node.textContent, node.hidden, node.disabled, node.value, [...node.attributes]]);
+  }
+  function errorEvent(client: StageClient, detail: unknown = new Error('Current failure')): void {
+    client.dispatchEvent(new CustomEvent('error', { detail }));
+  }
+  function micError(client: StageClient): void {
+    client.dispatchEvent(new CustomEvent('micerror', { detail: { name: 'NotReadableError', message: 'Current capture failure' } }));
+  }
+
+  it('starts with a hidden native button beside the unchanged alert and outside live-region ancestors', () => {
+    const element = new StageElement(); widgets.push(element);
+    const all = nodes(element as unknown as Node), error = element['error'] as unknown as Node;
+    const dismiss = element['errorDismiss'] as unknown as Node;
+    assertHidden(element, true); assert.equal(element['errorRevision'], 0); assert.equal(error.textContent, '');
+    assert.equal(dismiss.tagName, 'BUTTON'); assert.equal(dismiss.type, 'button'); assert.equal(dismiss.textContent, '關閉錯誤訊息');
+    assert.equal(dismiss.part.has('error-dismiss'), true);
+    assert.equal(dismiss.getAttribute('role'), null); assert.equal(dismiss.getAttribute('aria-live'), null);
+    assert.equal(error.tagName, 'P'); assert.equal(error.getAttribute('role'), 'alert'); assert.deepEqual(error.children, []);
+    const parent = all.find(node => node.children.includes(error)); assert.ok(parent);
+    assert.ok(parent.children.includes(dismiss)); assert.equal(parent.children.indexOf(dismiss), parent.children.indexOf(error) + 1);
+    const ancestors = (node: Node): Node[] | undefined => node === dismiss ? []
+      : node.children.map(child => ancestors(child)).find(path => path !== undefined)?.concat(node);
+    const path = ancestors(element as unknown as Node); assert.ok(path);
+    assert.ok(path.every(node => !node.hasAttribute('aria-live') && !['status', 'alert', 'log'].includes(node.getAttribute('role') ?? '')));
+    assert.equal(all.filter(node => node === dismiss).length, 1);
+    click(element['errorDismiss']); assertHidden(element, true); assert.equal(element['errorRevision'], 0);
+  });
+
+  it('dismisses only presentation, keeps literal error text and raw event identity, and shows every later error', async t => {
+    const { element, client } = await subscribedWidget(t);
+    const detail = { message: '<img src=x onerror=alert(1)> &amp; "private"', code: 'conflict' };
+    const forwarded: { detail: unknown; bubbles: boolean; composed: boolean; shown: ReturnType<typeof view> }[] = [];
+    element.addEventListener('stage-error', event => forwarded.push({ detail: (event as CustomEvent).detail,
+      bubbles: event.bubbles, composed: event.composed, shown: view(element) }));
+    errorEvent(client, detail);
+    assertHidden(element, false); assert.equal(element['error'].textContent, detail.message);
+    assert.deepEqual((element['error'] as unknown as Node).children, []); assert.equal(Reflect.get(element['error'], 'innerHTML'), undefined);
+    assert.equal(forwarded.length, 1); assert.equal(forwarded[0]!.detail, detail);
+    assert.equal(forwarded[0]!.bubbles, true); assert.equal(forwarded[0]!.composed, true); assert.equal(forwarded[0]!.shown.hidden, false);
+    const before = otherView(element), revision = element['errorRevision'], generation = element['generation'];
+    const state = client.state, timeout = t.mock.method(globalThis, 'setTimeout'), interval = t.mock.method(globalThis, 'setInterval');
+    const connect = t.mock.method(client, 'connect'), disconnect = t.mock.method(client, 'disconnect');
+    click(element['errorDismiss']);
+    assertHidden(element, true); assert.equal(element['error'].textContent, detail.message); assert.equal(element['errorRevision'], revision);
+    assert.deepEqual(otherView(element), before); assert.equal(element['generation'], generation); assert.equal(element.client, client); assert.equal(client.state, state);
+    assert.equal(connect.mock.callCount(), 0); assert.equal(disconnect.mock.callCount(), 0);
+    assert.equal(timeout.mock.callCount(), 0); assert.equal(interval.mock.callCount(), 0); assert.equal(forwarded.length, 1);
+    element['render'](); await client['receive']({ type: 'room:state', ...roomState() });
+    assertHidden(element, true); assert.equal(element['errorRevision'], revision);
+    errorEvent(client, detail); assertHidden(element, false); assert.equal(element['errorRevision'], revision + 1);
+    assert.equal(forwarded[1]!.detail, detail, 'even the same error object can be shown again');
+    click(element['errorDismiss']); errorEvent(client, 'unstructured failure');
+    assertHidden(element, false); assert.equal(element['error'].textContent, '操作失敗。');
+    assert.equal(forwarded[2]!.detail, 'unstructured failure');
+  });
+
+  it('dismisses a settled real command rejection without issuing a retry or changing room state', async t => {
+    const { element, client, socket, tick } = await socketJoinedWidget(t);
+    click(element['hand']); await tick(100);
+    const request = socket.sent.find(message => message.type === 'hand:raise'); assert.ok(request);
+    socket.deliver({ type: 'error', code: 'forbidden', message: 'Control request rejected', requestId: request.requestId }); await settle();
+    assertHidden(element, false); assert.equal(element['error'].textContent, 'Control request rejected'); assert.equal(client['pending'].size, 0);
+    const before = otherView(element), frames = [...socket.sent], revision = element['errorRevision'];
+    click(element['errorDismiss']);
+    assertHidden(element, true); assert.equal(element['errorRevision'], revision); assert.equal(element['error'].textContent, 'Control request rejected');
+    assert.deepEqual(otherView(element), before); assert.deepEqual(socket.sent, frames); assert.equal(client.me!.handRaised, false);
+    await tick(1000); assertHidden(element, true); assert.deepEqual(socket.sent, frames);
+  });
+
+  it('allows the same real request catch to show again after its earlier SDK error event was dismissed', async t => {
+    const { element, client, socket, tick } = await socketJoinedWidget(t);
+    click(element['hand']); await tick(100);
+    const request = socket.sent.find(message => message.type === 'hand:raise'); assert.ok(request);
+    const observations: { detail: unknown; before: ReturnType<typeof view>; after: ReturnType<typeof view> }[] = [];
+    const sdkDetails: unknown[] = []; client.on('error', ({ detail }) => sdkDetails.push(detail));
+    element.addEventListener('stage-error', event => {
+      const before = view(element); click(element['errorDismiss']);
+      observations.push({ detail: (event as CustomEvent).detail, before, after: view(element) });
+    });
+    socket.deliver({ type: 'error', code: 'forbidden', message: 'One request failure', requestId: request.requestId });
+    assert.equal(observations.length, 1); assert.equal(observations[0]!.before.hidden, false); assert.equal(observations[0]!.after.hidden, true);
+    assert.equal(sdkDetails.length, 1); assert.equal(observations[0]!.detail, sdkDetails[0]);
+    assert.equal(observations[0]!.after.dismissHidden, true); assert.equal(observations[0]!.before.revision, observations[0]!.after.revision);
+    assertHidden(element, true); await settle();
+    assertHidden(element, false); assert.equal(element['error'].textContent, 'One request failure');
+    assert.equal(element['errorRevision'], observations[0]!.after.revision + 1, 'dismissal does not deduplicate a later show from the command catch');
+    assert.equal(observations.length, 1, 'the catch does not synthesize another SDK error event'); assert.equal(client['pending'].size, 0);
+    click(element['errorDismiss']); assertHidden(element, true);
+  });
+
+  it('retains initial-entry retry and failure status after dismissal without reconnecting or cancelling', async t => {
+    const { element, connections, joins } = deferredJoiningWidget(t); await settle();
+    assert.equal(connections.length, 1); connections[0]!.pending.reject(new Error('Initial connection rejected')); await settle();
+    assertHidden(element, false); assert.equal(element['retry'].hidden, false); assert.equal(element['retry'].disabled, false);
+    const before = otherView(element), client = element.client, generation = element['generation'];
+    click(element['errorDismiss']); await settle();
+    assertHidden(element, true); assert.deepEqual(otherView(element), before); assert.equal(element.client, client); assert.equal(element['generation'], generation);
+    assert.equal(connections.length, 1); assert.equal(joins.length, 0); assert.equal(element['error'].textContent, 'Initial connection rejected');
+  });
+
+  for (const terminal of terminalCases) {
+    it(`keeps the ${terminal.title} notice and retired room controls after dismissing a retained error`, async t => {
+      const { element, client, socket, sockets } = await socketJoinedWidget(t);
+      socket.deliver({ type: 'error', code: 'conflict', message: 'Retained terminal failure' }); socket.deliver(terminal.message); await settle();
+      assertHidden(element, false); assert.equal(element['status'].textContent, terminal.text); assertRoomControlsHidden(element);
+      const before = otherView(element), frames = [...socket.sent], revision = element['errorRevision'];
+      click(element['errorDismiss']); await settle();
+      assertHidden(element, true); assert.deepEqual(otherView(element), before); assert.equal(element['errorRevision'], revision);
+      assert.equal(element['status'].textContent, terminal.text); assert.equal(client.state, null); assert.equal(client.status, 'disconnected');
+      assert.equal(element['retry'].hidden, true); assert.equal(sockets.length, 1); assert.deepEqual(socket.sent, frames);
+    });
+  }
+
+  for (const control of ['hand', 'mic'] as const) {
+    it(`keeps an unrelated pending ${control} request busy and lets a later rejection become visible`, async t => {
+      const { element, client, socket, tick } = await socketJoinedWidget(t, roomState(control === 'mic'));
+      click(element[control]); await tick(100);
+      const request = socket.sent.find(message => message.type === (control === 'mic' ? 'mic:mute' : 'hand:raise')); assert.ok(request && 'requestId' in request);
+      socket.deliver({ type: 'error', code: 'conflict', message: 'Unrelated pending-control error' });
+      const before = otherView(element), frames = [...socket.sent], pending = [...element['pendingActions']], size = client['pending'].size;
+      const timeout = t.mock.method(globalThis, 'setTimeout'), interval = t.mock.method(globalThis, 'setInterval');
+      click(element['errorDismiss']);
+      assertHidden(element, true); assert.deepEqual(otherView(element), before); assert.deepEqual([...element['pendingActions']], pending);
+      assert.equal(element[control].disabled, true); assert.equal(element[control].getAttribute('aria-busy'), 'true');
+      assert.equal(client['pending'].size, size); assert.deepEqual(socket.sent, frames);
+      assert.equal(timeout.mock.callCount(), 0); assert.equal(interval.mock.callCount(), 0);
+      socket.deliver({ type: 'error', code: 'forbidden', message: 'Later pending request rejection', requestId: request.requestId }); await settle();
+      assertHidden(element, false); assert.equal(element['error'].textContent, 'Later pending request rejection');
+      assert.equal(client['pending'].size, 0); assert.equal(element['pendingActions'].has(element[control]), false);
+      assert.equal(element[control].getAttribute('aria-busy'), null);
+    });
+  }
+
+  it('keeps a new nested error when a forwarded error callback dismisses its predecessor', async t => {
+    const { element, client } = await subscribedWidget(t);
+    const first = new Error('Outer error'), next = new Error('Nested new error');
+    const observations: ReturnType<typeof view>[] = [], details: unknown[] = [];
+    element.addEventListener('stage-error', event => details.push((event as CustomEvent).detail));
+    element.addEventListener('stage-error', () => {
+      observations.push(view(element)); click(element['errorDismiss']); observations.push(view(element)); errorEvent(client, next);
+    }, { once: true });
+    errorEvent(client, first);
+    assert.equal(observations.length, 2); assert.equal(observations[0]!.hidden, false); assert.equal(observations[1]!.hidden, true);
+    assert.equal(observations[0]!.revision, observations[1]!.revision); assert.deepEqual(details, [first, next]);
+    assertHidden(element, false); assert.equal(element['error'].textContent, next.message);
+    assert.equal(element['errorRevision'], observations[1]!.revision + 1);
+  });
+
+  it('shows a new synchronous retry exception after its SDK callback dismisses the prior microphone error', async t => {
+    const { element, client } = await subscribedWidget(t, true); micError(client);
+    const revision = element['errorRevision'], observations: ReturnType<typeof view>[] = [];
+    const retry = t.mock.method(client, 'retryMicrophone', () => {
+      observations.push(view(element)); click(element['errorDismiss']); observations.push(view(element));
+      throw new Error('New synchronous retry failure');
+    });
+    click(element['micRetry']);
+    assert.equal(retry.mock.callCount(), 1); assert.equal(observations.length, 2);
+    assert.equal(observations[0]!.revision, revision); assert.equal(observations[1]!.revision, revision);
+    assert.equal(observations[1]!.hidden, true); assert.equal(observations[1]!.dismissHidden, true);
+    assertHidden(element, false); assert.equal(element['error'].textContent, 'New synchronous retry failure');
+    assert.equal(element['errorRevision'], revision + 1); assert.equal(element['micFailure']!.errorRevision, revision + 1);
+    assert.equal(element['micFailure']!.pending, false); assert.equal(element['micRetry'].hidden, false); assert.equal(element['micRetry'].disabled, false);
+  });
+
+  for (const newer of [false, true]) {
+    for (const dismissed of [false, true]) {
+      it(`preserves natural micready ownership with ${newer ? 'a newer independent' : 'its own'} ${dismissed ? 'dismissed' : 'visible'} error`, async t => {
+        const { element, client } = await subscribedWidget(t, true); micError(client);
+        if (newer) errorEvent(client, new Error('Newer unrelated control failure'));
+        const failure = element['micFailure'], revision = element['errorRevision'], text = element['error'].textContent;
+        if (dismissed) click(element['errorDismiss']);
+        assert.equal(element['micFailure'], failure); assert.equal(element['errorRevision'], revision);
+        const observations: ReturnType<typeof view>[] = [];
+        element.addEventListener('stage-micready', () => observations.push(view(element)));
+        client.dispatchEvent(new CustomEvent('micready', { detail: undefined }));
+        assertHidden(element, dismissed || !newer); assert.equal(observations.length, 1);
+        assert.equal(observations[0]!.hidden, dismissed || !newer); assert.equal(observations[0]!.dismissHidden, dismissed || !newer);
+        assert.equal(element['errorRevision'], revision); assert.equal(element['error'].textContent, text);
+        assert.equal(element['micFailure'], undefined); assert.equal(element['micRetry'].hidden, true);
+      });
+    }
+  }
+
+  for (const guard of ['hidden button', 'hidden alert', 'detached', 'unmounted'] as const) {
+    it(`does nothing on a direct dismissal handler invocation with a ${guard}`, async t => {
+      const { element, client } = await subscribedWidget(t); errorEvent(client);
+      if (guard === 'hidden button') element['errorDismiss'].hidden = true;
+      else if (guard === 'hidden alert') element['error'].hidden = true;
+      else {
+        Object.assign(element, { isConnected: false });
+        if (guard === 'unmounted') { element.disconnectedCallback(); await settle(); }
+      }
+      const before = view(element), other = otherView(element), generation = element['generation'];
+      click(element['errorDismiss']); await settle();
+      assert.deepEqual(view(element), before); assert.deepEqual(otherView(element), other); assert.equal(element['generation'], generation);
+    });
+  }
+
+  for (const transition of ['attribute rejoin', 'unmount and remount'] as const) {
+    it(`isolates old errors, readiness and deferred command rejection after ${transition}`, async t => {
+      const { element, client } = await subscribedWidget(t, true);
+      const pending = deferred(); t.mock.method(client, 'mute', () => pending.promise);
+      t.after(async () => { pending.resolve(); await settle(); });
+      click(element['mic']); errorEvent(client, new Error('Retired failure')); click(element['errorDismiss']);
+      if (transition === 'attribute rejoin') element.setAttribute('name', 'Replacement');
+      else {
+        Object.assign(element, { isConnected: false }); element.disconnectedCallback(); await settle();
+        Object.assign(element, { isConnected: true }); element.connectedCallback();
+      }
+      await settle();
+      const replacement = element.client; assert.ok(replacement); assert.notEqual(replacement, client);
+      await replacement['receive']({ type: 'room:state', ...roomState(true) });
+      const detail = new Error('Current same-ID failure'), forwarded: unknown[] = [];
+      element.addEventListener('stage-error', event => forwarded.push((event as CustomEvent).detail));
+      errorEvent(replacement, detail); const before = view(element), other = otherView(element);
+      errorEvent(client, new Error('Retired client error')); micError(client); client.dispatchEvent(new CustomEvent('micready', { detail: undefined }));
+      pending.reject(new Error('Retired command rejection')); await settle();
+      assert.deepEqual(view(element), before); assert.deepEqual(otherView(element), other); assert.deepEqual(forwarded, [detail]);
+      click(element['errorDismiss']); assertHidden(element, true); assert.equal(element.client, replacement);
+      errorEvent(replacement, detail); assertHidden(element, false);
+    });
+  }
+
+  for (const action of ['hand', 'participant name', 'room name', 'playback unlock', 'leave room', 'attribute rejoin',
+    'initial retry', 'initial cancel', 'microphone retry', 'microphone ready'] as const) {
+    it(`hides the dismissal together with its existing error clear on ${action}`, async t => {
+      let element: Widget, client: StageClient;
+      if (action === 'initial retry' || action === 'initial cancel') {
+        const fixture = deferredJoiningWidget(t); element = fixture.element; await settle();
+        client = fixture.connections[0]!.client;
+        if (action === 'initial retry') { fixture.connections[0]!.pending.reject(new Error('Retryable initial failure')); await settle(); }
+      } else ({ element, client } = await subscribedWidget(t, action.startsWith('microphone')));
+      if (action === 'room name') {
+        const state = roomState(); state.me.role = 'controller'; await client['receive']({ type: 'room:state', ...state });
+      }
+      if (action.startsWith('microphone')) micError(client); else errorEvent(client);
+      if (action === 'playback unlock') client.dispatchEvent(new CustomEvent('audioblocked', { detail: { message: 'Blocked playback' } }));
+      assertHidden(element, false); const text = element['error'].textContent, revision = element['errorRevision'];
+      if (action === 'hand') { t.mock.method(client, 'raiseHand', async () => {}); click(element['hand']); }
+      else if (action === 'participant name') { t.mock.method(client, 'setName', async () => {}); click(element['nameUpdate']); }
+      else if (action === 'room name') { t.mock.method(client, 'setRoomName', async () => {}); click(element['roomNameUpdate']); }
+      else if (action === 'playback unlock') { t.mock.method(client, 'unlockAudio', async () => {}); click(element['unlock']); }
+      else if (action === 'leave room') click(element['roomAction']);
+      else if (action === 'attribute rejoin') element.setAttribute('name', 'Replacement');
+      else if (action === 'initial retry') click(element['retry']);
+      else if (action === 'initial cancel') click(element['cancelJoin']);
+      else if (action === 'microphone retry') { t.mock.method(client, 'retryMicrophone', () => true); click(element['micRetry']); }
+      else client.dispatchEvent(new CustomEvent('micready', { detail: undefined }));
+      await settle(); assertHidden(element, true); assert.equal(element['error'].textContent, text); assert.equal(element['errorRevision'], revision);
+    });
+  }
 });

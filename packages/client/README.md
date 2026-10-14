@@ -141,6 +141,7 @@ WebSocket 建構失敗、hello 逾時或尚未進房的連線關閉，也會釋�
 ```
 
 - 屬性：`room`、`name`（兩者都有才進房）、`code`、`url`（ws 位址，預設為載入此模組的伺服器 `/ws`）。進入文件即進房、移除即離開（close 1000，席位依伺服器既有離線政策處理）；`room`／`name`／`code`／`url` 變更會重新進房。使用者按「離開房間」後例外：同一元素即使更換這些屬性或移除再掛載，也保持離房，直到明確按「重新加入」；新建元素仍正常自動進房。快速移除／重新掛載或更換屬性時，只讓最新一次掛載繼續進房，舊連線的事件不再更新畫面。
+- 錯誤訊息可用旁邊的「關閉錯誤訊息」按鈕隱藏，只整理畫面，不取消請求、重試、離房、改變收聽或麥克風恢復資格。原文字保留，狀態列不變；後續錯誤仍會顯示，關閉不代表問題已解決。既有操作或麥克風恢復清除錯誤時，也會隱藏關閉按鈕。若 host 在 `stage-error` 同步回呼內關閉，同一請求稍後的 promise catch 仍可能再顯示；此操作不新增錯誤去重或因果判定。按鈕位於 alert 之外，可用 `::part(error-dismiss)` 設定外觀；受控測試不等同原生輔助科技驗收。
 - 本人名稱：已進房的所有角色可在標籤輸入欄編輯並按「更新名稱」，使用既有 `setName()` 留席更新。另列「目前名稱」只依本人快照顯示，不由 ACK 推測成功；原始草稿交給伺服器清洗及驗證，不另設 maxlength。入席時以目前名稱初始化草稿，同席快照與重連保留編輯，失敗不清空；等待回覆與重連期間停用送出，快照先於 ACK 仍保持 aria-busy。離房、終止連線、移除或換房／換席會清除草稿與舊等待，晚到結果不影響新席位。此功能不反寫 `name` 屬性：SDK 自動重連使用已接受的名稱，但明確「重新加入」仍讀最新屬性，若 host 沒更新 name，會用原加入設定。舊伺服器的 `unknown_type` 照常顯示，不自動重入。測試為受控 DOM／SDK 控制流程，未驗收原生鍵盤、IME 或輔助科技。
 - 房間名稱：只有目前主控可見房名輸入欄與「更新房間名稱」，台下主控也可使用既有 `setRoomName()`。另列「目前房間名稱」只採伺服器快照，不由 ACK 回寫；原始草稿不 trim、不加 maxlength，由伺服器既有規則判定。取得主控時從目前房名初始化；同席狀態更新、成功／失敗與暫時重連保留草稿，等待回覆或重連時不能重複送出。失去主控、終止連線、離房、移除或換房／換席即清除；再次取得主控重新初始化，舊結果不清新等待或錯誤。送出當下重查資格，伺服器仍作最終授權；`forbidden`、`bad_request`、`unknown_type` 等錯誤照常顯示，不自動重試。不反寫 `room` 或 `name` 屬性、不新增儲存或媒體操作。可用 `::part(room-name)` 設定外觀；受控測試不代表原生鍵盤、IME 或輔助科技驗收。
 - 發言者摘要：所有已進房者可看到最近收到的伺服器發言偵測回報，按目前台上順序列出名稱與人數。尚未收到時顯示等待，明確空集合才顯示「未偵測到發言」；回報中的 ID 無法對應台上成員時另作說明，不公開未知 ID 或觀眾名稱。名稱依目前快照安全顯示，改名與移出台上會同步更新；已移除或當下無法對應的 ID 不會因之後上台而復活舊活動，須等新回報；控制連線暫時斷開但仍在台上的寬限席位不因此排除。重連、終止連線、離房或換席清除舊集合，恢復快照後須再收到新回報，不從 SDK 保留的 getter 還原。這是伺服器活動偵測（VAD），沒有時間戳，不保證即時或實際可聽見音訊；空集合也不是無音訊的證明。本機收聽靜音、音量、自動播放與傳輸狀態可能不同。不增加輪詢或媒體操作，原 `stage-speaking` detail 仍原樣轉送；摘要為普通文字，未新增頻繁宣讀的 live region。可用 `::part(speaking)` 設定外觀；原生畫面、輔助科技與實體音訊仍需驗收。
@@ -162,7 +163,7 @@ WebSocket 建構失敗、hello 逾時或尚未進房的連線關閉，也會釋�
 - 舉手／收回與麥克風靜音按鈕在接納 click 前重查目前席位、重連、冷卻與強制靜音限制。即使主頁的 `stage-state`／`stage-status` listener 在畫面重繪前同步點擊舊的 enabled 按鈕，已失效操作也不進入 pending、不清除目前錯誤、不送請求或占用 SDK 舉手冷卻；隱藏的這兩種控制同時停用。有效操作仍沿用目前快照選擇 raise／withdraw 或 mute／unmute，並保留各自等待 ACK 與錯誤處理。
 - 連線結束提示：呼叫 `element.client.disconnect()` 會顯示「未連線」並隱藏房內操作；一般關房、被移出與伺服器維護／重啟各有提示，收聽偏好變更不會清掉提示。換房或重新掛載後清除舊提示，舊 client 的遲到事件不更新或重新派發到新 widget。
 - 事件：所有 client 事件以 `stage-<type>` 從元素派發（`bubbles`、`composed`，`detail` 相同），例如 `stage-state`、`stage-hand`、`stage-kicked`。
-- 樣式：`::part(panel)`、`::part(status)`、`::part(error)`、`::part(actions)`、`::part(playback)`、`::part(name)`、`::part(room-name)`、`::part(quality)`、`::part(speaking)`，以及 CSS 變數 `--stage-fg`、`--stage-bg`、`--stage-border`、`--stage-radius`、`--stage-button-bg`、`--stage-accent`、`--stage-accent-fg`、`--stage-error`。
+- 樣式：`::part(panel)`、`::part(status)`、`::part(error)`、`::part(error-dismiss)`、`::part(actions)`、`::part(playback)`、`::part(name)`、`::part(room-name)`、`::part(quality)`、`::part(speaking)`，以及 CSS 變數 `--stage-fg`、`--stage-bg`、`--stage-border`、`--stage-radius`、`--stage-button-bg`、`--stage-accent`、`--stage-accent-fg`、`--stage-error`。
 - 自訂標籤名：`import { defineStageElement } from 'https://host/lib/stage-element.js'` 後呼叫 `defineStageElement('my-stage')`（`stage-client` 已於載入時註冊，多個自訂標籤可並存）。每個自訂標籤使用 `StageElement` 的獨立子類別，因此仍是 `instanceof StageElement`，但 constructor 不與預設／其他標籤相同；重複註冊同名標籤為 no-op，既有其他元件不被覆寫。
 
 `<stage-client>` 的舉手、麥克風、離開／返回舞台與音訊解鎖按鈕在各自請求完成前保持停用並標示 `aria-busy`，不會被冷卻倒數或新 state 的重新繪製提前解鎖。失敗後顯示錯誤並重新套用目前冷卻／強制靜音限制；切換房間或移除元件時，舊請求不會改動新房間的按鈕狀態。

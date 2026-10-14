@@ -55,8 +55,9 @@ export class StageElement extends HTMLElement {
   private readonly speaking: HTMLParagraphElement;
   private speakingOwner: { client: StageClient; roomId: string; participantId: string; generation: number } | undefined;
   private speakingReport: { ids: Set<string>; empty: boolean } | undefined;
-  /** Last failure (request rejected, mic denied…); stays until the next action or join. */
+  /** Last failure (request rejected, mic denied…); stays until dismissed, the next action or join. */
   private readonly error: HTMLParagraphElement;
+  private readonly errorDismiss: HTMLButtonElement;
   private readonly namePanel: HTMLDivElement;
   private readonly acceptedName: HTMLSpanElement;
   private readonly nameInput: HTMLInputElement;
@@ -116,7 +117,14 @@ export class StageElement extends HTMLElement {
     this.error = document.createElement('p');
     this.error.part.add('error');
     this.error.setAttribute('role', 'alert');
-    this.error.hidden = true;
+    this.errorDismiss = document.createElement('button');
+    this.errorDismiss.type = 'button'; this.errorDismiss.part.add('error-dismiss');
+    this.errorDismiss.textContent = '關閉錯誤訊息';
+    this.errorDismiss.onclick = () => {
+      if (!this.isConnected || this.errorDismiss.hidden || this.error.hidden) return;
+      this.hideError();
+    };
+    this.hideError();
     this.namePanel = document.createElement('div');
     this.namePanel.part.add('name');
     this.acceptedName = document.createElement('span');
@@ -184,7 +192,7 @@ export class StageElement extends HTMLElement {
     this.retry = this.button('重試加入', () => { if (this.canRetry()) this.rejoin(); });
     this.cancelJoin = this.button('取消加入', () => this.cancelInitial?.());
     actions.append(this.unlock, this.listen, this.hand, this.mic, this.micRetry, this.leaveStage, this.roomAction, this.retry, this.cancelJoin);
-    panel.append(this.status, this.quality, this.speaking, this.error, this.namePanel, this.roomNamePanel, actions, this.playback);
+    panel.append(this.status, this.quality, this.speaking, this.error, this.errorDismiss, this.namePanel, this.roomNamePanel, actions, this.playback);
     root.append(style, panel);
     this.render();
   }
@@ -228,7 +236,7 @@ export class StageElement extends HTMLElement {
       this.pendingActions.add(b);
       b.disabled = true;
       b.setAttribute('aria-busy', 'true');
-      this.error.hidden = true;
+      this.hideError();
       // Invoke synchronously to retain the clicked client's identity, but catch synchronous
       // failures too. A later render must not unlock the action before its promise settles.
       void (async () => {
@@ -309,7 +317,7 @@ export class StageElement extends HTMLElement {
           }
           if (type === 'micready' && this.micFailure?.client === client) {
             // micready is shared with preview and precedes sender installation.
-            if (this.micFailure.errorRevision === this.errorRevision) this.error.hidden = true;
+            if (this.micFailure.errorRevision === this.errorRevision) this.hideError();
             this.micFailure = undefined;
           }
           // Revoke stale action admission before application event listeners can reenter.
@@ -318,7 +326,7 @@ export class StageElement extends HTMLElement {
           if (type === 'state' || type === 'status' || type === 'mic' || type === 'closed' || type === 'kicked') this.render();
         });
       }
-      this.error.hidden = true;
+      this.hideError();
       this.render();
       try {
         await client.connect();
@@ -356,7 +364,7 @@ export class StageElement extends HTMLElement {
     ++this.generation;
     const exit = {};
     this.leftRoom = true; this.roomExit = exit;
-    this.error.hidden = true;
+    this.hideError();
     // Retire the event lane before disconnect can synchronously invoke application callbacks.
     void this.leave().catch(error => {
       if (this.roomExit === exit) this.show(error);
@@ -497,7 +505,7 @@ export class StageElement extends HTMLElement {
     const raw = this.nameInput.value;
     // Reserve before invoking the public SDK: a synchronous state callback may click again.
     const attempt = this.nameAttempt = {};
-    this.syncNameOwner(); this.error.hidden = true;
+    this.syncNameOwner(); this.hideError();
     const current = () => {
       if (this.nameOwner !== owner || this.nameAttempt !== attempt) return false;
       // The public client can retire a snapshot without another status transition.
@@ -550,7 +558,7 @@ export class StageElement extends HTMLElement {
     const raw = this.roomNameInput.value;
     // Reserve before public SDK callbacks can synchronously reenter the controller editor.
     const attempt = this.roomNameAttempt = {};
-    this.syncRoomNameOwner(); this.error.hidden = true;
+    this.syncRoomNameOwner(); this.hideError();
     const current = () => {
       if (this.roomNameOwner !== owner || this.roomNameAttempt !== attempt) return false;
       // Recheck control and seat identity even when no further lifecycle event was emitted.
@@ -589,7 +597,7 @@ export class StageElement extends HTMLElement {
     const attempt = this.unlockAttempt = {};
     const notice = owner.notice;
     this.pendingActions.add(this.unlock); this.unlock.disabled = true;
-    this.unlock.setAttribute('aria-busy', 'true'); this.error.hidden = true;
+    this.unlock.setAttribute('aria-busy', 'true'); this.hideError();
     const current = () => this.playbackOwner === owner && this.unlockAttempt === attempt;
     // Invoke before the first await so browser gesture admission remains synchronous.
     void (async () => {
@@ -646,7 +654,7 @@ export class StageElement extends HTMLElement {
       const admitted = failure.client.retryMicrophone();
       if (this.micFailure !== attempt) return;
       if (!admitted) this.micFailure = failure;
-      else if (failure.errorRevision === this.errorRevision) this.error.hidden = true;
+      else if (failure.errorRevision === this.errorRevision) this.hideError();
     } catch (error) {
       if (this.micFailure === attempt) {
         this.micFailure = failure;
@@ -694,12 +702,16 @@ export class StageElement extends HTMLElement {
     return ws.href;
   }
 
+  private hideError(): void {
+    this.error.hidden = true; this.errorDismiss.hidden = this.errorDismiss.disabled = true;
+  }
+
   private show(error: unknown): void {
     this.errorRevision++;
     // StageError / Error, or a `micerror` detail ({name, message}).
     const message = typeof error === 'object' && error !== null && 'message' in error && typeof error.message === 'string' ? error.message : '操作失敗。';
     this.error.textContent = message;
-    this.error.hidden = false;
+    this.error.hidden = false; this.errorDismiss.hidden = this.errorDismiss.disabled = false;
   }
 
   /** Only a visible countdown needs clock-driven renders; other changes arrive as SDK events. */

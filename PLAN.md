@@ -742,3 +742,6 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 
 
 187. **Web Component 發言者摘要（2026-10-14）：** actual widget→SDK→Hub受控bridge證實state→speaking→ACK與mixer active／empty轉換已到達，但基線只有stage-speaking轉送、可見DOM不顯示發言者。新增固定普通段落part=speaking，私下複製完整ID集合並按目前snapshot.speakers順序投影，僅台上speaker/controller，ID去重但同名不同人不合併；保留connected=false寬限席位，不列未知／觀眾ID。名稱單次decode後textContent，快照改名／移出台上同步更新；採納時只保留當下合法ID，後續移除永久prune，避免同ID重新上台復活舊活動，必須新speaking事件才可加回。owner綁client/generation/room/pid，事件轉送前整理；nested新事件／離房不得被外層回呼覆寫。重連／disconnected／terminal／離房／換席退役，不從SDK可能保留的speaking getter復活，尚未收到、明確empty、非空但無對應成員分開；普通同席更新與本人micerror不清其他人的房間回報。無timestamp／epoch，文案只稱最近收到，VAD不是實際可聽音訊或健康保證；不新增live region、API、timer、媒體或儲存，保留原事件detail。驗證限受控DOM/socket、公開SDK與Hub／mock媒體，原生畫面、AT與硬體音訊未驗收。
+
+
+188. **Widget 顯示層錯誤關閉（2026-10-14）：** actual SDK／受控socket與getUserMedia拒絕證明，一般錯誤、控制拒絕、初次加入失敗及終止時的alert沒有獨立關閉入口，只能另做控制／重入或等待既有麥克風恢復清除。新增alert外普通type=button「關閉錯誤訊息」，hideError共用既有九個隱藏點以同步按鈕；dismiss只隱藏兩節點，保留文字、errorRevision、micFailure、pending、status與playback。實證若dismiss推進revision，會誤吞同步retryMicrophone回呼後新拋錯，故不改revision語義。新show仍顯示；同一request先error事件再promise catch可能再次show，明確不做去重、因果判斷或恢復承諾。隱藏／未掛載直接callback不操作，不新增timer、SDK、media、storage或新事件；原role=alert文字安全與detail保持。驗證限受控DOM/socket／公開SDK與假媒體，不代表原生AT、鍵盤或可聽音訊驗收。
