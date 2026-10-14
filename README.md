@@ -288,6 +288,8 @@ Web Component 的「離開房間」會停止本機收聽／擷取及自動重連
 
 完整範例與 embed 的房間代碼欄也不設固定 16 字元 `maxlength`，讓手動輸入／編輯符合部署設定的較長代碼；`rooms.codeLength` 與 `limits.codeMaxLength` 仍由伺服器決定與驗證。代碼仍可留空，送出時沿用 trim／空白省略，字母大小寫由既有 validator 正規化；不更動認證或錯誤隱私。原先以邀請 query 預填長代碼是程式設定 value，本來就不會由這個屬性自動截斷，此修正不宣稱舊版所有長邀請皆無法加入。錯誤、缺少代碼或不存在房間仍沿用既有 generic 回覆，超過設定長度／frame 上限仍會拒絕或斷線；不猜測遠端上限、不自動重試或回顯代碼。驗證為 authored DOM 與受控 SDK／validator／Hub，不包含原生輸入操作。
 
+名稱驗證在既有 NFC、移除不安全字元與 trim 後，以 UTF-16 長度作安全快速判定；確定可容納的非空名稱不再展開 code-point 陣列，其餘逐個 code point 計數並在超過上限時停止。Astral 字元仍按一個 code point 計算，驗證結果與 HTML 轉義順序不變。範例上限 32 下，超長名稱的計數最多讀到第 33 個 code point，但 JSON 解析、正規化與清洗仍處理完整輸入，既有 frame 上限不變。受控 Node parser 三次重複量測的混合有效輸入在此上限下耗時減少約 9–13%；近 64 KiB 無效名稱約 49–76%，依字元類別而異。這是本機同步 parser microbenchmark，並非部署吞吐、原生音訊容量或量化記憶體節省保證；實作可確認移除了完整 code-point 陣列建構。
+
 ## 測試與驗證
 
 ```bash

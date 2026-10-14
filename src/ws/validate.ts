@@ -33,8 +33,14 @@ const KNOWN_TYPES: Record<string, true> = Object.fromEntries(CLIENT_MESSAGE_TYPE
 export function sanitizeName(raw: unknown, maxLength: number): string | undefined {
   if (typeof raw !== 'string') return undefined;
   const cleaned = raw.normalize('NFC').replace(UNSAFE_CHARS_RE, '').trim();
-  const length = [...cleaned].length;
-  if (length === 0 || length > maxLength) return undefined;
+  if (cleaned.length === 0) return undefined;
+  // UTF-16 length is an upper bound on code points; only ambiguous lengths need counting.
+  if (!(cleaned.length <= maxLength)) {
+    let length = 0;
+    for (const _char of cleaned) {
+      if (++length > maxLength) return undefined;
+    }
+  }
   return cleaned.replace(/[&<>"']/g, (c) => HTML_ESCAPES[c] ?? c);
 }
 
