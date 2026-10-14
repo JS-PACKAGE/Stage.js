@@ -70,6 +70,7 @@ export class SampleNode {
       '#app': node => node.id === 'app',
       '[data-landing-submit]': node => node.dataset.landingSubmit !== undefined,
       '[data-landing-cancel]': node => node.dataset.landingCancel !== undefined,
+      '[data-landing-progress]': node => node.dataset.landingProgress !== undefined,
       '[data-room-action]': node => node.dataset.roomAction !== undefined,
       '[data-return-stage]': node => node.dataset.returnStage !== undefined,
       '.badge.quality': node => node.classList.contains('badge') && node.classList.contains('quality'),

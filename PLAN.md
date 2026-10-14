@@ -679,3 +679,6 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 
 
 166. **完整範例播放解鎖的跨通知 pending（2026-10-14）：** whole-module 與未替換公開 SDK 的受控 audio／socket probe 重現：第一次 unlock 的 play promise 未完成時，同席 room state 或上台邀請會重建 notices，新的按鈕恢復 enabled，再點可同時留下兩個 play promise。以目前房間 generation 綁定單一 symbol pending，建立每個提示按鈕時同步 disabled／aria-busy；handler 在 pending 或 error 改動前檢查目前節點、generation、room state、blocked 與 pending。維持手勢內同步 unlockAudio，只有自己的 finally 清 token 並更新目前提示，原有 run 保留 current error 與世代失效抑制；新身分重設 token，信令重連不撤銷仍存在的媒體操作。沒有改 SDK、autoplay policy 或自動重試；未把僅 synthetic event injection 的舊成功遮蔽新 notice 假設擴入修正。證據限受控 promise／DOM／信令，不能視為原生播放、權限或音訊驗收。
+
+
+167. **完整範例初次進房等待文字（2026-10-14）：** actual SDK／fake wire 與 whole-sample DOM 確認 create、join 在 hello 及 ACK 等待時，頁首仍為「未連線」，只有停用／aria-busy submit 與取消按鈕表示進行中。替既有 landingEntry 增加 operation 與送出時 revision，syncLandingActions 更新獨立 role=status／aria-live=polite 段落，不改 header、errorBox 或 notices。僅尚未 cancelled／entered、沒有 client state 且仍 busy 的原 landing revision 顯示；不能只共用 canCancelLanding，因 pre-state reconnecting 後 error listener 同步 disconnect 會先重建 landing，舊 promise 尚未 finally 時 cancel 仍可見。較嚴格的 progress revision guard 避免誤示重啟，原取消准入與 request lock 不變。收到 state 前的 hello／ACK 不細分，取消／失敗／終止／重建清空，新的明確操作採新 owner；無 timer、額外請求或輸入內容回顯。受控 DOM 與 SDK 事件順序證據，不宣稱原生螢幕閱讀器或音訊驗收。

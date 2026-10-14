@@ -44,7 +44,7 @@ restorePlaybackPreferences();
 const statusLabels = { waiting: '等待發言', live: '直播中', reconnecting: '重新連線中', disconnected: '未連線' };
 const roleLabels = { controller: '主控', speaker: '發言者', audience: '觀眾' };
 let busy = false;
-let landingEntry: { cancelled: boolean; entered: boolean } | undefined;
+let landingEntry: { operation: 'create' | 'join'; revision: number; cancelled: boolean; entered: boolean } | undefined;
 let landingRevision = 0;
 let audioBlocked = false;
 let pendingAudioUnlock: symbol | undefined;
@@ -467,6 +467,12 @@ function syncLandingActions(): void {
   if (cancel) {
     cancel.hidden = cancel.disabled = !canCancelLanding();
   }
+  const progress = content.querySelector<HTMLParagraphElement>('[data-landing-progress]');
+  if (progress) {
+    const pending = canCancelLanding() && landingEntry?.revision === landingRevision;
+    progress.hidden = !pending;
+    progress.textContent = pending ? landingEntry!.operation === 'create' ? '正在建立房間…' : '正在加入房間…' : '';
+  }
 }
 function canCancelLanding(): boolean {
   return busy && Boolean(landingEntry && !landingEntry.cancelled && !landingEntry.entered) && !client.state;
@@ -474,8 +480,8 @@ function canCancelLanding(): boolean {
 function runLanding(operation: 'create' | 'join', action: (isCancelled: () => boolean) => Promise<unknown>): void {
   if (busy) return;
   if (signaling.error) { showError(signaling.error); return; }
-  const entry = { cancelled: false, entered: false };
   const revision = landingRevision;
+  const entry = { operation, revision, cancelled: false, entered: false };
   landingEntry = entry; busy = true; syncLandingActions();
   void run(() => action(() => entry.cancelled), undefined, undefined, () => !entry.cancelled, error => {
     const message = error instanceof Error ? error.message : '操作失敗，請稍後再試。';
@@ -570,7 +576,10 @@ function landing(): void {
     syncLandingActions();
     void run(() => client.disconnect());
   };
-  content.replaceChildren(intro, grid, cancel);
+  const progress = element('p', 'muted');
+  progress.id = 'landing-progress'; progress.dataset.landingProgress = 'true';
+  progress.setAttribute('role', 'status'); progress.setAttribute('aria-live', 'polite');
+  content.replaceChildren(intro, grid, progress, cancel);
   syncLandingActions(); renderNotices();
 }
 function syncMicRetry(): void {
