@@ -53,7 +53,7 @@ function retireEntry(): number {
 let handTimer: ReturnType<typeof setTimeout> | undefined;
 let handTimerDue = 0;
 function syncHand(): void {
-  const me = client?.me;
+  const me = client === controlsClient ? client?.me : undefined;
   const audience = Boolean(me && !me.onStage && me.role !== 'controller');
   const pending = Boolean(pendingHand && pendingHand.client === client);
   const remaining = audience ? client!.handCooldownMs : 0;

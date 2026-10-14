@@ -733,3 +733,6 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 
 
 184. **進場頁主動退役房內診斷 timer（2026-10-14）：** actual SDK 初次建立／加入收到state、未ACK即失聯，status已disconnected但保留snapshot；之後使用者離房呼叫disconnect清snapshot，不再發相同status。基線完整範例返回landing仍留一個2000ms interval，6秒假時鐘後亦存活；refresh本身因無state不讀stats，不能誇大為持續網路或媒體工作。把既有clearInterval／poll sequence退役／連線文字清除抽成stopRoomTimers，由landing直接呼叫，syncRoomTimers原停止分支共用。既有newstate/visibility恢復單一timer、queued callback identity與poll generation隔離保持，無新增SDK、timer、listener、媒體或重連政策。此批僅修診斷資源清理；fullsample與embed失聯控制admission另案。證據限受控timer/DOM/socket＋公開SDK，未量測原生CPU／耗電或音訊。
+
+
+185. **範例頁失聯控制 admission（2026-10-14）：** 延續已證實的初次state-before-ACK socketLost路徑，actual SDK完整範例仍以殘留snapshot啟用hand/mic/stage/rename及主控操作／gain，先清錯誤／pending／prompt再被SDK拒絕（wire增量0）；embed僅hand在retireControls後被syncHand重新啟用，其餘mic/stage/rename已正確隔離不重改。完整範例roomButton在任何副作用前排除disconnected/reconnecting，syncRoomActions停用一致，gain直接handler亦排除disconnected。embed的hand採現有controlsClient資格，同席正常重連保留owner，終止失聯不以殘留me復活。保留waiting/live、state-beforeACK有效狀態、resume、新操作及room leave清理，不改SDK/server/media/pending settlement或擴張未重現的prompt內重入政策。證據限whole-module／公開SDK與受控DOM/socket，非原生keyboard、AT或音訊。

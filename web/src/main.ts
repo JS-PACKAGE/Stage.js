@@ -429,7 +429,8 @@ function roomButton(key: string, label: string, action: () => Promise<unknown>, 
   node.type = 'button'; node.dataset.roomAction = key;
   const generation = roomActionGeneration;
   node.onclick = () => {
-    if (node.disabled || generation !== roomActionGeneration || pendingRoomActions.has(key) || (canAct && !canAct())) return;
+    if (node.disabled || client.status === 'disconnected' || client.status === 'reconnecting'
+      || generation !== roomActionGeneration || pendingRoomActions.has(key) || (canAct && !canAct())) return;
     const token = Symbol(key); pendingRoomActions.set(key, token);
     updateCooldown(); errorBox.hidden = true;
     void (async () => {
@@ -455,7 +456,8 @@ function syncRoomActions(): void {
     const key = node.dataset.roomAction!;
     const pending = pendingRoomActions.has(key);
     node.setAttribute('aria-busy', String(pending));
-    node.disabled = pending || client.status === 'reconnecting' || node.dataset.policyDisabled === 'true'
+    node.disabled = pending || client.status === 'reconnecting' || client.status === 'disconnected'
+      || node.dataset.policyDisabled === 'true'
       || (key === 'hand' && !client.me?.handRaised && client.handCooldownMs > 0);
   }
 }
@@ -869,7 +871,7 @@ function gainSlider(person: ParticipantView): HTMLLabelElement {
   renderedGainInputs.push({ input: slider, value: slider.value });
   slider.title = `${person.gainDb} dB`;
   slider.onchange = () => {
-    if (slider.disabled || client.status === 'reconnecting') return;
+    if (slider.disabled || client.status === 'reconnecting' || client.status === 'disconnected') return;
     void run(() => client.setGain(id, Number(slider.value)), undefined, roomActionGeneration);
   };
   label.append(slider);
