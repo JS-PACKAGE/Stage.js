@@ -58,6 +58,7 @@ hello、內部 SDP／ICE 信令及自動回座不占用此上限，仍遵守原�
 
 ## 連線生命週期
 
+- `url` 在建構時擷取，初次連線、手動重新連線與自動回座都沿用該網址；之後修改或重用原始 options 物件不會改變既有 client 的目的地。切換伺服器請建立新的 client，避免既有房間代碼／resume token 隨 options 變更送往另一個端點。網址仍由 WebSocket 在連線時驗證，不新增建構時的網址正規化或驗證；`micConstraints` 的既有讀取方式不變。
 - 可傳入 `audioElement`、`micConstraints`、`requestTimeoutMs`、`maxPendingControlRequests`、`reconnect: {initialDelayMs,maxDelayMs}`。預設隱藏 audio 與 500–15000ms 指數重連；所有人自動帶上 resume token 恢復席位（伺服器 `rooms.participantGraceMs`／`controllerGraceMs` 內有效）。
 
 - `reconnect.initialDelayMs`／`maxDelayMs` 必須各為 0–2147483647 的有限毫秒數，允許小數與 0；無效值在建構時、建立或修改 audio 前同步拋 `RangeError`。預設仍為 500／15000；最大值小於初始值時照常以最大值封頂，0 表示立即排程重試而非停用重連。重連數值在建構時複製，後續修改原 options／reconnect 物件不會改變既有 client 的重試政策。

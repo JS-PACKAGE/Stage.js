@@ -665,3 +665,5 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 
 
 160. **共用 micready 公開契約釐清（2026-10-13）：** 事件 detail 為 undefined，SDK 有三個發出位置：初次／重試房間擷取在 sender 安裝前、使用中裝置替換在 replaceTrack 與串流接管後、獨立預覽不需要房間 sender。既有 retry／widget README 使用未限定流程的「早於 sender 安裝」可能被誤讀為通用順序，改為明確限定，並補公開 StageEventMap 的 JSDoc，提醒事件不是可聽傳送或特定公開操作完成的證明。只改文件／註解與本決策紀錄；檢查 generated declaration、三個來源及既有生命週期測試，建置 JS 需與前版逐 byte 相同，無 runtime 或事件順序變更。
+
+161. **SDK 連線目的地建構快照（2026-10-14）：** 實際公開 SDK 搭配受控 WebSocket／時鐘重現：呼叫端重用 options 建立第二個 client 或改寫 url，會讓第一個 client 的自動重連讀取新網址，並把原先房間的 name／code／resumeToken 送往新端點。只在建構時保存 url 字串，所有 connect／resume 使用固定目的地；新的 client 仍讀取當次傳入的網址。保留原有 immediate options 驗證次序、WebSocket 建構時的網址驗證與拒絕時機、連線／重連／取消與 controller code refresh 邏輯，micConstraints 仍依既有方式於擷取時讀取。測試使用 synthetic 資料與 fake wire，不對外傳送憑證或宣稱原生瀏覽器／音訊驗證。

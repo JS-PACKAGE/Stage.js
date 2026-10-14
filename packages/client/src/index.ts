@@ -16,6 +16,7 @@ export class StageError extends Error {
   }
 }
 export interface StageClientOptions {
+  /** Captured at construction for every connection and resume; create a new client to change servers. */
   url: string;
   /** Connection hello, request acknowledgement and SDP answer deadline; default 15000 ms. */
   requestTimeoutMs?: number;
@@ -155,6 +156,7 @@ const CLOSE_PAGE_HIDDEN = 4002;
 
 export class StageClient extends EventTarget {
   private readonly options: StageClientOptions;
+  private readonly url: string;
   private readonly audio: HTMLAudioElement;
   private readonly ownsAudio: boolean;
   private socket: WebSocket | null = null;
@@ -230,6 +232,8 @@ export class StageClient extends EventTarget {
     this.maxPendingControlRequests = capacity ?? Infinity;
     this.requestTimeoutMs = timeout;
     this.options = options;
+    // Reusing a caller-owned option bag must not redirect this session and its resume credentials.
+    this.url = options.url;
     this.ownsAudio = !options.audioElement;
     this.audio = options.audioElement ?? document.createElement('audio');
     this.audio.autoplay = true;
@@ -430,7 +434,7 @@ export class StageClient extends EventTarget {
     if (this.ownsAudio && !this.audio.isConnected) document.body.append(this.audio);
     window.addEventListener('pagehide', this.onPageHide);
     const promise = new Promise<void>((resolve, reject) => {
-      const ws = new WebSocket(this.options.url);
+      const ws = new WebSocket(this.url);
       this.socket = ws;
       let ready = false;
       const timer = setTimeout(() => {
