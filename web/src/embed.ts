@@ -7,6 +7,7 @@ function input(id: string): HTMLInputElement {
 const status = document.querySelector<HTMLParagraphElement>('#status')!;
 const errorNotice = document.querySelector<HTMLDivElement>('#error-notice')!;
 const lastError = document.querySelector<HTMLParagraphElement>('#last-error')!;
+const handRejectionNotice = document.querySelector<HTMLParagraphElement>('#hand-rejected')!;
 const errorDismiss = document.querySelector<HTMLButtonElement>('#error-dismiss')!;
 const join = document.querySelector<HTMLFormElement>('#join')!;
 const submit = join.querySelector<HTMLButtonElement>('button')!;
@@ -44,13 +45,36 @@ let playbackGeneration = 0;
 let pendingUnlock: { client: Client | null; generation: number } | undefined;
 let entryGeneration = 0;
 let feedbackRevision = 0;
+let handRejectionOwner: { client: Client; roomId: string; participantId: string; generation: number } | undefined;
+function retireHandRejection(): void {
+  handRejectionOwner = undefined;
+  if (!handRejectionNotice.hidden) handRejectionNotice.hidden = true;
+  if (handRejectionNotice.textContent) handRejectionNotice.textContent = '';
+}
+function eligibleHandRejection(current: Client | null): boolean {
+  const me = current?.state?.me;
+  return Boolean(current && current === controlsClient && me?.role === 'audience' && !me.onStage && !me.handRaised
+    && current.status !== 'reconnecting' && current.status !== 'disconnected');
+}
+function syncHandRejection(): void {
+  const owner = handRejectionOwner, state = client?.state;
+  if (!eligibleHandRejection(client) || (owner && (owner.client !== client || owner.generation !== entryGeneration
+    || state?.roomId !== owner.roomId || state.me.participantId !== owner.participantId))) {
+    retireHandRejection(); return;
+  }
+  if (!owner) return;
+  const message = '主控已婉拒這次舉手申請。';
+  if (handRejectionNotice.textContent !== message) handRejectionNotice.textContent = message;
+  if (handRejectionOwner === owner && handRejectionNotice.hidden) handRejectionNotice.hidden = false;
+}
 let cancelEntry: (() => void) | undefined;
 function hideCancel(): void {
   cancelEntry = undefined; cancelJoin.hidden = cancelJoin.disabled = true;
 }
 function retireControls(): void {
+  controlsClient = undefined; retireHandRejection();
   pendingHand = undefined; pendingMic = undefined; pendingStage = undefined;
-  controlsClient = undefined; micRetryParticipant = undefined; pendingMicRetry = undefined;
+  micRetryParticipant = undefined; pendingMicRetry = undefined;
   pendingRename = undefined; syncRename(); retireRoomName();
 }
 /** Retire initial-join feedback before user or terminal callbacks can start another entry. */
@@ -62,6 +86,7 @@ function retireEntry(): number {
 let handTimer: ReturnType<typeof setTimeout> | undefined;
 let handTimerDue = 0;
 function syncHand(): void {
+  syncHandRejection();
   const me = client === controlsClient ? client?.me : undefined;
   const audience = Boolean(me && !me.onStage && me.role !== 'controller');
   const pending = Boolean(pendingHand && pendingHand.client === client);
@@ -242,6 +267,24 @@ join.onsubmit = (event) => {
         syncHand(); syncMic(); syncStage(); syncMicRetry(); syncRename(); syncRoomName();
         leave.disabled = false;
       });
+      const retireOwnHandRejection = (participantId: string): void => {
+        if (client === current && controlsClient === current && !cancelledEntry && generation === entryGeneration
+          && participantId === current.me?.participantId) retireHandRejection();
+      };
+      client.on('hand', ({ detail }) => { if (detail.raised) retireOwnHandRejection(detail.participantId); });
+      client.on('stagejoined', ({ detail }) => retireOwnHandRejection(detail.participantId));
+      client.on('role', ({ detail }) => { if (detail.role !== 'audience') retireOwnHandRejection(detail.participantId); });
+      client.on('transferred', ({ detail }) => retireOwnHandRejection(detail.toId));
+      client.on('handrejected', ({ detail }) => {
+        // No per-raise identity is provided; feedback belongs only to the current eligible seat.
+        if (!detail || typeof detail !== 'object') return;
+        const roomId = detail.roomId, participantId = detail.participantId;
+        const state = current.state;
+        if (client !== current || cancelledEntry || generation !== entryGeneration
+          || !eligibleHandRejection(current) || state?.roomId !== roomId || state.me.participantId !== participantId) return;
+        handRejectionOwner = { client: current, roomId, participantId, generation };
+        syncHandRejection();
+      });
       client.on('micerror', ({ detail }) => {
         if (client !== current || controlsClient !== current || cancelledEntry) return;
         progress = false; pendingMicRetry = undefined;
@@ -257,7 +300,7 @@ join.onsubmit = (event) => {
       client.on('status', ({ detail }) => {
         if (client !== current || cancelledEntry) return;
         if (current.state) { receivedState = true; if (generation === entryGeneration) hideCancel(); }
-        if (detail === 'reconnecting') { progress = false; status.textContent = '重新連線中'; hand.disabled = true; }
+        if (detail === 'reconnecting') { retireHandRejection(); progress = false; status.textContent = '重新連線中'; hand.disabled = true; }
         else if (detail === 'disconnected') { progress = false; retirePlayback(); retireControls(); status.textContent = '未連線'; hand.disabled = leave.disabled = true; }
         syncHand(); syncMic(); syncStage(); syncMicRetry(); syncRename(); syncRoomName();
       });

@@ -401,6 +401,15 @@ export class StageHub {
     // Preserve the requester's state-before-ACK contract without sending N full snapshots
     // for every hand in a crowd. Other clients receive ordered events, then one fresh snapshot.
     if (handOnly || unchangedMic) session.send({ type: 'room:state', ...room.snapshot(pid) });
+    if (msg.type === 'stage:reject' && !rt.closed) {
+      // Preserve the public withdrawal/state sequence, then privately explain this decision.
+      // Offline seats have no notification history; never send through a retired room binding.
+      const target = rt.sessions.get(msg.targetId);
+      const binding = target && this.bindings.get(target);
+      if (target && binding?.roomId === room.roomId && binding.participantId === msg.targetId) {
+        target.send({ type: 'hand:rejected', roomId: room.roomId, participantId: msg.targetId });
+      }
+    }
     session.send({ type: 'ok', requestId: msg.requestId });
     if (msg.type === 'control:transfer') this.deps.log.info('control transferred', { roomId: room.roomId, fromId: pid, toId: msg.targetId });
   }

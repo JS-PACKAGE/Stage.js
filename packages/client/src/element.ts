@@ -2,7 +2,7 @@ import { StageClient, decodeName, type ConnectionQuality, type StageEventMap } f
 
 /** Every StageClient event, re-dispatched from the element as `stage-<type>`. */
 const EVENTS: (keyof StageEventMap)[] = [
-  'state', 'status', 'created', 'closed', 'kicked', 'hand', 'invite', 'stagejoined', 'stageleft',
+  'state', 'status', 'created', 'closed', 'kicked', 'hand', 'handrejected', 'invite', 'stagejoined', 'stageleft',
   'transferred', 'mic', 'role', 'error', 'micerror', 'micready', 'audioblocked', 'speaking', 'quality',
 ];
 const STATUS_LABELS = { waiting: '等待發言', live: '直播中', reconnecting: '重新連線中', disconnected: '未連線' };
@@ -13,6 +13,7 @@ const STYLE = `
 [part=status] { margin: 0; }
 [part=quality] { margin: 0; font-size: .875em; }
 [part=speaking] { margin: 0; font-size: .875em; }
+[part=hand-rejection] { margin: 0; }
 [part=error] { margin: 0; color: var(--stage-error, #dc2626); }
 [part=actions] { display: flex; flex-wrap: wrap; gap: .5rem; }
 [part=name] { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; }
@@ -47,7 +48,7 @@ button.primary { background: var(--stage-accent, #2563eb); border-color: transpa
  * later snapshots update its accepted-name display, not the draft or the `name` attribute.
  * The controller's room-name draft follows the same rule while control is retained.
  * A controller can explicitly approve or reject the snapshot's hand requests; the server owns admission.
- * Style through `::part(panel|status|quality|speaking|actions|name|room-name|hands|playback)` and the
+ * Style through `::part(panel|status|quality|speaking|hand-rejection|actions|name|room-name|hands|playback)` and the
  * `--stage-*` custom properties.
  */
 export class StageElement extends HTMLElement {
@@ -60,6 +61,8 @@ export class StageElement extends HTMLElement {
   private readonly speaking: HTMLParagraphElement;
   private speakingOwner: { client: StageClient; roomId: string; participantId: string; generation: number } | undefined;
   private speakingReport: { ids: Set<string>; empty: boolean } | undefined;
+  private readonly handRejection: HTMLParagraphElement;
+  private handRejectionOwner: { client: StageClient; roomId: string; participantId: string; generation: number } | undefined;
   /** Last failure (request rejected, mic denied…); stays until dismissed, the next action or join. */
   private readonly error: HTMLParagraphElement;
   private readonly errorDismiss: HTMLButtonElement;
@@ -127,6 +130,11 @@ export class StageElement extends HTMLElement {
     this.speaking = document.createElement('p');
     this.speaking.part.add('speaking');
     this.speaking.hidden = true;
+    this.handRejection = document.createElement('p');
+    this.handRejection.part.add('hand-rejection');
+    this.handRejection.setAttribute('role', 'status');
+    this.handRejection.setAttribute('aria-live', 'polite');
+    this.handRejection.hidden = true;
     this.error = document.createElement('p');
     this.error.part.add('error');
     this.error.setAttribute('role', 'alert');
@@ -211,7 +219,7 @@ export class StageElement extends HTMLElement {
     this.retry = this.button('重試加入', () => { if (this.canRetry()) this.rejoin(); });
     this.cancelJoin = this.button('取消加入', () => this.cancelInitial?.());
     actions.append(this.unlock, this.listen, this.hand, this.mic, this.micRetry, this.leaveStage, this.roomAction, this.retry, this.cancelJoin);
-    panel.append(this.status, this.quality, this.speaking, this.error, this.errorDismiss, this.namePanel, this.roomNamePanel, this.handQueuePanel, actions, this.playback);
+    panel.append(this.status, this.quality, this.speaking, this.handRejection, this.error, this.errorDismiss, this.namePanel, this.roomNamePanel, this.handQueuePanel, actions, this.playback);
     root.append(style, panel);
     this.render();
   }
@@ -308,6 +316,14 @@ export class StageElement extends HTMLElement {
           if (type === 'state' || type === 'status' || type === 'closed' || type === 'kicked') this.syncNameOwner();
           if (type === 'state' || type === 'status' || type === 'closed' || type === 'kicked') this.syncRoomNameOwner();
           if (type === 'state' || type === 'status' || type === 'closed' || type === 'kicked') this.syncHandQueue();
+          const ownId = client.me?.participantId;
+          if (type === 'closed' || type === 'kicked'
+            || (type === 'status' && (detail === 'reconnecting' || detail === 'disconnected'))
+            || (type === 'hand' && (detail as StageEventMap['hand']).raised && (detail as StageEventMap['hand']).participantId === ownId)
+            || (type === 'stagejoined' && (detail as StageEventMap['stagejoined']).participantId === ownId)
+            || (type === 'role' && (detail as StageEventMap['role']).role !== 'audience' && (detail as StageEventMap['role']).participantId === ownId)
+            || (type === 'transferred' && (detail as StageEventMap['transferred']).toId === ownId)) this.retireHandRejection();
+          else this.syncHandRejection(type === 'handrejected' ? detail as StageEventMap['handrejected'] : undefined);
           if (type === 'closed' || type === 'kicked' || type === 'micerror'
             || (type === 'status' && (detail === 'reconnecting' || detail === 'disconnected'))
             || (type === 'stageleft' && (detail as StageEventMap['stageleft']).participantId === client.state?.me.participantId)) this.retireQualityOwner();
@@ -343,6 +359,8 @@ export class StageElement extends HTMLElement {
           // Revoke stale action admission before application event listeners can reenter.
           if (micLifecycle) this.syncMicRetry();
           this.dispatchEvent(new CustomEvent(`stage-${type}`, { detail, bubbles: true, composed: true }));
+          // Application callbacks may retire this seat or mutate its exposed snapshot.
+          this.syncHandRejection();
           if (type === 'state' || type === 'status' || type === 'mic' || type === 'closed' || type === 'kicked') this.render();
         });
       }
@@ -402,6 +420,7 @@ export class StageElement extends HTMLElement {
     this.retireHandQueue();
     this.retireQualityOwner();
     this.retireSpeakingOwner();
+    this.retireHandRejection();
     this.hideCancel();
     this.hideRetry();
     for (const button of this.pendingActions) button.removeAttribute('aria-busy');
@@ -423,6 +442,29 @@ export class StageElement extends HTMLElement {
   private retireSpeakingOwner(): void {
     this.speakingOwner = undefined; this.speakingReport = undefined;
     this.speaking.textContent = ''; this.speaking.hidden = true;
+  }
+
+  private retireHandRejection(): void {
+    this.handRejectionOwner = undefined;
+    this.handRejection.textContent = ''; this.handRejection.hidden = true;
+  }
+
+  private syncHandRejection(rejection?: StageEventMap['handrejected']): void {
+    const client = this.current, state = client?.state, me = client?.me;
+    if (!this.isConnected || !client || !state || me?.role !== 'audience' || me.onStage || me.handRaised
+      || (client.status !== 'waiting' && client.status !== 'live')) {
+      this.retireHandRejection(); return;
+    }
+    const owner = this.handRejectionOwner;
+    if (owner && (owner.client !== client || owner.generation !== this.generation
+      || owner.roomId !== state.roomId || owner.participantId !== me.participantId)) this.retireHandRejection();
+    // Only a targeted rejection establishes the notice; snapshots and withdrawals cannot infer one.
+    if (rejection?.roomId === state.roomId && rejection.participantId === me.participantId) {
+      this.handRejectionOwner = { client, roomId: state.roomId, participantId: me.participantId, generation: this.generation };
+    }
+    this.handRejection.hidden = !this.handRejectionOwner;
+    const text = this.handRejectionOwner ? '主控已婉拒這次舉手申請。' : '';
+    if (this.handRejection.textContent !== text) this.handRejection.textContent = text;
   }
 
   /** A resumed SDK getter can retain the old report; only a new event establishes this owner's set. */
@@ -847,6 +889,7 @@ export class StageElement extends HTMLElement {
     this.syncHandQueue();
     this.syncQualityOwner();
     this.syncSpeakingOwner();
+    this.syncHandRejection();
     const client = this.current;
     const me = client?.me ?? null;
     const state = client?.state ?? null;

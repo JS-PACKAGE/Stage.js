@@ -80,6 +80,31 @@ let speakingIds = new Set<string>();
 const connectionLine = element('p', 'muted connection');
 const ownHandPosition = element('p', 'muted own-hand-position');
 ownHandPosition.hidden = true; ownHandPosition.setAttribute('role', 'status');
+const handRejectionNotice = element('p', 'banner hand-rejected');
+handRejectionNotice.hidden = true; handRejectionNotice.setAttribute('role', 'status');
+let handRejectionOwner: { roomId: string; participantId: string; generation: number } | undefined;
+let handRejectionRoomActive = false;
+function retireHandRejection(): void {
+  handRejectionOwner = undefined;
+  if (!handRejectionNotice.hidden) handRejectionNotice.hidden = true;
+  if (handRejectionNotice.textContent) handRejectionNotice.textContent = '';
+}
+function eligibleHandRejection(): boolean {
+  const me = client.state?.me;
+  return Boolean(handRejectionRoomActive && me?.role === 'audience' && !me.onStage && !me.handRaised
+    && client.status !== 'reconnecting' && client.status !== 'disconnected');
+}
+function syncHandRejection(): void {
+  const owner = handRejectionOwner, state = client.state;
+  if (!eligibleHandRejection() || (owner && (owner.generation !== roomActionGeneration
+    || state?.roomId !== owner.roomId || state.me.participantId !== owner.participantId))) {
+    retireHandRejection(); return;
+  }
+  if (!owner) return;
+  const message = '主控已婉拒這次舉手申請。';
+  if (handRejectionNotice.textContent !== message) handRejectionNotice.textContent = message;
+  if (handRejectionOwner === owner && handRejectionNotice.hidden) handRejectionNotice.hidden = false;
+}
 let connectionPollSequence = 0;
 let connectionResultWatermark = 0;
 const header = element('header', 'topbar');
@@ -422,6 +447,7 @@ async function run(action: () => Promise<unknown>, target?: HTMLButtonElement, g
 function resetRoomActions(identity: string): void {
   if (roomActionIdentity === identity) return;
   roomActionIdentity = identity; roomActionGeneration++; pendingRoomActions.clear();
+  handRejectionRoomActive = identity !== ''; retireHandRejection();
   pendingAudioUnlock = undefined;
   micRetryAvailable = micRetryPending = false; micNotice = '';
 }
@@ -521,6 +547,7 @@ function field(form: HTMLFormElement, label: string, name: string, value = '', r
   return input;
 }
 function landing(): void {
+  handRejectionRoomActive = false; retireHandRejection();
   stopRoomTimers();
   resetQualityDetails();
   stagePermissionOwner = undefined;
@@ -755,7 +782,7 @@ function renderRoom(state: RoomStatePayload): void {
     }));
   }
   const controls = element('section', 'panel');
-  controls.append(element('h2', '', `你好，${decodeName(state.me.name)}`), element('p', '', `${roleLabels[state.me.role]}${state.me.forceMuted ? ' · 主控已鎖定靜音' : ''}`), connectionLine, ownHandPosition);
+  controls.append(element('h2', '', `你好，${decodeName(state.me.name)}`), element('p', '', `${roleLabels[state.me.role]}${state.me.forceMuted ? ' · 主控已鎖定靜音' : ''}`), connectionLine, ownHandPosition, handRejectionNotice);
   const actions = element('div', 'actions');
   const ownRoomId = state.roomId, ownParticipantId = state.me.participantId;
   const canRename = () => generation === roomActionGeneration && client.status !== 'reconnecting'
@@ -784,6 +811,7 @@ function renderRoom(state: RoomStatePayload): void {
     actions.append(cooldownButton);
   }
   actions.append(button('離開房間', async () => {
+    handRejectionRoomActive = false; retireHandRejection();
     // Leaving after a pre-ACK snapshot also retires that entry's local feedback.
     if (landingEntry) landingEntry.cancelled = true;
     micTest?.stop(); micTest = null;
@@ -889,7 +917,7 @@ function applyQuality(row: HTMLElement): void {
   badge.title = `上行掉包 ${q.uplinkLossPercent ?? '—'}%、下行掉包 ${q.downlinkLossPercent ?? '—'}%${q.rttMs !== undefined ? `、RTT ${q.rttMs} ms` : ''}`;
 }
 function updateCooldown(): void {
-  syncHandPosition();
+  syncHandRejection(); syncHandPosition();
   const remainingMs = client.handCooldownMs;
   const remaining = Math.ceil(remainingMs / 1000);
   if (cooldownButton?.isConnected) {
@@ -933,6 +961,7 @@ function scheduleCooldown(remaining: number): void {
 }
 client.on('state', ({ detail }) => { if (landingEntry) landingEntry.entered = true; renderRoom(detail); });
 client.on('status', ({ detail }) => {
+  if (detail === 'reconnecting' || detail === 'disconnected') retireHandRejection();
   if (landingEntry && client.state) landingEntry.entered = true;
   status.textContent = statusLabels[detail];
   if (detail === 'disconnected' && !client.state) {
@@ -943,6 +972,21 @@ client.on('status', ({ detail }) => {
     syncMeter(); landing();
   }
   updateCooldown(); syncMicRetry(); syncQualityDetails();
+});
+client.on('hand', ({ detail }) => { if (detail.raised && detail.participantId === client.me?.participantId) retireHandRejection(); });
+client.on('stagejoined', ({ detail }) => { if (detail.participantId === client.me?.participantId) retireHandRejection(); });
+client.on('role', ({ detail }) => { if (detail.role !== 'audience' && detail.participantId === client.me?.participantId) retireHandRejection(); });
+client.on('transferred', ({ detail }) => { if (detail.toId === client.me?.participantId) retireHandRejection(); });
+client.on('handrejected', ({ detail }) => {
+  // Events carry no raise identifier; copy the current-seat ownership before observable work.
+  const generation = roomActionGeneration;
+  if (!detail || typeof detail !== 'object') return;
+  const roomId = detail.roomId, participantId = detail.participantId;
+  const state = client.state;
+  if (generation !== roomActionGeneration || !eligibleHandRejection()
+    || state?.roomId !== roomId || state.me.participantId !== participantId) return;
+  handRejectionOwner = { roomId, participantId, generation };
+  syncHandRejection();
 });
 client.on('created', ({ detail }) => { createdRoom = detail; });
 client.on('closed', ({ detail }) => { if (landingEntry) landingEntry.entered = true; createdRoom = null; micNotice = ''; invitation = detail.reason === 'shutdown' ? '伺服器維護或重新啟動，房間已關閉；請稍後重新建立或加入。' : '房間已關閉，歡迎建立或加入其他舞台。'; audioBlocked = false; landing(); });

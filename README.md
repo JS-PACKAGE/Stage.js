@@ -191,6 +191,7 @@ JSON frame，型別定義在 [`shared/protocol.ts`](shared/protocol.ts)。每個
 | `speaking` | `{participantIds}`：目前在混音中有聲的參與者（VAD＋釋放延遲）；成功建立／加入／恢復連線時，在房間快照之後、ACK 之前送目前集合（可為空），之後只在集合變動時廣播 |
 | `quality` | `{participants: [{participantId, uplinkLossPercent?, downlinkLossPercent?, rttMs?}]}`：依 `qualityIntervalMs` 回報可取得統計的上行者連線品質（上行掉包為該區間伺服器實際遺失比例，下行掉包取自對方 RTCP 接收報告），只送給主控與台上者 |
 | `role:update`、`hand:raise`／`hand:withdraw`、`stage:invite`、`stage:joined`、`stage:left`、`control:transferred`、`mic:muted`／`mic:unmuted` | 事件廣播 |
+| `hand:rejected {roomId, participantId}` | 成功婉拒後，僅向當前在線申請者發送的暫時通知；在其更新快照之後，不保存或重播 |
 | `rtc:answer`、`rtc:ice` | 伺服器端信令 |
 | `status` | `waiting`／`live` |
 
@@ -237,6 +238,9 @@ JSON frame，型別定義在 [`shared/protocol.ts`](shared/protocol.ts)。每個
 Web Component 的錯誤列另有「關閉錯誤訊息」，可單純隱藏提示，不必觸發其他控制或重新加入。不取消請求、不更改狀態或麥克風重試資格；後續錯誤仍可顯示，關閉並非問題恢復的證明，也不新增錯誤去重。
 
 Web Component 的主控另可展開「舉手申請」，依目前快照查看佇列姓名並明確核准上台或婉拒；自動接任的台下主控也能完成這個主持流程，不必另外寫管理按鈕。每個目標的兩個操作共用 pending，等待回覆及重連時停用；同席快照更新保留列節點與展開狀態，失權／離房／換席清理。伺服器仍判斷目標是否舉手、是否在線及舞台容量，沒有自動邀請、完整觀眾名單或額外媒體操作。過期畫面與 promise 依當前身份隔離，但既有 SDK 全域錯誤仍顯示，且協定沒有每次舉手的 epoch；詳細生命週期與受控驗收限制見 client README。原生 details、鍵盤焦點與輔助科技仍需實際驗收。
+
+主控成功婉拒後，完整範例、最小 embed 與 Web Component 會向申請者顯示「主控已婉拒這次舉手申請。」獨立普通提示。它只由明確的私人 `hand:rejected` 事件產生，不把自行收回、過期或快照移除猜成婉拒，也不覆蓋錯誤。既有全房 `hand:withdraw`／`room:state` 保留，其他人不收到新通知；離線保留席位仍可被婉拒，但恢復連線不補發歷史。提示在伺服器接受新舉手、上台／成為主控、重連或離房／換席時清除，僅點擊重舉且尚未成功不抹去已知回饋，沒有自動重舉。舊版官方 SDK 安全忽略新事件，新版遇到舊伺服器不推測結果；第三方嚴格事件解析器需自行確認相容性。協定沒有逐次舉手 epoch，不能辨識任意重排的同房同人舊通知。驗證限受控 DOM/socket、公開 SDK 與 Hub；原生畫面及輔助科技宣讀未驗收。
+
 
 Web Component 已進房後也可用內建名稱欄與「更新名稱」留席更正本人名稱，所有角色皆可操作；目前名稱依伺服器快照，草稿在同席更新／重連時保留。待回覆或重連時不能重複送出，離房／換席會退役舊操作。此編輯不反寫 `name` attribute，明確重新加入仍使用最新屬性；自動重連則沿用 SDK 已接受的名稱。沒有新增擷取、儲存空間或名稱日誌；原生輸入與輔助科技仍需實際驗收。 舉手、麥克風與個人舞台操作也會在初次加入 ACK 前失聯、僅剩舊快照時停用；在轉送狀態事件的同步回呼中點擊舊按鈕，不會先清除錯誤或進入等待。離開房間仍可用於清理。
 

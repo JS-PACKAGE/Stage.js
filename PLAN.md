@@ -139,6 +139,7 @@
 | `room:closed` | `{ roomId }`（房間關閉，全員離場） |
 | `role:update` | `{ participantId, role, reason? }` |
 | `hand:raise`／`hand:withdraw` | `{ participantId }` |
+| `hand:rejected` | `{ roomId, participantId }`（成功婉拒後僅送在線本人，不保存或重播） |
 | `stage:invite` | `{ participantId, byId }`（核准後邀請上台） |
 | `stage:joined`／`stage:left` | `{ participantId, role, reason? }`（`left.reason`：`"leave"`｜`"removed"`） |
 | `control:transferred` | `{ fromId, toId }` |
@@ -757,3 +758,6 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 192. **名稱長度驗證避免完整 code-point 陣列（2026-10-14）：** immutable e491f709 validator 對照兩個scratch候選；純bounded for-of在部分正常parser流量回退，捨棄。採UTF-16 length安全上界快速判定，再對仍不確定的長度逐code point計數並於超限早停；NFC→unsafe stripping→trim→計長→HTML escape順序與錯誤優先序保持。166,776 sanitizer／完整parser差異檢查一致，含custom/異常numeric bounds、malformed surrogate及清洗後成對surrogate。三次獨立混合有效流量重測8/32/64上限無median回退，32上限約9.0–12.6%較快；各action近範例65536-byte cap無效名稱約49–76%下降。計數instrumentation證明大輸入只yield33而不建完整陣列，短合格名稱零iteration；JSON／normalize／clean／trim仍為完整輸入工作。沒有policy/frame/protocol改變，不宣稱實際heap/RSS、整體容量、browser/media效能。正式回歸使用輸出／錯誤與操作計數，不加入脆弱timing門檻。
 
 193. **Widget 最小舉手主持面板（2026-10-14）：** actual SDK→validator→Hub受控proof證明transfer與controller grace expiry皆會讓widget觀眾成為台下主控並收到hands，但既有listener/speaker介面無approve/reject入口，只能宿主另寫JS。作明確功能擴充：原生details/summary＋只讀快照順序的具名核准／婉拒列，不複製全觀眾、kick／transfer／gain管理。按ID重用列、名稱安全decode/textContent；主控任期owner綁client/generation/room/pid，per-target共享pending保留至settle，即使列先消失再出現亦不重複接納。click前同步目前owner/row身份、settlement再核對，state/status/terminal在公開事件前撤銷舊權；重連保留展開/pending但停用，失權/離房清理並收起。server仍裁決stage_full、disconnected target conflict及withdraw競態，reject不被容量一起封鎖；不新增本機容量政策、自動邀請、epoch、protocol、timer或media操作。SDK global error沒有requestId，保留既有顯示，不保證所有舊wire errors隔離；hand delta不取代authoritative snapshot，沒有per-raise世代保證。證據限受控DOM/socket/公開SDK/Hub/Mock transport，未驗收native details／焦點／AT／音訊。
+
+
+194. **完整舉手婉拒回饋流程（2026-10-14）：** actual validator／Hub→公開SDK→三個完整UI模組的基線四例證明，成功婉拒僅有與自行收回相同的hand:withdraw/state，使用者只見按鈕或身分默默復原。新增target-only hand:rejected帶roomId/pid，在既有apply/state後、主控ACK前送當前有效session；不修改Room的全房事件、權限、離線拒絕政策或快照排程，不保存歷史／重連補發。SDK新增typed handrejected並驗目前room/pid、waiting/live及台下非舉手觀眾資格；原hand形狀與state保持。三UI獨立安全普通提示，綁當前身份與生命週期，伺服器接受新舉手／上台／主控／重連／退役即清，不在pending click時假設新申請成立。Widget先同步再轉送事件，保持原detail與錯誤通道；無新增timer、storage、auto raise/retry或media操作。舊官方SDK忽略新事件已有實證；第三方嚴格解析器未保證。無per-raise epoch，不能辨識任意重排同房同人通知；證據限受控DOM/socket、actualSDK/Hub，原生AT/瀏覽器/硬體音訊未驗收。

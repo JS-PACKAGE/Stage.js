@@ -150,6 +150,8 @@ export interface ServerMessageMap {
   'role:update': { participantId: string; role: Role; reason?: string };
   'hand:raise': { participantId: string };
   'hand:withdraw': { participantId: string };
+  /** Target-only successful rejection notice, after room:state; transient and never replayed. */
+  'hand:rejected': { roomId: string; participantId: string };
   'stage:invite': { participantId: string; byId: string };
   'stage:joined': { participantId: string; role: Role };
   'stage:left': { participantId: string; role: Role; reason?: StageLeftReason };

@@ -398,6 +398,285 @@ describe('widget hand queue position', () => {
   });
 });
 
+describe('widget transient hand rejection feedback', () => {
+  const message = '主控已婉拒這次舉手申請。';
+  const rejected = (roomId = 'one', participantId = 'me'): Extract<ServerMessage, { type: 'hand:rejected' }> =>
+    ({ type: 'hand:rejected', roomId, participantId });
+  function feedback(element: InstanceType<typeof StageElement>, visible = false): void {
+    const notice = element['handRejection'];
+    assert.equal(notice.hidden, !visible);
+    assert.equal(notice.textContent, visible ? message : '');
+    assert.equal(notice.getAttribute('role'), 'status');
+    assert.equal(notice.getAttribute('aria-live'), 'polite');
+    assert.ok((notice as unknown as Node).part.has('hand-rejection'));
+    assert.equal(Reflect.get(notice, 'innerHTML'), undefined);
+    assert.equal((notice as unknown as Node).children.length, 0, 'feedback uses a plain text paragraph');
+  }
+
+  it('shows actual successful Hub rejection only after the target snapshot, preserving ordinary errors and SDK detail identity', async t => {
+    const h = harness(); t.after(async () => { await h.hub.shutdown(); });
+    const host = await h.create(), listener = await h.join(host.roomId, host.code, '<img src=x> & Listener');
+    const observer = await h.join(host.roomId, host.code, 'Observer');
+    assert.equal(await h.req(listener.s, { type: 'hand:raise' }), 'ok');
+    const initial = listener.s.last('room:state'); assert.ok(initial);
+    const { element, client, socket } = await socketJoinedWidget(t, initial);
+    feedback(element);
+    socket.deliver({ type: 'error', code: 'conflict', message: 'Keep this existing error' });
+    const before = { frames: [...socket.sent], pending: client['pending'].size, controls: element['pendingActions'].size,
+      cooldown: client.handCooldownMs, error: element['error'].textContent };
+    const raw: unknown[] = [], forwarded: CustomEvent[] = [];
+    client.on('handrejected', event => raw.push(event.detail));
+    element.addEventListener('stage-handrejected', event => {
+      feedback(element, true); assert.equal(client.me?.handRaised, false);
+      forwarded.push(event as CustomEvent);
+    });
+    listener.s.clear(); host.s.clear(); observer.s.clear();
+    assert.equal(await h.req(host.s, { type: 'stage:reject', targetId: listener.id }), 'ok');
+    const replies = [...listener.s.inbox], at = replies.findIndex(item => item.type === 'hand:rejected');
+    assert.ok(at >= 0); assert.ok(replies.slice(0, at).some(item => item.type === 'room:state' && !item.me.handRaised));
+    assert.equal(host.s.all('hand:rejected').length, 0); assert.equal(observer.s.all('hand:rejected').length, 0);
+    for (const reply of replies.slice(0, at)) { socket.deliver(reply); feedback(element); }
+    socket.deliver(replies[at]!); feedback(element, true);
+    for (const reply of replies.slice(at + 1)) socket.deliver(reply);
+    assert.equal(raw.length, 1); assert.equal(forwarded.length, 1); assert.equal(forwarded[0]!.detail, raw[0]);
+    assert.deepEqual(raw[0], { roomId: host.roomId, participantId: listener.id });
+    assert.equal(forwarded[0]!.bubbles, true); assert.equal(forwarded[0]!.composed, true);
+    assert.equal(element['error'].hidden, false); assert.equal(element['status'].textContent, 'Room · 直播中 · 收聽中');
+    assert.equal(element['hand'].textContent, '舉手發言'); assert.equal(element['hand'].disabled, false);
+    assert.deepEqual({ frames: socket.sent, pending: client['pending'].size, controls: element['pendingActions'].size,
+      cooldown: client.handCooldownMs, error: element['error'].textContent }, before);
+    assert.doesNotMatch(element['handRejection'].textContent ?? '', /img|Listener|Observer|audio|音訊/);
+  });
+
+  it('never infers rejection from real Hub withdrawal, approval or failed moderation', async t => {
+    const h = harness(); t.after(async () => { await h.hub.shutdown(); });
+    const host = await h.create(), listener = await h.join(host.roomId, host.code, 'Listener');
+    const { element, socket } = await socketJoinedWidget(t, listener.s.last('room:state')!);
+    const relay = async (actor: FakeSession, command: Parameters<Harness['req']>[1]) => {
+      listener.s.clear(); const result = await h.req(actor, command);
+      for (const reply of listener.s.inbox) { socket.deliver(reply); feedback(element); }
+      assert.equal(listener.s.all('hand:rejected').length, 0); return result;
+    };
+    assert.equal(await relay(host.s, { type: 'stage:reject', targetId: listener.id }), 'conflict');
+    assert.equal(await relay(listener.s, { type: 'hand:raise' }), 'ok');
+    assert.equal(await relay(listener.s, { type: 'stage:reject', targetId: listener.id }), 'forbidden');
+    assert.equal(await relay(listener.s, { type: 'hand:withdraw' }), 'ok');
+    assert.equal(await relay(host.s, { type: 'stage:reject', targetId: listener.id }), 'conflict');
+    assert.equal(await relay(listener.s, { type: 'hand:raise' }), 'ok');
+    assert.equal(await relay(host.s, { type: 'stage:approve', targetId: listener.id }), 'ok');
+    assert.equal(await relay(host.s, { type: 'stage:reject', targetId: listener.id }), 'conflict');
+  });
+
+  it('forwards pre-snapshot and mismatched events without storing them for a later matching seat', async t => {
+    const { element, sockets, hello } = socketJoiningWidget(t); await settle();
+    const socket = sockets[0]!, join = await hello(socket), client = element.client!;
+    const seen: unknown[] = []; element.addEventListener('stage-handrejected', event => seen.push((event as CustomEvent).detail));
+    socket.deliver(rejected()); feedback(element);
+    assert.equal(seen.length, 0, 'the SDK drops an unowned wire rejection');
+    client.dispatchEvent(new CustomEvent('handrejected', { detail: { roomId: 'one', participantId: 'me' } })); feedback(element);
+    socket.deliver({ type: 'room:state', ...roomState() }); feedback(element);
+    socket.deliver({ type: 'ok', requestId: join.requestId }); await settle();
+    for (const report of [rejected('another-room'), rejected('one', 'another-person')]) {
+      socket.deliver(report); feedback(element);
+      const { type: _, ...detail } = report;
+      client.dispatchEvent(new CustomEvent('handrejected', { detail })); feedback(element);
+    }
+    const replacement = roomState(false, 'another-room'); replacement.me.participantId = 'another-person';
+    socket.deliver({ type: 'room:state', ...replacement }); feedback(element);
+    assert.equal(seen.length, 3);
+  });
+
+  it('uses safe static text and copies ownership before mutable details are forwarded', async t => {
+    const { element, client, socket } = await socketJoinedWidget(t);
+    const detail = { roomId: 'one', participantId: 'me', message: '<img src=x onerror=alert(1)>', name: 'SECRET' };
+    let forwarded: unknown, raw: unknown;
+    client.on('handrejected', event => { raw = event.detail; });
+    element.addEventListener('stage-handrejected', event => {
+      feedback(element, true); forwarded = (event as CustomEvent).detail;
+      detail.roomId = 'mutated-room'; detail.participantId = 'mutated-person';
+    }, { once: true });
+    client.dispatchEvent(new CustomEvent('handrejected', { detail }));
+    assert.equal(forwarded, detail); assert.equal(raw, detail); feedback(element, true);
+    socket.deliver({ type: 'room:state', ...roomState() }); element.playbackMuted = true; feedback(element, true);
+    assert.doesNotMatch(element['handRejection'].textContent ?? '', /SECRET|img|mutated/);
+    for (const invalid of [undefined, null, {}, { roomId: 'one' }, { participantId: 'me' }, { roomId: 1, participantId: 'me' }]) {
+      await client.disconnect(); await client['receive']({ type: 'room:state', ...roomState() });
+      let received: unknown;
+      element.addEventListener('stage-handrejected', event => { received = (event as CustomEvent).detail; }, { once: true });
+      const event = new CustomEvent('handrejected', { detail: invalid }); client.dispatchEvent(event);
+      assert.equal(received, event.detail); feedback(element);
+    }
+  });
+
+  for (const transition of ['raised', 'onstage', 'speaker', 'offstage controller', 'onstage controller', 'room', 'participant'] as const) {
+    it(`retires on ${transition} before forwarding state and does not revive on return`, async t => {
+      const { element, socket } = await socketJoinedWidget(t);
+      socket.deliver(rejected()); feedback(element, true);
+      const next = roomState();
+      if (transition === 'raised') next.me.handRaised = true;
+      else if (transition === 'onstage') next.me.onStage = true;
+      else if (transition === 'speaker') next.me.role = 'speaker';
+      else if (transition.includes('controller')) { next.me.role = 'controller'; next.me.onStage = transition === 'onstage controller'; }
+      else if (transition === 'room') next.roomId = 'two';
+      else next.me.participantId = 'new-me';
+      let callbacks = 0;
+      element.addEventListener('stage-state', () => { callbacks++; feedback(element); }, { once: true });
+      socket.deliver({ type: 'room:state', ...next }); assert.equal(callbacks, 1); feedback(element);
+      socket.deliver(rejected()); feedback(element);
+      socket.deliver({ type: 'room:state', ...roomState() }); feedback(element);
+      socket.deliver(rejected()); feedback(element, true);
+    });
+  }
+
+  it('retains notice across ordinary waiting/live state and playback changes without touching pending actions', async t => {
+    const { element, client, socket, tick } = await socketJoinedWidget(t);
+    socket.deliver(rejected()); feedback(element, true);
+    const node = element['handRejection'];
+    for (const status of ['waiting', 'live'] as const) {
+      const next = roomState(); next.status = status;
+      socket.deliver({ type: 'room:state', ...next }); feedback(element, true);
+      element.playbackMuted = !element.playbackMuted; element.playbackVolume = .25; feedback(element, true);
+      assert.equal(element['handRejection'], node);
+    }
+    click(element['hand']); await tick(100);
+    const raise = socket.sent.find(item => item.type === 'hand:raise'); assert.ok(raise && raise.type === 'hand:raise');
+    assert.equal(element['hand'].getAttribute('aria-busy'), 'true'); assert.equal(client['pending'].has(raise.requestId), true);
+    socket.deliver(rejected()); feedback(element, true);
+    assert.equal(element['hand'].disabled, true); assert.equal(element['hand'].getAttribute('aria-busy'), 'true');
+    const raised = roomState(); raised.me.handRaised = true; raised.hands = [raised.me];
+    socket.deliver({ type: 'room:state', ...raised }); feedback(element);
+    assert.equal(element['hand'].textContent, '收回舉手'); assert.equal(element['hand'].disabled, true);
+    socket.deliver({ type: 'ok', requestId: raise.requestId }); await settle();
+    assert.equal(element['hand'].disabled, false); assert.equal(element['pendingActions'].size, 0);
+    socket.deliver({ type: 'hand:withdraw', participantId: 'me' });
+    socket.deliver({ type: 'room:state', ...roomState() }); feedback(element);
+  });
+
+  for (const event of [
+    { wire: { type: 'hand:raise', participantId: 'me' }, forwarded: 'hand' },
+    { wire: { type: 'stage:joined', participantId: 'me', role: 'speaker' }, forwarded: 'stagejoined' },
+    { wire: { type: 'role:update', participantId: 'me', role: 'controller', reason: 'transfer' }, forwarded: 'role' },
+    { wire: { type: 'control:transferred', fromId: 'host', toId: 'me' }, forwarded: 'transferred' },
+  ] as const satisfies readonly { wire: ServerMessage; forwarded: string }[]) {
+    it(`retires before forwarding own ${event.forwarded}, without waiting for the next snapshot`, async t => {
+      const { element, socket } = await socketJoinedWidget(t);
+      socket.deliver(rejected()); feedback(element, true);
+      const other = 'participantId' in event.wire ? { ...event.wire, participantId: 'other' } : { ...event.wire, toId: 'other' };
+      socket.deliver(other); feedback(element, true);
+      let callbacks = 0;
+      element.addEventListener(`stage-${event.forwarded}`, () => { callbacks++; feedback(element); }, { once: true });
+      socket.deliver(event.wire); assert.equal(callbacks, 1); feedback(element);
+      socket.deliver({ type: 'room:state', ...roomState() }); feedback(element);
+    });
+  }
+
+  it('clears reconnect feedback before forwarding status and rejects old socket callbacks after same-seat resume', async t => {
+    const { element, client, socket, sockets, tick, hello } = await socketJoinedWidget(t);
+    socket.deliver(rejected()); feedback(element, true);
+    const oldMessage = socket.onmessage, retained = client.state;
+    let callbacks = 0;
+    element.addEventListener('stage-status', () => { callbacks++; feedback(element); }, { once: true });
+    socket.close(); await settle(); feedback(element); assert.equal(callbacks, 1); assert.equal(client.state, retained);
+    await client['receive'](rejected()); feedback(element);
+    await tick(500); const next = sockets[1]!, join = await hello(next);
+    next.deliver({ type: 'room:state', ...roomState() }); feedback(element);
+    next.deliver({ type: 'ok', requestId: join.requestId }); await settle();
+    let reports = 0; element.addEventListener('stage-handrejected', () => { reports++; });
+    oldMessage?.({ data: JSON.stringify(rejected()) }); feedback(element); assert.equal(reports, 0);
+    next.deliver(rejected()); feedback(element, true); assert.equal(reports, 1);
+  });
+
+  it('retires direct public disconnect and allows a same-client same-ID rejoin without replaying its notice', async t => {
+    const { element, client, socket, sockets, tick, joinRequest } = await socketJoinedWidget(t);
+    socket.deliver(rejected()); feedback(element, true);
+    const oldMessage = socket.onmessage;
+    await client.disconnect(); feedback(element);
+    const connecting = client.connect(), next = sockets[1]!; next.hello(); await connecting;
+    const joining = client.join({ roomId: 'one', name: 'Listener' }); await settle(); await tick(100);
+    const join = joinRequest(next); next.deliver({ type: 'room:state', ...roomState() }); feedback(element);
+    next.deliver({ type: 'ok', requestId: join.requestId }); await joining;
+    assert.equal(element.client, client); oldMessage?.({ data: JSON.stringify(rejected()) }); feedback(element);
+    next.deliver(rejected()); feedback(element, true);
+  });
+
+  it('clears a pre-ACK disconnected snapshot and silent public disconnect without carrying notice into a fresh join', async t => {
+    const { element, sockets, hello, tick, joinRequest } = socketJoiningWidget(t); await settle();
+    const socket = sockets[0]!, join = await hello(socket), client = element.client!;
+    socket.deliver({ type: 'room:state', ...roomState() }); socket.deliver(rejected()); feedback(element, true);
+    assert.equal(client['pending'].has(join.requestId), true); assert.equal(client['session'], null);
+    socket.close(); await settle(); assert.equal(client.status, 'disconnected'); assert.ok(client.state); feedback(element);
+    let statuses = 0; element.addEventListener('stage-status', () => { statuses++; });
+    await client.disconnect(); assert.equal(statuses, 0); feedback(element);
+    const connecting = client.connect(), next = sockets[1]!; next.hello(); await connecting;
+    const joining = client.join({ roomId: 'one', name: 'Listener' }); await settle(); await tick(100);
+    const fresh = joinRequest(next); next.deliver({ type: 'room:state', ...roomState() }); feedback(element);
+    next.deliver({ type: 'ok', requestId: fresh.requestId }); await joining; feedback(element);
+    next.deliver(rejected()); feedback(element, true);
+  });
+
+  it('retires generation ownership and the old client event lane across a same-seat remount', async t => {
+    const { element, client } = await subscribedWidget(t);
+    await client['receive'](rejected()); feedback(element, true);
+    ++element['generation']; element['render'](); feedback(element);
+    await client['receive'](rejected()); feedback(element);
+    Object.assign(element, { isConnected: false }); element.disconnectedCallback(); await settle();
+    Object.assign(element, { isConnected: true }); element.connectedCallback(); await settle();
+    const replacement = element.client; assert.ok(replacement); assert.notEqual(replacement, client);
+    await replacement['receive']({ type: 'room:state', ...roomState() }); feedback(element);
+    let reports = 0; element.addEventListener('stage-handrejected', () => { reports++; });
+    client.dispatchEvent(new CustomEvent('handrejected', { detail: { roomId: 'one', participantId: 'me' } }));
+    assert.equal(reports, 0); feedback(element);
+    await replacement['receive'](rejected()); assert.equal(reports, 1); feedback(element, true);
+    await client['receive']({ type: 'status', state: 'reconnecting' }); feedback(element, true);
+  });
+
+  it('does not rewrite the live notice for unrelated reports or routine same-seat renders', async t => {
+    const { element, socket } = await socketJoinedWidget(t);
+    socket.deliver(rejected()); feedback(element, true);
+    let text = element['handRejection'].textContent, writes = 0;
+    Object.defineProperty(element['handRejection'], 'textContent', {
+      configurable: true, get: () => text, set: (value: string) => { writes++; text = value; },
+    });
+    socket.deliver({ type: 'speaking', participantIds: [] });
+    socket.deliver({ type: 'quality', participants: [] });
+    socket.deliver({ type: 'room:state', ...roomState() });
+    element.playbackMuted = true; element.playbackVolume = .5;
+    assert.equal(writes, 0); feedback(element, true);
+  });
+
+  for (const transition of ['leave', 'detach', 'room attribute', 'ordinary close', 'kick', 'shutdown'] as const) {
+    it(`clears notice on ${transition} and ignores its retired event lane`, async t => {
+      const { element, client, socket } = await socketJoinedWidget(t);
+      socket.deliver(rejected()); feedback(element, true);
+      if (transition === 'leave') click(element['roomAction']);
+      else if (transition === 'detach') { Object.assign(element, { isConnected: false }); element.disconnectedCallback(); }
+      else if (transition === 'room attribute') element.setAttribute('room', 'two');
+      else socket.deliver(terminalCases.find(item => item.title === transition)!.message);
+      await settle(); feedback(element);
+      client.dispatchEvent(new CustomEvent('handrejected', { detail: { roomId: 'one', participantId: 'me' } })); feedback(element);
+      element.playbackMuted = true; feedback(element);
+    });
+  }
+
+  for (const transition of ['new raised snapshot', 'public disconnect', 'snapshot mutation', 'attribute rejoin', 'own role event'] as const) {
+    it(`does not restore an outer notice after a nested ${transition} callback`, async t => {
+      const { element, client, socket } = await socketJoinedWidget(t);
+      let callbacks = 0;
+      element.addEventListener('stage-handrejected', () => {
+        callbacks++; feedback(element, true);
+        if (transition === 'new raised snapshot') {
+          const next = roomState(); next.me.handRaised = true; socket.deliver({ type: 'room:state', ...next });
+        } else if (transition === 'public disconnect') void client.disconnect();
+        else if (transition === 'snapshot mutation') client.me!.onStage = true;
+        else if (transition === 'attribute rejoin') element.setAttribute('room', 'two');
+        else socket.deliver({ type: 'role:update', participantId: 'me', role: 'controller', reason: 'transfer' });
+      }, { once: true });
+      socket.deliver(rejected()); assert.equal(callbacks, 1); feedback(element);
+      await settle(); feedback(element); element.playbackMuted = true; feedback(element);
+    });
+  }
+});
+
 describe('widget force-mute feedback', () => {
   function assertFeedback(element: InstanceType<typeof StageElement>, muted: boolean, locked: boolean,
     { pending = false, reconnecting = false, name = 'Room' } = {}): void {

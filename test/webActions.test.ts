@@ -36,7 +36,10 @@ interface Harness {
 function setup(): Harness {
   return runInNewContext(stripTypeScriptTypes(`
     let busy = false;
-    let pendingAudioUnlock;
+    let pendingAudioUnlock, handRejectionRoomActive = false;
+    const handRejectionNotice = { hidden: true, textContent: '', dataset: {}, children: [] };
+    function retireHandRejection() {}
+    function syncHandRejection() {}
     let landingRevision = 0;
     let roomActionIdentity = '', roomActionGeneration = 0, cooldownButton = null, cooldownTimer, cooldownDue = 0, invitation = '';
     const pendingRoomActions = new Map(), nodes = [], errors = [];

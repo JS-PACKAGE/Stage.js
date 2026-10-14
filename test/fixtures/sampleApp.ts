@@ -145,6 +145,9 @@ type Status = 'waiting' | 'live' | 'reconnecting' | 'disconnected';
 interface Events {
   state: RoomStatePayload; status: Status; micready: undefined;
   created: { roomId: string; code?: string }; closed: { roomId: string; reason?: 'shutdown' }; kicked: { roomId: string };
+  handrejected: { roomId: string; participantId: string };
+  hand: { participantId: string; raised: boolean }; stagejoined: { participantId: string; role: ParticipantView['role'] };
+  role: { participantId: string; role: ParticipantView['role'] }; transferred: { fromId: string; toId: string };
   invite: { participantId: string }; stageleft: { participantId: string; reason?: string };
   micerror: { message: string; name: string }; audioblocked: unknown; error: { message: string };
   speaking: { participantIds: string[] };

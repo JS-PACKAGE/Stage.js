@@ -127,6 +127,8 @@ export interface StageEventMap {
   /** The controller removed you from the room; you are disconnected and will not rejoin on your own. */
   kicked: ServerMessageMap['kicked'];
   hand: { participantId: string; raised: boolean };
+  /** An explicit controller rejection of your hand request. Transient; no replay or per-raise epoch. */
+  handrejected: ServerMessageMap['hand:rejected'];
   invite: ServerMessageMap['stage:invite'];
   stagejoined: ServerMessageMap['stage:joined'];
   stageleft: ServerMessageMap['stage:left'];
@@ -796,6 +798,15 @@ export class StageClient extends EventTarget {
         break;
       case 'status': this.setStatus(message.state); break;
       case 'hand:raise': case 'hand:withdraw': this.emit('hand', { participantId: message.participantId, raised: message.type === 'hand:raise' }); break;
+      case 'hand:rejected': {
+        const state = this.snapshot;
+        if (state?.roomId === message.roomId && state.me.participantId === message.participantId &&
+            (this.currentStatus === 'waiting' || this.currentStatus === 'live') &&
+            state.me.role === 'audience' && !state.me.onStage && !state.me.handRaised) {
+          this.emit('handrejected', { roomId: message.roomId, participantId: message.participantId });
+        }
+        break;
+      }
       case 'stage:invite': this.emit('invite', { participantId: message.participantId, byId: message.byId }); break;
       case 'stage:joined': this.emit('stagejoined', { participantId: message.participantId, role: message.role }); break;
       case 'stage:left': this.emit('stageleft', { participantId: message.participantId, role: message.role, reason: message.reason }); break;
