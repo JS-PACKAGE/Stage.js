@@ -36,6 +36,7 @@ interface Harness {
 function setup(): Harness {
   return runInNewContext(stripTypeScriptTypes(`
     let busy = false;
+    let pendingAudioUnlock;
     let landingRevision = 0;
     let roomActionIdentity = '', roomActionGeneration = 0, cooldownButton = null, cooldownTimer, cooldownDue = 0, invitation = '';
     const pendingRoomActions = new Map(), nodes = [], errors = [];

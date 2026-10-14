@@ -676,3 +676,6 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 
 
 165. **完整範例可展開的舞台品質明細（2026-10-14）：** bounded whole-module／Hub 審查確認健康品質回報原本沒有可見文字，差品質僅在非互動 badge 的 title 呈現數值。新增原生 details／summary 面板，沿用既有品質事件，僅主控或台上者可見；只保存目前房間／參與者且目前仍在台上的報告，複製 primitive 欄位，不保留事件物件別名。每筆報告替換前筆，省略或離台者移除；以目前安全解碼名稱和 textContent 呈現，數值缺失／非有限／不合法比例顯示破折號。有效更新重用列並保留 open，landing、身分改變或資格喪失清空並收合；重連清空資料但保留展開，重連期間不接納明細，恢復後等下一則事件。協定無時間戳／epoch，文案僅說最近收到，不能保證收集始於重連之後；RTT 不是端到端音訊延遲。沒有新 API、timer、polling、媒體或既有 badge policy 變更。測試以實際 Hub 收件政策與 whole-module fake DOM 為界，不宣稱原生鍵盤、輔助科技或音訊驗收。
+
+
+166. **完整範例播放解鎖的跨通知 pending（2026-10-14）：** whole-module 與未替換公開 SDK 的受控 audio／socket probe 重現：第一次 unlock 的 play promise 未完成時，同席 room state 或上台邀請會重建 notices，新的按鈕恢復 enabled，再點可同時留下兩個 play promise。以目前房間 generation 綁定單一 symbol pending，建立每個提示按鈕時同步 disabled／aria-busy；handler 在 pending 或 error 改動前檢查目前節點、generation、room state、blocked 與 pending。維持手勢內同步 unlockAudio，只有自己的 finally 清 token 並更新目前提示，原有 run 保留 current error 與世代失效抑制；新身分重設 token，信令重連不撤銷仍存在的媒體操作。沒有改 SDK、autoplay policy 或自動重試；未把僅 synthetic event injection 的舊成功遮蔽新 notice 假設擴入修正。證據限受控 promise／DOM／信令，不能視為原生播放、權限或音訊驗收。

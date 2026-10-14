@@ -47,6 +47,7 @@ let busy = false;
 let landingEntry: { cancelled: boolean; entered: boolean } | undefined;
 let landingRevision = 0;
 let audioBlocked = false;
+let pendingAudioUnlock: symbol | undefined;
 let micNotice = '';
 let micRetryAvailable = false, micRetryPending = false;
 let micRetryButton: HTMLButtonElement | undefined;
@@ -418,6 +419,7 @@ async function run(action: () => Promise<unknown>, target?: HTMLButtonElement, g
 function resetRoomActions(identity: string): void {
   if (roomActionIdentity === identity) return;
   roomActionIdentity = identity; roomActionGeneration++; pendingRoomActions.clear();
+  pendingAudioUnlock = undefined;
   micRetryAvailable = micRetryPending = false; micNotice = '';
 }
 function roomButton(key: string, label: string, action: () => Promise<unknown>, className = '', canAct?: () => boolean): HTMLButtonElement {
@@ -582,10 +584,26 @@ function renderNotices(): void {
   if (audioBlocked) {
     const generation = roomActionGeneration;
     const banner = element('div', 'banner');
-    banner.append(element('span', '', '自動播放遭阻擋。'), button('點擊啟用音訊', async () => {
-      await client.unlockAudio();
-      if (generation === roomActionGeneration) { audioBlocked = false; renderNotices(); }
-    }, 'primary', generation));
+    const unlock = element('button', 'primary', '點擊啟用音訊');
+    unlock.type = 'button'; unlock.disabled = Boolean(pendingAudioUnlock);
+    unlock.setAttribute('aria-busy', String(Boolean(pendingAudioUnlock)));
+    unlock.onclick = () => {
+      if (!unlock.isConnected || generation !== roomActionGeneration || !client.state || !audioBlocked || pendingAudioUnlock) return;
+      const token = Symbol('audio-unlock'); pendingAudioUnlock = token;
+      unlock.disabled = true; unlock.setAttribute('aria-busy', 'true');
+      void run(async () => {
+        try {
+          // Invoke synchronously in this gesture; notice redraws must not admit another play.
+          await client.unlockAudio();
+          if (generation === roomActionGeneration && pendingAudioUnlock === token) audioBlocked = false;
+        } finally {
+          if (generation === roomActionGeneration && pendingAudioUnlock === token) {
+            pendingAudioUnlock = undefined; renderNotices();
+          }
+        }
+      }, unlock, generation);
+    };
+    banner.append(element('span', '', '自動播放遭阻擋。'), unlock);
     notices.append(banner);
   }
   if (micNotice) {
