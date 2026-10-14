@@ -730,3 +730,6 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 
 
 183. **Widget 殘留快照的失聯操作 admission（2026-10-14）：** actual SDK 初次 join 收到 state、未 ACK 即 socketLost，會留下 snapshot、session=null 並切 disconnected。基線7種舉手/收回、mute/unmute、speaker/controller離台及controller返回仍enabled；一般點擊與forwarded status舊DOM皆會進widget pending、清錯誤再被SDK拒絕，SDK本身未送frame／占容量／消耗冷卻。另personal stage於forwarded reconnecting callback雖被action內guard擋SDK，wrapper已清錯誤。窄修hand/mic predicate排除disconnected，新增共用canUseStage供button admission（pending/error之前）與renderdisabled，handler仍重查。保留waiting/live有效操作、正常重連後恢復及room leave本機清理；不改SDK/session/媒體或其他controls，不擴大既有pending settlement政策。驗證限公開SDK與受控DOM/socket，非原生輸入/媒體驗收。
+
+
+184. **進場頁主動退役房內診斷 timer（2026-10-14）：** actual SDK 初次建立／加入收到state、未ACK即失聯，status已disconnected但保留snapshot；之後使用者離房呼叫disconnect清snapshot，不再發相同status。基線完整範例返回landing仍留一個2000ms interval，6秒假時鐘後亦存活；refresh本身因無state不讀stats，不能誇大為持續網路或媒體工作。把既有clearInterval／poll sequence退役／連線文字清除抽成stopRoomTimers，由landing直接呼叫，syncRoomTimers原停止分支共用。既有newstate/visibility恢復單一timer、queued callback identity與poll generation隔離保持，無新增SDK、timer、listener、媒體或重連政策。此批僅修診斷資源清理；fullsample與embed失聯控制admission另案。證據限受控timer/DOM/socket＋公開SDK，未量測原生CPU／耗電或音訊。

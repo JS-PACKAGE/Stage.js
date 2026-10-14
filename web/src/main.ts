@@ -518,6 +518,7 @@ function field(form: HTMLFormElement, label: string, name: string, value = '', r
   return input;
 }
 function landing(): void {
+  stopRoomTimers();
   resetQualityDetails();
   stagePermissionOwner = undefined;
   landingRevision += 1;
@@ -1004,11 +1005,12 @@ function syncRoomTimers(): void {
       refreshConnectionLine();
     }, 2000);
     roomTimers = [timer];
-  } else if (!polling) {
-    roomTimers.forEach(clearInterval); roomTimers = [];
-    connectionPollSequence++; connectionLine.textContent = '';
-    connectionLine.classList.toggle('error', false);
-  }
+  } else if (!polling) stopRoomTimers();
+}
+function stopRoomTimers(): void {
+  roomTimers.forEach(clearInterval); roomTimers = [];
+  connectionPollSequence++; connectionLine.textContent = '';
+  connectionLine.classList.toggle('error', false);
 }
 client.on('state', syncRoomTimers);
 client.on('status', syncRoomTimers);
