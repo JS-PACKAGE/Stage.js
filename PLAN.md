@@ -751,3 +751,5 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 
 
 190. **最小 embed 明確關機原因提示（2026-10-14）：** actual Hub.shutdown→公開SDK→whole embed受控bridge證明reason=shutdown已完整到達，但closed listener忽略detail，顯示成一般關房。僅在既有current client／entry generation／cancel guard後讀明確shutdown reason，採與widget相同維護／重啟文字；缺少或未知reason保留普通關房，被踢不變。不從status／error推測原因，retireEntry／playback／controls／error清除與初次ACK前／舊操作隔離保持，無新事件、重連、媒體或自動重試。證據限公開SDK／Hub與受控DOM/socket/mock媒體，原生瀏覽器、AT與音訊未驗收。
+
+191. **最小 embed 主控房名編輯（2026-10-14）：** actual Hub／validator→公開SDK→whole embed受控probe證明普通觀眾可被轉交為台下主控且setRoomName可用，但頁面沒有入口、房名僅在會被錯誤覆蓋的status。新增join form外具明確label／type=button的主控編輯器，獨立textContent顯示decode後accepted title；草稿只在新client／entry generation／room／participant／主控任期初始化，同席state／reconnect保留。送出前同步資格、reserve獨立attempt、raw值交既有SDK/server驗證；state-before-ACK不解鎖，ACK-only不改accepted title。失權／disconnected／既有retireControls清除，catch/finally再核owner避免舊結果污染新操作。保留既有全域error回報，不宣稱無request ID的error事件可按操作隔離；不新增API、timer、storage、auto retry/rejoin或media操作。修正SDK README過時的embed/widget無管理入口描述。證據限受控DOM/socket、公開SDK、validator與Hub，無原生IME／AT／硬體音訊驗收。

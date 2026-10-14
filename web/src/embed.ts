@@ -16,6 +16,10 @@ const leave = document.querySelector<HTMLButtonElement>('#leave')!;
 const cancelJoin = document.querySelector<HTMLButtonElement>('#cancel-join')!;
 const mic = document.querySelector<HTMLButtonElement>('#mic')!;
 const rename = document.querySelector<HTMLButtonElement>('#rename')!;
+const roomNamePanel = document.querySelector<HTMLDivElement>('#room-name-panel')!;
+const roomNameCurrent = document.querySelector<HTMLParagraphElement>('#room-name-current')!;
+const roomNameDraft = input('room-name-draft');
+const roomNameUpdate = document.querySelector<HTMLButtonElement>('#room-name-update')!;
 const stage = document.querySelector<HTMLButtonElement>('#stage')!;
 const micRetry = document.querySelector<HTMLButtonElement>('#mic-retry')!;
 const audio = document.querySelector<HTMLAudioElement>('#audio')!;
@@ -31,6 +35,9 @@ let pendingMic: { client: Client } | undefined;
 let pendingStage: { client: Client } | undefined;
 let controlsClient: Client | undefined;
 let pendingRename: { client: Client; roomId: string; participantId: string; generation: number } | undefined;
+let roomNameOwner: { client: Client; roomId: string; participantId: string; generation: number } | undefined;
+let roomNameAttempt: object | undefined;
+let decodeRoomName: typeof StageLibrary.decodeName | undefined;
 let micRetryParticipant: string | undefined;
 let pendingMicRetry: { client: Client } | undefined;
 let playbackGeneration = 0;
@@ -44,7 +51,7 @@ function hideCancel(): void {
 function retireControls(): void {
   pendingHand = undefined; pendingMic = undefined; pendingStage = undefined;
   controlsClient = undefined; micRetryParticipant = undefined; pendingMicRetry = undefined;
-  pendingRename = undefined; syncRename();
+  pendingRename = undefined; syncRename(); retireRoomName();
 }
 /** Retire initial-join feedback before user or terminal callbacks can start another entry. */
 function retireEntry(): number {
@@ -80,6 +87,29 @@ function syncRename(): void {
   rename.hidden = !state?.me;
   rename.disabled = rename.hidden || client?.status === 'reconnecting' || Boolean(pendingRename);
   rename.setAttribute('aria-busy', String(Boolean(pendingRename)));
+}
+function retireRoomName(): void {
+  roomNameOwner = undefined; roomNameAttempt = undefined;
+  roomNameDraft.value = ''; roomNameCurrent.textContent = '';
+  roomNamePanel.hidden = true; roomNameDraft.disabled = roomNameUpdate.disabled = true;
+  roomNameUpdate.setAttribute('aria-busy', 'false');
+}
+function syncRoomName(): void {
+  const current = client, state = current?.state;
+  if (!current || current !== controlsClient || !state || state.me.role !== 'controller'
+    || current.status === 'disconnected' || !decodeRoomName) { retireRoomName(); return; }
+  const owner = roomNameOwner;
+  if (!owner || owner.client !== current || owner.generation !== entryGeneration
+    || owner.roomId !== state.roomId || owner.participantId !== state.me.participantId) {
+    retireRoomName();
+    roomNameOwner = { client: current, roomId: state.roomId, participantId: state.me.participantId, generation: entryGeneration };
+    roomNameDraft.value = decodeRoomName(state.name);
+  }
+  // Authoritative updates change the accepted title without overwriting a same-controller draft.
+  roomNameCurrent.textContent = `目前房間名稱：${decodeRoomName(state.name)}`;
+  roomNamePanel.hidden = false; roomNameDraft.disabled = false;
+  roomNameUpdate.disabled = current.status === 'reconnecting' || Boolean(roomNameAttempt);
+  roomNameUpdate.setAttribute('aria-busy', String(Boolean(roomNameAttempt)));
 }
 function syncMic(): void {
   const me = client === controlsClient ? client?.me : undefined;
@@ -202,14 +232,14 @@ join.onsubmit = (event) => {
       if (generation !== entryGeneration) return;
       // This compact UI has no room-level meter; explicit preview APIs remain available.
       client = new library.StageClient({ url: ws.href, audioElement: audio, enableMicMeter: false });
-      const current = client; controlsClient = current; entryClient = current; syncUnlock();
+      const current = client; controlsClient = current; entryClient = current; decodeRoomName = library.decodeName; syncUnlock();
       client.on('state', ({ detail }: CustomEvent<StageEventMap['state']>) => {
         if (client !== current || cancelledEntry) return;
         receivedState = true;
         if (generation === entryGeneration) hideCancel();
         progress = false;
         status.textContent = `${library.decodeName(detail.name)} · ${library.decodeName(detail.me.name)} · ${detail.me.onStage ? '已上台' : '收聽中'}`;
-        syncHand(); syncMic(); syncStage(); syncMicRetry(); syncRename();
+        syncHand(); syncMic(); syncStage(); syncMicRetry(); syncRename(); syncRoomName();
         leave.disabled = false;
       });
       client.on('micerror', ({ detail }) => {
@@ -229,12 +259,12 @@ join.onsubmit = (event) => {
         if (current.state) { receivedState = true; if (generation === entryGeneration) hideCancel(); }
         if (detail === 'reconnecting') { progress = false; status.textContent = '重新連線中'; hand.disabled = true; }
         else if (detail === 'disconnected') { progress = false; retirePlayback(); retireControls(); status.textContent = '未連線'; hand.disabled = leave.disabled = true; }
-        syncHand(); syncMic(); syncStage(); syncMicRetry(); syncRename();
+        syncHand(); syncMic(); syncStage(); syncMicRetry(); syncRename(); syncRoomName();
       });
       client.on('error', ({ detail }) => { if (client !== current || cancelledEntry || generation !== entryGeneration) return; progress = false; report(detail); });
       client.on('audioblocked', () => { if (cancelledEntry) return; progress = false; status.textContent = '請點擊啟用音訊。'; });
-      client.on('closed', ({ detail }) => { if (client !== current || cancelledEntry || generation !== entryGeneration) return; retireEntry(); clearError(); retirePlayback(); retireControls(); syncHand(); syncMic(); syncStage(); syncMicRetry(); syncRename(); status.textContent = detail.reason === 'shutdown' ? '伺服器維護或重新啟動，房間已關閉。' : '房間已關閉。'; hand.disabled = leave.disabled = true; });
-      client.on('kicked', () => { if (client !== current || cancelledEntry || generation !== entryGeneration) return; retireEntry(); clearError(); retirePlayback(); retireControls(); syncHand(); syncMic(); syncStage(); syncMicRetry(); syncRename(); status.textContent = '你已被主控移出房間。'; hand.disabled = leave.disabled = true; });
+      client.on('closed', ({ detail }) => { if (client !== current || cancelledEntry || generation !== entryGeneration) return; retireEntry(); clearError(); retirePlayback(); retireControls(); syncHand(); syncMic(); syncStage(); syncMicRetry(); syncRename(); syncRoomName(); status.textContent = detail.reason === 'shutdown' ? '伺服器維護或重新啟動，房間已關閉。' : '房間已關閉。'; hand.disabled = leave.disabled = true; });
+      client.on('kicked', () => { if (client !== current || cancelledEntry || generation !== entryGeneration) return; retireEntry(); clearError(); retirePlayback(); retireControls(); syncHand(); syncMic(); syncStage(); syncMicRetry(); syncRename(); syncRoomName(); status.textContent = '你已被主控移出房間。'; hand.disabled = leave.disabled = true; });
       showProgress('連線中…');
       await current.connect();
       if (generation !== entryGeneration) return;
@@ -322,6 +352,24 @@ stage.onclick = () => {
     }
   })();
 };
+roomNameUpdate.onclick = () => {
+  syncRoomName();
+  const owner = roomNameOwner;
+  if (!owner || roomNamePanel.hidden || roomNameUpdate.disabled || roomNameAttempt) return;
+  const name = roomNameDraft.value;
+  const attempt = roomNameAttempt = {};
+  syncRoomName();
+  const current = (): boolean => {
+    if (roomNameOwner !== owner || roomNameAttempt !== attempt) return false;
+    syncRoomName();
+    return roomNameOwner === owner && roomNameAttempt === attempt;
+  };
+  void (async () => {
+    try { await owner.client.setRoomName(name); }
+    catch (error) { if (current()) report(error); }
+    finally { if (current()) { roomNameAttempt = undefined; syncRoomName(); } }
+  })();
+};
 micRetry.onclick = () => {
   syncMicRetry();
   if (!client || micRetry.disabled || micRetry.hidden) return;
@@ -347,4 +395,4 @@ leave.onclick = () => {
     status.textContent = '已離開。'; hand.disabled = leave.disabled = true;
   });
 };
-syncHand(); syncMic(); syncStage(); syncMicRetry(); syncRename(); syncUnlock();
+syncHand(); syncMic(); syncStage(); syncMicRetry(); syncRename(); syncRoomName(); syncUnlock();

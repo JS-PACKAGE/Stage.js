@@ -71,6 +71,8 @@ export class EmbedSdk {
   readonly actions: { type: Action; work: Deferred }[] = [];
   readonly renames: { name: string; work: Deferred }[] = [];
   setName(name: string): Promise<void> { const work = new Deferred(); this.renames.push({ name, work }); return work.promise; }
+  readonly roomRenames: { name: string; work: Deferred }[] = [];
+  setRoomName(name: string): Promise<void> { const work = new Deferred(); this.roomRenames.push({ name, work }); return work.promise; }
   private readonly listeners = new Map<string, ((event: { detail: unknown }) => void)[]>();
   constructor(options: ClientOptions, now: () => number = () => 0) { this.options = options; this.now = now; }
   on(type: string, listener: (event: { detail: unknown }) => void): void {
@@ -105,7 +107,7 @@ export class EmbedSdk {
 export const flush = async (): Promise<void> => { for (let i = 0; i < 16; i++) await Promise.resolve(); };
 
 export function embedApp(options: { libraryLoad?: Promise<void> | ((url: string, attempt: number) => Promise<void>); source?: string; search?: string } = {}) {
-  const nodes = new Map(['host', 'ws-path', 'room', 'code', 'name', 'status', 'error-notice', 'last-error', 'error-dismiss', 'join', 'hand', 'mic', 'rename', 'stage', 'mic-retry', 'cancel-join', 'leave', 'audio', 'unlock'].map(id => [id, new EmbedNode()]));
+  const nodes = new Map(['host', 'ws-path', 'room', 'code', 'name', 'status', 'error-notice', 'last-error', 'error-dismiss', 'join', 'hand', 'mic', 'rename', 'room-name-panel', 'room-name-current', 'room-name-draft', 'room-name-update', 'stage', 'mic-retry', 'cancel-join', 'leave', 'audio', 'unlock'].map(id => [id, new EmbedNode()]));
   const node = (id: string): EmbedNode => { const found = nodes.get(id); assert.ok(found, `unmodeled node: ${id}`); return found; };
   node('error-notice').hidden = true;
   const cancel = node('cancel-join'); cancel.hidden = cancel.disabled = true; cancel.textContent = '取消連線';
@@ -195,9 +197,9 @@ export function embedApp(options: { libraryLoad?: Promise<void> | ((url: string,
       assert.equal(sdk.joins.length, 1); sdk.snapshot(overrides); assert.equal(submit.disabled, false); return sdk;
     },
     async cleanup(): Promise<void> {
-      for (const sdk of clients) for (const action of [...sdk.actions, ...sdk.renames]) if (!action.work.settled) action.work.resolve();
+      for (const sdk of clients) for (const action of [...sdk.actions, ...sdk.renames, ...sdk.roomRenames]) if (!action.work.settled) action.work.resolve();
       await flush(); timers.clear(); retired.clear();
-      assert.ok(clients.every(sdk => [...sdk.actions, ...sdk.renames].every(action => action.work.settled)), 'all command promises must settle');
+      assert.ok(clients.every(sdk => [...sdk.actions, ...sdk.renames, ...sdk.roomRenames].every(action => action.work.settled)), 'all command promises must settle');
       assert.equal(timers.size, 0);
     },
   };
