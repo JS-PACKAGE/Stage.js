@@ -52,6 +52,7 @@ export interface AudioStats {
 }
 export interface StageStats { inbound: AudioStats | null; outbound: AudioStats | null }
 export interface AudioDevices { inputs: MediaDeviceInfo[]; outputs: MediaDeviceInfo[] }
+/** Preview levels become zero after explicit stop or natural capture end; stop remains idempotent. */
 export interface MicTest { level(): number; stop(): void }
 export interface MicTestOptions { signal?: AbortSignal }
 
@@ -372,30 +373,43 @@ export class StageClient extends EventTarget {
       if (signal?.aborted) throw abortReason(signal);
       if (revision !== this.testRevision) throw new StageError('disconnected', '麥克風測試已取消。');
     };
-    let meter: MicTest;
+    let track: MediaStreamTrack | undefined;
+    const checkTrack = () => {
+      if (track?.readyState === 'ended') throw new DOMException('麥克風測試音軌已中斷，請重新測試。', 'NotReadableError');
+    };
+    let meter: MicTest | undefined;
     try {
       checkCancelled();
+      track = stream.getAudioTracks()[0]; checkTrack();
       meter = createMicMeter(stream);
-    } catch (error) { stream.getTracks().forEach((track) => track.stop()); throw error; }
+      // Platform meter construction can synchronously retire this capture.
+      checkCancelled(); checkTrack();
+    } catch (error) { meter?.stop(); stream.getTracks().forEach((track) => track.stop()); throw error; }
+    const ownedMeter = meter;
     let stopped = false;
     const test: MicTest = {
-      level: meter.level,
+      level: ownedMeter.level,
       stop: () => {
         if (stopped) return;
         stopped = true;
         signal?.removeEventListener('abort', stopOnAbort);
-        meter.stop();
+        track?.removeEventListener('ended', stopOnEnded);
+        ownedMeter.stop();
         stream.getTracks().forEach((track) => track.stop());
         this.micTests.delete(test);
       },
     };
     const stopOnAbort = () => test.stop();
+    const stopOnEnded = () => test.stop();
     this.micTests.add(test);
     signal?.addEventListener('abort', stopOnAbort, { once: true });
+    track?.addEventListener('ended', stopOnEnded, { once: true });
     try {
-      checkCancelled();
+      checkCancelled(); checkTrack();
       this.emit('micready', undefined);
       checkCancelled();
+      // A listener may call track.stop(), which does not dispatch ended.
+      if (track?.readyState === 'ended') test.stop();
       return test;
     } catch (error) { test.stop(); throw error; }
   }

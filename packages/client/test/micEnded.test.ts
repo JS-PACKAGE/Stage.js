@@ -532,7 +532,7 @@ for (const action of ['offstage', 'disconnect', 'kicked', 'closed'] as const) it
 it('keeps independent preview capture alive across room ended recovery', async t => {
   const h = setup(t), { socket, peer } = await h.join(); await h.promote(socket, peer);
   const preview = await h.client.startMicTest(), previewSource = h.sources[1]!;
-  assert.equal(listeners(previewSource).length, 0);
+  assert.equal(listeners(previewSource).length, 1);
   h.sources[0]!.track.end(); await receiving(h, peer);
   assert.equal(previewSource.track.readyState, 'live'); assert.equal(preview.level(), 0.25);
   assert.deepEqual(Context.instances.map(context => context.closes), [1, 0]);
@@ -541,7 +541,10 @@ it('keeps independent preview capture alive across room ended recovery', async t
   const errors = h.micErrors.length;
   previewSource.track.end(); await h.tick();
   assert.equal(h.micErrors.length, errors, 'preview track events never enter room recovery');
-  preview.stop(); assert.equal(Context.instances[1]!.closes, 1);
+  assert.equal(listeners(previewSource).length, 0); assert.equal(preview.level(), 0);
+  assert.equal(Context.instances[1]!.closes, 1); assert.equal(previewSource.track.stops, 1);
+  assert.equal(h.client['micTests'].size, 0);
+  preview.stop(); assert.equal(Context.instances[1]!.closes, 1); assert.equal(previewSource.track.stops, 1);
   assert.equal(h.client['mic'], h.sources[2]!.value); assert.equal(h.client.retryMicrophone(), false);
   assert.deepEqual(h.errors, []);
 });

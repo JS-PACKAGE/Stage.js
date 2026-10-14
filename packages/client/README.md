@@ -92,6 +92,8 @@ WebSocket 建構失敗、hello 逾時或尚未進房的連線關閉，也會釋�
 - `micLevel: number`：目前上台麥克風的 RMS 振幅（0–1，非分貝），未上台、靜音或停用房間音量計時為 0；即使在同步 state／micready callback 中、實際音軌尚未套用最新靜音，也依目前房間狀態回 0。音軌仍停用時亦不讀取音量計；此 getter 不代表 sender 已安裝或其他人能聽見。可定期讀取以更新音量表。
 - `startMicTest(): Promise<MicTest>`：不需連線或上台，使用所選麥克風，回傳 `{ level(): number, stop(): void }`；`level()` 同樣為 0–1 RMS，不會播放測試音訊。`stop()` 可重複呼叫，停止軌道並關閉 AudioContext；`disconnect()`、關房與被踢也會停止所有測試（包含仍等待授權的測試）。測試期間切換裝置後，請停止並重啟測試。
 
+獨立預覽的麥克風音軌自然 `ended` 時，也會停止該預覽、關閉音量計並移除其 listener／SDK 管理記錄；既有 handle 的 `level()` 回 0，`stop()` 仍可安全重複呼叫。其他預覽與房間麥克風不受影響，不發出房間 `micerror`、不觸發房間重試或自動重新擷取。若取得音軌時或建立音量計期間已 ended，promise 以 name 為 `NotReadableError` 的錯誤拒絕且不發出 `micready`；同時取消／disconnect 仍優先使用既有取消結果。若 `micready` 監聽器本身使音軌結束，呼叫可回傳已停止、讀值為 0 的 handle；這不新增預覽結束事件或操作 ID，UI 可由使用者停止並重新測試。受控測試只確認關閉／解除連接、listener 清理與不再讀取 analyser；呼叫端保留 handle 時，不保證相關物件／sample buffer 已被垃圾回收，也未量測原生 CPU 或硬體效果。
+
 已取得的房間麥克風若發生瀏覽器 `ended` 事件，SDK 會退休該串流與音量計、發出 `micerror`（name 為 `NotReadableError`，表示擷取已中斷，不推斷硬體或權限原因），保留房間席位與收聽，並讓符合條件的 `retryMicrophone()` 可由使用者明確重試。同一 peer 的一般快照／靜音變更不因此自動重新擷取；既有 peer 重建或重新上台的擷取政策不變。已在進行的使用者裝置替換仍可完成，不會被舊麥克風的 ended 一併取消。若新候選軌道在替換完成前已 ended，裝置操作會失敗且不發出假的 micready，既有媒體佇列會重新同步仍存活的舊麥克風，或在沒有舊麥克風時切成只收聽；無法取消瀏覽器尚未完成的 replaceTrack，恢復本身也仍可能失敗。SDK 自己的停止／下台／離房會先移除 listener，不當成自然中斷；獨立預覽不採用這套房間重試生命週期。`micready` 仍是共用的擷取事件而非 sender 安裝或真實發聲證明。
 
 不顯示房間麥克風音量表的整合可使用 `new StageClient({ url, enableMicMeter: false })`。省略或設 `true` 時保留原本建立音量計與相關失敗回報；`false` 則不為房間擷取／裝置替換建立 AudioContext、source、analyser 或取樣陣列，`micLevel` 固定為 0，但麥克風擷取、sender 安裝、靜音與停止串流仍照常。選項只能是 boolean（其他值在建構時拋 TypeError，尚未修改 audio），建構時複製，後續修改原 options 不會切換設定。明確呼叫 `startMicTest()` 仍建立自己的音量計並依原方式回報失敗；此選項不會停用預覽，也不繞過麥克風授權或自動播放政策。最小 embed 沒有音量表，會明確選用 false；完整範例與 Web Component 保留預設。這是省去未使用的圖節點與 buffer，不代表已量測 CPU、耗電或音訊延遲改善。
