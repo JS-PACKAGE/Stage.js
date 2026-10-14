@@ -503,7 +503,8 @@ function runLanding(operation: 'create' | 'join', action: (isCancelled: () => bo
   });
 }
 function showError(message: string): void { errorBox.textContent = message; errorBox.hidden = false; }
-// Name limits belong to the server's normalized code-point policy, not HTML's UTF-16 maxlength.
+// Name limits follow normalized code points; room-code limits are also deployment-specific.
+// Only fields with a fixed client contract receive an authored HTML maxlength.
 function field(form: HTMLFormElement, label: string, name: string, value = '', required = true, maxLength?: number): HTMLInputElement {
   const wrapper = element('label', 'field', label);
   const input = element('input');
@@ -558,7 +559,7 @@ function landing(): void {
   const join = element('form', 'panel');
   join.append(element('h2', '', '加入房間'));
   const roomId = field(join, '房間 ID', 'roomId', params.get('room') ?? '', true, 128);
-  const code = field(join, '房間代碼（未設定時可留空）', 'code', params.get('code') ?? '', false, 16);
+  const code = field(join, '房間代碼（未設定時可留空）', 'code', params.get('code') ?? '', false);
   const joinName = field(join, '你的名稱', 'name');
   const joinSubmit = element('button', 'primary', '加入收聽');
   joinSubmit.type = 'submit'; joinSubmit.dataset.landingSubmit = 'true';

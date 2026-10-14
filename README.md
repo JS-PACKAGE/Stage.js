@@ -268,7 +268,9 @@ Web Component 的「離開房間」會停止本機收聽／擷取及自動重連
 
 主控可在完整範例的房間資訊按「修改房間名稱」，不必關房重建即可更正名稱或切換討論主題。台下主控亦可使用；對話框取消不送出，等待回覆或重連時停用，對話框返回時再次核對目前房間、席位與主控權限。結果只依 `state.name` 顯示，ACK 不會樂觀改寫；更新不更換房間 ID、代碼、邀請連結、參與者或台位。伺服器沿用 `limits.nameMaxLength` 與 Unicode 清洗／轉義，不能用名稱作為認證身分。舊伺服器不支援時顯示原錯誤，不自動關房／重建；正常狀態更新仍可能執行既有 SDK 媒體同步，沒有新增擷取或協商操作。原生 prompt／輔助科技與硬體音訊仍需實際驗收。
 
-完整範例的建立／加入名稱、建立房間名稱，以及 embed 共用的名稱欄不設硬編碼 `maxlength`。HTML 以 UTF-16 code unit 計長，與伺服器在 NFC、移除不安全字元及 trim 後計算 Unicode code point 不同；例如 32 個 😀 是 64 個 code unit，但在預設名稱上限 32 下有效。實際上限仍由 `limits.nameMaxLength` 決定；欄位保留原 required／trim，不額外截斷、正規化或猜測部署限制。房間 ID、代碼、建立權杖的既有欄位上限維持。過長名稱仍由伺服器拒絕，極大貼上可能觸發既有 frame 上限而關閉連線；沒有放寬伺服器驗證。測試證明 authored DOM 契約與 SDK／validator 流程，不等同原生鍵盤、貼上或 IME 驗收。
+完整範例的建立／加入名稱、建立房間名稱，以及 embed 共用的名稱欄不設硬編碼 `maxlength`。HTML 以 UTF-16 code unit 計長，與伺服器在 NFC、移除不安全字元及 trim 後計算 Unicode code point 不同；例如 32 個 😀 是 64 個 code unit，但在預設名稱上限 32 下有效。實際上限仍由 `limits.nameMaxLength` 決定；欄位保留原 required／trim，不額外截斷、正規化或猜測部署限制。房間 ID 與建立權杖的既有固定欄位上限維持。過長名稱仍由伺服器拒絕，極大貼上可能觸發既有 frame 上限而關閉連線；沒有放寬伺服器驗證。測試證明 authored DOM 契約與 SDK／validator 流程，不等同原生鍵盤、貼上或 IME 驗收。
+
+完整範例與 embed 的房間代碼欄也不設固定 16 字元 `maxlength`，讓手動輸入／編輯符合部署設定的較長代碼；`rooms.codeLength` 與 `limits.codeMaxLength` 仍由伺服器決定與驗證。代碼仍可留空，送出時沿用 trim／空白省略，字母大小寫由既有 validator 正規化；不更動認證或錯誤隱私。原先以邀請 query 預填長代碼是程式設定 value，本來就不會由這個屬性自動截斷，此修正不宣稱舊版所有長邀請皆無法加入。錯誤、缺少代碼或不存在房間仍沿用既有 generic 回覆，超過設定長度／frame 上限仍會拒絕或斷線；不猜測遠端上限、不自動重試或回顯代碼。驗證為 authored DOM 與受控 SDK／validator／Hub，不包含原生輸入操作。
 
 ## 測試與驗證
 

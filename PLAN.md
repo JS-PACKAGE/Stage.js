@@ -706,3 +706,6 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 
 
 175. **名稱欄位採伺服器的 Unicode 長度契約（2026-10-14）：** 標準/source與實際sanitizeName證據：HTML maxlength計UTF-16 units，而server先NFC/去控制字元/trim再計codepoints；32個補充平面emoji與32組分解重音均64units但預設32下合法。移除完整範例create/join本人名與embed共享name三欄的32，以及create房名一欄的64；房名原64足以容納預設32個emoji，但仍限制更大custom上限及清洗後有效的較長原文；field helper只在明確提供時設maxLength，required/trim、ID128/code16/token256與所有entry/pending/lifecycle維持。沒有client codepoint猜限、truncate、normalize或新增hello/SDK API，custom deployment限額仍由server判定；frame上限不變，極大貼上可能導致原有拒絕/斷線。名稱prompt原已無此硬限，現在表單不再額外排除server有效文字。回歸包含authored DOM、實際SDK wire/validator/Hub及原genericerror/cancel/snapshot流程；fakeDOM不冒充native keyboard/paste/IME，未做該驗收。
+
+
+176. **自訂房間代碼長度的手動輸入（2026-10-14）：** 第175項只調整名字欄；另以dummy24字設定實際驗證生成code、validator與Hub join皆合法，發現完整範例及embed兩個代碼欄仍設16。僅移除兩欄固定maxlength，保留optional、trim/空白省略、validator大小寫正規化、roomID128/token256與既有auth/rate/frame/錯誤隱私。原query-prefill直接設value，並不由maxlength截斷；問題是HTML標準的手動編輯限制，不能宣稱舊長邀請路徑普遍失敗。沒有新增協定/SDK API或在前端猜deployment上限，超長與錯誤代碼照原server政策拒絕，極大paste仍可能frame關閉。回歸區分DOM authored cap和actual SDK-validator-Hub語意，不冒充native keyboard/paste驗收；不使用真實code、不新增secret logging或自動重試。

@@ -29,7 +29,7 @@ const unicodeCases = [
   { label: '32 decomposed accented letters', raw: 'e\u0301'.repeat(32), accepted: 'é'.repeat(32) },
 ];
 
-it('four name controls omit authored maxlength while required flags and non-name caps stay intact', async t => {
+it('four name controls omit authored maxlength while required flags and fixed ID/token caps stay intact', async t => {
   assert.equal(new SampleNode('input').maxLength, -1, 'the fixture represents the unset native property, not browser editing');
   const h = sampleApp(); t.after(() => h.cleanup());
   const create = entryForm(h, 'create'), join = entryForm(h, 'join');
@@ -37,7 +37,7 @@ it('four name controls omit authored maxlength while required flags and non-name
     assert.equal(input.maxLength, -1); assert.equal(input.required, required);
     assert.equal(input.attributes.maxlength, undefined); assert.equal(input.attributes.maxLength, undefined);
   }
-  for (const [input, cap, required] of [[create.input('token'), 256, false], [join.input('roomId'), 128, true], [join.input('code'), 16, false]] as const) {
+  for (const [input, cap, required] of [[create.input('token'), 256, false], [join.input('roomId'), 128, true], [join.input('code'), -1, false]] as const) {
     assert.equal(input.maxLength, cap); assert.equal(input.required, required);
   }
   assert.equal(create.input('token').type, 'password');
@@ -48,7 +48,7 @@ it('four name controls omit authored maxlength while required flags and non-name
   };
   assert.doesNotMatch(input('name'), /\bmaxlength\s*=/i); assert.match(input('name'), /\brequired\b/);
   assert.match(input('room'), /\brequired\b/); assert.match(input('room'), /\bmaxlength="128"/);
-  assert.match(input('code'), /\bmaxlength="16"/); assert.doesNotMatch(input('code'), /\brequired\b/);
+  assert.doesNotMatch(input('code'), /\bmaxlength\s*=/i); assert.doesNotMatch(input('code'), /\brequired\b/);
   // The embed fixtures execute the script but do not parse HTML or model native input editing.
 });
 

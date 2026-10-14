@@ -78,7 +78,7 @@ export class StageContext {
   async close(): Promise<void> { this.closes++; }
 }
 /** Complete production module and real SDK. Only external-host import, socket, DOM and browser media are replaced. */
-export async function actualApp(t: TestContext, options: { deferCapture?: boolean } = {}) {
+export async function actualApp(t: TestContext, options: { deferCapture?: boolean; search?: string } = {}) {
   const { StageClient, decodeName } = await import(new URL('../../packages/client/src/index.ts', import.meta.url).href);
   StageSocket.instances = []; StagePeer.instances = []; StageContext.instances = [];
   const tracks: StageTrack[] = [];
@@ -125,7 +125,7 @@ export async function actualApp(t: TestContext, options: { deferCapture?: boolea
   assert.doesNotMatch(executable, /\bimport\s*(?:\(|['"])/, 'no real external host import');
   runInNewContext(executable, {
     document: { querySelector(selector: string) { assert.match(selector, /^#[a-z-]+$/); return node(selector.slice(1)); } },
-    location: { search: '?room=same-room', origin: 'https://stage.example.test' },
+    location: { search: options.search ?? '?room=same-room', origin: 'https://stage.example.test' },
     URL, URLSearchParams, Error, Promise, performance, setTimeout, clearTimeout, setInterval, clearInterval,
     loadLibrary: async (url: string) => { assert.equal(url, 'https://stage.example.test/lib/stage-client.js'); return library; },
   }, { filename: 'web/src/embed.ts', timeout: 1000 });
