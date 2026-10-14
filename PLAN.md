@@ -736,3 +736,6 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 
 
 185. **範例頁失聯控制 admission（2026-10-14）：** 延續已證實的初次state-before-ACK socketLost路徑，actual SDK完整範例仍以殘留snapshot啟用hand/mic/stage/rename及主控操作／gain，先清錯誤／pending／prompt再被SDK拒絕（wire增量0）；embed僅hand在retireControls後被syncHand重新啟用，其餘mic/stage/rename已正確隔離不重改。完整範例roomButton在任何副作用前排除disconnected/reconnecting，syncRoomActions停用一致，gain直接handler亦排除disconnected。embed的hand採現有controlsClient資格，同席正常重連保留owner，終止失聯不以殘留me復活。保留waiting/live、state-beforeACK有效狀態、resume、新操作及room leave清理，不改SDK/server/media/pending settlement或擴張未重現的prompt內重入政策。證據限whole-module／公開SDK與受控DOM/socket，非原生keyboard、AT或音訊。
+
+
+186. **個人診斷採已成功完成的最高請求序號（2026-10-14）：** 受控 whole sample＋公開 SDK＋fake peer 固定5秒統計延遲，既有2秒輪詢於60秒啟動30次、完成27次，但latest-started guard使畫面更新0次。拒絕single-inflight gate，因永不settle的舊請求會阻擋新peer／恢復取樣，且改變既有刷新頻率。新增顯示watermark，只接受目前room generation／可見生命週期內序號高於已套用界線的fulfilled結果，含empty；較新pending或reject不阻擋較早成功，較新成功或empty已套用則拒絕舊結果。stopRoomTimers與每次visibility通知同時推進失效界線，保留離房／同ID重入／隱藏隔離、SDK差量基準與原輪詢排程。相同受控60秒工作量仍30次要求、3個pending，畫面可更新27次；這是明示UI結果接納契約改變，不是CPU／記憶體優化，也不新增timeout、底層取消或pending上限。資料為最近成功取樣結果，不保證即時或可聽音訊；未重現原生瀏覽器慢getStats，證據限受控時鐘／DOM／公開SDK與fake peer。

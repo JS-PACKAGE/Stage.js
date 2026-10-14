@@ -81,6 +81,7 @@ const connectionLine = element('p', 'muted connection');
 const ownHandPosition = element('p', 'muted own-hand-position');
 ownHandPosition.hidden = true; ownHandPosition.setAttribute('role', 'status');
 let connectionPollSequence = 0;
+let connectionResultWatermark = 0;
 const header = element('header', 'topbar');
 const brand = element('h1', '', 'Stage.js 音訊舞台');
 const status = element('span', 'badge', statusLabels.disconnected);
@@ -985,8 +986,9 @@ function refreshConnectionLine(): void {
   if (!client.state || document.hidden) return;
   const generation = roomActionGeneration, sequence = ++connectionPollSequence;
   void client.getStats().then(({ inbound, outbound }) => {
-    // SDK polls can settle out of order; an obsolete empty result must not erase a newer display.
-    if (!client.state || document.hidden || generation !== roomActionGeneration || sequence !== connectionPollSequence) return;
+    // A newer pending poll must not starve completed samples; older completions cannot replace newer results.
+    if (!client.state || document.hidden || generation !== roomActionGeneration || sequence <= connectionResultWatermark) return;
+    connectionResultWatermark = sequence;
     const parts: string[] = [];
     if (inbound?.lossPercent !== undefined) parts.push(`收聽掉包 ${inbound.lossPercent.toFixed(1)}%`);
     if (outbound?.lossPercent !== undefined) parts.push(`發言掉包 ${outbound.lossPercent.toFixed(1)}%`);
@@ -1011,14 +1013,14 @@ function syncRoomTimers(): void {
 }
 function stopRoomTimers(): void {
   roomTimers.forEach(clearInterval); roomTimers = [];
-  connectionPollSequence++; connectionLine.textContent = '';
+  connectionResultWatermark = ++connectionPollSequence; connectionLine.textContent = '';
   connectionLine.classList.toggle('error', false);
 }
 client.on('state', syncRoomTimers);
 client.on('status', syncRoomTimers);
 // Page-lifetime listener, like the client/device listeners; landing previews also use it.
 document.addEventListener('visibilitychange', () => {
-  connectionPollSequence++; // Retire pending UI results without resetting SDK delta baselines.
+  connectionResultWatermark = ++connectionPollSequence; // Retire pending UI results without resetting SDK delta baselines.
   syncMeter(); syncRoomTimers();
   // A resumed SDK sample can span the hidden interval since the last completed stats sample.
   if (!document.hidden) refreshConnectionLine();
