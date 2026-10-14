@@ -5,10 +5,13 @@ import { it } from 'node:test';
 import type { TestContext } from 'node:test';
 import { parse } from 'yaml';
 import { parseConfig } from '../src/config.ts';
+import type { AppConfig } from '../src/config.ts';
 import { ERROR_MESSAGES } from '../src/model/errors.ts';
 import { parseClientMessage, ValidationError } from '../src/ws/validate.ts';
 import { Deferred, flushSample, roomState, sampleApp } from './fixtures/sampleApp.ts';
 import type { SampleNode } from './fixtures/sampleApp.ts';
+import { FakeSession, harness, testConfig } from './helpers.ts';
+import type { Harness } from './helpers.ts';
 
 type Action = 'create' | 'join';
 type View = Pick<ReturnType<typeof sampleApp>, 'app' | 'find' | 'id' | 'button'>;
@@ -57,6 +60,16 @@ function setup(t: TestContext) {
   });
   return { ...h, requests, reject(value: unknown): void { requests.at(-1)!.work.reject(value as Error); } };
 }
+type EntryCode = 'bad_request' | 'unauthorized';
+const admissionGuidance = (message = ERROR_MESSAGES.unauthorized) => `${message}（unauthorized）\n請確認房間 ID 與代碼，或向主控索取最新邀請連結。`;
+function assertEntryGuidance(h: View, action: Action, code: EntryCode): void {
+  if (code === 'bad_request') { assertGuidance(h, action); return; }
+  const box = errorBox(h);
+  assert.equal(box.hidden, false);
+  assert.equal(box.textContent, action === 'join' ? admissionGuidance() : ERROR_MESSAGES.unauthorized);
+  assert.equal(box.children.length, 0);
+  for (const value of Object.values(privateValues)) assert.ok(!box.textContent.includes(value));
+}
 const badRequest = (message = ERROR_MESSAGES.bad_request) => Object.assign(new Error(message), { code: 'bad_request' });
 
 interface Request { type: string; requestId: string; roomName?: string }
@@ -101,11 +114,34 @@ interface IntegratedClient {
   disconnect(): Promise<void>;
   on(type: string, listener: (event: { detail: unknown }) => void): () => void;
 }
-async function integrated(t: TestContext) {
+async function integrated(t: TestContext, wire?: { h: Harness; config: AppConfig }) {
+  const wireSockets: HubSocket[] = [];
+  class HubSocket extends Socket {
+    readonly session = new FakeSession();
+    work = Promise.resolve();
+    constructor(url: string) {
+      super(url); wireSockets.push(this);
+      const record = this.session.send.bind(this.session);
+      this.session.send = (message, encoded) => {
+        record(message, encoded);
+        if (this.readyState === Socket.OPEN) this.deliver(message);
+      };
+    }
+    override hello(): void { this.readyState = Socket.OPEN; wire!.h.hub.attach(this.session); }
+    override send(data: string): void {
+      super.send(data);
+      const request = parseClientMessage(data, wire!.config.limits);
+      this.work = this.work.then(() => wire!.h.hub.handle(this.session, request));
+    }
+    override close(): void {
+      if (this.readyState !== Socket.OPEN) return;
+      super.close(); this.work = this.work.then(() => wire!.h.hub.detach(this.session, true));
+    }
+  }
   // A dynamic import executes the real SDK without adding browser types to the server-test graph.
   const { StageClient } = await import(new URL('../packages/client/src/index.ts', import.meta.url).href);
   const target = new EventTarget();
-  const globals = { window: target, WebSocket: Socket, RTCPeerConnection: Peer,
+  const globals = { window: target, WebSocket: wire ? HubSocket : Socket, RTCPeerConnection: Peer,
     navigator: { mediaDevices: { enumerateDevices: async () => [] } } };
   const originals = new Map(Object.keys(globals).map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
   for (const [key, value] of Object.entries(globals)) Object.defineProperty(globalThis, key, { configurable: true, value });
@@ -123,7 +159,16 @@ async function integrated(t: TestContext) {
   }
   const h = sampleApp({ sdk });
   t.after(async () => {
-    try { await h.cleanup(); assert.equal(getEventListeners(target, 'pagehide').length, 0); }
+    try {
+      await h.cleanup();
+      await Promise.all(wireSockets.map(socket => socket.work));
+      if (wire) {
+        await wire.h.hub.shutdown(); await wire.h.transport.close();
+        assert.equal(wire.h.hub.roomCount, 0); assert.equal(wire.h.transport.rooms.size, 0);
+        assert.equal(wire.h.timers.filter(timer => !timer.cleared).length, 0);
+      }
+      assert.equal(getEventListeners(target, 'pagehide').length, 0);
+    }
     finally {
       for (const [key, descriptor] of originals) {
         if (descriptor) Object.defineProperty(globalThis, key, descriptor); else Reflect.deleteProperty(globalThis, key);
@@ -131,13 +176,15 @@ async function integrated(t: TestContext) {
     }
   });
   const events: unknown[] = []; sdk.on('error', ({ detail }) => events.push(detail));
-  return { ...h, events, rejected, async start(action: Action) {
-    const landing = forms(h); landing[action].form.submit(); assertPending(landing, true);
-    const socket = Socket.instances.at(-1)!; socket.hello(); await flushSample(); t.mock.timers.tick(0);
-    assert.equal(socket.sent.length, 1); const request = socket.sent[0]!;
-    assert.equal(request.type, action === 'create' ? 'room:create' : 'join');
-    return { landing, socket, request };
-  } };
+  return { ...h, events, rejected, wireSockets,
+    async flushWire() { await Promise.all(wireSockets.map(socket => socket.work)); await flushSample(); },
+    async start(action: Action, configure?: (landing: Forms) => void) {
+      const landing = forms(h); configure?.(landing); landing[action].form.submit(); assertPending(landing, true);
+      const socket = Socket.instances.at(-1)!; socket.hello(); await flushSample(); t.mock.timers.tick(0);
+      assert.equal(socket.sent.length, 1); const request = socket.sent[0]!;
+      assert.equal(request.type, action === 'create' ? 'room:create' : 'join');
+      return { landing, socket, request };
+    } };
 }
 const limits = parseConfig(parse(readFileSync(new URL('../config.example.yaml', import.meta.url), 'utf8'))).limits;
 function validatorReply(socket: Socket, request: Request, nameMaxLength = limits.nameMaxLength): void {
@@ -190,10 +237,11 @@ for (const action of ['create', 'join'] as const) {
   it(`whole sample ${action} preserves other error codes, uncoded messages and non-Error rejections`, async t => {
     const h = setup(t), landing = forms(h);
     const errors: unknown[] = [
-      ...['unauthorized', 'timeout', 'disconnected', 'forbidden', 'internal', 'BAD_REQUEST']
+      ...[...(action === 'create' ? ['unauthorized'] : []), 'timeout', 'disconnected', 'forbidden', 'internal', 'BAD_REQUEST', 'UNAUTHORIZED']
         .map(code => Object.assign(new Error('Bad request'), { code })),
       new Error('Bad request'), new Error('伺服器提供的其他訊息。'),
-      { code: 'bad_request', message: 'Bad request' }, 'bad_request', null,
+      { code: 'bad_request', message: 'Bad request' }, { code: 'unauthorized', message: 'Cannot join room' },
+      'bad_request', 'unauthorized', null,
     ];
     for (const error of errors) {
       landing[action].form.submit(); h.reject(error); await flushSample();
@@ -227,34 +275,38 @@ for (const action of ['create', 'join'] as const) {
   }
 }
 
-it('whole sample actual RTC bad_request remains generic while an entry ACK is pending', async t => {
-  const h = await integrated(t), { socket, request } = await h.start('join');
-  socket.deliver({ type: 'room:state', ...roomState() }); await flushSample();
-  const peer = Peer.instances[0]!; assert.ok(peer.onicecandidate); peer.onicecandidate({ candidate: null });
-  t.mock.timers.tick(100); await flushSample();
-  const rtc = socket.sent.find(message => message.type === 'rtc:ice'); assert.ok(rtc);
-  socket.deliver({ type: 'error', requestId: rtc.requestId, code: 'bad_request', message: 'Bad request' });
-  await flushSample();
-  assert.equal(errorBox(h).textContent, 'Bad request'); assert.equal(errorBox(h).hidden, false);
-  assert.deepEqual(h.rejected, [], 'RTC failure must not reject the pending entry');
-  assert.ok(h.events.length >= 1);
-  for (const event of h.events) { assert.ok(event instanceof Error); assert.equal(event.message, 'Bad request'); }
-  socket.deliver({ type: 'ok', requestId: request.requestId }); await flushSample();
-  assert.equal(errorBox(h).textContent, 'Bad request'); assert.ok(h.sdk.state);
-});
+for (const code of ['bad_request', 'unauthorized'] as const) {
+  it(`whole sample actual RTC ${code} remains generic while an entry ACK is pending`, async t => {
+    const h = await integrated(t), { socket, request } = await h.start('join');
+    socket.deliver({ type: 'room:state', ...roomState() }); await flushSample();
+    const peer = Peer.instances[0]!; assert.ok(peer.onicecandidate); peer.onicecandidate({ candidate: null });
+    t.mock.timers.tick(100); await flushSample();
+    const rtc = socket.sent.find(message => message.type === 'rtc:ice'); assert.ok(rtc);
+    socket.deliver({ type: 'error', requestId: rtc.requestId, code, message: ERROR_MESSAGES[code] });
+    await flushSample();
+    assert.equal(errorBox(h).textContent, ERROR_MESSAGES[code]); assert.equal(errorBox(h).hidden, false);
+    assert.deepEqual(h.rejected, [], 'RTC failure must not reject the pending entry');
+    assert.ok(h.events.length >= 1);
+    for (const event of h.events) { assert.ok(event instanceof Error); assert.equal(event.message, ERROR_MESSAGES[code]); }
+    socket.deliver({ type: 'ok', requestId: request.requestId }); await flushSample();
+    assert.equal(errorBox(h).textContent, ERROR_MESSAGES[code]); assert.ok(h.sdk.state);
+  });
+}
 
 for (const action of ['create', 'join'] as const) {
   it(`whole sample actual SDK ${action} preserves another code with the same generic message`, async t => {
     const h = await integrated(t), { landing, socket, request } = await h.start(action);
-    socket.deliver({ type: 'error', requestId: request.requestId, code: 'unauthorized', message: 'Bad request' });
+    socket.deliver({ type: 'error', requestId: request.requestId, code: 'forbidden', message: 'Bad request' });
     await flushSample(); assert.equal(errorBox(h).textContent, 'Bad request'); assertPending(landing, false);
     assert.equal(h.events[0], h.rejected[0]);
     const raw = h.rejected[0]; assert.ok(raw instanceof Error);
-    assert.equal((raw as Error & { code: string }).code, 'unauthorized');
+    assert.equal((raw as Error & { code: string }).code, 'forbidden');
   });
+}
 
+for (const [action, code] of [['create', 'bad_request'], ['join', 'bad_request'], ['join', 'unauthorized']] as const) {
   for (const retirement of ['cancel', 'Leave'] as const) {
-    it(`whole sample actual SDK ${action} ${retirement} ignores stale bad_request frames during a fresh pending entry`, async t => {
+    it(`whole sample actual SDK ${action} ${retirement} ignores stale ${code} frames during a fresh pending entry`, async t => {
       const h = await integrated(t), old = await h.start(action);
       const oldMessage = old.socket.onmessage; assert.ok(oldMessage);
       if (retirement === 'cancel') h.id('landing-cancel').click();
@@ -265,51 +317,51 @@ for (const action of ['create', 'join'] as const) {
       await flushSample(); assert.equal(errorBox(h).hidden, true);
       const opposite = action === 'create' ? 'join' : 'create', fresh = await h.start(opposite);
       oldMessage({ data: JSON.stringify({ type: 'error', requestId: old.request.requestId,
-        code: 'bad_request', message: 'Retired bad request' }) });
+        code, message: 'Retired entry error' }) });
       await flushSample(); assertPending(fresh.landing, true); assert.equal(errorBox(h).hidden, true);
       assert.deepEqual(h.events, []); assert.equal(fresh.socket.readyState, Socket.OPEN);
-      fresh.socket.deliver({ type: 'error', requestId: fresh.request.requestId, code: 'bad_request', message: 'Bad request' });
-      await flushSample(); assertGuidance(h, opposite); assertPending(fresh.landing, false);
+      fresh.socket.deliver({ type: 'error', requestId: fresh.request.requestId, code, message: ERROR_MESSAGES[code] });
+      await flushSample(); assertEntryGuidance(h, opposite, code); assertPending(fresh.landing, false);
     });
   }
 
-  it(`whole sample actual SDK ${action} respects synchronous Leave from its error listener before the rejection continuation`, async t => {
+  it(`whole sample actual SDK ${action}/${code} respects synchronous Leave from its error listener before the rejection continuation`, async t => {
     const h = await integrated(t), { socket, request } = await h.start(action);
     socket.deliver({ type: 'room:state', ...roomState() }); await flushSample();
     let left = false;
     const off = h.sdk.on('error', () => {
-      assert.equal(errorBox(h).textContent, 'Bad request'); assert.deepEqual(h.rejected, []);
+      assert.equal(errorBox(h).textContent, ERROR_MESSAGES[code]); assert.deepEqual(h.rejected, []);
       h.button('離開房間').click(); left = true;
     });
-    socket.deliver({ type: 'error', requestId: request.requestId, code: 'bad_request', message: 'Bad request' });
+    socket.deliver({ type: 'error', requestId: request.requestId, code, message: ERROR_MESSAGES[code] });
     assert.equal(left, true); assertPending(forms(h), true); off();
     await flushSample(); assertPending(forms(h), false); assert.equal(errorBox(h).hidden, true);
     assert.equal(h.events[0], h.rejected[0]);
     const fresh = await h.start(action); assertPending(fresh.landing, true);
-    fresh.socket.deliver({ type: 'error', requestId: fresh.request.requestId, code: 'bad_request', message: 'Bad request' });
-    await flushSample(); assertGuidance(h, action); assertPending(fresh.landing, false);
+    fresh.socket.deliver({ type: 'error', requestId: fresh.request.requestId, code, message: ERROR_MESSAGES[code] });
+    await flushSample(); assertEntryGuidance(h, action, code); assertPending(fresh.landing, false);
   });
 }
 
-for (const action of ['create', 'join'] as const) {
+for (const [action, code] of [['create', 'bad_request'], ['join', 'bad_request'], ['join', 'unauthorized']] as const) {
   for (const retirement of ['state', 'closed', 'kicked', 'disconnect'] as const) {
-    it(`whole sample actual SDK ${action} keeps raw feedback when ${retirement} retires its context before the rejection continuation`, async t => {
+    it(`whole sample actual SDK ${action}/${code} keeps raw feedback when ${retirement} retires its context before the rejection continuation`, async t => {
       const h = await integrated(t), { landing, socket, request } = await h.start(action);
       if (retirement === 'disconnect') {
         // A pre-state status change lets disconnect rebuild landing without marking entry.entered.
         socket.deliver({ type: 'status', state: 'reconnecting' }); assert.equal(h.sdk.state, null);
       }
       const off = h.sdk.on('error', () => {
-        assert.equal(errorBox(h).textContent, 'Bad request'); assert.deepEqual(h.rejected, []);
+        assert.equal(errorBox(h).textContent, ERROR_MESSAGES[code]); assert.deepEqual(h.rejected, []);
         if (retirement === 'state') socket.deliver({ type: 'room:state', ...roomState() });
         else if (retirement === 'closed') socket.deliver({ type: 'room:closed', roomId: 'same-room', reason: 'shutdown' });
         else if (retirement === 'kicked') socket.deliver({ type: 'kicked', roomId: 'same-room' });
         else void h.sdk.disconnect();
       });
-      socket.deliver({ type: 'error', requestId: request.requestId, code: 'bad_request', message: 'Bad request' }); off();
+      socket.deliver({ type: 'error', requestId: request.requestId, code, message: ERROR_MESSAGES[code] }); off();
       await flushSample();
       assert.equal(h.events[0], h.rejected[0]); assert.equal(errorBox(h).hidden, false);
-      assert.equal(errorBox(h).textContent, 'Bad request', 'retirement suppresses only contextual guidance, never ordinary errors');
+      assert.equal(errorBox(h).textContent, ERROR_MESSAGES[code], 'retirement suppresses only contextual guidance, never ordinary errors');
       assert.equal(landing[action].form.isConnected, false);
       assertPending(landing, true);
       if (retirement === 'state') { assert.ok(h.sdk.state); return; }
@@ -319,8 +371,99 @@ for (const action of ['create', 'join'] as const) {
       else if (retirement === 'kicked') assert.match(notices, /你已被主控移出房間/);
       else assert.equal(notices, '');
       const fresh = await h.start(action); assert.equal(errorBox(h).hidden, true); assertPending(fresh.landing, true);
-      fresh.socket.deliver({ type: 'error', requestId: fresh.request.requestId, code: 'bad_request', message: 'Bad request' });
-      await flushSample(); assertGuidance(h, action); assertPending(fresh.landing, false);
+      fresh.socket.deliver({ type: 'error', requestId: fresh.request.requestId, code, message: ERROR_MESSAGES[code] });
+      await flushSample(); assertEntryGuidance(h, action, code); assertPending(fresh.landing, false);
     });
   }
 }
+
+for (const cause of ['missing-code', 'wrong-code', 'nonexistent-room'] as const) {
+  it(`whole sample actual Hub and validator give identical join guidance for ${cause} without disclosing existence`, async t => {
+    const config = testConfig(c => { c.rooms.presenceBroadcastMs = 0; c.rooms.qualityIntervalMs = 0; });
+    const hub = harness(config), host = await hub.create('Synthetic host');
+    const h = await integrated(t, { h: hub, config });
+    let original: PropertyDescriptorMap | undefined;
+    h.sdk.on('error', ({ detail }) => {
+      assert.ok(detail instanceof Error); original = Object.getOwnPropertyDescriptors(detail);
+      assert.equal(errorBox(h).textContent, ERROR_MESSAGES.unauthorized);
+      assert.deepEqual(h.rejected, [], 'the generic error event precedes the entry catch');
+    });
+    const roomId = cause === 'nonexistent-room' ? 'synthetic-absent-room' : host.roomId;
+    const code = cause === 'missing-code' ? '' : cause === 'wrong-code' ? 'SYNTHETICWRONG' : host.code;
+    const { landing } = await h.start('join', forms => {
+      forms.join.input('roomId').value = roomId; forms.join.input('code').value = code;
+    });
+    await h.flushWire();
+    const socket = h.wireSockets[0]!;
+    assert.deepEqual(socket.session.last('error'), { type: 'error', requestId: socket.sent[0]!.requestId,
+      code: 'unauthorized', message: ERROR_MESSAGES.unauthorized });
+    assertEntryGuidance(h, 'join', 'unauthorized'); assertPending(landing, false);
+    assert.equal(h.events.length, 1); assert.equal(h.rejected.length, 1);
+    assert.equal(h.events[0], h.rejected[0]);
+    assert.deepEqual(Object.getOwnPropertyDescriptors(h.events[0]), original);
+    assert.equal(h.sdk.state, null); assert.equal(hub.hub.isJoined(socket.session), false);
+    assert.equal(socket.session.all('room:state').length, 0); assert.equal(socket.sent.length, 1);
+    assert.equal(Peer.instances.length, 0); assert.equal(hub.hub.roomCount, 1);
+    assert.equal(landing.join.input('roomId').value, roomId); assert.equal(landing.join.input('code').value, code);
+    for (const value of [roomId, code, host.code].filter(Boolean)) assert.ok(!errorBox(h).textContent.includes(value));
+    assert.doesNotMatch(errorBox(h).textContent, /不存在|房間已關閉|代碼錯誤|代碼未填|unknown room|bad code/);
+    await flushSample(); assert.equal(socket.sent.length, 1, 'denied admission must not automatically retry');
+    assert.equal(landing.join.submit.disabled, false, 'manual retry remains available');
+  });
+}
+
+it('whole sample actual Hub create-token unauthorized remains generic and cannot create a room', async t => {
+  const config = testConfig(c => { c.rooms.createToken = 'synthetic-create-token'; });
+  const hub = harness(config), h = await integrated(t, { h: hub, config });
+  const { landing } = await h.start('create', forms => {
+    forms.create.input('roomName').value = 'Synthetic room'; forms.create.input('token').value = '';
+  });
+  await h.flushWire();
+  const socket = h.wireSockets[0]!;
+  assert.equal(socket.sent[0]!.type, 'room:create');
+  assert.equal(socket.session.last('error')?.code, 'unauthorized');
+  assertEntryGuidance(h, 'create', 'unauthorized'); assertPending(landing, false);
+  assert.equal(h.events[0], h.rejected[0]); assert.equal(hub.hub.roomCount, 0);
+  assert.equal(h.sdk.state, null); assert.equal(Peer.instances.length, 0);
+});
+
+for (const message of ['Bad request', '<img src=x onerror=alert(1)> 請重試。']) {
+  it(`whole sample actual SDK join unauthorized keeps its original message as safe text: ${message}`, async t => {
+    const h = await integrated(t), { landing, socket, request } = await h.start('join');
+    socket.deliver({ type: 'error', requestId: request.requestId, code: 'unauthorized', message });
+    assert.equal(errorBox(h).textContent, message); assert.deepEqual(h.rejected, []);
+    const raw = h.events[0]; assert.ok(raw instanceof Error);
+    const original = Object.getOwnPropertyDescriptors(raw);
+    await flushSample();
+    assert.equal(errorBox(h).textContent, admissionGuidance(message)); assert.equal(errorBox(h).children.length, 0);
+    assert.equal(h.rejected[0], raw); assert.deepEqual(Object.getOwnPropertyDescriptors(raw), original);
+    assertPending(landing, false);
+  });
+}
+
+it('whole sample actual SDK join unauthorized stays generic after state arrives before the ACK', async t => {
+  const h = await integrated(t), { socket, request } = await h.start('join');
+  socket.deliver({ type: 'room:state', ...roomState() }); await flushSample();
+  assert.ok(h.sdk.state);
+  socket.deliver({ type: 'error', requestId: request.requestId, code: 'unauthorized', message: ERROR_MESSAGES.unauthorized });
+  await flushSample();
+  assert.equal(errorBox(h).textContent, ERROR_MESSAGES.unauthorized);
+  assert.equal(h.events[0], h.rejected[0]); assert.ok(h.sdk.state);
+});
+
+it('whole sample actual SDK synchronous error-listener cancellation preserves the entry lock and fresh join feedback', async t => {
+  const h = await integrated(t), old = await h.start('join');
+  const off = h.sdk.on('error', () => {
+    assert.equal(errorBox(h).textContent, ERROR_MESSAGES.unauthorized); assert.deepEqual(h.rejected, []);
+    h.id('landing-cancel').click();
+    const landing = forms(h); assertPending(landing, true);
+    landing.join.form.submit(); assert.equal(Socket.instances.length, 1, 'synchronous reentry cannot bypass the retiring request lock');
+  });
+  old.socket.deliver({ type: 'error', requestId: old.request.requestId, code: 'unauthorized', message: ERROR_MESSAGES.unauthorized });
+  off(); await flushSample();
+  assert.equal(errorBox(h).hidden, true); assertPending(forms(h), false);
+  assert.equal(h.events[0], h.rejected[0]);
+  const fresh = await h.start('join');
+  fresh.socket.deliver({ type: 'error', requestId: fresh.request.requestId, code: 'unauthorized', message: ERROR_MESSAGES.unauthorized });
+  await flushSample(); assertEntryGuidance(h, 'join', 'unauthorized'); assertPending(fresh.landing, false);
+});

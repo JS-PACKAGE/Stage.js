@@ -117,7 +117,9 @@ for (const action of ['create', 'join'] as const) {
     ]) {
       landing[action].form.submit(); assertCancel(h, true);
       h.pending(action).reject(Object.assign(new Error(message), { code })); await flushSample();
-      assert.equal(errorBox(h).hidden, false); assert.equal(errorBox(h).textContent, message);
+      assert.equal(errorBox(h).hidden, false);
+      assert.equal(errorBox(h).textContent, action === 'join' && code === 'unauthorized'
+        ? `${message}（unauthorized）\n請確認房間 ID 與代碼，或向主控索取最新邀請連結。` : message);
       assertLocked(landing, false); assertCancel(h, false);
     }
     assert.equal(h.disconnectCalls(), 0);
@@ -368,7 +370,9 @@ for (const action of ['create', 'join'] as const) {
     current.deliver({ type: 'error', requestId: current.sent[0]!.requestId, code: 'unauthorized', message: '目前的加入失敗。' });
     await flushSample();
     assertLocked(replacement, false); assertCancel(h, false);
-    assert.equal(errorBox(h).hidden, false); assert.equal(errorBox(h).textContent, '目前的加入失敗。');
+    assert.equal(errorBox(h).hidden, false);
+    assert.equal(errorBox(h).textContent, action === 'join'
+      ? '目前的加入失敗。（unauthorized）\n請確認房間 ID 與代碼，或向主控索取最新邀請連結。' : '目前的加入失敗。');
     assert.equal(errors.length, 1);
   });
 }

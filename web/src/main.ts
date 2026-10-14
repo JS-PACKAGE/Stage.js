@@ -415,7 +415,11 @@ function runLanding(operation: 'create' | 'join', action: (isCancelled: () => bo
   void run(() => action(() => entry.cancelled), undefined, undefined, () => !entry.cancelled, error => {
     const message = error instanceof Error ? error.message : '操作失敗，請稍後再試。';
     if (landingEntry !== entry || entry.entered || client.state || revision !== landingRevision
-      || !(error instanceof Error) || !('code' in error) || error.code !== 'bad_request') return message;
+      || !(error instanceof Error) || !('code' in error)) return message;
+    if (operation === 'join' && error.code === 'unauthorized') {
+      return `${message}（unauthorized）\n請確認房間 ID 與代碼，或向主控索取最新邀請連結。`;
+    }
+    if (error.code !== 'bad_request') return message;
     const guidance = operation === 'create'
       ? '請檢查名稱、房間名稱及建立資料是否符合伺服器規則，或試著縮短名稱後重試。'
       : '請檢查房間 ID、名稱及代碼是否符合伺服器規則，必要時向主控確認後重試。';
