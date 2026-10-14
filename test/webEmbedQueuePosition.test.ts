@@ -126,7 +126,7 @@ for (const terminal of ['leave', 'disconnected', 'closed', 'shutdown', 'kicked']
       : { type: 'room:closed', roomId: 'same-room', ...(terminal === 'shutdown' ? { reason: 'shutdown' as const } : {}) });
     await flush();
     const notice = terminal === 'leave' ? '已離開。' : terminal === 'disconnected' ? '未連線'
-      : terminal === 'kicked' ? '你已被主控移出房間。' : '房間已關閉。';
+      : terminal === 'kicked' ? '你已被主控移出房間。' : terminal === 'shutdown' ? '伺服器維護或重新啟動，房間已關閉。' : '房間已關閉。';
     assert.equal(h.status.textContent, notice); assert.equal(hand.textContent, '舉手發言');
     assert.equal(hand.disabled, true); assert.equal(hand.attributes['aria-busy'], 'false');
     socket.deliver({ type: 'room:state', ...state(['guest']) }); hand.invoke(); await h.tick(20000);

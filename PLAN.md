@@ -748,3 +748,6 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 
 
 189. **最小 embed 音訊解鎖 pending 接納（2026-10-14）：** whole embed＋公開 SDK／受控 audio 在進房前、live、保留媒體的reconnecting三態連點，基線皆同步發生3次play且按鈕未busy；受控拒絕亂序也可使舊失敗覆寫較新回饋。新增client/playbackGeneration綁定operation，先reserve與disabled/aria-busy再同步呼叫play，重複handler不另送；current失敗可重試，成功維持原feedback。既有generation退役點抽成retirePlayback，client建構時同步退休import等待期間啟動的pre-entry播放；舊catch/finally不得污染新pending。同席重連保留既有pending，保留null-client fallback與終止後明確手動播放，不新增live資格限制、timeout、取消、SDK/media/API或自動重試。原audioblocked舊client假設未有真SDK重現，明確不改；此批不推論原生autoplay／權限／可聽音訊行為。證據限受控DOM/audio/socket與公開SDK，未完成promise持續busy直到settle或lifecycle retirement。
+
+
+190. **最小 embed 明確關機原因提示（2026-10-14）：** actual Hub.shutdown→公開SDK→whole embed受控bridge證明reason=shutdown已完整到達，但closed listener忽略detail，顯示成一般關房。僅在既有current client／entry generation／cancel guard後讀明確shutdown reason，採與widget相同維護／重啟文字；缺少或未知reason保留普通關房，被踢不變。不從status／error推測原因，retireEntry／playback／controls／error清除與初次ACK前／舊操作隔離保持，無新事件、重連、媒體或自動重試。證據限公開SDK／Hub與受控DOM/socket/mock媒體，原生瀏覽器、AT與音訊未驗收。

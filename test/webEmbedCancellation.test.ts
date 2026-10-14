@@ -191,7 +191,7 @@ for (const terminal of ['closed', 'shutdown', 'kicked'] as const) {
     h.socket.deliver(terminal === 'kicked' ? { type: 'kicked', roomId: 'same-room' }
       : { type: 'room:closed', roomId: 'same-room', ...(terminal === 'shutdown' ? { reason: 'shutdown' as const } : {}) });
     await flush();
-    const expected = terminal === 'kicked' ? '你已被主控移出房間。' : '房間已關閉。';
+    const expected = terminal === 'kicked' ? '你已被主控移出房間。' : terminal === 'shutdown' ? '伺服器維護或重新啟動，房間已關閉。' : '房間已關閉。';
     assert.equal(h.status.textContent, expected); cancelControl(h.cancel, false); submission(h.submit, false);
     h.cancel.invoke(); assert.equal(h.status.textContent, expected); assert.equal(h.leave.disabled, true);
   });

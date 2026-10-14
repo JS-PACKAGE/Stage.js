@@ -233,7 +233,7 @@ join.onsubmit = (event) => {
       });
       client.on('error', ({ detail }) => { if (client !== current || cancelledEntry || generation !== entryGeneration) return; progress = false; report(detail); });
       client.on('audioblocked', () => { if (cancelledEntry) return; progress = false; status.textContent = '請點擊啟用音訊。'; });
-      client.on('closed', () => { if (client !== current || cancelledEntry || generation !== entryGeneration) return; retireEntry(); clearError(); retirePlayback(); retireControls(); syncHand(); syncMic(); syncStage(); syncMicRetry(); syncRename(); status.textContent = '房間已關閉。'; hand.disabled = leave.disabled = true; });
+      client.on('closed', ({ detail }) => { if (client !== current || cancelledEntry || generation !== entryGeneration) return; retireEntry(); clearError(); retirePlayback(); retireControls(); syncHand(); syncMic(); syncStage(); syncMicRetry(); syncRename(); status.textContent = detail.reason === 'shutdown' ? '伺服器維護或重新啟動，房間已關閉。' : '房間已關閉。'; hand.disabled = leave.disabled = true; });
       client.on('kicked', () => { if (client !== current || cancelledEntry || generation !== entryGeneration) return; retireEntry(); clearError(); retirePlayback(); retireControls(); syncHand(); syncMic(); syncStage(); syncMicRetry(); syncRename(); status.textContent = '你已被主控移出房間。'; hand.disabled = leave.disabled = true; });
       showProgress('連線中…');
       await current.connect();
