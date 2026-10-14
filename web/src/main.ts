@@ -503,13 +503,14 @@ function runLanding(operation: 'create' | 'join', action: (isCancelled: () => bo
   });
 }
 function showError(message: string): void { errorBox.textContent = message; errorBox.hidden = false; }
-function field(form: HTMLFormElement, label: string, name: string, value = '', required = true, maxLength = 32): HTMLInputElement {
+// Name limits belong to the server's normalized code-point policy, not HTML's UTF-16 maxlength.
+function field(form: HTMLFormElement, label: string, name: string, value = '', required = true, maxLength?: number): HTMLInputElement {
   const wrapper = element('label', 'field', label);
   const input = element('input');
   input.name = name;
   input.value = value;
   input.required = required;
-  input.maxLength = maxLength;
+  if (maxLength !== undefined) input.maxLength = maxLength;
   input.setAttribute('autocomplete', name === 'name' ? 'nickname' : 'off');
   wrapper.append(input);
   form.append(wrapper);
@@ -534,7 +535,7 @@ function landing(): void {
   const create = element('form', 'panel');
   create.append(element('h2', '', '建立房間'));
   const createName = field(create, '你的名稱', 'name');
-  const roomName = field(create, '房間名稱', 'roomName', '', false, 64);
+  const roomName = field(create, '房間名稱', 'roomName', '', false);
   const codeLabel = element('label', 'check');
   const codeRequired = element('input');
   codeRequired.type = 'checkbox'; codeRequired.checked = true;

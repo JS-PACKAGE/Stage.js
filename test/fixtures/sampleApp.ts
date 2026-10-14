@@ -13,7 +13,9 @@ export class SampleNode {
   readonly attributes: Record<string, string> = {};
   id = ''; className = ''; name = ''; type = ''; title = '';
   value: string | number = ''; min: string | number = ''; max: string | number = ''; step = '';
-  hidden = false; disabled = false; checked = false; required = false; readOnly = false; maxLength = 0;
+  hidden = false; disabled = false; checked = false; required = false; readOnly = false;
+  // Reflect the unset input property; this fixture does not model typing, IME or native validation.
+  maxLength = -1;
   readonly htmlFor = { value: '' };
   onclick: (() => void) | null = null;
   onchange: (() => void) | null = null;

@@ -200,7 +200,7 @@ function validatorReply(socket: Socket, request: Request, nameMaxLength = limits
 it('whole sample actual SDK decorates default-validator rejection of a 33-character room name after its untouched error event', async t => {
   assert.equal(limits.nameMaxLength, 32);
   const h = await integrated(t), { landing, socket, request } = await h.start('create');
-  assert.equal(landing.create.input('roomName').maxLength, 64, 'do not impose the default server limit in the UI');
+  assert.equal(landing.create.input('roomName').maxLength, -1, 'leave name length validation to the configured server policy');
   assert.equal(request.roomName, privateValues.roomName);
   validatorReply(socket, request);
   assert.equal(errorBox(h).textContent, 'Bad request', 'the generic event runs before the entry promise continuation');
