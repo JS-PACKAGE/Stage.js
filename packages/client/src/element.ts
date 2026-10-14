@@ -16,6 +16,8 @@ const STYLE = `
 [part=actions] { display: flex; flex-wrap: wrap; gap: .5rem; }
 [part=name] { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; }
 [part=name][hidden] { display: none; }
+[part=room-name] { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; }
+[part=room-name][hidden] { display: none; }
 [part=playback] { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; }
 [part=playback][hidden] { display: none; }
 input[type=range] { flex: 1; min-width: 5rem; max-width: 12rem; }
@@ -38,7 +40,8 @@ button.primary { background: var(--stage-accent, #2563eb); border-color: transpa
  * and every client event is re-dispatched from the element as `stage-<type>` (bubbling,
  * composed) with the same `detail`. The inline name draft starts from each new seat's name;
  * later snapshots update its accepted-name display, not the draft or the `name` attribute.
- * Style through `::part(panel|status|quality|actions|name|playback)` and the
+ * The controller's room-name draft follows the same rule while control is retained.
+ * Style through `::part(panel|status|quality|actions|name|room-name|playback)` and the
  * `--stage-*` custom properties.
  */
 export class StageElement extends HTMLElement {
@@ -56,6 +59,12 @@ export class StageElement extends HTMLElement {
   private readonly nameUpdate: HTMLButtonElement;
   private nameOwner: { client: StageClient; roomId: string; participantId: string; generation: number } | undefined;
   private nameAttempt: object | undefined;
+  private readonly roomNamePanel: HTMLDivElement;
+  private readonly acceptedRoomName: HTMLSpanElement;
+  private readonly roomNameInput: HTMLInputElement;
+  private readonly roomNameUpdate: HTMLButtonElement;
+  private roomNameOwner: { client: StageClient; roomId: string; participantId: string; generation: number } | undefined;
+  private roomNameAttempt: object | undefined;
   private readonly unlock: HTMLButtonElement;
   private playbackOwner: { client: StageClient; roomId: string; participantId: string; notice: number } | undefined;
   private unlockAttempt: object | undefined;
@@ -113,6 +122,18 @@ export class StageElement extends HTMLElement {
     this.nameUpdate.type = 'button'; this.nameUpdate.textContent = '更新名稱';
     this.nameUpdate.onclick = () => this.updateName();
     this.namePanel.append(this.acceptedName, nameLabel, this.nameInput, this.nameUpdate);
+    this.roomNamePanel = document.createElement('div');
+    this.roomNamePanel.part.add('room-name');
+    this.acceptedRoomName = document.createElement('span');
+    const roomNameLabel = document.createElement('label');
+    roomNameLabel.textContent = '房間名稱';
+    roomNameLabel.setAttribute('for', 'room-name');
+    this.roomNameInput = document.createElement('input');
+    this.roomNameInput.id = 'room-name'; this.roomNameInput.type = 'text';
+    this.roomNameUpdate = document.createElement('button');
+    this.roomNameUpdate.type = 'button'; this.roomNameUpdate.textContent = '更新房間名稱';
+    this.roomNameUpdate.onclick = () => this.updateRoomName();
+    this.roomNamePanel.append(this.acceptedRoomName, roomNameLabel, this.roomNameInput, this.roomNameUpdate);
     const actions = document.createElement('div');
     actions.part.add('actions');
     this.unlock = document.createElement('button');
@@ -158,7 +179,7 @@ export class StageElement extends HTMLElement {
     this.retry = this.button('重試加入', () => { if (this.canRetry()) this.rejoin(); });
     this.cancelJoin = this.button('取消加入', () => this.cancelInitial?.());
     actions.append(this.unlock, this.listen, this.hand, this.mic, this.micRetry, this.leaveStage, this.roomAction, this.retry, this.cancelJoin);
-    panel.append(this.status, this.quality, this.error, this.namePanel, actions, this.playback);
+    panel.append(this.status, this.quality, this.error, this.namePanel, this.roomNamePanel, actions, this.playback);
     root.append(style, panel);
     this.render();
   }
@@ -253,6 +274,7 @@ export class StageElement extends HTMLElement {
           if (micLifecycle) this.syncMicRetry();
           if (type === 'state' || type === 'status' || type === 'closed' || type === 'kicked' || type === 'audioblocked') this.syncPlaybackOwner();
           if (type === 'state' || type === 'status' || type === 'closed' || type === 'kicked') this.syncNameOwner();
+          if (type === 'state' || type === 'status' || type === 'closed' || type === 'kicked') this.syncRoomNameOwner();
           if (type === 'closed' || type === 'kicked' || type === 'micerror'
             || (type === 'status' && (detail === 'reconnecting' || detail === 'disconnected'))
             || (type === 'stageleft' && (detail as StageEventMap['stageleft']).participantId === client.state?.me.participantId)) this.retireQualityOwner();
@@ -339,6 +361,7 @@ export class StageElement extends HTMLElement {
     this.joinPhase = undefined;
     this.micFailure = undefined;
     this.retireNameOwner();
+    this.retireRoomNameOwner();
     this.retireQualityOwner();
     this.hideCancel();
     this.hideRetry();
@@ -437,6 +460,59 @@ export class StageElement extends HTMLElement {
         if (current()) {
           this.nameAttempt = undefined;
           this.syncNameOwner();
+        }
+      }
+    })();
+  }
+
+  private retireRoomNameOwner(): void {
+    this.roomNameOwner = undefined; this.roomNameAttempt = undefined;
+    this.roomNameInput.value = ''; this.acceptedRoomName.textContent = '';
+    this.roomNamePanel.hidden = true;
+    this.roomNameInput.disabled = this.roomNameUpdate.disabled = true;
+    this.roomNameUpdate.removeAttribute('aria-busy');
+  }
+
+  private syncRoomNameOwner(): void {
+    const client = this.current, state = client?.state, me = client?.me;
+    if (!this.isConnected || !client || !state || me?.role !== 'controller' || client.status === 'disconnected') {
+      this.retireRoomNameOwner(); return;
+    }
+    const owner = this.roomNameOwner;
+    if (!owner || owner.client !== client || owner.generation !== this.generation
+      || owner.roomId !== state.roomId || owner.participantId !== me.participantId) {
+      this.retireRoomNameOwner();
+      this.roomNameOwner = { client, roomId: state.roomId, participantId: me.participantId, generation: this.generation };
+      this.roomNameInput.value = decodeName(state.name);
+    }
+    // Same-controller snapshots and reconnects update the accepted value, never the draft.
+    this.acceptedRoomName.textContent = `目前房間名稱：${decodeName(state.name)}`;
+    this.roomNamePanel.hidden = false; this.roomNameInput.disabled = false;
+    this.roomNameUpdate.disabled = client.status === 'reconnecting' || Boolean(this.roomNameAttempt);
+    this.roomNameUpdate.setAttribute('aria-busy', String(Boolean(this.roomNameAttempt)));
+  }
+
+  private updateRoomName(): void {
+    this.syncRoomNameOwner();
+    const owner = this.roomNameOwner;
+    if (!owner || this.roomNamePanel.hidden || this.roomNameUpdate.hidden || this.roomNameUpdate.disabled || this.roomNameAttempt) return;
+    const raw = this.roomNameInput.value;
+    // Reserve before public SDK callbacks can synchronously reenter the controller editor.
+    const attempt = this.roomNameAttempt = {};
+    this.syncRoomNameOwner(); this.error.hidden = true;
+    const current = () => {
+      if (this.roomNameOwner !== owner || this.roomNameAttempt !== attempt) return false;
+      // Recheck control and seat identity even when no further lifecycle event was emitted.
+      this.syncRoomNameOwner();
+      return this.roomNameOwner === owner && this.roomNameAttempt === attempt;
+    };
+    void (async () => {
+      try { await owner.client.setRoomName(raw); }
+      catch (error) { if (current()) this.show(error); }
+      finally {
+        if (current()) {
+          this.roomNameAttempt = undefined;
+          this.syncRoomNameOwner();
         }
       }
     })();
@@ -590,6 +666,7 @@ export class StageElement extends HTMLElement {
     this.syncPlaybackOwner();
     this.syncMicRetry();
     this.syncNameOwner();
+    this.syncRoomNameOwner();
     this.syncQualityOwner();
     const client = this.current;
     const me = client?.me ?? null;

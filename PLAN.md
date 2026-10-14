@@ -724,3 +724,6 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 
 
 181. **最後一位停止發布後清空品質集合（2026-10-14）：** 基線 actual Hub 搭配完整範例受控 DOM，在最後 publisher 轉 recvonly 或 peer 關閉後，先前品質列持續保留且後續排程已停止。保留既有 quality cycle，僅允許其於執行／settle 時觀察到零 publisher 後，向當時 controller／onstage recipients 送一次既有 shape 的空 participants；這是明示新增事件，不是透明效能改動。仍有 publisher 而全部 stats rejected/null 不發空集合，維持下一輪與成功樣本差量；await 期間同／異 ID 新發布者與世代檢查不得被舊空結果誤清。關房不發，無 publisher 不再排程，不增加 timer、getStats、SDK API 或媒體操作。既有 SDK/full-set UI 可消費空陣列，普通觀眾不接收。清空依賴既有輪次執行和 pending stats settle，無 timeout 或 interval 內完成保證；不把缺少新數據解讀為健康或恢復，也不新增 peer epoch。證據限 actual Hub／SDK 與受控 timer、DOM、媒體，非原生音訊或 CPU 改善。
+
+
+182. **Web Component 主控房名編輯（2026-10-14）：** 基線 widget 已安全顯示房名並隨 rename snapshot 更新，故拒絕重複資訊列；實際缺少的是既有公開 setRoomName 的內建編輯入口。增加獨立 room-name panel，僅目前 controller（含台下）顯示，原始草稿由既有 server規則驗證，accepted房名只取snapshot，不把ACK當名稱資料。owner綁client/generation/room/pid與主控資格，失去主控或disconnected即退役，即使SDK仍保留初次state-before-ACK的snapshot；重新取得資格從當前房名初始化。同席普通state與reconnecting保留draft/pending，重連暫停送出；呼叫SDK前reserve，事件轉送前及click/settlement重查，舊結果不能污染新owner。此處不抽象重構本人名稱editor，不新增protocol、SDKAPI、storage、attribute reflection、媒體或自動重試。驗證以公開SDK／Hub與受控DOM/socket為界，原生鍵盤/IME/AT及實體音訊未驗收。

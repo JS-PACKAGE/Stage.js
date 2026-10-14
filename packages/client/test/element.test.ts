@@ -5179,6 +5179,380 @@ describe('widget inline participant name editor', () => {
   }
 });
 
+/**
+ * Room-name cases exercise the real SDK request/state lane with controlled sockets and DOM.
+ * Hub cases use the real parser and room model. Media is stubbed; assigning input.value and
+ * calling onclick tests handler ownership, not browser layout, keyboard/IME, or device capture.
+ */
+describe('widget inline controller room name editor', () => {
+  type Widget = InstanceType<typeof StageElement>;
+  const nodes = (node: Node): Node[] => [node, ...node.children.flatMap(nodes)];
+  function controllerState(onStage = false, roomId = 'one'): RoomStatePayload {
+    const state = roomState(onStage, roomId); state.me.role = 'controller'; state.controllerId = state.me.participantId;
+    return state;
+  }
+  function draft(element: Widget, value: string): void { element['roomNameInput'].value = value; }
+  function assertEditor(element: Widget, { accepted = 'Room & Hall', value = accepted, hidden = false,
+    disabled = hidden, busy = false }: { accepted?: string; value?: string; hidden?: boolean; disabled?: boolean; busy?: boolean } = {}): void {
+    assert.equal(element['roomNamePanel'].hidden, hidden, 'controller-only room editor visibility');
+    assert.equal(element['acceptedRoomName'].textContent, hidden ? '' : `目前房間名稱：${accepted}`, 'accepted title comes only from state');
+    assert.equal(element['roomNameInput'].value, value, 'room draft belongs to the current controller tenure');
+    assert.equal(element['roomNameUpdate'].disabled, disabled);
+    assert.equal(element['roomNameUpdate'].getAttribute('aria-busy'), hidden ? null : String(busy));
+    assert.equal(Boolean(element['roomNameAttempt']), busy);
+  }
+  function assertRetired(element: Widget): void {
+    assertEditor(element, { accepted: '', value: '', hidden: true });
+    assert.equal(element['roomNameOwner'], undefined); assert.equal(element['roomNameInput'].disabled, true);
+  }
+  function renameRequest(socket: ReturnType<typeof socketJoiningWidget>['sockets'][number]) {
+    const request = socket.sent.filter(message => message.type === 'room:rename').at(-1);
+    assert.ok(request && request.type === 'room:rename', 'public setRoomName sends room:rename'); return request;
+  }
+
+  it('exposes one labeled room-name part with no client-side limit and stays inert before state or with an ACK-only join', async t => {
+    const empty = new StageElement(); widgets.push(empty); assertRetired(empty); click(empty['roomNameUpdate']);
+    const { element, sockets, hello } = socketJoiningWidget(t); await settle();
+    const client = element.client!, setRoomName = t.mock.method(client, 'setRoomName');
+    assertRetired(element); click(element['roomNameUpdate']);
+    const join = await hello(sockets[0]!); sockets[0]!.deliver({ type: 'ok', requestId: join.requestId }); await settle();
+    assertRetired(element); click(element['roomNameUpdate']);
+    assert.equal(setRoomName.mock.callCount(), 0); assert.equal(client['pending'].size, 0);
+    const matches = nodes(element as unknown as Node).filter(node => node.part.has('room-name'));
+    assert.deepEqual(matches, [element['roomNamePanel']]);
+    const input = element['roomNameInput'], button = element['roomNameUpdate'];
+    assert.equal(input.tagName, 'INPUT'); assert.equal(input.type, 'text'); assert.equal(input.id, 'room-name');
+    assert.equal(input.hasAttribute('maxlength'), false); assert.equal(Reflect.get(input, 'maxLength'), undefined);
+    assert.equal(input.hasAttribute('required'), false);
+    const label = nodes(element as unknown as Node).find(node => node.tagName === 'LABEL' && node.getAttribute('for') === input.id);
+    assert.ok(label?.textContent); assert.equal(button.type, 'button'); assert.equal(button.textContent, '更新房間名稱');
+    assert.notEqual(input.id, element['nameInput'].id); assert.equal(element['error'].hidden, true);
+  });
+
+  for (const onStage of [false, true]) {
+    it(`hides the editor from a joined ${onStage ? 'speaker' : 'audience'} and rejects direct invocation without clearing errors`, async t => {
+      const { element, client, socket } = await socketJoinedWidget(t, roomState(onStage));
+      const setRoomName = t.mock.method(client, 'setRoomName');
+      socket.deliver({ type: 'error', code: 'conflict', message: 'Existing role error' });
+      const frames = [...socket.sent]; assertRetired(element); draft(element, 'unauthorized direct draft');
+      click(element['roomNameUpdate']); await settle();
+      assert.equal(setRoomName.mock.callCount(), 0); assert.deepEqual(socket.sent, frames); assert.equal(client['pending'].size, 0);
+      assertRetired(element); assert.equal(element['error'].hidden, false); assert.equal(element['error'].textContent, 'Existing role error');
+      assert.equal(element['namePanel'].hidden, false, 'participant name editing is still available');
+    });
+
+    it(`offers an ${onStage ? 'onstage' : 'offstage'} controller safe decoded accepted text and forwards the exact raw draft`, async t => {
+      const state = controllerState(onStage); state.name = '&lt;img src=x onerror=alert(1)&gt; &amp; &quot;Q&quot; &#39;S&#39; &amp;lt;';
+      const decoded = '<img src=x onerror=alert(1)> & "Q" \'S\' &lt;';
+      const { element, client, socket, tick } = await socketJoinedWidget(t, state);
+      assertEditor(element, { accepted: decoded }); assert.equal(element['roomNameInput'].disabled, false);
+      assert.deepEqual((element['acceptedRoomName'] as unknown as Node).children, []);
+      assert.equal(Reflect.get(element['acceptedRoomName'], 'innerHTML'), undefined);
+      const raw = '  \u200be\u0301 & <room> \n  ', attrs = [...(element as unknown as Node).attributes];
+      draft(element, raw); click(element['roomNameUpdate']); await tick(100); const request = renameRequest(socket);
+      assert.equal(request.name, raw); assertEditor(element, { accepted: decoded, value: raw, disabled: true, busy: true });
+      socket.deliver({ type: 'ok', requestId: request.requestId }); await settle();
+      assertEditor(element, { accepted: decoded, value: raw }); assert.equal(client.state?.name, state.name);
+      assert.deepEqual([...(element as unknown as Node).attributes], attrs, 'room/name/code attributes are never rewritten');
+    });
+  }
+
+  it('renders the actual Hub normalized title before ACK without replacing drafts, controls, playback, or the client', async t => {
+    const h = harness(); t.after(async () => { await h.hub.shutdown(); }); const host = await h.create();
+    const initial = host.s.last('room:state')!;
+    const { element, client, socket, sockets, tick } = await socketJoinedWidget(t, initial);
+    const owner = element['roomNameOwner'], generation = element['generation'];
+    const controls = [element['roomNameInput'], element['acceptedRoomName'], element['nameInput'], element['hand'], element['mic'], element['roomAction'], element['volume']];
+    const setRoomName = t.mock.method(client, 'setRoomName');
+    element.playbackMuted = true; element.playbackVolume = 0.37;
+    element['nameInput'].value = 'unsubmitted personal name';
+    const raw = '  \u200be\u0301 <&> "room"\n  ';
+    draft(element, raw); click(element['roomNameUpdate']); click(element['roomNameUpdate']); await tick(100);
+    assert.equal(setRoomName.mock.callCount(), 1); assert.deepEqual(setRoomName.mock.calls[0]!.arguments, [raw]);
+    const request = renameRequest(socket), start = host.s.inbox.length;
+    await h.hub.handle(host.s, parseClientMessage(JSON.stringify(request), testConfig().limits));
+    const replies = host.s.inbox.slice(start), snapshot = replies.find(message => message.type === 'room:state');
+    const ack = replies.find(message => message.type === 'ok' && message.requestId === request.requestId);
+    assert.ok(snapshot && snapshot.type === 'room:state'); assert.ok(ack);
+    assert.equal(snapshot.name, 'é &lt;&amp;&gt; &quot;room&quot;'); socket.deliver(snapshot);
+    assertEditor(element, { accepted: 'é <&> "room"', value: raw, disabled: true, busy: true });
+    assert.equal(client['pending'].has(request.requestId), true);
+    draft(element, '  next unsent room draft  '); socket.deliver(snapshot); socket.deliver({ type: 'status', state: 'waiting' });
+    click(element['roomNameUpdate']); await tick(100); assert.equal(setRoomName.mock.callCount(), 1);
+    assert.equal(element['roomNameInput'].disabled, false, 'pending submission still allows typing the next draft');
+    socket.deliver(ack); await settle();
+    assertEditor(element, { accepted: 'é <&> "room"', value: '  next unsent room draft  ' });
+    assert.equal(element['roomNameOwner'], owner); assert.equal(element['generation'], generation); assert.equal(element.client, client); assert.equal(sockets.length, 1);
+    assert.deepEqual([element['roomNameInput'], element['acceptedRoomName'], element['nameInput'], element['hand'], element['mic'], element['roomAction'], element['volume']], controls);
+    assert.equal(element['nameInput'].value, 'unsubmitted personal name'); assert.equal(element['acceptedName'].textContent, '目前名稱：Host');
+    assert.equal(element.getAttribute('room'), host.roomId); assert.equal(element.getAttribute('name'), 'Listener');
+    assert.equal(client.playbackMuted, true); assert.equal(client.playbackVolume, 0.37); assert.equal(element['volume'].value, '37');
+    assert.equal(client['pc'], null, 'stubbed media remains untouched'); assert.equal(element['error'].hidden, true);
+  });
+
+  it('lets the real server parser own empty, whitespace and custom length limits without trimming or imposing a default cap', async t => {
+    const config = testConfig(c => { c.limits.nameMaxLength = 2; });
+    const { element, client, socket, tick } = await socketJoinedWidget(t, controllerState());
+    for (const raw of ['', ' \n\t\u200b ', '🐱🐱🐱']) {
+      draft(element, raw); click(element['roomNameUpdate']); await tick(100); const request = renameRequest(socket);
+      assert.equal(request.name, raw); let failure: ValidationError | undefined;
+      try { parseClientMessage(JSON.stringify(request), config.limits); }
+      catch (error) { assert.ok(error instanceof ValidationError); failure = error; }
+      assert.ok(failure); assert.equal(failure.code, 'bad_request');
+      socket.deliver({ type: 'error', code: failure.code, message: failure.message, requestId: request.requestId }); await settle();
+      assertEditor(element, { value: raw }); assert.equal(element['error'].textContent, failure.message); assert.equal(client['pending'].size, 0);
+    }
+    const raw = '  e\u0301<\u200b  '; draft(element, raw); click(element['roomNameUpdate']); await tick(100);
+    const normalized = parseClientMessage(JSON.stringify(renameRequest(socket)), config.limits);
+    assert.deepEqual(normalized, { ...renameRequest(socket), name: 'é&lt;' });
+    socket.deliver({ type: 'ok', requestId: renameRequest(socket).requestId }); await settle();
+    const long = '🐱'.repeat(testConfig().limits.nameMaxLength + 1);
+    draft(element, long); click(element['roomNameUpdate']); await tick(100);
+    const custom = testConfig(c => { c.limits.nameMaxLength = long.length; });
+    assert.equal(renameRequest(socket).name, long);
+    assert.doesNotThrow(() => parseClientMessage(JSON.stringify(renameRequest(socket)), custom.limits));
+    socket.deliver({ type: 'ok', requestId: renameRequest(socket).requestId }); await settle(); assertEditor(element, { value: long });
+  });
+
+  it('preserves actual Hub forbidden failures when control changed on the server before the widget receives its snapshot', async t => {
+    const h = harness(); t.after(async () => { await h.hub.shutdown(); });
+    const host = await h.create(), next = await h.join(host.roomId, host.code, 'Next');
+    const { element, client, socket, tick } = await socketJoinedWidget(t, host.s.last('room:state')!);
+    assert.equal(await h.req(host.s, { type: 'control:transfer', targetId: next.id }), 'ok');
+    const raw = '  unauthorized server title  '; draft(element, raw); click(element['roomNameUpdate']); await tick(100);
+    const request = renameRequest(socket), start = host.s.inbox.length;
+    await h.hub.handle(host.s, parseClientMessage(JSON.stringify(request), testConfig().limits));
+    const failure = host.s.inbox.slice(start).find(message => message.type === 'error' && message.requestId === request.requestId);
+    assert.ok(failure && failure.type === 'error'); assert.equal(failure.code, 'forbidden');
+    const forwarded: unknown[] = []; element.addEventListener('stage-error', event => forwarded.push((event as CustomEvent).detail));
+    socket.deliver(failure); await settle(); assertEditor(element, { accepted: 'Room', value: raw });
+    assert.equal(element['error'].hidden, false); assert.equal(element['error'].textContent, failure.message);
+    assert.equal(forwarded.length, 1); assert.equal(client['pending'].size, 0); assert.equal(client.state?.name, 'Room');
+    socket.deliver(host.s.last('room:state')!); assertRetired(element);
+  });
+
+  it('keeps the draft after actual SDK queue_full and retries without creating an extra occupied request', async t => {
+    const { element, client, socket, tick } = await socketJoinedWidget(t, controllerState());
+    Object.defineProperty(client, 'maxPendingControlRequests', { value: 1 });
+    const occupied = client.mute(); void occupied.catch(() => {}); await tick(100);
+    const held = socket.sent.find(message => message.type === 'mic:mute'); assert.ok(held); const frames = [...socket.sent];
+    draft(element, '  queue draft  '); click(element['roomNameUpdate']); await settle();
+    assertEditor(element, { value: '  queue draft  ' }); assert.equal(element['error'].hidden, false);
+    assert.equal(element['error'].textContent, '待回覆控制請求已滿，請等待完成後再試。');
+    assert.equal(client['pendingControlRequests'], 1); assert.deepEqual(socket.sent, frames);
+    socket.deliver({ type: 'ok', requestId: held.requestId }); await occupied;
+    click(element['roomNameUpdate']); await tick(100); const request = renameRequest(socket); assert.equal(request.name, '  queue draft  ');
+    socket.deliver({ type: 'ok', requestId: request.requestId }); await settle(); assertEditor(element, { value: request.name }); assert.equal(element['error'].hidden, true);
+  });
+
+  for (const outcome of ['resolve', 'reject'] as const) {
+    it(`retires a controller tenure before role-loss forwarding and isolates its late ${outcome} after transfer back`, async t => {
+      const h = harness(); t.after(async () => { await h.hub.shutdown(); });
+      const host = await h.create(), next = await h.join(host.roomId, host.code, 'Next');
+      const { element, client, socket } = await socketJoinedWidget(t, host.s.last('room:state')!);
+      const old = deferred(), active = deferred(); let calls = 0;
+      // Deferred SDK method isolates widget completion after the real Hub transfers authority twice.
+      t.mock.method(client, 'setRoomName', () => (++calls === 1 ? old : active).promise);
+      draft(element, 'old controller draft'); click(element['roomNameUpdate']); const owner = element['roomNameOwner'];
+      socket.deliver({ type: 'error', code: 'conflict', message: 'Retained transfer error' });
+      assert.equal(await h.req(host.s, { type: 'control:transfer', targetId: next.id }), 'ok');
+      let lost = 0; element.addEventListener('stage-state', () => {
+        lost++; assertRetired(element); click(element['roomNameUpdate']); assert.equal(calls, 1);
+        assert.equal(element['error'].textContent, 'Retained transfer error'); assert.equal(element['error'].hidden, false);
+      }, { once: true });
+      socket.deliver(host.s.last('room:state')!); assert.equal(lost, 1); assertRetired(element);
+      assert.equal(await h.req(next.s, { type: 'room:rename', name: 'Changed while away' }), 'ok');
+      assert.equal(await h.req(next.s, { type: 'control:transfer', targetId: host.id }), 'ok');
+      let regained = 0; element.addEventListener('stage-state', () => {
+        regained++; assertEditor(element, { accepted: 'Changed while away' }); assert.notEqual(element['roomNameOwner'], owner);
+        draft(element, 'new tenure pending'); click(element['roomNameUpdate']);
+      }, { once: true });
+      socket.deliver(host.s.last('room:state')!); assert.equal(regained, 1); assert.equal(calls, 2);
+      const attempt = element['roomNameAttempt']; socket.deliver({ type: 'error', code: 'conflict', message: 'New tenure error' });
+      if (outcome === 'resolve') old.resolve(); else old.reject(new Error('Old tenure error')); await settle();
+      assert.equal(element['roomNameAttempt'], attempt); assertEditor(element, { accepted: 'Changed while away', value: 'new tenure pending', disabled: true, busy: true });
+      assert.equal(element['error'].textContent, 'New tenure error'); active.resolve(); await settle();
+      assertEditor(element, { accepted: 'Changed while away', value: 'new tenure pending' });
+    });
+  }
+
+  for (const transition of ['room', 'participant'] as const) {
+    for (const outcome of ['resolve', 'reject'] as const) {
+      it(`isolates a retired ${transition} owner's ${outcome} from a replacement pending room draft`, async t => {
+        const { element, client, socket } = await socketJoinedWidget(t, controllerState());
+        const old = deferred(), active = deferred(); let calls = 0;
+        t.mock.method(client, 'setRoomName', () => (++calls === 1 ? old : active).promise);
+        draft(element, 'old owner draft'); click(element['roomNameUpdate']); const owner = element['roomNameOwner'];
+        const next = controllerState(false, transition === 'room' ? 'two' : 'one');
+        if (transition === 'participant') { next.me.participantId = 'replacement'; next.controllerId = 'replacement'; }
+        next.name = 'Fresh &amp; room'; socket.deliver({ type: 'room:state', ...next });
+        assert.notEqual(element['roomNameOwner'], owner); assertEditor(element, { accepted: 'Fresh & room' });
+        draft(element, 'fresh pending'); click(element['roomNameUpdate']); const attempt = element['roomNameAttempt'];
+        socket.deliver({ type: 'error', code: 'conflict', message: 'Current owner error' });
+        if (outcome === 'resolve') old.resolve(); else old.reject(new Error('Retired owner error')); await settle();
+        assert.equal(element['roomNameAttempt'], attempt); assertEditor(element, { accepted: 'Fresh & room', value: 'fresh pending', disabled: true, busy: true });
+        assert.equal(element['error'].textContent, 'Current owner error'); active.resolve(); await settle();
+      });
+    }
+  }
+
+  it('retires on real pre-ACK socket loss with retained snapshot, then isolates silent disconnect and same-ID public rejoin', async t => {
+    const { element, sockets, hello, tick, joinRequest } = socketJoiningWidget(t); await settle();
+    const socket = sockets[0]!, initialJoin = await hello(socket), client = element.client!;
+    socket.deliver({ type: 'room:state', ...controllerState() });
+    assert.equal(client['session'], null); assert.equal(client['pending'].has(initialJoin.requestId), true);
+    const old = deferred(), active = deferred(); let calls = 0;
+    t.mock.method(client, 'setRoomName', () => (++calls === 1 ? old : active).promise);
+    draft(element, 'old same-ID room draft'); click(element['roomNameUpdate']); const owner = element['roomNameOwner'];
+    socket.close(); await settle(); assert.equal(client.status, 'disconnected'); assert.ok(client.state); assertRetired(element);
+    let statuses = 0; element.addEventListener('stage-status', () => { statuses++; });
+    await client.disconnect(); assert.equal(statuses, 0); assert.equal(client.state, null); assertRetired(element);
+    const connecting = client.connect(), next = sockets[1]!; next.hello(); await connecting;
+    const joining = client.join({ roomId: 'one', name: 'Listener' }); await settle(); await tick(100);
+    const request = joinRequest(next), fresh = controllerState(); fresh.name = 'Fresh same-ID room';
+    next.deliver({ type: 'room:state', ...fresh }); next.deliver({ type: 'ok', requestId: request.requestId }); await joining;
+    assert.notEqual(element['roomNameOwner'], owner); assertEditor(element, { accepted: fresh.name });
+    draft(element, 'fresh same-ID pending'); click(element['roomNameUpdate']); const attempt = element['roomNameAttempt'];
+    next.deliver({ type: 'error', code: 'conflict', message: 'Fresh same-ID error' }); old.reject(new Error('Retired same-ID error')); await settle();
+    assert.equal(element['roomNameAttempt'], attempt); assertEditor(element, { accepted: fresh.name, value: 'fresh same-ID pending', disabled: true, busy: true });
+    assert.equal(element['error'].textContent, 'Fresh same-ID error'); active.resolve(); await settle();
+  });
+
+  for (const callback of ['stage-status', 'stage-state'] as const) {
+    it(`initializes room ownership before forwarded ${callback} and admits one reentrant update before join ACK`, async t => {
+      const { element, sockets, hello, tick } = socketJoiningWidget(t); await settle();
+      const socket = sockets[0]!, join = await hello(socket), client = element.client!, state = controllerState(); state.name = 'Fresh &amp; title';
+      let callbacks = 0; element.addEventListener(callback, () => {
+        callbacks++; assertEditor(element, { accepted: 'Fresh & title' });
+        draft(element, '  callback room draft  '); click(element['roomNameUpdate']); click(element['roomNameUpdate']);
+        assert.equal(element['roomNameUpdate'].getAttribute('aria-busy'), 'true');
+      }, { once: true });
+      socket.deliver({ type: 'room:state', ...state }); await tick(100);
+      assert.equal(callbacks, 1); assert.equal(socket.sent.filter(message => message.type === 'room:rename').length, 1);
+      const rename = renameRequest(socket); assert.equal(rename.name, '  callback room draft  '); assert.equal(client['pending'].has(join.requestId), true);
+      socket.deliver({ type: 'ok', requestId: join.requestId }); await settle();
+      assertEditor(element, { accepted: 'Fresh & title', value: rename.name, disabled: true, busy: true });
+      socket.deliver({ type: 'ok', requestId: rename.requestId }); await settle(); assertEditor(element, { accepted: 'Fresh & title', value: rename.name });
+    });
+  }
+
+  it('reserves the room operation before a synchronous method callback can edit and resubmit the same tenure', async t => {
+    const { element, client, socket } = await socketJoinedWidget(t, controllerState());
+    const pending = deferred(), state = controllerState(); state.name = 'Accepted synchronously'; let callbacks = 0;
+    element.addEventListener('stage-state', () => {
+      callbacks++; assert.equal(element['roomNameUpdate'].getAttribute('aria-busy'), 'true');
+      draft(element, 'edited inside callback'); click(element['roomNameUpdate']);
+    }, { once: true });
+    const setRoomName = t.mock.method(client, 'setRoomName', () => { socket.deliver({ type: 'room:state', ...state }); return pending.promise; });
+    draft(element, 'submitted primitive'); click(element['roomNameUpdate']);
+    assert.equal(callbacks, 1); assert.equal(setRoomName.mock.callCount(), 1); assert.deepEqual(setRoomName.mock.calls[0]!.arguments, ['submitted primitive']);
+    assertEditor(element, { accepted: state.name, value: 'edited inside callback', disabled: true, busy: true });
+    pending.resolve(); await settle(); assertEditor(element, { accepted: state.name, value: 'edited inside callback' });
+  });
+
+  it('retains a deferred pending draft through same-seat reconnect and blocks direct invocation without clearing errors', async t => {
+    const { element, client, socket, sockets, tick, hello } = await socketJoinedWidget(t, controllerState());
+    // Unlike real SDK requests, this deferred method deliberately survives socket loss to isolate widget ownership.
+    const pending = deferred(), setRoomName = t.mock.method(client, 'setRoomName', () => pending.promise);
+    draft(element, 'pending reconnect room draft'); click(element['roomNameUpdate']);
+    const owner = element['roomNameOwner'], attempt = element['roomNameAttempt'];
+    socket.deliver({ type: 'error', code: 'conflict', message: 'Existing reconnect error' });
+    let forwarded = 0; element.addEventListener('stage-status', () => {
+      forwarded++; click(element['roomNameUpdate']); assert.equal(setRoomName.mock.callCount(), 1);
+      assert.equal(element['error'].hidden, false); assert.equal(element['error'].textContent, 'Existing reconnect error');
+    }, { once: true });
+    socket.close(); await settle(); assert.equal(forwarded, 1);
+    assertEditor(element, { value: 'pending reconnect room draft', disabled: true, busy: true });
+    assert.equal(element['roomNameOwner'], owner); assert.equal(element['roomNameAttempt'], attempt);
+    await tick(500); const next = sockets[1]!, resume = await hello(next), state = controllerState(); state.name = 'Changed on resume';
+    next.deliver({ type: 'room:state', ...state }); next.deliver({ type: 'ok', requestId: resume.requestId }); await settle();
+    assertEditor(element, { accepted: state.name, value: 'pending reconnect room draft', disabled: true, busy: true });
+    click(element['roomNameUpdate']); assert.equal(setRoomName.mock.callCount(), 1); assert.equal(element['roomNameOwner'], owner);
+    pending.resolve(); await settle(); assertEditor(element, { accepted: state.name, value: 'pending reconnect room draft' });
+    assert.equal(element['error'].textContent, 'Existing reconnect error');
+    assert.equal(next.sent.some(message => message.type === 'room:rename'), false, 'reconnect does not replay a title update');
+  });
+
+  it('preserves a real lost request failure and ignores old-wire ACK, error and state during a new pending rename', async t => {
+    const { element, client, socket, sockets, tick, hello } = await socketJoinedWidget(t, controllerState());
+    draft(element, 'lost room draft'); click(element['roomNameUpdate']); await tick(100);
+    const first = renameRequest(socket), oldMessage = socket.onmessage; socket.close(); await settle();
+    assertEditor(element, { value: 'lost room draft', disabled: true }); assert.equal(element['error'].textContent, '連線已中斷。');
+    click(element['roomNameUpdate']); assert.equal(client['pending'].size, 0);
+    await tick(500); const next = sockets[1]!, resume = await hello(next);
+    next.deliver({ type: 'room:state', ...controllerState() }); next.deliver({ type: 'ok', requestId: resume.requestId }); await settle();
+    draft(element, 'new room draft'); click(element['roomNameUpdate']); await tick(100); const active = renameRequest(next), attempt = element['roomNameAttempt'];
+    for (const message of [
+      { type: 'ok', requestId: first.requestId },
+      { type: 'error', code: 'bad_request', message: 'Old-wire room error', requestId: first.requestId },
+      { type: 'room:state', ...controllerState(), name: 'Old-wire room name' },
+    ] satisfies ServerMessage[]) oldMessage?.({ data: JSON.stringify(message) });
+    await settle(); assert.equal(element['roomNameAttempt'], attempt); assert.equal(element['error'].hidden, true);
+    assertEditor(element, { value: 'new room draft', disabled: true, busy: true });
+    next.deliver({ type: 'ok', requestId: active.requestId }); await settle(); assertEditor(element, { value: 'new room draft' });
+  });
+
+  for (const transition of ['leave', 'detach', 'direct disconnect', 'ordinary close', 'kick', 'shutdown'] as const) {
+    it(`retires room title, draft and pending immediately on ${transition}`, async t => {
+      const { element, client, socket, tick } = await socketJoinedWidget(t, controllerState());
+      draft(element, 'private controller draft'); click(element['roomNameUpdate']); await tick(100);
+      if (transition === 'leave') click(element['roomAction']);
+      else if (transition === 'detach') { Object.assign(element, { isConnected: false }); element.disconnectedCallback(); }
+      else if (transition === 'direct disconnect') await client.disconnect();
+      else socket.deliver(terminalCases.find(item => item.title === transition)!.message);
+      await settle(); await settle(); assertRetired(element);
+      const error = element['error'].textContent, hidden = element['error'].hidden;
+      click(element['roomNameUpdate']); element.playbackMuted = true; await settle(); assertRetired(element);
+      assert.equal(element['error'].textContent, error); assert.equal(element['error'].hidden, hidden); assert.equal(client['pending'].size, 0);
+    });
+  }
+
+  it('isolates a retired client and generation across attribute rejoin using the same DOM nodes', async t => {
+    const { element, client, socket, sockets, hello } = await socketJoinedWidget(t, controllerState());
+    const old = deferred(); t.mock.method(client, 'setRoomName', () => old.promise);
+    draft(element, 'old client draft'); click(element['roomNameUpdate']); const oldMessage = socket.onmessage, oldClose = socket.onclose;
+    const input = element['roomNameInput'], generation = element['generation'];
+    element.setAttribute('room', 'two'); await settle(); await settle(); assertRetired(element);
+    const current = element.client!; assert.notEqual(current, client); assert.ok(element['generation'] > generation);
+    const next = sockets[1]!, join = await hello(next), state = controllerState(false, 'two'); state.name = 'New client title';
+    next.deliver({ type: 'room:state', ...state }); next.deliver({ type: 'ok', requestId: join.requestId }); await settle();
+    const active = deferred(); t.mock.method(current, 'setRoomName', () => active.promise);
+    draft(element, 'new client pending'); click(element['roomNameUpdate']); const owner = element['roomNameOwner'], attempt = element['roomNameAttempt'];
+    next.deliver({ type: 'error', code: 'conflict', message: 'Current client error' }); old.reject(new Error('Retired client error'));
+    oldMessage?.({ data: JSON.stringify({ type: 'room:state', ...controllerState(), name: 'Old-wire title' }) }); oldClose?.(); await settle();
+    assert.equal(element['roomNameInput'], input); assert.equal(element['roomNameOwner'], owner); assert.equal(element['roomNameAttempt'], attempt);
+    assertEditor(element, { accepted: state.name, value: 'new client pending', disabled: true, busy: true }); assert.equal(element['error'].textContent, 'Current client error');
+    active.resolve(); await settle();
+  });
+
+  it('rechecks authority on settlement even if the current SDK snapshot changed without a forwarded render', async t => {
+    const { element, client, socket } = await socketJoinedWidget(t, controllerState());
+    const pending = deferred(); t.mock.method(client, 'setRoomName', () => pending.promise);
+    draft(element, 'now unauthorized'); click(element['roomNameUpdate']);
+    socket.deliver({ type: 'error', code: 'conflict', message: 'Unrelated current error' });
+    // Synthetic silent mutation stresses the settlement guard, not the normal event delivery path.
+    client.state!.me.role = 'speaker'; client.state!.controllerId = 'someone-else';
+    pending.reject(new Error('Late unauthorized failure')); await settle(); assertRetired(element);
+    assert.equal(element['error'].hidden, false); assert.equal(element['error'].textContent, 'Unrelated current error');
+  });
+
+  it('keeps room and personal rename pending lanes independent and ignores a duplicate old room ACK', async t => {
+    const { element, client, socket, tick } = await socketJoinedWidget(t, controllerState(true));
+    element['nameInput'].value = 'Personal draft'; click(element['nameUpdate']);
+    draft(element, 'First room draft'); click(element['roomNameUpdate']); click(element['mic']); await tick(300);
+    const personal = socket.sent.find(message => message.type === 'participant:rename'), mic = socket.sent.find(message => message.type === 'mic:mute');
+    assert.ok(personal); assert.ok(mic); const first = renameRequest(socket);
+    assert.equal(element['pendingActions'].has(element['roomNameUpdate']), false);
+    socket.deliver({ type: 'ok', requestId: first.requestId }); await settle();
+    assertEditor(element, { value: 'First room draft' }); assert.equal(element['nameUpdate'].getAttribute('aria-busy'), 'true'); assert.equal(element['mic'].getAttribute('aria-busy'), 'true');
+    draft(element, 'Second room draft'); click(element['roomNameUpdate']); await tick(100); const second = renameRequest(socket), attempt = element['roomNameAttempt'];
+    socket.deliver({ type: 'ok', requestId: first.requestId }); socket.deliver({ type: 'ok', requestId: personal.requestId }); socket.deliver({ type: 'ok', requestId: mic.requestId }); await settle();
+    assert.equal(element['roomNameAttempt'], attempt); assert.equal(element['nameUpdate'].getAttribute('aria-busy'), 'false'); assert.equal(element['mic'].getAttribute('aria-busy'), null);
+    assertEditor(element, { value: 'Second room draft', disabled: true, busy: true }); assert.equal(client['pending'].size, 1);
+    socket.deliver({ type: 'ok', requestId: second.requestId }); await settle(); assertEditor(element, { value: 'Second room draft' });
+  });
+});
+
 describe('widget latest own connection quality', () => {
   type Widget = InstanceType<typeof StageElement>;
   const nodes = (node: Node): Node[] => [node, ...node.children.flatMap(nodes)];
