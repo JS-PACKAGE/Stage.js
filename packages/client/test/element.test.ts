@@ -9384,3 +9384,470 @@ describe('widget explicit output selection', () => {
     assert.equal(media.actual(client), ''); assertPicker(element, { value: 'private-output-a' });
   });
 });
+
+/** Fake DOM and controlled native promises verify handler/SDK ordering, never audible recovery or real hardware. */
+describe('widget manual audio negotiation recovery', () => {
+  type Widget = InstanceType<typeof StageElement>;
+  const drain = async () => { for (let n = 0; n < 40; n++) await Promise.resolve(); };
+  const press = (element: Widget) => click(element['audioRetry']);
+  const force = (element: Widget) => {
+    element['audioRetry'].disabled = false; element['audioRetry'].hidden = false; press(element);
+  };
+  const error = (element: Widget, message = 'Keep newer error') => element['show'](new Error(message));
+  function view(element: Widget, { hidden = false, busy = false, disabled = hidden || busy, text = busy ? '正在重新協商音訊連線…' : '' }:
+    { hidden?: boolean; busy?: boolean; disabled?: boolean; text?: string } = {}): void {
+    assert.equal(element['audioRetry'].hidden, hidden, 'retry visibility');
+    assert.equal(element['audioRetry'].disabled, disabled, 'retry admission');
+    assert.equal(element['audioRetry'].getAttribute('aria-busy'), String(busy));
+    assert.equal(element['audioRecovery'].textContent, text);
+    assert.equal(element['audioRecovery'].hidden, !text);
+  }
+  async function rejoin(fixture: Awaited<ReturnType<typeof socketJoinedWidget>>, state = roomState()) {
+    const { client, sockets, tick, joinRequest } = fixture;
+    const connected = client.connect(), socket = sockets.at(-1)!; socket.hello(); await connected;
+    const joined = client.join({ roomId: state.roomId, name: 'Listener' }); await drain(); await tick(100);
+    const request = joinRequest(socket); socket.deliver({ type: 'room:state', ...state });
+    socket.deliver({ type: 'ok', requestId: request.requestId }); await joined; await drain();
+    return socket;
+  }
+
+  for (const status of ['waiting', 'live'] as const) for (const policy of ['audience', 'speaker', 'controller'] as const) {
+    it(`offers a native, separate polite recovery action for a joined ${status} ${policy}`, async t => {
+      const state = roomState(policy !== 'audience'); state.status = status; state.me.role = policy;
+      const { element, client } = await socketJoinedWidget(t, state);
+      const pending = deferred(), retry = t.mock.method(client, 'retryAudioConnection', () => pending.promise);
+      assert.equal(element['audioRetry'].type, 'button'); assert.equal(element['audioRetry'].textContent, '重試音訊連線');
+      assert.equal(element['audioRecovery'].getAttribute('role'), 'status');
+      assert.equal(element['audioRecovery'].getAttribute('aria-live'), 'polite');
+      assert.equal(element['audioRetry'].getAttribute('aria-describedby'), element['audioRecovery'].id);
+      assert.notEqual(element['audioRecovery'], element['status']); assert.notEqual(element['audioRetry'], element['micRetry']);
+      view(element); error(element); press(element); view(element, { busy: true }); assert.equal(element['error'].hidden, true);
+      press(element); force(element); assert.equal(retry.mock.callCount(), 1); view(element, { busy: true });
+      error(element); pending.resolve(); await drain(); view(element, { text: '音訊連線協商已完成。' });
+      assert.equal(element['error'].hidden, false); assert.equal(element['error'].textContent, 'Keep newer error');
+    });
+  }
+
+  it('keeps no-room, joining and failed-entry controls hidden and protects existing errors from forced handlers', async t => {
+    const { element, connections } = deferredJoiningWidget(t); await drain();
+    const client = element.client!, retry = t.mock.method(client, 'retryAudioConnection', async () => {});
+    error(element); force(element); view(element, { hidden: true }); assert.equal(retry.mock.callCount(), 0);
+    connections[0]!.pending.reject(new Error('Initial connection failure')); await drain();
+    error(element); force(element); view(element, { hidden: true }); assert.equal(retry.mock.callCount(), 0);
+    assert.equal(element['error'].textContent, 'Keep newer error'); assert.equal(element['error'].hidden, false);
+  });
+
+  it('reserves synchronously across forwarded state reentry and preserves the same seat through role and name changes', async t => {
+    const { element, client, socket } = await socketJoinedWidget(t);
+    const pending = deferred(); let observations = 0;
+    element.addEventListener('stage-state', () => { observations++; force(element); });
+    const retry = t.mock.method(client, 'retryAudioConnection', () => {
+      const state = roomState(true); state.me.role = 'controller'; state.me.name = 'Updated';
+      socket.deliver({ type: 'room:state', ...state }); return pending.promise;
+    });
+    const owner = element['audioRecoveryOwner']; press(element); const attempt = element['audioRecoveryAttempt'];
+    assert.equal(retry.mock.callCount(), 1); assert.equal(observations, 1); assert.equal(element['audioRecoveryOwner'], owner);
+    socket.deliver({ type: 'room:state', ...roomState() });
+    assert.equal(element['audioRecoveryAttempt'], attempt); view(element, { busy: true });
+    pending.resolve(); await drain(); view(element, { text: '音訊連線協商已完成。' });
+  });
+
+  for (const synchronous of [true, false]) {
+    it(`shows a current ${synchronous ? 'synchronous' : 'asynchronous'} failure and allows a later manual attempt`, async t => {
+      const { element, client } = await socketJoinedWidget(t); const pending = deferred(); let calls = 0;
+      t.mock.method(client, 'retryAudioConnection', () => {
+        if (++calls === 1) { if (synchronous) throw new Error('Controlled retry failure'); return Promise.reject(new Error('Controlled retry failure')); }
+        return pending.promise;
+      });
+      press(element); await drain(); view(element); assert.equal(element['error'].textContent, 'Controlled retry failure');
+      press(element); view(element, { busy: true }); assert.equal(calls, 2); pending.resolve(); await drain(); view(element, { text: '音訊連線協商已完成。' });
+    });
+  }
+
+  for (const outcome of ['resolve', 'reject'] as const) for (const transition of ['room', 'participant', 'generation', 'client'] as const) {
+    it(`isolates a retired ${transition} owner's ${outcome} from a fresh pending attempt and error`, async t => {
+      const { element, client, socket } = await socketJoinedWidget(t);
+      const old = deferred(), fresh = deferred(); let calls = 0;
+      t.mock.method(client, 'retryAudioConnection', () => (++calls === 1 ? old : fresh).promise);
+      press(element); const owner = element['audioRecoveryOwner'];
+      if (transition === 'client') {
+        const replacement = new StageClient({ url: 'ws://localhost/ws' });
+        replacement['snapshot'] = roomState(); replacement['currentStatus'] = 'live';
+        t.mock.method(replacement, 'retryAudioConnection', () => { calls++; return fresh.promise; });
+        element['current'] = replacement; element['render']();
+        t.after(() => client.disconnect());
+      } else if (transition === 'generation') { ++element['generation']; element['render'](); }
+      else { const state = roomState(false, transition === 'room' ? 'two' : 'one'); if (transition === 'participant') state.me.participantId = 'new-seat'; socket.deliver({ type: 'room:state', ...state }); }
+      assert.notEqual(element['audioRecoveryOwner'], owner); view(element); press(element);
+      const attempt = element['audioRecoveryAttempt']; error(element);
+      if (outcome === 'resolve') old.resolve(); else old.reject(new Error('Retired failure'));
+      await drain(); assert.equal(element['audioRecoveryAttempt'], attempt); view(element, { busy: true });
+      assert.equal(element['error'].hidden, false); assert.equal(element['error'].textContent, 'Keep newer error');
+      force(element); assert.equal(calls, 2); fresh.resolve(); await drain(); view(element, { text: '音訊連線協商已完成。' });
+    });
+  }
+
+  for (const transition of ['leave', 'detach', 'disconnect', 'ordinary close', 'kick', 'shutdown'] as const) {
+    it(`retires on ${transition} before forced callback admission and ignores stale rejection`, async t => {
+      const { element, client, socket } = await socketJoinedWidget(t); const pending = deferred();
+      const retry = t.mock.method(client, 'retryAudioConnection', () => pending.promise); press(element);
+      let observed: boolean | undefined;
+      const event = transition === 'disconnect' ? 'stage-status' : `stage-${terminalCases.find(item => item.title === transition)?.event ?? 'status'}`;
+      element.addEventListener(event, () => { observed = element['audioRecoveryOwner'] === undefined; error(element); force(element); }, { once: true });
+      if (transition === 'leave') click(element['roomAction']);
+      else if (transition === 'detach') { Object.assign(element, { isConnected: false }); element.disconnectedCallback(); }
+      else if (transition === 'disconnect') await client.disconnect();
+      else socket.deliver(terminalCases.find(item => item.title === transition)!.message);
+      await drain(); view(element, { hidden: true });
+      if (transition !== 'leave' && transition !== 'detach') assert.equal(observed, true);
+      error(element); force(element); pending.reject(new Error('Obsolete teardown failure')); await drain();
+      view(element, { hidden: true }); assert.equal(retry.mock.callCount(), 1); assert.equal(element['error'].textContent, 'Keep newer error');
+    });
+  }
+
+  for (const terminal of terminalCases) {
+    it(`allows a later authoritative same-client same-ID state after ${terminal.title}, without reviving the old operation`, async t => {
+      const fixture = await socketJoinedWidget(t), { element, client, socket } = fixture;
+      const old = deferred(), fresh = deferred(); let calls = 0;
+      t.mock.method(client, 'retryAudioConnection', () => (++calls === 1 ? old : fresh).promise);
+      press(element); const original = element['audioRecoveryOwner']; socket.deliver(terminal.message); await drain(); view(element, { hidden: true });
+      await rejoin(fixture); assert.notEqual(element['audioRecoveryOwner'], original); view(element); press(element);
+      error(element); old.reject(new Error('Old terminal failure')); await drain(); view(element, { busy: true });
+      assert.equal(element['error'].textContent, 'Keep newer error'); fresh.resolve(); await drain(); view(element, { text: '音訊連線協商已完成。' });
+    });
+  }
+
+  it('retires a pre-ACK disconnected snapshot and silent public disconnect before same-ID rejoin', async t => {
+    const fixture = socketJoiningWidget(t); await drain();
+    const { element, sockets, hello } = fixture, socket = sockets[0]!, join = await hello(socket), client = element.client!;
+    socket.deliver({ type: 'room:state', ...roomState() }); assert.equal(client['session'], null); assert.ok(client['pending'].has(join.requestId));
+    const old = deferred(), fresh = deferred(); let calls = 0;
+    t.mock.method(client, 'retryAudioConnection', () => (++calls === 1 ? old : fresh).promise);
+    press(element); const owner = element['audioRecoveryOwner']; socket.close(); await drain();
+    assert.equal(client.status, 'disconnected'); assert.ok(client.state); view(element, { hidden: true });
+    error(element); force(element); assert.equal(calls, 1); assert.equal(element['error'].textContent, 'Keep newer error');
+    let statuses = 0; element.addEventListener('stage-status', () => { statuses++; }); await client.disconnect(); assert.equal(statuses, 0);
+    await rejoin({ ...fixture, client, socket }); assert.notEqual(element['audioRecoveryOwner'], owner); press(element);
+    error(element); old.resolve(); await drain(); view(element, { busy: true }); assert.equal(element['error'].textContent, 'Keep newer error');
+    fresh.resolve(); await drain(); view(element, { text: '音訊連線協商已完成。' });
+  });
+
+  it('keeps pending ownership through reconnect, clears feedback, blocks admission and never replays the action', async t => {
+    const { element, client, socket, sockets, hello, tick } = await socketJoinedWidget(t);
+    const pending = deferred(), retry = t.mock.method(client, 'retryAudioConnection', () => pending.promise);
+    press(element); const owner = element['audioRecoveryOwner'], attempt = element['audioRecoveryAttempt'];
+    error(element); let blocked = false;
+    element.addEventListener('stage-status', () => { force(element); blocked = element['audioRetry'].disabled; }, { once: true });
+    socket.close(); await drain(); view(element, { busy: true, text: '' }); assert.equal(blocked, true);
+    assert.equal(element['audioRecoveryOwner'], owner); assert.equal(element['audioRecoveryAttempt'], attempt);
+    assert.equal(element['error'].hidden, false); assert.equal(retry.mock.callCount(), 1);
+    await tick(500); const next = sockets[1]!, join = await hello(next);
+    next.deliver({ type: 'room:state', ...roomState() }); next.deliver({ type: 'ok', requestId: join.requestId }); await drain();
+    view(element, { busy: true }); assert.equal(element['audioRecoveryOwner'], owner); assert.equal(retry.mock.callCount(), 1);
+    pending.resolve(); await drain(); view(element, { text: '音訊連線協商已完成。' });
+    next.close(); await drain(); view(element, { disabled: true }); assert.equal(retry.mock.callCount(), 1);
+  });
+
+  for (const outcome of ['resolve', 'reject'] as const) {
+    it(`clears pending silently on ${outcome} during reconnect and does not restore completion on resume`, async t => {
+      const { element, client, socket, sockets, hello, tick } = await socketJoinedWidget(t);
+      const pending = deferred(), retry = t.mock.method(client, 'retryAudioConnection', () => pending.promise);
+      press(element); socket.close(); error(element);
+      if (outcome === 'resolve') pending.resolve(); else pending.reject(new Error('Reconnect failure'));
+      await drain(); view(element, { disabled: true }); assert.equal(element['error'].textContent, 'Keep newer error');
+      await tick(500); const next = sockets[1]!, join = await hello(next);
+      next.deliver({ type: 'room:state', ...roomState() }); next.deliver({ type: 'ok', requestId: join.requestId }); await drain();
+      view(element); assert.equal(retry.mock.callCount(), 1);
+    });
+  }
+
+  for (const event of ['state', 'status', 'error', 'micready', 'speaking'] as const) {
+    it(`rechecks ownership after a forwarded stage-${event} callback silently removes the exposed snapshot`, async t => {
+      const { element, client } = await socketJoinedWidget(t); const pending = deferred();
+      t.mock.method(client, 'retryAudioConnection', () => pending.promise); press(element);
+      element.addEventListener(`stage-${event}`, () => { client['snapshot'] = null; }, { once: true });
+      const detail = event === 'state' ? roomState() : event === 'status' ? 'live' : event === 'error' ? new Error('Host error') : event === 'speaking' ? { participantIds: [] } : undefined;
+      client.dispatchEvent(new CustomEvent(event, { detail })); view(element, { hidden: true });
+      error(element); pending.reject(new Error('Retired silent mutation')); await drain(); assert.equal(element['error'].textContent, 'Keep newer error');
+    });
+  }
+
+  it('preserves the SDK global error forwarding contract after a local retry has retired', async t => {
+    const { element, client, socket } = await socketJoinedWidget(t); const pending = deferred();
+    t.mock.method(client, 'retryAudioConnection', () => pending.promise); press(element);
+    const state = roomState(); state.me.participantId = 'replacement'; socket.deliver({ type: 'room:state', ...state });
+    error(element); pending.reject(new Error('Retired local failure')); await drain(); assert.equal(element['error'].textContent, 'Keep newer error');
+    let seen = 0; element.addEventListener('stage-error', () => { seen++; });
+    socket.deliver({ type: 'error', code: 'internal', message: 'Global wire error still visible' });
+    assert.equal(seen, 1); assert.equal(element['error'].textContent, 'Global wire error still visible');
+  });
+
+  async function mediaFixture(t: TestContext, state = roomState()) {
+    let captures = 0, plays = 0;
+    const track = Object.assign(new EventTarget(), { enabled: true, readyState: 'live', stops: 0,
+      stop() { this.stops++; this.readyState = 'ended'; } });
+    const stream = { getTracks: () => [track], getAudioTracks: () => [track] } as unknown as MediaStream;
+    class Peer {
+      static instances: Peer[] = [];
+      connectionState = 'new'; signalingState = 'stable';
+      localDescription: RTCSessionDescriptionInit | null = null;
+      remoteDescription: RTCSessionDescriptionInit | null = null;
+      readonly operations: { name: string; resolve(): void; reject(error: unknown): void }[] = [];
+      readonly calls: string[] = [];
+      readonly offerOptions: (RTCOfferOptions | undefined)[] = [];
+      readonly replacements: unknown[] = [];
+      readonly failures = new Map<string, Error>();
+      readonly transceiver = { direction: 'recvonly', sender: { track: null as MediaStreamTrack | null,
+        replaceTrack: async (value: MediaStreamTrack | null) => { this.replacements.push(value); this.transceiver.sender.track = value; } } };
+      constructor() { Peer.instances.push(this); }
+      addTransceiver() { return this.transceiver; }
+      private enqueue<T>(name: string, apply: () => T): Promise<T> {
+        this.calls.push(name); const failure = this.failures.get(name);
+        if (failure) { this.failures.delete(name); throw failure; }
+        const operation = deferred(); this.operations.push({ name, resolve: operation.resolve, reject: operation.reject });
+        return operation.promise.then(apply);
+      }
+      complete(name: string, error?: unknown): void {
+        const operation = this.operations.shift(); assert.ok(operation, `pending ${name}`); assert.equal(operation.name, name);
+        if (error !== undefined) operation.reject(error); else operation.resolve();
+      }
+      createOffer(options?: RTCOfferOptions) { this.offerOptions.push(options); return this.enqueue('createOffer', () => ({ ...(state.me.onStage ? SENDRECV_OFFER : RECVONLY_OFFER) })); }
+      setLocalDescription(description: RTCSessionDescriptionInit) { return this.enqueue('setLocalDescription', () => { this.localDescription = description; this.signalingState = 'have-local-offer'; }); }
+      setRemoteDescription(description: RTCSessionDescriptionInit) { return this.enqueue('setRemoteDescription', () => { this.remoteDescription = description; this.signalingState = 'stable'; }); }
+      addIceCandidate(candidate?: RTCIceCandidateInit) { return this.enqueue(`ice:${candidate?.candidate}`, () => {}); }
+      restartIce() { this.calls.push('restartIce'); }
+      close() { this.connectionState = this.signalingState = 'closed'; }
+    }
+    class Context {
+      createMediaStreamSource() { return { connect() {}, disconnect() {} }; }
+      createAnalyser() { return { fftSize: 2048, disconnect() {}, getFloatTimeDomainData() {} }; }
+      async resume() {} async close() {}
+    }
+    const originals = new Map(['RTCPeerConnection', 'navigator', 'AudioContext'].map(name => [name, Object.getOwnPropertyDescriptor(globalThis, name)]));
+    for (const [name, value] of Object.entries({ RTCPeerConnection: Peer, AudioContext: Context,
+      navigator: { mediaDevices: { async getUserMedia() { captures++; return stream; } } } })) Object.defineProperty(globalThis, name, { configurable: true, value });
+    t.mock.method(Audio.prototype, 'play', async () => { plays++; });
+    const f = await socketJoinedWidget(t, state, true); await drain(); const peer = Peer.instances[0]!;
+    t.after(async () => {
+      await f.client.disconnect();
+      for (const item of Peer.instances) for (const operation of item.operations.splice(0)) operation.reject(new Error('Fixture cleanup'));
+      await drain();
+      for (const [name, descriptor] of originals) { if (descriptor) Object.defineProperty(globalThis, name, descriptor); else Reflect.deleteProperty(globalThis, name); }
+    });
+    const offers = () => f.socket.sent.filter(message => message.type === 'rtc:offer');
+    async function sentOffer() {
+      peer.complete('createOffer'); await drain(); peer.complete('setLocalDescription'); await drain(); await f.tick(100); await drain();
+      const offer = offers().at(-1); assert.ok(offer); return offer;
+    }
+    const acknowledge = (offer: Extract<ClientMessage, { type: 'rtc:offer' }>) => f.socket.deliver({ type: 'ok', requestId: offer.requestId });
+    const answer = () => f.socket.deliver({ type: 'rtc:answer', fromId: 'server', payload: { type: 'answer', sdp: 'v=0\r\n' } });
+    async function failInitial() {
+      const offer = await sentOffer(); f.socket.deliver({ type: 'error', requestId: offer.requestId, code: 'internal', message: 'Initial negotiation rejected' });
+      await drain(); assert.equal(f.client['negotiating'], false); view(f.element);
+    }
+    async function finish() { const offer = await sentOffer(); acknowledge(offer); answer(); await drain(); peer.complete('setRemoteDescription'); await drain(); }
+    return { ...f, peer, Peer, track, stream, offers, sentOffer, acknowledge, answer, failInitial, finish, counts: () => ({ captures, plays }) };
+  }
+
+  for (const status of ['waiting', 'live'] as const) for (const policy of ['audience', 'speaker', 'self-muted', 'force-muted'] as const) {
+    it(`repairs a real SDK rejected initial ${status} ${policy} negotiation on the same socket, peer and seat without recapture or playback`, async t => {
+      const state = roomState(policy !== 'audience'); state.status = status;
+      state.me.muted = policy === 'self-muted' || policy === 'force-muted'; state.me.forceMuted = policy === 'force-muted';
+      const f = await mediaFixture(t, state); await f.failInitial();
+      const before = { counts: f.counts(), replacements: [...f.peer.replacements], direction: f.peer.transceiver.direction, track: f.peer.transceiver.sender.track, mic: f.client['mic'], flags: structuredClone(f.client.me) };
+      f.element.playbackMuted = true; f.element.playbackVolume = .37;
+      for (let n = 0; n < 5; n++) await f.tick(100);
+      assert.equal(f.offers().length, 1); press(f.element); view(f.element, { busy: true }); force(f.element);
+      await f.finish(); view(f.element, { text: '音訊連線協商已完成。' });
+      assert.equal(f.client.me!.participantId, 'me'); assert.equal(f.Peer.instances.length, 1); assert.equal(f.sockets.length, 1);
+      assert.equal(f.socket.sent.filter(message => message.type === 'join').length, 1); assert.equal(f.offers().length, 2);
+      assert.deepEqual(f.counts(), before.counts); assert.deepEqual(f.peer.replacements, before.replacements);
+      assert.equal(f.peer.transceiver.direction, before.direction); assert.equal(f.peer.transceiver.sender.track, before.track);
+      assert.equal(f.client['mic'], before.mic); assert.deepEqual(f.client.me, before.flags); assert.equal(f.track.stops, 0);
+      assert.equal(f.peer.calls.includes('restartIce'), false); assert.deepEqual(f.peer.offerOptions, [undefined, undefined]);
+      assert.equal(f.client.playbackMuted, true); assert.equal(f.client.playbackVolume, .37);
+      assert.equal(f.peer.connectionState, 'new', 'completed negotiation is not evidence of connected ICE or audible audio');
+    });
+  }
+
+  for (const order of ['ack-first', 'answer-first'] as const) {
+    it(`retains busy feedback through actual ${order} ACK, answer installation, buffered ICE and a dirty second round`, async t => {
+      const f = await mediaFixture(t); await f.failInitial(); press(f.element); const offer = await f.sentOffer();
+      const owner = f.element['audioRecoveryOwner'], attempt = f.element['audioRecoveryAttempt'];
+      f.socket.deliver({ type: 'room:state', ...roomState() }); await drain(); assert.equal(f.client['negotiationDirty'], true);
+      assert.equal(f.element['audioRecoveryOwner'], owner); assert.equal(f.element['audioRecoveryAttempt'], attempt);
+      for (let n = 1; n <= 2; n++) f.socket.deliver({ type: 'rtc:ice', fromId: 'server', payload: { candidate: String(n), sdpMid: '0', sdpMLineIndex: 0 } });
+      if (order === 'ack-first') f.acknowledge(offer);
+      f.answer(); await drain(); view(f.element, { busy: true });
+      f.peer.complete('setRemoteDescription'); await drain(); view(f.element, { busy: true });
+      f.peer.complete('ice:1'); await drain(); view(f.element, { busy: true });
+      f.peer.complete('ice:2'); await drain(); view(f.element, { busy: true });
+      if (order === 'answer-first') { f.acknowledge(offer); await drain(); }
+      assert.deepEqual(f.peer.operations.map(operation => operation.name), ['createOffer']);
+      error(f.element); await f.finish(); view(f.element, { text: '音訊連線協商已完成。' });
+      assert.equal(f.element['error'].textContent, 'Keep newer error'); assert.equal(f.element['error'].hidden, false); assert.equal(f.offers().length, 3);
+    });
+  }
+
+  it('exposes the real SDK initial-negotiation conflict without dirtying it, then permits one manual retry', async t => {
+    const f = await mediaFixture(t); press(f.element); await drain(); view(f.element);
+    assert.match(f.element['error'].textContent ?? '', /音訊協商進行中/); assert.equal(f.client['negotiationDirty'], false);
+    assert.deepEqual(f.peer.operations.map(operation => operation.name), ['createOffer']);
+    await f.failInitial(); press(f.element); await f.finish(); view(f.element, { text: '音訊連線協商已完成。' });
+  });
+
+  for (const failure of ['wire', 'offer', 'answer', 'ice', 'synchronous offer', 'ack timeout', 'answer timeout'] as const) {
+    it(`shows real SDK ${failure} failure, settles busy state and never automatically retries`, async t => {
+      const f = await mediaFixture(t); await f.failInitial();
+      if (failure === 'synchronous offer') f.peer.failures.set('createOffer', new Error('Controlled synchronous offer failure'));
+      press(f.element);
+      if (failure === 'offer') f.peer.complete('createOffer', new Error('Controlled native offer failure'));
+      else if (failure !== 'synchronous offer') {
+        const offer = await f.sentOffer();
+        if (failure === 'wire') f.socket.deliver({ type: 'error', requestId: offer.requestId, code: 'internal', message: 'Controlled wire failure' });
+        else {
+          if (failure !== 'ack timeout') f.acknowledge(offer);
+          if (failure !== 'answer timeout') {
+            if (failure === 'ice') f.socket.deliver({ type: 'rtc:ice', fromId: 'server', payload: { candidate: '1', sdpMid: '0', sdpMLineIndex: 0 } });
+            f.answer(); await drain(); f.peer.complete('setRemoteDescription', failure === 'answer' ? new Error('Controlled native answer failure') : undefined);
+            await drain(); if (failure === 'ice') f.peer.complete('ice:1', new Error('Controlled native ICE failure'));
+          }
+          if (failure.endsWith('timeout')) await f.tick(15000);
+        }
+      }
+      await drain(); view(f.element); assert.equal(f.element['error'].hidden, false); assert.equal(f.client['negotiating'], false);
+      const count = f.offers().length; await f.tick(100); assert.equal(f.offers().length, count);
+      assert.doesNotMatch(f.element['audioRecovery'].textContent ?? '', /完成/);
+    });
+  }
+
+  it('rejects immediately on actual SDK socket loss while a controlled peer operation retains its lock, then exposes conflict after resume without another offer', async t => {
+    const f = await mediaFixture(t); await f.failInitial(); press(f.element); view(f.element, { busy: true });
+    const original = f.element['audioRecoveryOwner']; f.socket.close();
+    view(f.element, { busy: true, text: '' }); await drain(); view(f.element, { disabled: true });
+    assert.equal(f.client['negotiating'], true); assert.equal(f.element['audioRecoveryOwner'], original);
+    await f.tick(500); const next = f.sockets[1]!, join = await f.hello(next);
+    next.deliver({ type: 'room:state', ...roomState() }); next.deliver({ type: 'ok', requestId: join.requestId }); await drain();
+    press(f.element); await drain(); view(f.element); assert.match(f.element['error'].textContent ?? '', /音訊協商進行中/);
+    assert.equal(next.sent.filter(message => message.type === 'rtc:offer').length, 0);
+    f.peer.complete('createOffer', new Error('Held native operation finally failed')); await drain();
+    assert.equal(f.client['negotiating'], false); view(f.element);
+  });
+
+  it('does not let a synchronous old-method throw clear a new attempt installed by forwarded disconnect and same-ID state reentry', async t => {
+    const { element, client } = await socketJoinedWidget(t), fresh = deferred(); let calls = 0;
+    const retired: boolean[] = [];
+    element.addEventListener('stage-error', () => {
+      void client.disconnect(); retired.push(element['audioRecoveryOwner'] === undefined);
+      void client['receive']({ type: 'room:state', ...roomState() }); press(element); error(element, 'Fresh reentrant error');
+    }, { once: true });
+    t.mock.method(client, 'retryAudioConnection', () => {
+      if (++calls === 1) {
+        client.dispatchEvent(new CustomEvent('error', { detail: new Error('Old synchronous error') }));
+        throw new Error('Retired synchronous throw');
+      }
+      return fresh.promise;
+    });
+    press(element); await drain(); assert.deepEqual(retired, [true]); assert.equal(calls, 2);
+    view(element, { busy: true }); assert.equal(element['error'].textContent, 'Fresh reentrant error');
+    fresh.resolve(); await drain(); view(element, { text: '音訊連線協商已完成。' }); assert.equal(element['error'].textContent, 'Fresh reentrant error');
+  });
+
+  for (const invalid of ['snapshot', 'participant', 'room', 'detached', 'current client', 'disconnected', 'unknown status'] as const) {
+    it(`guards a silently invalid ${invalid} before changing errors or pending state`, async t => {
+      const { element, client } = await socketJoinedWidget(t), retry = t.mock.method(client, 'retryAudioConnection', async () => {});
+      if (invalid === 'snapshot') client['snapshot'] = null;
+      else if (invalid === 'participant') client.state!.me.participantId = '';
+      else if (invalid === 'room') client.state!.roomId = '';
+      else if (invalid === 'detached') Object.assign(element, { isConnected: false });
+      else if (invalid === 'current client') element['current'] = null;
+      else client['currentStatus'] = (invalid === 'unknown status' ? 'unknown' : invalid) as typeof client.status;
+      error(element); force(element); view(element, { hidden: true }); assert.equal(retry.mock.callCount(), 0);
+      assert.equal(element['error'].hidden, false); assert.equal(element['error'].textContent, 'Keep newer error');
+      await client.disconnect();
+    });
+  }
+
+  for (const invalid of ['missing peer', 'failed peer', 'closed peer', 'closed signaling', 'closed socket'] as const) {
+    it(`lets the actual SDK reject ${invalid} with controlled media without capture, play or a new offer`, async t => {
+      const f = await mediaFixture(t); await f.failInitial();
+      if (invalid === 'missing peer') f.client['pc'] = null;
+      else if (invalid === 'closed signaling') f.peer.signalingState = 'closed';
+      else if (invalid === 'closed socket') f.socket.readyState = 3;
+      else f.peer.connectionState = invalid === 'failed peer' ? 'failed' : 'closed';
+      const before = f.counts(); press(f.element); await drain(); view(f.element);
+      assert.equal(f.element['error'].hidden, false); assert.equal(f.offers().length, 1); assert.deepEqual(f.counts(), before);
+    });
+  }
+
+  it('repairs the real hub subscriber after initial transport rejection through the native widget button, without rejoin, capture, play or ICE restart', async t => {
+    const config = testConfig(c => { c.rooms.qualityIntervalMs = 0; });
+    const h = harness(config), host = await h.create(), rejected = deferred();
+    const negotiate = h.transport.negotiate.bind(h.transport);
+    let negotiations = 0, captures = 0, plays = 0, serverWork = Promise.resolve();
+    h.transport.negotiate = (...args) => ++negotiations === 1 ? rejected.promise.then(() => negotiate(...args)) : negotiate(...args);
+    class Socket {
+      static OPEN = 1; static instances: Socket[] = [];
+      readyState = 1; readonly sent: ClientMessage[] = [];
+      readonly id = `widget-recovery-${Socket.instances.length}`;
+      onmessage: ((event: { data: string }) => void) | null = null;
+      onclose: (() => void) | null = null;
+      readonly session = { id: this.id,
+        send: (message: ServerMessage) => { if (this.readyState === 1) this.onmessage?.({ data: JSON.stringify(message) }); },
+        close: () => this.close() };
+      constructor() { Socket.instances.push(this); queueMicrotask(() => h.hub.attach(this.session)); }
+      send(data: string) { const message = parseClientMessage(data, config.limits); this.sent.push(message); serverWork = serverWork.then(() => h.hub.handle(this.session, message)); }
+      close(code?: number) { if (this.readyState === 3) return; this.readyState = 3; this.onclose?.(); serverWork = serverWork.then(() => h.hub.detach(this.session, code === 1000)); }
+    }
+    class Peer {
+      static instances: Peer[] = []; connectionState = 'new'; signalingState = 'stable';
+      localDescription: RTCSessionDescriptionInit | null = null; remoteDescription: RTCSessionDescriptionInit | null = null;
+      readonly offerOptions: (RTCOfferOptions | undefined)[] = []; restarts = 0;
+      readonly transceiver = { direction: 'recvonly', sender: { track: null as unknown, async replaceTrack(track: unknown) { this.track = track; } } };
+      constructor() { Peer.instances.push(this); }
+      addTransceiver() { return this.transceiver; }
+      async createOffer(options?: RTCOfferOptions) { this.offerOptions.push(options); return { ...RECVONLY_OFFER }; }
+      async setLocalDescription(description: RTCSessionDescriptionInit) { this.localDescription = description; this.signalingState = 'have-local-offer'; }
+      async setRemoteDescription(description: RTCSessionDescriptionInit) { this.remoteDescription = description; this.signalingState = 'stable'; }
+      async addIceCandidate() {} async getStats() { return new Map(); }
+      restartIce() { this.restarts++; } close() { this.connectionState = 'closed'; }
+    }
+    const globals = { WebSocket: Socket, RTCPeerConnection: Peer,
+      navigator: { mediaDevices: { async getUserMedia() { captures++; throw new Error('Audience must not capture'); } } } };
+    const originals = new Map(Object.keys(globals).map(name => [name, Object.getOwnPropertyDescriptor(globalThis, name)]));
+    for (const [name, value] of Object.entries(globals)) Object.defineProperty(globalThis, name, { configurable: true, value });
+    t.mock.method(Audio.prototype, 'play', async () => { plays++; });
+    t.mock.timers.enable({ apis: ['setTimeout', 'setInterval'] }); let now = 0; t.mock.method(performance, 'now', () => now);
+    const tick = async (ms = 25) => { now += ms; t.mock.timers.tick(ms); await drain(); };
+    const until = async (predicate: () => boolean, label: string) => {
+      for (let n = 0; n < 100 && !predicate(); n++) await tick(); assert.ok(predicate(), label);
+    };
+    const element = mountJoiningWidget({ url: 'wss://stage.example.test/ws', room: host.roomId, code: host.code!, 'playback-muted': '', 'playback-volume': '.37' });
+    await drain(); const client = element.client!;
+    t.after(async () => {
+      try {
+        Object.assign(element, { isConnected: false }); element.disconnectedCallback(); await client.disconnect();
+        rejected.reject(new Error('Fixture cleanup')); await drain(); await serverWork; await h.hub.shutdown(); await h.transport.close();
+        assert.ok(Socket.instances.every(socket => socket.readyState === 3)); assert.ok(Peer.instances.every(peer => peer.connectionState === 'closed'));
+      } finally { for (const [name, descriptor] of originals) { if (descriptor) Object.defineProperty(globalThis, name, descriptor); else Reflect.deleteProperty(globalThis, name); } }
+    });
+    await until(() => negotiations === 1 && Boolean(client.state), 'first real hub negotiation and joined snapshot');
+    const socket = Socket.instances[0]!, peer = Peer.instances[0]!, id = client.me!.participantId;
+    for (const timer of h.timers) if (!timer.cleared && timer.ms === config.rooms.presenceBroadcastMs) { timer.cleared = true; timer.fn(); }
+    await drain(); rejected.reject(new Error('Controlled transient transport failure')); await drain(); await serverWork;
+    assert.equal(client.status, 'live'); assert.equal(h.hub.isJoined(socket.session), true);
+    assert.equal(h.transport.rooms.get(host.roomId)!.subscribers.has(id), false); assert.equal(peer.remoteDescription, null);
+    assert.equal(element['error'].hidden, false); view(element); assert.equal(element['retry'].hidden, true); assert.equal(element['micRetry'].hidden, true);
+    for (let n = 0; n < 8; n++) await tick(15000);
+    assert.equal(negotiations, 1, 'two minutes of healthy control keepalive do not retry media');
+    assert.equal(client.retryMicrophone(), false); await client.unlockAudio(); await drain(); assert.equal(negotiations, 1);
+    const playsBefore = plays; press(element); view(element, { busy: true });
+    await until(() => !element['audioRecoveryAttempt'], 'button-driven actual SDK ACK and installed answer'); await serverWork;
+    view(element, { text: '音訊連線協商已完成。' }); assert.equal(h.transport.rooms.get(host.roomId)!.subscribers.has(id), true);
+    assert.ok(peer.remoteDescription); assert.equal(negotiations, 2); assert.equal(Peer.instances.length, 1); assert.equal(Socket.instances.length, 1);
+    assert.equal(client.me!.participantId, id); assert.equal(socket.sent.filter(message => message.type === 'join').length, 1);
+    assert.equal(socket.sent.filter(message => message.type === 'rtc:offer').length, 2); assert.deepEqual(peer.offerOptions, [undefined, undefined]);
+    assert.equal(captures, 0); assert.equal(plays, playsBefore); assert.equal(peer.transceiver.sender.track, null); assert.equal(peer.restarts, 0);
+    assert.equal(client.playbackMuted, true); assert.equal(client.playbackVolume, .37); assert.equal(peer.connectionState, 'new');
+  });
+});

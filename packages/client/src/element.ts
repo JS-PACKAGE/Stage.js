@@ -14,6 +14,7 @@ const STYLE = `
 [part=quality] { margin: 0; font-size: .875em; }
 [part=speaking] { margin: 0; font-size: .875em; }
 [part=hand-rejection] { margin: 0; }
+[part=audio-recovery] { margin: 0; font-size: .875em; }
 [part=error] { margin: 0; color: var(--stage-error, #dc2626); }
 [part=actions] { display: flex; flex-wrap: wrap; gap: .5rem; }
 [part=name] { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; }
@@ -63,7 +64,7 @@ button.primary { background: var(--stage-accent, #2563eb); border-color: transpa
  * Controllers can lock/unlock other speakers' mute or remove them from the stage without removing them from the room.
  * The microphone picker is an explicit draft, never an indicator of the actual capture device.
  * The output picker is also a draft; explicit refresh and submission never imply audible playback.
- * Style through `::part(panel|status|quality|speaking|hand-rejection|actions|name|room-name|hands|stage-management|playback|microphone|output-device)` and the
+ * Style through `::part(panel|status|quality|speaking|hand-rejection|audio-recovery|audio-retry|actions|name|room-name|hands|stage-management|playback|microphone|output-device)` and the
  * `--stage-*` custom properties.
  */
 export class StageElement extends HTMLElement {
@@ -116,6 +117,12 @@ export class StageElement extends HTMLElement {
   private readonly hand: HTMLButtonElement;
   private readonly mic: HTMLButtonElement;
   private readonly micRetry: HTMLButtonElement;
+  private readonly audioRetry: HTMLButtonElement;
+  private readonly audioRecovery: HTMLParagraphElement;
+  private audioRecoveryOwner: { client: StageClient; roomId: string; participantId: string; generation: number } | undefined;
+  private audioRecoveryTerminalClient: StageClient | undefined;
+  private audioRecoveryAttempt: object | undefined;
+  private audioRecoveryComplete = false;
   private micFailure: { client: StageClient; roomId: string; participantId: string; errorRevision: number; pending: boolean } | undefined;
   private readonly microphonePanel: HTMLDivElement;
   private readonly microphoneSelect: HTMLSelectElement;
@@ -235,6 +242,15 @@ export class StageElement extends HTMLElement {
     this.micRetry.type = 'button';
     this.micRetry.setAttribute('aria-label', '重試麥克風');
     this.micRetry.onclick = () => this.retryMic();
+    this.audioRetry = document.createElement('button');
+    this.audioRetry.type = 'button'; this.audioRetry.part.add('audio-retry');
+    this.audioRetry.textContent = '重試音訊連線';
+    this.audioRetry.setAttribute('aria-describedby', 'audio-recovery');
+    this.audioRetry.onclick = () => this.retryAudio();
+    this.audioRecovery = document.createElement('p');
+    this.audioRecovery.id = 'audio-recovery'; this.audioRecovery.part.add('audio-recovery');
+    this.audioRecovery.setAttribute('role', 'status');
+    this.audioRecovery.setAttribute('aria-live', 'polite');
     this.microphonePanel = document.createElement('div');
     this.microphonePanel.part.add('microphone');
     const microphoneLabel = document.createElement('label');
@@ -311,8 +327,8 @@ export class StageElement extends HTMLElement {
     this.playback.append(volumeLabel, this.volume, this.volumeValue);
     this.retry = this.button('重試加入', () => { if (this.canRetry()) this.rejoin(); });
     this.cancelJoin = this.button('取消加入', () => this.cancelInitial?.());
-    actions.append(this.unlock, this.listen, this.hand, this.mic, this.micRetry, this.leaveStage, this.roomAction, this.retry, this.cancelJoin);
-    panel.append(this.status, this.quality, this.speaking, this.handRejection, this.error, this.errorDismiss, this.namePanel, this.roomNamePanel, this.handQueuePanel, this.stageManagementPanel, actions, this.microphonePanel, this.outputDevicePanel, this.playback);
+    actions.append(this.unlock, this.listen, this.hand, this.mic, this.micRetry, this.audioRetry, this.leaveStage, this.roomAction, this.retry, this.cancelJoin);
+    panel.append(this.status, this.quality, this.speaking, this.handRejection, this.error, this.errorDismiss, this.namePanel, this.roomNamePanel, this.handQueuePanel, this.stageManagementPanel, actions, this.audioRecovery, this.microphonePanel, this.outputDevicePanel, this.playback);
     root.append(style, panel);
     this.render();
   }
@@ -408,6 +424,9 @@ export class StageElement extends HTMLElement {
           else if (type === 'state') this.outputDeviceTerminalClient = undefined;
           if (type === 'closed' || type === 'kicked') this.stageManagementTerminalClient = client;
           else if (type === 'state') this.stageManagementTerminalClient = undefined;
+          if (type === 'closed' || type === 'kicked' || (type === 'status' && detail === 'disconnected')) this.audioRecoveryTerminalClient = client;
+          else if (type === 'state') this.audioRecoveryTerminalClient = undefined;
+          this.syncAudioRecovery();
           // Revoke picker admission before any forwarded callback can click an old control.
           this.syncMicrophoneOwner();
           this.syncOutputDeviceOwner();
@@ -467,6 +486,7 @@ export class StageElement extends HTMLElement {
           this.syncOutputDeviceOwner();
           this.syncStageManagement();
           this.syncHandRejection();
+          this.syncAudioRecovery();
           if (type === 'state' || type === 'status' || type === 'mic' || type === 'closed' || type === 'kicked') this.render();
         });
       }
@@ -530,6 +550,8 @@ export class StageElement extends HTMLElement {
     this.retireHandQueue();
     this.stageManagementTerminalClient = undefined;
     this.retireStageManagement();
+    this.audioRecoveryTerminalClient = undefined;
+    this.retireAudioRecovery();
     this.retireQualityOwner();
     this.retireSpeakingOwner();
     this.retireHandRejection();
@@ -975,6 +997,65 @@ export class StageElement extends HTMLElement {
     this.cancelJoin.disabled = true;
   }
 
+  private retireAudioRecovery(): void {
+    this.audioRecoveryOwner = undefined; this.audioRecoveryAttempt = undefined;
+    this.audioRecoveryComplete = false;
+    this.audioRetry.hidden = this.audioRetry.disabled = true;
+    this.audioRetry.setAttribute('aria-busy', 'false');
+    this.audioRecovery.hidden = true; this.audioRecovery.textContent = '';
+  }
+
+  private syncAudioRecovery(): void {
+    const client = this.current, state = client?.state, me = client?.me;
+    const active = client?.status === 'waiting' || client?.status === 'live';
+    // A pre-ACK socket loss can leave a snapshot behind. Only a later state event reopens this lane.
+    if (client?.status === 'disconnected') this.audioRecoveryTerminalClient = client;
+    if (!this.isConnected || !client || !state?.roomId || !me?.participantId || this.audioRecoveryTerminalClient === client
+      || (!active && client.status !== 'reconnecting')) {
+      this.retireAudioRecovery(); return;
+    }
+    const owner = this.audioRecoveryOwner;
+    if (!owner || owner.client !== client || owner.generation !== this.generation
+      || owner.roomId !== state.roomId || owner.participantId !== me.participantId) {
+      this.retireAudioRecovery();
+      if (!active) return;
+      this.audioRecoveryOwner = { client, roomId: state.roomId, participantId: me.participantId, generation: this.generation };
+    }
+    if (!active) this.audioRecoveryComplete = false;
+    const pending = Boolean(this.audioRecoveryAttempt);
+    this.audioRetry.hidden = false; this.audioRetry.disabled = !active || pending;
+    this.audioRetry.setAttribute('aria-busy', String(pending));
+    const text = !active ? '' : pending ? '正在重新協商音訊連線…' : this.audioRecoveryComplete ? '音訊連線協商已完成。' : '';
+    this.audioRecovery.hidden = !text;
+    if (this.audioRecovery.textContent !== text) this.audioRecovery.textContent = text;
+  }
+
+  private retryAudio(): void {
+    this.syncAudioRecovery();
+    const owner = this.audioRecoveryOwner;
+    if (!owner || this.audioRetry.hidden || this.audioRetry.disabled || this.audioRecoveryAttempt
+      || (owner.client.status !== 'waiting' && owner.client.status !== 'live')) return;
+    // The public method may synchronously emit, throw or reenter through a host callback.
+    const attempt = this.audioRecoveryAttempt = {};
+    this.audioRecoveryComplete = false;
+    this.syncAudioRecovery(); this.hideError();
+    const current = () => {
+      if (this.audioRecoveryOwner !== owner || this.audioRecoveryAttempt !== attempt) return false;
+      this.syncAudioRecovery();
+      return this.audioRecoveryOwner === owner && this.audioRecoveryAttempt === attempt;
+    };
+    void (async () => {
+      try {
+        await owner.client.retryAudioConnection();
+        if (current() && (owner.client.status === 'waiting' || owner.client.status === 'live')) this.audioRecoveryComplete = true;
+      } catch (error) {
+        if (current() && (owner.client.status === 'waiting' || owner.client.status === 'live')) this.show(error);
+      } finally {
+        if (current()) { this.audioRecoveryAttempt = undefined; this.syncAudioRecovery(); }
+      }
+    })();
+  }
+
   private hideRetry(): void {
     this.retryAvailable = false;
     // Revoke native click admission before forwarding events that can synchronously invoke it.
@@ -1299,6 +1380,7 @@ export class StageElement extends HTMLElement {
   }
 
   private render(): void {
+    this.syncAudioRecovery();
     this.syncPlaybackOwner();
     this.syncMicRetry();
     this.syncMicrophoneOwner();

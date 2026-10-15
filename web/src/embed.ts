@@ -23,6 +23,8 @@ const roomNameDraft = input('room-name-draft');
 const roomNameUpdate = document.querySelector<HTMLButtonElement>('#room-name-update')!;
 const stage = document.querySelector<HTMLButtonElement>('#stage')!;
 const micRetry = document.querySelector<HTMLButtonElement>('#mic-retry')!;
+const audioRetry = document.querySelector<HTMLButtonElement>('#audio-retry')!;
+const audioRetryStatus = document.querySelector<HTMLParagraphElement>('#audio-retry-status')!;
 const microphonePanel = document.querySelector<HTMLDivElement>('#microphone-panel')!;
 const microphoneSelect = document.querySelector<HTMLSelectElement>('#microphone-device')!;
 const microphoneRefresh = document.querySelector<HTMLButtonElement>('#microphone-refresh')!;
@@ -50,6 +52,8 @@ let microphoneOwner: {
   draft: string; choices: Set<string>;
 } | undefined;
 let pendingMicrophone: { kind: 'refresh' | 'apply' } | undefined;
+let audioRetryOwner: { client: Client; roomId: string; participantId: string; generation: number } | undefined;
+let pendingAudioRetry: object | undefined;
 let playbackGeneration = 0;
 let pendingUnlock: { client: Client | null; generation: number } | undefined;
 let entryGeneration = 0;
@@ -84,7 +88,7 @@ function retireControls(): void {
   controlsClient = undefined; retireHandRejection();
   pendingHand = undefined; pendingMic = undefined; pendingStage = undefined;
   micRetryParticipant = undefined; pendingMicRetry = undefined;
-  pendingRename = undefined; syncRename(); retireRoomName(); retireMicrophone();
+  pendingRename = undefined; syncRename(); retireRoomName(); retireMicrophone(); retireAudioRetry();
 }
 /** Retire initial-join feedback before user or terminal callbacks can start another entry. */
 function retireEntry(): number {
@@ -231,6 +235,40 @@ function reportMicrophoneError(owner: NonNullable<typeof microphoneOwner>, attem
   if (ownsMicrophoneAttempt(owner, attempt) && !microphonePanel.hidden
     && (owner.client.status === 'waiting' || owner.client.status === 'live')) report(error);
 }
+function clearAudioRetryStatus(): void {
+  audioRetryStatus.hidden = true; audioRetryStatus.textContent = '';
+}
+function retireAudioRetry(): void {
+  audioRetryOwner = undefined; pendingAudioRetry = undefined;
+  audioRetry.hidden = audioRetry.disabled = true;
+  audioRetry.setAttribute('aria-busy', 'false'); clearAudioRetryStatus();
+}
+function syncAudioRetry(): void {
+  const current = client, state = current?.state;
+  const active = current?.status === 'waiting' || current?.status === 'live';
+  if (!current || current !== controlsClient || !state?.roomId || !state.me.participantId || typeof current.retryAudioConnection !== 'function'
+    || (!active && current.status !== 'reconnecting')) { retireAudioRetry(); return; }
+  const owner = audioRetryOwner;
+  if (!owner || owner.client !== current || owner.generation !== entryGeneration
+    || owner.roomId !== state.roomId || owner.participantId !== state.me.participantId) {
+    retireAudioRetry();
+    // Reconnect may retain an owned seat, but cannot establish ownership of another seat.
+    if (!active) return;
+    audioRetryOwner = { client: current, roomId: state.roomId, participantId: state.me.participantId, generation: entryGeneration };
+  }
+  audioRetry.hidden = false;
+  audioRetry.disabled = !active || Boolean(pendingAudioRetry);
+  audioRetry.setAttribute('aria-busy', String(Boolean(pendingAudioRetry)));
+  if (!active) clearAudioRetryStatus();
+}
+function ownsAudioRetry(owner: NonNullable<typeof audioRetryOwner>, attempt: object): boolean {
+  if (audioRetryOwner !== owner || pendingAudioRetry !== attempt) return false;
+  syncAudioRetry();
+  return audioRetryOwner === owner && pendingAudioRetry === attempt;
+}
+function canReportAudioRetry(owner: NonNullable<typeof audioRetryOwner>, attempt: object): boolean {
+  return ownsAudioRetry(owner, attempt) && (owner.client.status === 'waiting' || owner.client.status === 'live');
+}
 /** Only a visible countdown needs a clock; state and action events handle other changes. */
 function scheduleHandCooldown(remaining: number): void {
   if (remaining <= 0) {
@@ -331,7 +369,7 @@ join.onsubmit = (event) => {
         if (generation === entryGeneration) hideCancel();
         progress = false;
         status.textContent = `${library.decodeName(detail.name)} · ${library.decodeName(detail.me.name)} · ${detail.me.onStage ? '已上台' : '收聽中'}`;
-        syncHand(); syncMic(); syncStage(); syncMicRetry(); syncRename(); syncRoomName(); syncMicrophone();
+        syncHand(); syncMic(); syncStage(); syncMicRetry(); syncRename(); syncRoomName(); syncMicrophone(); syncAudioRetry();
         leave.disabled = false;
       });
       const retireOwnHandRejection = (participantId: string): void => {
@@ -369,7 +407,7 @@ join.onsubmit = (event) => {
         if (current.state) { receivedState = true; if (generation === entryGeneration) hideCancel(); }
         if (detail === 'reconnecting') { retireHandRejection(); progress = false; status.textContent = '重新連線中'; hand.disabled = true; }
         else if (detail === 'disconnected') { progress = false; retirePlayback(); retireControls(); status.textContent = '未連線'; hand.disabled = leave.disabled = true; }
-        syncHand(); syncMic(); syncStage(); syncMicRetry(); syncRename(); syncRoomName(); syncMicrophone();
+        syncHand(); syncMic(); syncStage(); syncMicRetry(); syncRename(); syncRoomName(); syncMicrophone(); syncAudioRetry();
       });
       client.on('error', ({ detail }) => { if (client !== current || cancelledEntry || generation !== entryGeneration) return; progress = false; report(detail); });
       client.on('audioblocked', () => { if (cancelledEntry) return; progress = false; status.textContent = '請點擊啟用音訊。'; });
@@ -517,6 +555,24 @@ microphoneApply.onclick = () => {
     }
   })();
 };
+audioRetry.onclick = () => {
+  syncAudioRetry();
+  const owner = audioRetryOwner;
+  if (!owner || audioRetry.hidden || audioRetry.disabled || pendingAudioRetry) return;
+  // Reserve before the public SDK can synchronously dispatch another application callback.
+  const attempt = pendingAudioRetry = {};
+  audioRetryStatus.textContent = '正在重新協商音訊連線…'; audioRetryStatus.hidden = false;
+  syncAudioRetry();
+  void (async () => {
+    try {
+      await owner.client.retryAudioConnection();
+      if (canReportAudioRetry(owner, attempt)) {
+        audioRetryStatus.textContent = '音訊連線協商已完成。'; audioRetryStatus.hidden = false;
+      }
+    } catch (error) { if (canReportAudioRetry(owner, attempt)) { clearAudioRetryStatus(); report(error); } }
+    finally { if (ownsAudioRetry(owner, attempt)) { pendingAudioRetry = undefined; syncAudioRetry(); } }
+  })();
+};
 micRetry.onclick = () => {
   syncMicRetry();
   if (!client || micRetry.disabled || micRetry.hidden) return;
@@ -542,4 +598,4 @@ leave.onclick = () => {
     status.textContent = '已離開。'; hand.disabled = leave.disabled = true;
   });
 };
-syncHand(); syncMic(); syncStage(); syncMicRetry(); syncRename(); syncRoomName(); syncMicrophone(); syncUnlock();
+syncHand(); syncMic(); syncStage(); syncMicRetry(); syncRename(); syncRoomName(); syncMicrophone(); syncAudioRetry(); syncUnlock();
