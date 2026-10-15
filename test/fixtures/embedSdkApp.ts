@@ -78,7 +78,7 @@ export class StageContext {
   async close(): Promise<void> { this.closes++; }
 }
 /** Complete production module and real SDK. Only external-host import, socket, DOM and browser media are replaced. */
-export async function actualApp(t: TestContext, options: { deferCapture?: boolean; search?: string } = {}) {
+export async function actualApp(t: TestContext, options: { deferCapture?: boolean; search?: string; output?: boolean } = {}) {
   const { StageClient, decodeName } = await import(new URL('../../packages/client/src/index.ts', import.meta.url).href);
   StageSocket.instances = []; StagePeer.instances = []; StageContext.instances = [];
   const tracks: StageTrack[] = [];
@@ -87,9 +87,13 @@ export async function actualApp(t: TestContext, options: { deferCapture?: boolea
       stop() { this.stopped = true; this.readyState = 'ended'; this.stops++; } });
     tracks.push(track); return { track, stream: { getTracks: () => [track], getAudioTracks: () => [track] } };
   };
+  const enumerations: ReturnType<typeof Promise.withResolvers<{ kind: string; deviceId: string; label: string }[]>>[] = [];
+  const sinks: { id: string; work: Deferred }[] = [];
   const captures: { constraints: unknown; settled: boolean; resolve(): StageTrack; reject(error: unknown): void }[] = [];
   const globals = { window: new EventTarget(), WebSocket: StageSocket, RTCPeerConnection: StagePeer, AudioContext: StageContext,
-    navigator: { mediaDevices: { getUserMedia(constraints: unknown) {
+    navigator: { mediaDevices: {
+      enumerateDevices() { const work = Promise.withResolvers<{ kind: string; deviceId: string; label: string }[]>(); enumerations.push(work); return work.promise; },
+      getUserMedia(constraints: unknown) {
       const work = Promise.withResolvers<StageStream>();
       const capture = { constraints, settled: false,
         resolve(): StageTrack {
@@ -103,7 +107,7 @@ export async function actualApp(t: TestContext, options: { deferCapture?: boolea
   const originals = new Map(Object.keys(globals).map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
   for (const [key, value] of Object.entries(globals)) Object.defineProperty(globalThis, key, { configurable: true, value });
   t.mock.timers.enable({ apis: ['setTimeout', 'setInterval'] }); let now = 1000; t.mock.method(performance, 'now', () => now);
-  const nodes = new Map(['host', 'ws-path', 'room', 'code', 'name', 'status', 'hand-rejected', 'error-notice', 'last-error', 'error-dismiss', 'join', 'hand', 'mic', 'rename', 'room-name-panel', 'room-name-current', 'room-name-draft', 'room-name-update', 'stage', 'mic-retry', 'audio-retry', 'audio-retry-status', 'microphone-panel', 'microphone-device', 'microphone-refresh', 'microphone-apply', 'microphone-draft-notice', 'cancel-join', 'leave', 'audio', 'unlock'].map(id => [id, new EmbedNode()]));
+  const nodes = new Map(['host', 'ws-path', 'room', 'code', 'name', 'status', 'hand-rejected', 'error-notice', 'last-error', 'error-dismiss', 'join', 'hand', 'mic', 'rename', 'room-name-panel', 'room-name-current', 'room-name-draft', 'room-name-update', 'stage', 'mic-retry', 'audio-retry', 'audio-retry-status', 'microphone-panel', 'microphone-device', 'microphone-refresh', 'microphone-apply', 'microphone-draft-notice', 'output-panel', 'output-device', 'output-refresh', 'output-apply', 'output-draft-notice', 'output-support', 'cancel-join', 'leave', 'audio', 'unlock'].map(id => [id, new EmbedNode()]));
   const node = (id: string): EmbedNode => { const found = nodes.get(id); assert.ok(found, id); return found; };
   node('error-notice').hidden = true; node('hand-rejected').hidden = true;
   const cancel = node('cancel-join'); cancel.hidden = cancel.disabled = true; cancel.textContent = '取消連線';
@@ -112,6 +116,10 @@ export async function actualApp(t: TestContext, options: { deferCapture?: boolea
   micRetry.hidden = micRetry.disabled = true; micRetry.textContent = '重試麥克風'; micRetry.setAttribute('aria-busy', 'false');
   const audio = Object.assign(node('audio'), { volume: 0.37, muted: true, srcObject: null as unknown, pauses: 0, plays: 0,
     pause() { this.pauses++; }, async play() { this.plays++; } });
+  if (options.output) Reflect.set(audio, 'setSinkId', (id: string) => {
+    const work = new Deferred(); sinks.push({ id, work });
+    return work.promise.then(() => { Reflect.set(audio, 'sinkId', id); });
+  });
   const clients: ActualClient[] = [];
   let calls = 0, ready = 0;
   const library = { StageClient: function (options: unknown): ActualClient {
@@ -137,6 +145,8 @@ export async function actualApp(t: TestContext, options: { deferCapture?: boolea
   t.after(async () => {
     try {
       for (const client of clients) await client.disconnect(); await flush();
+      for (const sink of sinks) if (!sink.work.settled) sink.work.resolve();
+      for (const enumeration of enumerations) enumeration.resolve([]);
       for (const peer of StagePeer.instances) if (peer.gate && !peer.gate.settled) peer.gate.resolve();
       for (const capture of captures) if (!capture.settled) capture.reject(new Error('fixture cleanup'));
       await flush();
@@ -145,7 +155,7 @@ export async function actualApp(t: TestContext, options: { deferCapture?: boolea
       assert.ok(StagePeer.instances.every(peer => peer.connectionState === 'closed')); assert.ok(StageContext.instances.every(context => context.closes === 1));
     } finally { for (const [key, descriptor] of originals) { if (descriptor) Object.defineProperty(globalThis, key, descriptor); else Reflect.deleteProperty(globalThis, key); } }
   });
-  return { stage, status, mic, micRetry, leave, form, node, audio, clients, tracks, captures, tick, until,
+  return { stage, status, mic, micRetry, leave, form, node, audio, clients, tracks, captures, enumerations, sinks, tick, until,
     calls: () => calls, ready: () => ready,
     async join(overrides: Partial<ParticipantView> = {}) {
       form.submit(); await flush(); const socket = StageSocket.instances.at(-1)!;

@@ -29,6 +29,11 @@ const microphonePanel = document.querySelector<HTMLDivElement>('#microphone-pane
 const microphoneSelect = document.querySelector<HTMLSelectElement>('#microphone-device')!;
 const microphoneRefresh = document.querySelector<HTMLButtonElement>('#microphone-refresh')!;
 const microphoneApply = document.querySelector<HTMLButtonElement>('#microphone-apply')!;
+const outputPanel = document.querySelector<HTMLDivElement>('#output-panel')!;
+const outputSelect = document.querySelector<HTMLSelectElement>('#output-device')!;
+const outputRefresh = document.querySelector<HTMLButtonElement>('#output-refresh')!;
+const outputApply = document.querySelector<HTMLButtonElement>('#output-apply')!;
+const outputSupport = document.querySelector<HTMLParagraphElement>('#output-support')!;
 const audio = document.querySelector<HTMLAudioElement>('#audio')!;
 const unlock = document.querySelector<HTMLButtonElement>('#unlock')!;
 const params = new URLSearchParams(location.search);
@@ -54,6 +59,11 @@ let microphoneOwner: {
 let pendingMicrophone: { kind: 'refresh' | 'apply' } | undefined;
 let audioRetryOwner: { client: Client; roomId: string; participantId: string; generation: number } | undefined;
 let pendingAudioRetry: object | undefined;
+// Every embed client shares one page audio element; native sink work cannot be cancelled by leaving.
+let outputDraft = '';
+let outputChoices = new Set(['']);
+let pendingOutput: { kind: 'refresh' | 'apply' } | undefined;
+let outputOwner: { client: Client; roomId: string; participantId: string; generation: number } | undefined;
 let playbackGeneration = 0;
 let pendingUnlock: { client: Client | null; generation: number } | undefined;
 let entryGeneration = 0;
@@ -88,7 +98,7 @@ function retireControls(): void {
   controlsClient = undefined; retireHandRejection();
   pendingHand = undefined; pendingMic = undefined; pendingStage = undefined;
   micRetryParticipant = undefined; pendingMicRetry = undefined;
-  pendingRename = undefined; syncRename(); retireRoomName(); retireMicrophone(); retireAudioRetry();
+  pendingRename = undefined; syncRename(); retireRoomName(); retireMicrophone(); retireAudioRetry(); retireOutput();
 }
 /** Retire initial-join feedback before user or terminal callbacks can start another entry. */
 function retireEntry(): number {
@@ -235,6 +245,60 @@ function reportMicrophoneError(owner: NonNullable<typeof microphoneOwner>, attem
   if (ownsMicrophoneAttempt(owner, attempt) && !microphonePanel.hidden
     && (owner.client.status === 'waiting' || owner.client.status === 'live')) report(error);
 }
+function replaceOutputOptions(outputs: readonly MediaDeviceInfo[]): void {
+  const initial = document.createElement('option');
+  initial.value = ''; initial.textContent = '系統預設';
+  const options = [initial], choices = new Set<string>(['']);
+  for (const device of outputs) {
+    if (device.kind !== 'audiooutput' || !device.deviceId || choices.has(device.deviceId)) continue;
+    choices.add(device.deviceId);
+    const option = document.createElement('option');
+    option.value = device.deviceId;
+    option.textContent = device.label.trim() ? device.label : `揚聲器 ${options.length}`;
+    options.push(option);
+  }
+  if (outputDraft && !choices.has(outputDraft)) {
+    const missing = document.createElement('option');
+    missing.value = outputDraft; missing.textContent = '先前選擇（目前清單未提供）';
+    missing.disabled = true; options.push(missing);
+  }
+  outputChoices = choices;
+  outputSelect.replaceChildren(...options); outputSelect.value = outputDraft;
+}
+function retireOutput(): void {
+  outputOwner = undefined;
+  outputPanel.hidden = true;
+  outputSelect.disabled = outputRefresh.disabled = outputApply.disabled = true;
+  outputRefresh.setAttribute('aria-busy', String(pendingOutput?.kind === 'refresh'));
+  outputApply.setAttribute('aria-busy', String(pendingOutput?.kind === 'apply'));
+}
+function syncOutput(): void {
+  const current = client, state = current?.state;
+  const active = current?.status === 'waiting' || current?.status === 'live';
+  if (!current || current !== controlsClient || !state?.roomId || !state.me.participantId
+    || (!active && current.status !== 'reconnecting')) { retireOutput(); return; }
+  const owner = outputOwner;
+  if (!owner || owner.client !== current || owner.generation !== entryGeneration
+    || owner.roomId !== state.roomId || owner.participantId !== state.me.participantId) {
+    retireOutput();
+    if (!active) return;
+    outputOwner = { client: current, roomId: state.roomId, participantId: state.me.participantId, generation: entryGeneration };
+  }
+  const supported = typeof current.listAudioDevices === 'function' && typeof current.setOutputDevice === 'function'
+    && current.outputDeviceSupported === true;
+  outputPanel.hidden = false; outputSupport.hidden = supported;
+  outputSupport.textContent = supported ? '' : '此瀏覽器或 SDK 不支援選擇輸出裝置，請使用系統音訊設定。';
+  outputSelect.value = outputDraft;
+  outputSelect.disabled = outputRefresh.disabled = !active || !supported || Boolean(pendingOutput);
+  outputApply.disabled = outputRefresh.disabled || !outputChoices.has(outputDraft);
+  outputRefresh.setAttribute('aria-busy', String(pendingOutput?.kind === 'refresh'));
+  outputApply.setAttribute('aria-busy', String(pendingOutput?.kind === 'apply'));
+}
+function ownsOutputAttempt(owner: NonNullable<typeof outputOwner>, attempt: NonNullable<typeof pendingOutput>): boolean {
+  syncOutput();
+  return outputOwner === owner && pendingOutput === attempt
+    && (owner.client.status === 'waiting' || owner.client.status === 'live');
+}
 function clearAudioRetryStatus(): void {
   audioRetryStatus.hidden = true; audioRetryStatus.textContent = '';
 }
@@ -369,7 +433,7 @@ join.onsubmit = (event) => {
         if (generation === entryGeneration) hideCancel();
         progress = false;
         status.textContent = `${library.decodeName(detail.name)} · ${library.decodeName(detail.me.name)} · ${detail.me.onStage ? '已上台' : '收聽中'}`;
-        syncHand(); syncMic(); syncStage(); syncMicRetry(); syncRename(); syncRoomName(); syncMicrophone(); syncAudioRetry();
+        syncHand(); syncMic(); syncStage(); syncMicRetry(); syncRename(); syncRoomName(); syncMicrophone(); syncAudioRetry(); syncOutput();
         leave.disabled = false;
       });
       const retireOwnHandRejection = (participantId: string): void => {
@@ -407,7 +471,7 @@ join.onsubmit = (event) => {
         if (current.state) { receivedState = true; if (generation === entryGeneration) hideCancel(); }
         if (detail === 'reconnecting') { retireHandRejection(); progress = false; status.textContent = '重新連線中'; hand.disabled = true; }
         else if (detail === 'disconnected') { progress = false; retirePlayback(); retireControls(); status.textContent = '未連線'; hand.disabled = leave.disabled = true; }
-        syncHand(); syncMic(); syncStage(); syncMicRetry(); syncRename(); syncRoomName(); syncMicrophone(); syncAudioRetry();
+        syncHand(); syncMic(); syncStage(); syncMicRetry(); syncRename(); syncRoomName(); syncMicrophone(); syncAudioRetry(); syncOutput();
       });
       client.on('error', ({ detail }) => { if (client !== current || cancelledEntry || generation !== entryGeneration) return; progress = false; report(detail); });
       client.on('audioblocked', () => { if (cancelledEntry) return; progress = false; status.textContent = '請點擊啟用音訊。'; });
@@ -555,6 +619,35 @@ microphoneApply.onclick = () => {
     }
   })();
 };
+outputSelect.onchange = () => {
+  const draft = outputSelect.value;
+  syncOutput();
+  if (!outputOwner || outputPanel.hidden || outputSelect.disabled || pendingOutput || !outputChoices.has(draft)) return;
+  outputDraft = draft; syncOutput();
+};
+function selectOutput(kind: 'refresh' | 'apply'): void {
+  syncOutput();
+  const owner = outputOwner;
+  const button = kind === 'refresh' ? outputRefresh : outputApply;
+  if (!owner || outputPanel.hidden || button.hidden || button.disabled || pendingOutput) return;
+  const draft = outputDraft, feedback = feedbackRevision, attempt = pendingOutput = { kind };
+  syncOutput();
+  void (async () => {
+    try {
+      if (kind === 'refresh') {
+        const devices = await owner.client.listAudioDevices();
+        if (ownsOutputAttempt(owner, attempt)) replaceOutputOptions(devices.outputs);
+      } else await owner.client.setOutputDevice(draft);
+    } catch (error) {
+      if (ownsOutputAttempt(owner, attempt) && feedback === feedbackRevision) report(error);
+    } finally {
+      // Retiring a seat only retires feedback, never the unresolved shared-audio operation.
+      if (pendingOutput === attempt) { pendingOutput = undefined; syncOutput(); }
+    }
+  })();
+}
+outputRefresh.onclick = () => selectOutput('refresh');
+outputApply.onclick = () => selectOutput('apply');
 audioRetry.onclick = () => {
   syncAudioRetry();
   const owner = audioRetryOwner;
@@ -598,4 +691,5 @@ leave.onclick = () => {
     status.textContent = '已離開。'; hand.disabled = leave.disabled = true;
   });
 };
-syncHand(); syncMic(); syncStage(); syncMicRetry(); syncRename(); syncRoomName(); syncMicrophone(); syncAudioRetry(); syncUnlock();
+replaceOutputOptions([]);
+syncHand(); syncMic(); syncStage(); syncMicRetry(); syncRename(); syncRoomName(); syncMicrophone(); syncAudioRetry(); syncOutput(); syncUnlock();

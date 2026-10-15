@@ -213,7 +213,7 @@ for (const wsPath of ['/custom/stage', '/ws']) {
     } });
     const { StageClient, decodeName } = await import(new URL('../packages/client/src/index.ts', import.meta.url).href);
     const joined = Promise.withResolvers<RoomStatePayload>();
-    const nodes = new Map(['host', 'ws-path', 'room', 'code', 'name', 'status', 'hand-rejected', 'error-notice', 'last-error', 'error-dismiss', 'join', 'hand', 'mic', 'rename', 'room-name-panel', 'room-name-current', 'room-name-draft', 'room-name-update', 'stage', 'mic-retry', 'audio-retry', 'audio-retry-status', 'microphone-panel', 'microphone-device', 'microphone-refresh', 'microphone-apply', 'microphone-draft-notice', 'cancel-join', 'leave', 'audio', 'unlock'].map(id => [id, new EmbedNode()]));
+    const nodes = new Map(['host', 'ws-path', 'room', 'code', 'name', 'status', 'hand-rejected', 'error-notice', 'last-error', 'error-dismiss', 'join', 'hand', 'mic', 'rename', 'room-name-panel', 'room-name-current', 'room-name-draft', 'room-name-update', 'stage', 'mic-retry', 'audio-retry', 'audio-retry-status', 'microphone-panel', 'microphone-device', 'microphone-refresh', 'microphone-apply', 'microphone-draft-notice', 'output-panel', 'output-device', 'output-refresh', 'output-apply', 'output-draft-notice', 'output-support', 'cancel-join', 'leave', 'audio', 'unlock'].map(id => [id, new EmbedNode()]));
     const node = (id: string): EmbedNode => { const value = nodes.get(id); assert.ok(value, `unmodeled node: ${id}`); return value; };
     node('error-notice').hidden = true; node('hand-rejected').hidden = true;
     node('join').submitButton = new EmbedNode(); node('name').value = '嵌入聽眾';

@@ -109,6 +109,8 @@ WebSocket 建構失敗、hello 逾時或尚未進房的連線關閉，也會釋�
 - `setInputDevice(deviceId: string): Promise<void>`：選擇麥克風，空字串恢復設定的預設裝置。上台時透過 `replaceTrack` 即時切換、不重新協商，保留靜音狀態，停止舊裝置；替換 promise 尚未完成時，仍由最新房間狀態同步已安裝與候選音軌的靜音（含主控強制靜音／解除），獨立預覽不受影響；選擇會保留至重連。選定 ID 優先於 `micConstraints.deviceId`。
 - `retryMicrophone(): boolean`：手動要求重試已失敗或自然中斷的房間麥克風擷取，保留台位與目前 PeerConnection。只有目前 live、信令 socket OPEN、仍在台上、沒有已安裝麥克風且擷取失敗或音軌已自然結束並清理時才回傳 `true`；健康／尚在等待擷取、已下台、重連中或斷線時回傳 `false`，不送控制請求也不丟出操作錯誤。`true` 只表示已排入既有媒體佇列，不保證已開始提示、完成擷取、安裝、協商或傳送；同一待處理重試的重複呼叫回傳 `false`。使用目前選定裝置並保留自我／強制靜音，不自動解除靜音。不新增自動提示或輪詢；當前失敗仍依既有 `micerror`／`error` 回報，需再一次明確呼叫才重試，原本的重新上台／peer 替換恢復路徑不變。下台、明確 disconnect 或替換 PeerConnection 會沿用 revision 取消／忽略舊工作；只中斷 WebSocket 而保留 peer 的自動回座，不會因此取消已接納的擷取，無法取消已送入瀏覽器的 `replaceTrack()`。房間初次／重試擷取的 `micready` 早於 sender 安裝；事件也用於獨立預覽及裝置替換，不能把任意 `micready` 當作此重試成功或可聽見傳送的證明。
 - `outputDeviceSupported: boolean`：瀏覽器是否支援輸出選擇。`setOutputDevice(deviceId: string): Promise<void>` 使用 `setSinkId`，不支援時拒絕並拋出 `StageError('media_error', ...)`；空字串使用系統預設。音訊元件於重連重用，因此保留所選輸出。
+
+最小 embed 另提供手動刷新／明確送出的輸出選擇，依執行時 API 與瀏覽器能力顯示；選擇是草稿，缺失項保留但不可套用，完成不宣稱實際路由或可聽音訊。其不同 client 共用同一頁面 audioElement，故輸出等待鎖、草稿與清單按頁面資源生命週期保留，跨離房與重新加入不解除未完成的操作；已退役席位的錯誤與刷新結果不回填新席位。這只序列化該 UI 自己的操作，SDK 及宿主直接呼叫沒有新增序列化或取消保證，也沒有 timeout、自動枚舉／播放／擷取或持久化。受控 DOM／SDK／audio 測試不等同原生裝置、權限、AT 或音訊驗收。
 - `micLevel: number`：目前上台麥克風的 RMS 振幅（0–1，非分貝），未上台、靜音或停用房間音量計時為 0；即使在同步 state／micready callback 中、實際音軌尚未套用最新靜音，也依目前房間狀態回 0。音軌仍停用時亦不讀取音量計；此 getter 不代表 sender 已安裝或其他人能聽見。可定期讀取以更新音量表。
 - `startMicTest(): Promise<MicTest>`：不需連線或上台，使用所選麥克風，回傳提供 `level()`、`stop()` 與唯讀 `stopped` 的 handle；`level()` 同樣為 0–1 RMS，不會播放測試音訊。`stop()` 可重複呼叫，停止軌道並關閉 AudioContext；`disconnect()`、關房與被踢也會停止所有測試（包含仍等待授權的測試）。測試期間切換裝置後，請停止並重啟測試。
 
