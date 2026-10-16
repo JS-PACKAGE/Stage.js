@@ -353,16 +353,24 @@ function syncStageManagement(): void {
     if (row.gainCurrent.textContent !== accepted) row.gainCurrent.textContent = accepted;
     const gainLabel = `${name} 的混音增益草稿（dB）${gainSupported ? `，範圍 -${maxGainDb} 至 +${maxGainDb}，步進 0.1` : ''}`;
     if (row.gainLabel.textContent !== gainLabel) row.gainLabel.textContent = gainLabel;
-    if (maxGainDb !== undefined) { row.gainDraft.min = String(-maxGainDb); row.gainDraft.max = String(maxGainDb); }
+    if (maxGainDb !== undefined) {
+      const min = String(-maxGainDb), max = String(maxGainDb);
+      if (row.gainDraft.min !== min) row.gainDraft.min = min;
+      if (row.gainDraft.max !== max) row.gainDraft.max = max;
+    }
     const gainNotice = gainSupported
       ? '調整這位發言者在房間混音中的音量；0 表示不手動增減。可能在後續音訊或返回舞台時生效，不會解除麥克風靜音。'
       : '此 SDK 不支援混音增益調整；其他舞台操作仍可使用。';
     if (row.gainNotice.textContent !== gainNotice) row.gainNotice.textContent = gainNotice;
     const gainBusy = String(stageManagementPending.has(id));
-    row.gainDraft.disabled = !active || !state.me.connected || !gainSupported || stageManagementPending.has(id) || Boolean(pendingTransfer);
-    row.gainApply.disabled = row.gainDraft.disabled || stageGainDraft(row) === undefined;
-    row.gainDraft.setAttribute('aria-busy', gainBusy); row.gainApply.setAttribute('aria-busy', gainBusy);
-    row.gainApply.setAttribute('aria-label', `套用 ${name} 的混音增益`);
+    const gainDisabled = !active || !state.me.connected || !gainSupported || stageManagementPending.has(id) || Boolean(pendingTransfer);
+    if (row.gainDraft.disabled !== gainDisabled) row.gainDraft.disabled = gainDisabled;
+    const applyDisabled = row.gainDraft.disabled || stageGainDraft(row) === undefined;
+    if (row.gainApply.disabled !== applyDisabled) row.gainApply.disabled = applyDisabled;
+    if (row.gainDraft.getAttribute('aria-busy') !== gainBusy) row.gainDraft.setAttribute('aria-busy', gainBusy);
+    if (row.gainApply.getAttribute('aria-busy') !== gainBusy) row.gainApply.setAttribute('aria-busy', gainBusy);
+    const gainApplyLabel = `套用 ${name} 的混音增益`;
+    if (row.gainApply.getAttribute('aria-label') !== gainApplyLabel) row.gainApply.setAttribute('aria-label', gainApplyLabel);
     const muteLabel = person.forceMuted ? '解除靜音鎖定' : '鎖定靜音';
     if (row.mute.textContent !== muteLabel) row.mute.textContent = muteLabel;
     const labels = { mute: `${muteLabel}：${name}`, remove: `將 ${name} 移下台` };
@@ -376,10 +384,13 @@ function syncStageManagement(): void {
     }
     const transferLabel = `將控制權移交給 ${name}`;
     if (row.transfer.getAttribute('aria-label') !== transferLabel) row.transfer.setAttribute('aria-label', transferLabel);
-    row.transfer.hidden = typeof current.transferControl !== 'function';
-    row.transfer.disabled = Boolean(pendingTransfer) || stageManagementPending.size > 0
+    const transferHidden = typeof current.transferControl !== 'function';
+    if (row.transfer.hidden !== transferHidden) row.transfer.hidden = transferHidden;
+    const transferDisabled = Boolean(pendingTransfer) || stageManagementPending.size > 0
       || !eligibleTransfer(stageManagementOwner, id, row);
-    row.transfer.setAttribute('aria-busy', String(pendingTransfer?.id === id));
+    if (row.transfer.disabled !== transferDisabled) row.transfer.disabled = transferDisabled;
+    const transferBusy = String(pendingTransfer?.id === id);
+    if (row.transfer.getAttribute('aria-busy') !== transferBusy) row.transfer.setAttribute('aria-busy', transferBusy);
   }
   for (const [id, row] of stageManagementRows) if (!seen.has(id)) {
     for (const button of [row.mute, row.remove, row.transfer, row.gainDraft, row.gainApply]) { button.disabled = true; button.setAttribute('aria-busy', 'false'); }
@@ -391,8 +402,10 @@ function syncStageManagement(): void {
   }
   invalidateTransfer();
   // New keyed rows only become eligible after insertion into the list.
-  for (const [id, row] of stageManagementRows) row.transfer.disabled = Boolean(pendingTransfer)
-    || stageManagementPending.size > 0 || !eligibleTransfer(stageManagementOwner, id, row);
+  for (const [id, row] of stageManagementRows) {
+    const disabled = Boolean(pendingTransfer) || stageManagementPending.size > 0 || !eligibleTransfer(stageManagementOwner, id, row);
+    if (row.transfer.disabled !== disabled) row.transfer.disabled = disabled;
+  }
 }
 function currentStageRow(id: string, row: StageManagementRow, kind: 'mute' | 'remove' | 'transfer' | 'gainApply'): boolean {
   return stageManagementRows.get(id) === row && row.node.parentElement === stageManagementList

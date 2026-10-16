@@ -814,3 +814,6 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 
 
 213. **Widget 講者混音增益（第192批，2026-10-16）：** immutable191完整元件＋SDK→validator→Hub十一例證明HTML-only主控核准後舞台列看不到gainDb也不能調整，改本機播放音量不能取代房間mix trim。僅既有其他台上speaker列新增權威接受值、具名number草稿與明確apply；使用MAX_GAIN_DB界限／finite decimal驗證，拒絕空白／hex／非有限／超界，不clamp或本機round。保留raw draft跨同列快照／改名／排序／重連／ACK，接受值只依state；列移除／owner退役丟棄草稿。共用原target pending與transfer全舞台互鎖，先reserve防重入，同ID回台等舊settle；舊owner／row／token隔離，不改通知窗口或SDK全域error。191即時DOM比較完整保留，新增動態欄位也只寫不同值，不變快照zero新欄位寫入／zero草稿value寫入；無signaturecache或skip sync。離線／muted目標合法但不unmute；已送後下台仍可能接受並保留，無取消或原子台位保證。不改SDK／server／protocol／media／依賴，不新增公有屬性、timer、capture／play／協商；受控證據不等同native數字輸入／IME／版面／焦點／AT或聲音驗收。
+
+
+214. **最小 embed 舞台列等值寫入保護（第193批，2026-10-16）：** immutable192完整embed經公開SDK→validator→Hub的24筆rename／roomName／同值gain／hand操作，1／3／8講者264／792／2112等值列寫入，候選降0；必要寫入／草稿value寫入皆0，原兩次transfer eligibility呼叫48／144／384保留。僅十一處既有gain min／max／disabled／ARIA及transfer hidden／disabled／ARIA改為live DOM inequality guards；兩次transfer pass、原短路順序與apply讀回draft.disabled策略保持。所有sync、owner／pending／transfer state machine、panel／creation／removal／retire及舊text guards不改，不加signaturecache或事件合併。權威gain／rename／mute必要寫入1／6／3保持，state-before-ACK／reentry／host corruption與failed-write retry須回歸。無widget／SDK／server／protocol／media變更，不宣稱nativebrowser latency／CPU／memory／layout／focus／AT或硬體改善。
