@@ -84,6 +84,13 @@ export class StageElement extends HTMLElement {
   private readonly quality: HTMLParagraphElement;
   private qualityOwner: { client: StageClient; roomId: string; participantId: string; generation: number } | undefined;
   private qualityReport: Omit<ConnectionQuality, 'participantId'> | undefined;
+  private readonly qualitySnapshots = new WeakSet<object>();
+  private readonly qualityReceipts = new WeakSet<object>();
+  private qualityEventRevision = 0;
+  private qualityRevision = 0;
+  // Extra callback reconciliation repaints only changed projection; original paint triggers stay unconditional.
+  private qualityPaintedRevision = -1;
+  private qualityClearFirst = true;
   private readonly speaking: HTMLParagraphElement;
   private speakingOwner: { client: StageClient; roomId: string; participantId: string; generation: number } | undefined;
   private speakingReport: { ids: Set<string>; empty: boolean } | undefined;
@@ -453,9 +460,11 @@ export class StageElement extends HTMLElement {
       for (const type of EVENTS) {
         client.on(type, ({ detail }) => {
           if (generation !== this.generation || this.current !== client) return;
+          const qualityEvent = this.rememberQualityEvent(type, detail);
           // Own-role deltas precede their snapshot. Fence both dialogs before any DOM setter can reenter.
           this.noteRoomCloseEvent(type, detail);
           this.noteStageTransferEvent(type, detail);
+          this.noteQualityEvent(client, generation, type, detail, qualityEvent);
           if (type === 'closed' || type === 'kicked') this.microphoneTerminalClient = client;
           else if (type === 'state') this.microphoneTerminalClient = undefined;
           if (type === 'closed' || type === 'kicked') this.outputDeviceTerminalClient = client;
@@ -487,11 +496,9 @@ export class StageElement extends HTMLElement {
             || (type === 'role' && (detail as StageEventMap['role']).role !== 'audience' && (detail as StageEventMap['role']).participantId === ownId)
             || (type === 'transferred' && (detail as StageEventMap['transferred']).toId === ownId)) this.retireHandRejection();
           else this.syncHandRejection(type === 'handrejected' ? detail as StageEventMap['handrejected'] : undefined);
-          if (type === 'closed' || type === 'kicked' || type === 'micerror'
-            || (type === 'status' && (detail === 'reconnecting' || detail === 'disconnected'))
-            || (type === 'stageleft' && (detail as StageEventMap['stageleft']).participantId === client.state?.me.participantId)) this.retireQualityOwner();
-          else if (type === 'quality') this.syncQualityOwner((detail as StageEventMap['quality']).participants);
-          else if (type === 'state' || type === 'status') this.syncQualityOwner();
+          this.syncQualityOwner(type === 'quality' || type === 'state' || type === 'status' || type === 'closed'
+            || type === 'kicked' || type === 'micerror'
+            || (type === 'stageleft' && (detail as StageEventMap['stageleft']).participantId === ownId));
           if (type === 'closed' || type === 'kicked'
             || (type === 'status' && (detail === 'reconnecting' || detail === 'disconnected'))) this.retireSpeakingOwner();
           else if (type === 'speaking') this.syncSpeakingOwner({ participantIds: (detail as StageEventMap['speaking'] | null | undefined)?.participantIds });
@@ -522,8 +529,10 @@ export class StageElement extends HTMLElement {
           // Revoke stale action admission before application event listeners can reenter.
           if (micLifecycle) this.syncMicRetry();
           this.syncOccupancy();
+          this.syncQualityOwner(false);
           this.dispatchEvent(new CustomEvent(`stage-${type}`, { detail, bubbles: true, composed: true }));
           this.syncOccupancy();
+          this.syncQualityOwner(false);
           // Application callbacks may retire this seat or mutate its exposed snapshot.
           this.syncMicrophoneOwner();
           this.syncOutputDeviceOwner();
@@ -573,6 +582,7 @@ export class StageElement extends HTMLElement {
     const exit = {};
     this.leftRoom = true; this.roomExit = exit;
     this.retireOccupancy();
+    this.retireQualityOwner();
     this.hideError();
     // Retire the event lane before disconnect can synchronously invoke application callbacks.
     void this.leave().catch(error => {
@@ -585,6 +595,7 @@ export class StageElement extends HTMLElement {
 
   private async leave(): Promise<void> {
     this.retireOccupancy();
+    this.retireQualityOwner();
     this.retireRoomClose();
     this.roomCloseAuthority = undefined; this.roomCloseTerminalClient = undefined;
     this.joinPhase = undefined;
@@ -600,7 +611,6 @@ export class StageElement extends HTMLElement {
     this.retireStageManagement();
     this.audioRecoveryTerminalClient = undefined;
     this.retireAudioRecovery();
-    this.retireQualityOwner();
     this.retireSpeakingOwner();
     this.retireHandRejection();
     this.hideCancel();
@@ -812,8 +822,8 @@ export class StageElement extends HTMLElement {
   }
 
   private retireQualityOwner(): void {
-    this.qualityOwner = undefined; this.qualityReport = undefined;
-    this.quality.textContent = ''; this.quality.hidden = true;
+    ++this.qualityRevision;
+    this.qualityOwner = undefined; this.qualityReport = undefined; this.qualityClearFirst = true;
   }
 
   private retireSpeakingOwner(): void {
@@ -880,35 +890,109 @@ export class StageElement extends HTMLElement {
       : '最近收到的發言回報：沒有可對應的台上成員。';
   }
 
-  /** Reports have no timestamp or media epoch; only a new event may supply this seat's values. */
-  private syncQualityOwner(reports?: readonly ConnectionQuality[]): void {
-    const client = this.current, state = client?.state, me = state?.me;
-    if (!this.isConnected || !client || !state || !me?.onStage
-      || client.status === 'reconnecting' || client.status === 'disconnected') {
-      this.retireQualityOwner(); return;
-    }
-    const owner = this.qualityOwner;
-    if (!owner || owner.client !== client || owner.generation !== this.generation
-      || owner.roomId !== state.roomId || owner.participantId !== me.participantId) {
+  /** Retirement is pure: a corrective DOM write must never precede the dialog authority fences. */
+  private reconcileQualityOwner(): void {
+    for (;;) {
+      const owner = this.qualityOwner;
+      if (!owner) return;
+      const revision = this.qualityRevision, client = owner.client;
+      const status = client.status, state = client.state;
+      // Public getters can finish nested work before returning. Recheck the live owner, not just this painter.
+      const currentState = client.state, currentStatus = client.status;
+      if (owner !== this.qualityOwner || revision !== this.qualityRevision) continue;
+      if (state !== currentState || status !== currentStatus) continue;
+      if (this.isConnected && this.current === client && this.generation === owner.generation
+        && state?.roomId === owner.roomId && state.me.participantId === owner.participantId
+        && state.me.onStage && (status === 'waiting' || status === 'live')) return;
       this.retireQualityOwner();
-      this.qualityOwner = { client, roomId: state.roomId, participantId: me.participantId, generation: this.generation };
+      this.noteRoomCloseEvent('status', currentStatus);
+      this.noteStageTransferEvent('status', currentStatus);
+      // Either authority getter may have admitted a newer entry; reconcile that entry too.
     }
-    if (reports !== undefined) {
-      let report: ConnectionQuality | undefined;
-      for (const candidate of reports) if (candidate.participantId === me.participantId) report = candidate;
-      // The event remains public and mutable; retain only primitive values from its full replacement set.
-      this.qualityReport = report ? {
-        uplinkLossPercent: typeof report.uplinkLossPercent === 'number' ? report.uplinkLossPercent : undefined,
-        downlinkLossPercent: typeof report.downlinkLossPercent === 'number' ? report.downlinkLossPercent : undefined,
-        rttMs: typeof report.rttMs === 'number' ? report.rttMs : undefined,
-      } : undefined;
+  }
+
+  private rememberQualityEvent(type: keyof StageEventMap, detail: StageEventMap[keyof StageEventMap]): { revision: number; unseen: boolean } {
+    const revision = ++this.qualityEventRevision;
+    const identities = type === 'state' ? this.qualitySnapshots : type === 'quality' ? this.qualityReceipts : undefined;
+    const unseen = Boolean(identities && detail && !identities.has(detail as object));
+    // Consume before any public getter: even rejected or superseded receipts cannot gain authority on replay.
+    if (identities && detail) identities.add(detail as object);
+    const ownId = this.qualityOwner?.participantId;
+    // Known loss must precede even authority getters: a nested report alone cannot outrun retirement.
+    if (type === 'closed' || type === 'kicked'
+      || (type === 'status' && (detail === 'reconnecting' || detail === 'disconnected'))
+      || (ownId !== undefined && type === 'stageleft' && (detail as StageEventMap['stageleft']).participantId === ownId)
+      || (ownId !== undefined && type === 'role' && (detail as StageEventMap['role']).participantId === ownId
+        && (detail as StageEventMap['role']).role === 'audience')) this.retireQualityOwner();
+    else if (type === 'micerror') {
+      ++this.qualityRevision; this.qualityReport = undefined; this.qualityClearFirst = true;
     }
-    const report = this.qualityReport;
-    this.quality.hidden = !report;
-    if (!report) { this.quality.textContent = ''; return; }
+    return { revision, unseen };
+  }
+
+  private noteQualityEvent(client: StageClient, generation: number, type: keyof StageEventMap,
+    detail: StageEventMap[keyof StageEventMap], event: { revision: number; unseen: boolean }): void {
+    if (event.revision !== this.qualityEventRevision || this.current !== client || this.generation !== generation) return;
+    const snapshot = type === 'state' ? detail as StageEventMap['state'] : undefined;
+    const receipt = type === 'quality' ? detail as StageEventMap['quality'] : undefined;
+    this.reconcileQualityOwner();
+    const state = client.state;
+    if (event.revision !== this.qualityEventRevision || this.current !== client || this.generation !== generation) return;
+    if (snapshot && event.unseen && snapshot === state && this.isConnected && state.me.onStage
+      && (client.status === 'waiting' || client.status === 'live')
+      && snapshot === client.state && this.current === client && this.generation === generation
+      && event.revision === this.qualityEventRevision) {
+      if (!this.qualityOwner) {
+        this.qualityOwner = { client, roomId: state.roomId, participantId: state.me.participantId, generation };
+        ++this.qualityRevision; this.qualityClearFirst = false;
+      }
+    }
+    this.reconcileQualityOwner();
+    const owner = this.qualityOwner;
+    if (!receipt || !event.unseen || !owner || event.revision !== this.qualityEventRevision) return;
+    let report: ConnectionQuality | undefined;
+    for (const candidate of receipt.participants) if (candidate.participantId === owner.participantId) report = candidate;
+    // Preserve the last whole own item, and copy only its primitives before forwarding the raw detail.
+    const up = report?.uplinkLossPercent, down = report?.downlinkLossPercent, rtt = report?.rttMs;
+    const copied = report ? {
+      uplinkLossPercent: typeof up === 'number' ? up : undefined,
+      downlinkLossPercent: typeof down === 'number' ? down : undefined,
+      rttMs: typeof rtt === 'number' ? rtt : undefined,
+    } : undefined;
+    this.reconcileQualityOwner();
+    if (owner !== this.qualityOwner || event.revision !== this.qualityEventRevision) return;
+    ++this.qualityRevision; this.qualityReport = copied; this.qualityClearFirst = false;
+  }
+
+  /** Reports have no timestamp or media epoch; only a new admitted receipt supplies values. */
+  private syncQualityOwner(force = true): void {
+    this.reconcileQualityOwner();
+    if (!force && this.qualityPaintedRevision === this.qualityRevision) return;
+    const revision = this.qualityRevision, report = this.qualityReport;
+    const current = (): boolean => {
+      const before = this.qualityRevision;
+      // Even a superseded painter must observe silent ownership loss after nested newer work.
+      this.reconcileQualityOwner();
+      if (before !== this.qualityRevision) { this.syncQualityOwner(); return false; }
+      return revision === this.qualityRevision;
+    };
     const percent = (value: number | undefined) => typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 100 ? `${value.toFixed(1)}%` : '—';
     const rtt = (value: number | undefined) => typeof value === 'number' && Number.isFinite(value) && value >= 0 ? `${Math.round(value)} ms` : '—';
-    this.quality.textContent = `你的連線品質（最近收到）：上行掉包 ${percent(report.uplinkLossPercent)} · 下行掉包 ${percent(report.downlinkLossPercent)} · RTT ${rtt(report.rttMs)}（非端到端音訊延遲）`;
+    const text = report ? `你的連線品質（最近收到）：上行掉包 ${percent(report.uplinkLossPercent)} · 下行掉包 ${percent(report.downlinkLossPercent)} · RTT ${rtt(report.rttMs)}（非端到端音訊延遲）` : '';
+    // Keep unconditional text replacement, including repair of same-text host-added descendants.
+    if (this.qualityClearFirst) {
+      this.quality.textContent = text;
+      if (!current()) return;
+      this.quality.hidden = !report;
+    } else {
+      this.quality.hidden = !report;
+      if (!current()) return;
+      this.quality.textContent = text;
+    }
+    if (current()) {
+      this.qualityPaintedRevision = revision;
+      if (this.qualityOwner) this.qualityClearFirst = false;
+    }
   }
 
   private retireNameOwner(): void {

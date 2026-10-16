@@ -12495,3 +12495,470 @@ async function occupancyHub(t: TestContext, maxSpeakers = 1, maxAudience = 3) {
       assert.equal(confirm.mock.callCount(), 0); assert.equal(close.mock.callCount(), 0); assert.equal(transfer.mock.callCount(), 0);
     });
 });
+
+/** Complete widget and SDK regression coverage; controlled DOM does not model browser paint or audio. */
+describe('widget own quality observation window', () => {
+  const report = (rttMs = 46) => ({ participants: [{ participantId: 'me', rttMs }] });
+  const emit = (client: StageClient, type: string, detail: unknown) => client.dispatchEvent(new CustomEvent(type, { detail }));
+  const view = (element: InstanceType<typeof StageElement>) => ({ hidden: element['quality'].hidden, text: element['quality'].textContent });
+  function hidden(element: InstanceType<typeof StageElement>): void { assert.deepEqual(view(element), { hidden: true, text: '' }); }
+  function shown(element: InstanceType<typeof StageElement>, rtt = 46): void { assert.equal(view(element).hidden, false); assert.match(view(element).text, new RegExp(`RTT ${rtt} ms`)); }
+  const state = async (client: StageClient, value = roomState(true)) => { await client['receive']({ type: 'room:state', ...value }); return client.state!; };
+  function setter(node: object, property: string, action: () => void): () => void {
+    let value = Reflect.get(node, property), armed = true;
+    Object.defineProperty(node, property, { configurable: true, get: () => value, set: next => { value = next; if (armed) { armed = false; action(); } } });
+    return () => { Object.defineProperty(node, property, { configurable: true, writable: true, value }); };
+  }
+
+
+  for (const boundary of ['role', 'stageleft', 'reconnect', 'terminal'] as const) {
+    it(`${boundary} requires unseen current state, and records new reports rejected before it`, async t => {
+      const { element, client } = await subscribedWidget(t, true);
+      const accepted = report(46), rejected = report(88), oldState = client.state!;
+      emit(client, 'quality', accepted); shown(element);
+      if (boundary === 'role') emit(client, 'role', { participantId: 'me', role: 'audience' });
+      else if (boundary === 'stageleft') emit(client, 'stageleft', { participantId: 'me' });
+      else if (boundary === 'terminal') emit(client, 'closed', { roomId: 'one' });
+      else client['setStatus']('reconnecting');
+      hidden(element);
+      client['setStatus']('live');
+      emit(client, 'quality', rejected); hidden(element);
+      emit(client, 'state', oldState); emit(client, 'quality', report(99)); hidden(element);
+      await state(client); emit(client, 'quality', accepted); hidden(element);
+      emit(client, 'quality', rejected); hidden(element);
+      emit(client, 'quality', report(123)); shown(element, 123);
+    });
+  }
+
+  it('a state identity first rejected during reconnect cannot reopen after status-only recovery', async t => {
+    const { element, client } = await subscribedWidget(t, true); emit(client, 'quality', report());
+    client['setStatus']('reconnecting');
+    const rejected = roomState(true); client['snapshot'] = rejected; emit(client, 'state', rejected); hidden(element);
+    client['setStatus']('live'); emit(client, 'state', rejected); emit(client, 'quality', report(77)); hidden(element);
+    await state(client); emit(client, 'quality', report(78)); shown(element, 78);
+  });
+
+  it('an unseen noncurrent state event is consumed, not retained for later owner admission', async t => {
+    const { element, client } = await subscribedWidget(t, true); emit(client, 'quality', report());
+    emit(client, 'stageleft', { participantId: 'me' });
+    const rejected = roomState(true); emit(client, 'state', rejected); hidden(element);
+    client['snapshot'] = rejected; emit(client, 'state', rejected); emit(client, 'quality', report(79)); hidden(element);
+    await state(client); emit(client, 'quality', report(80)); shown(element, 80);
+  });
+
+  it('SDK status-before-state cannot admit a receipt before the replacement state event', async t => {
+    const { element, client } = await subscribedWidget(t, true); const rejected = report(97);
+    client['setStatus']('reconnecting'); let observed: ReturnType<typeof view> | undefined;
+    element.addEventListener('stage-status', event => {
+      if ((event as CustomEvent).detail === 'live') { emit(client, 'quality', rejected); observed = view(element); }
+    }, { once: true });
+    await state(client); assert.deepEqual(observed, { hidden: true, text: '' }); hidden(element);
+    emit(client, 'quality', rejected); hidden(element);
+    emit(client, 'quality', report(98)); shown(element, 98);
+  });
+
+  it('micerror clears the receipt without requiring a new authoritative state', async t => {
+    const { element, client } = await subscribedWidget(t, true); const accepted = report(); emit(client, 'quality', accepted);
+    emit(client, 'micerror', { name: 'NotAllowedError', message: 'Unavailable' }); hidden(element);
+    emit(client, 'micready', undefined); emit(client, 'quality', accepted); hidden(element);
+    emit(client, 'quality', report(81)); shown(element, 81);
+  });
+
+  it('preserves baseline onstage admission despite retained disconnected flag', async t => {
+    const { element, client } = await subscribedWidget(t, true);
+    const next = roomState(true); next.me.connected = false;
+    await state(client, next); emit(client, 'quality', report(90)); shown(element, 90);
+  });
+
+  it('replaying accepted quality identity cannot overwrite newer same-owner metrics', async t => {
+    const { element, client } = await subscribedWidget(t, true); const old = report(91);
+    emit(client, 'quality', old); emit(client, 'quality', report(92)); shown(element, 92);
+    old.participants[0]!.rttMs = 999; emit(client, 'quality', old); shown(element, 92);
+  });
+
+  it('same-owner state and stage-preserving role transfer preserve copied whole last-own-entry policy', async t => {
+    const { element, client } = await subscribedWidget(t, true);
+    const detail = { participants: [{ participantId: 'me', rttMs: 1 }, { participantId: 'me', downlinkLossPercent: 0 }] };
+    let forwarded: unknown; element.addEventListener('stage-quality', event => { forwarded = (event as CustomEvent).detail; }, { once: true });
+    emit(client, 'quality', detail); assert.equal(forwarded, detail);
+    const original = view(element); assert.match(original.text, /下行掉包 0.0% · RTT —/);
+    detail.participants[1]!.downlinkLossPercent = 99;
+    await state(client); emit(client, 'role', { participantId: 'me', role: 'controller' });
+    emit(client, 'transferred', { fromId: 'host', toId: 'me' }); emit(client, 'stageleft', { participantId: 'other' });
+    assert.deepEqual(view(element), original);
+  });
+
+  for (const property of ['hidden', 'textContent']) {
+    it(`quality ${property} setter cannot restore a retired receipt after nested ownership loss`, async t => {
+      const { element, client } = await subscribedWidget(t, true);
+      const pending = report(82); let calls = 0;
+      const restore = setter(element['quality'], property, () => {
+        calls++; emit(client, 'stageleft', { participantId: 'me' });
+        emit(client, 'quality', pending);
+      }); t.after(restore);
+      emit(client, 'quality', pending); assert.equal(calls, 1); hidden(element);
+      await state(client); emit(client, 'quality', pending); hidden(element);
+      emit(client, 'quality', report(83)); shown(element, 83);
+    });
+
+    it(`quality ${property} setter keeps newer nested same-owner metrics`, async t => {
+      const { element, client } = await subscribedWidget(t, true);
+      const restore = setter(element['quality'], property, () => emit(client, 'quality', report(85))); t.after(restore);
+      emit(client, 'quality', report(84)); shown(element, 85);
+    });
+  }
+
+  for (const property of ['hidden', 'textContent']) {
+    it(`quality ${property} setter reconciles a silent ownership loss after completing a newer nested report`, async t => {
+      const { element, client } = await subscribedWidget(t, true);
+      const restore = setter(element['quality'], property, () => { emit(client, 'quality', report(94)); client.state!.me.onStage = false; }); t.after(restore);
+      emit(client, 'quality', report(93)); hidden(element);
+      client.state!.me.onStage = true; emit(client, 'quality', report(95)); hidden(element);
+      await state(client); emit(client, 'quality', report(96)); shown(element, 96);
+    });
+  }
+
+  it('forwarded quality mutation of current authority is reconciled without another event', async t => {
+    const { element, client } = await subscribedWidget(t, true);
+    element.addEventListener('stage-quality', () => { client.state!.me.onStage = false; }, { once: true });
+    emit(client, 'quality', report(86)); hidden(element);
+    client.state!.me.onStage = true; emit(client, 'quality', report(87)); hidden(element);
+    await state(client); emit(client, 'quality', report(88)); shown(element, 88);
+  });
+
+  it('equal-value quality updates preserve baseline removal of host-added same-text descendants', async t => {
+    const { element, client } = await subscribedWidget(t, true); emit(client, 'quality', report(89));
+    const node = element['quality'] as unknown as Node; let value = node.textContent, writes = 0;
+    node.children.push(new Node());
+    Object.defineProperty(node, 'textContent', { configurable: true, get: () => value, set: next => { value = next; writes++; node.children.splice(0); } });
+    t.after(() => Object.defineProperty(node, 'textContent', { configurable: true, writable: true, value }));
+    emit(client, 'quality', report(89)); shown(element, 89);
+    assert.ok(writes > 0); assert.equal(node.children.length, 0);
+  });
+
+  for (const key of ['hidden', 'textContent']) {
+    it(`own-role loss fences close and transfer before quality ${key} setter reentry`, async t => {
+      const { element, client } = await subscribedWidget(t, true);
+      const value = roomState(true); value.me.role = 'controller'; value.controllerId = 'me';
+      const target = { ...value.me, participantId: 'target', role: 'speaker' as const }; value.speakers = [value.me, target];
+      await state(client, value); emit(client, 'quality', report());
+      const row = element['stageManagementRows'].get('target')!; assert.ok(row);
+      const close = t.mock.method(client, 'closeRoom', async () => {}), transfer = t.mock.method(client, 'transferControl', async () => {});
+      const confirm = t.mock.method(window, 'confirm', () => true);
+      let calls = 0; const restore = setter(element['quality'], key, () => { calls++; click(element['roomClose']); click(row.transfer); }); t.after(restore);
+      emit(client, 'role', { participantId: 'me', role: 'audience' }); hidden(element);
+      assert.equal(calls, 1); assert.equal(confirm.mock.callCount(), 0); assert.equal(close.mock.callCount(), 0); assert.equal(transfer.mock.callCount(), 0);
+    });
+
+    it(`manual leave fences close and transfer before quality ${key} setter reentry`, async t => {
+      const { element, client } = await subscribedWidget(t, true);
+      const value = roomState(true); value.me.role = 'controller'; value.controllerId = 'me';
+      const target = { ...value.me, participantId: 'target', role: 'speaker' as const }; value.speakers = [value.me, target];
+      await state(client, value); emit(client, 'quality', report());
+      const row = element['stageManagementRows'].get('target')!; assert.ok(row);
+      const close = t.mock.method(client, 'closeRoom', async () => {}), transfer = t.mock.method(client, 'transferControl', async () => {});
+      const confirm = t.mock.method(window, 'confirm', () => true);
+      let calls = 0; const restore = setter(element['quality'], key, () => { calls++; click(element['roomClose']); click(row.transfer); }); t.after(restore);
+      click(element['roomAction']); await settle(); hidden(element);
+      assert.equal(calls, 1); assert.equal(confirm.mock.callCount(), 0); assert.equal(close.mock.callCount(), 0); assert.equal(transfer.mock.callCount(), 0);
+    });
+  }
+
+  for (const transition of ['speaker leave', 'controller removal', 'controller leave'] as const) {
+    it(`actual Hub ${transition} retires before every pre-state callback and only new state plus new quality reopens`, async t => {
+      const config = testConfig(c => { c.rooms.presenceBroadcastMs = 0; });
+      const h = harness(config); t.after(async () => { await h.hub.shutdown(); });
+      const host = await h.create(), speaker = await h.join(host.roomId, host.code, 'Speaker');
+      assert.equal(await h.req(host.s, { type: 'rtc:offer', payload: SENDRECV_OFFER }), 'ok');
+      assert.equal(await h.req(speaker.s, { type: 'hand:raise' }), 'ok');
+      assert.equal(await h.req(host.s, { type: 'stage:approve', targetId: speaker.id }), 'ok');
+      assert.equal(await h.req(speaker.s, { type: 'rtc:offer', payload: SENDRECV_OFFER }), 'ok');
+      const own = transition === 'controller leave' ? host : speaker;
+      const { element, client, socket } = await socketJoinedWidget(t, own.s.last('room:state')!);
+      h.transport.getStats = async () => ({ inbound: { packetsReceived: 988, packetsLost: 12 }, outbound: { fractionLost: 0.035 }, rttMs: 46 });
+      const timer = h.timers.find(timer => !timer.cleared && timer.ms === config.rooms.qualityIntervalMs)!;
+      assert.ok(timer); timer.cleared = true; timer.fn(); await nextTurn();
+      const wireReport = own.s.last('quality'); assert.ok(wireReport);
+      let accepted: unknown;
+      element.addEventListener('stage-quality', event => { accepted = (event as CustomEvent).detail; }, { once: true });
+      socket.deliver(wireReport); shown(element);
+      const retained = client.state!, rejected = { participants: [{ participantId: own.id, rttMs: 88 }] };
+      let callbacks = 0;
+      const observe = () => {
+        callbacks++; assert.equal(client.me!.onStage, true); hidden(element);
+        for (const detail of [accepted, rejected, { participants: [{ participantId: own.id, rttMs: 89 }] }]) {
+          emit(client, 'quality', detail); hidden(element);
+        }
+        emit(client, 'state', retained); emit(client, 'stagejoined', { participantId: own.id, role: 'speaker' });
+        emit(client, 'role', { participantId: own.id, role: 'controller' });
+        socket.deliver({ type: 'status', state: 'waiting' }); element['render'](); hidden(element);
+      };
+      if (transition !== 'controller leave') element.addEventListener('stage-role', observe, { once: true });
+      element.addEventListener('stage-stageleft', observe, { once: true });
+      own.s.clear();
+      assert.equal(await h.req(transition === 'controller removal' ? host.s : own.s,
+        transition === 'controller removal' ? { type: 'stage:remove', targetId: own.id } : { type: 'stage:leave' }), 'ok');
+      const events = own.s.inbox.filter(message => ['role:update', 'stage:left', 'room:state'].includes(message.type));
+      assert.deepEqual(events.map(message => message.type), transition === 'controller leave'
+        ? ['stage:left', 'room:state'] : ['role:update', 'stage:left', 'room:state']);
+      for (const message of events) socket.deliver(message);
+      hidden(element); assert.equal(callbacks, transition === 'controller leave' ? 1 : 2);
+      own.s.clear();
+      if (own === speaker) assert.equal(await h.req(own.s, { type: 'hand:raise' }), 'ok');
+      assert.equal(await h.req(host.s, { type: 'stage:approve', targetId: own.id }), 'ok');
+      assert.equal(await h.req(own.s, { type: 'rtc:offer', payload: SENDRECV_OFFER }), 'ok');
+      for (const message of own.s.inbox) socket.deliver(message);
+      assert.equal(client.me!.onStage, true); hidden(element);
+      emit(client, 'quality', accepted); emit(client, 'quality', rejected); hidden(element);
+      socket.deliver(wireReport); shown(element);
+    });
+  }
+
+  it('actual SDK reconnect consumes status-only and retained-state reports until a distinct resume state', async t => {
+    const { element, client, socket, sockets, hello, tick } = await socketJoinedWidget(t, roomState(true));
+    const accepted = report(), rejected = report(90), statusOnly = report(91);
+    emit(client, 'quality', accepted); shown(element); const retained = client.state!;
+    socket.close(); hidden(element); assert.equal(client.state, retained);
+    await tick(500); const next = sockets[1]!, join = await hello(next);
+    emit(client, 'quality', rejected); hidden(element);
+    next.deliver({ type: 'status', state: 'live' }); emit(client, 'quality', statusOnly); hidden(element);
+    emit(client, 'state', retained); emit(client, 'quality', report(92)); hidden(element);
+    next.deliver({ type: 'room:state', ...roomState(true), resumeToken: 'resume-me' });
+    next.deliver({ type: 'ok', requestId: join.requestId }); await settle(); hidden(element);
+    for (const detail of [accepted, rejected, statusOnly]) { emit(client, 'quality', detail); hidden(element); }
+    emit(client, 'quality', report(91)); shown(element, 91);
+  });
+
+  it('a receipt rejected before the first authoritative state stays rejected after admission', async t => {
+    const { element, sockets, hello } = socketJoiningWidget(t); await settle();
+    const socket = sockets[0]!, join = await hello(socket), client = element.client!, rejected = report(90);
+    emit(client, 'quality', rejected); hidden(element);
+    socket.deliver({ type: 'room:state', ...roomState(true) }); socket.deliver({ type: 'ok', requestId: join.requestId }); await settle();
+    emit(client, 'quality', rejected); hidden(element); emit(client, 'quality', report(90)); shown(element, 90);
+  });
+
+  for (const property of ['hidden', 'textContent'] as const) {
+    for (const loss of ['status', 'identity'] as const) {
+      it(`${property} setter reconciles ${loss} loss after a newer report and cannot reopen from restored getters`, async t => {
+        const { element, client } = await subscribedWidget(t, true);
+        const restore = setter(element['quality'], property, () => {
+          emit(client, 'quality', report(102));
+          if (loss === 'status') client['currentStatus'] = 'reconnecting'; else client.state!.roomId = 'different';
+        }); t.after(restore);
+        emit(client, 'quality', report(101)); hidden(element);
+        client['currentStatus'] = 'live'; client.state!.roomId = 'one';
+        emit(client, 'quality', report(103)); hidden(element);
+        await state(client); emit(client, 'quality', report(104)); shown(element, 104);
+      });
+    }
+
+    it(`${property} setter preserves a newer admitted replacement entry`, async t => {
+      const { element, client } = await subscribedWidget(t, true);
+      const next = roomState(true, 'replacement'); next.me.participantId = 'replacement';
+      const restore = setter(element['quality'], property, () => {
+        void state(client, next);
+        emit(client, 'quality', { participants: [{ participantId: 'replacement', rttMs: 106 }] });
+      }); t.after(restore);
+      emit(client, 'quality', report(105)); shown(element, 106);
+      assert.equal(client.state!.roomId, 'replacement');
+    });
+  }
+
+  for (const getter of ['state', 'status'] as const) {
+    for (const loss of ['onstage', 'identity', 'status'] as const) {
+      it(`${getter} getter tail reconciles silent ${loss} loss after a completed newer report`, async t => {
+        const { element, client } = await subscribedWidget(t, true); emit(client, 'quality', report(107));
+        const read = Object.getOwnPropertyDescriptor(StageClient.prototype, getter)!.get!;
+        let armed = true;
+        Object.defineProperty(client, getter, { configurable: true, get() {
+          const result: unknown = read.call(client);
+          if (armed) {
+            armed = false; emit(client, 'quality', report(108));
+            if (loss === 'onstage') client['snapshot']!.me.onStage = false;
+            else if (loss === 'identity') client['snapshot']!.roomId = 'different';
+            else client['currentStatus'] = 'reconnecting';
+          }
+          return result;
+        } });
+        t.after(() => Reflect.deleteProperty(client, getter));
+        element['syncQualityOwner'](); hidden(element);
+        client['snapshot']!.me.onStage = true; client['snapshot']!.roomId = 'one'; client['currentStatus'] = 'live';
+        emit(client, 'quality', report(109)); hidden(element);
+        await state(client); emit(client, 'quality', report(110)); shown(element, 110);
+      });
+    }
+  }
+
+  it('consumes an outer receipt before a public authority getter admits a newer report', async t => {
+    const { element, client } = await subscribedWidget(t, true); emit(client, 'quality', report(111));
+    const read = Object.getOwnPropertyDescriptor(StageClient.prototype, 'state')!.get!;
+    const old = report(112); let armed = true;
+    Object.defineProperty(client, 'state', { configurable: true, get() {
+      const result: unknown = read.call(client);
+      if (armed) { armed = false; emit(client, 'quality', report(113)); }
+      return result;
+    } });
+    t.after(() => Reflect.deleteProperty(client, 'state'));
+    emit(client, 'quality', old); shown(element, 113);
+    emit(client, 'quality', old); shown(element, 113);
+  });
+
+  for (const action of ['close', 'transfer'] as const) {
+    for (const loss of ['status', 'identity'] as const) {
+      for (const property of ['hidden', 'textContent'] as const) {
+        it(`corrective quality ${property} paint cannot restore pending ${action} consent after silent ${loss} loss`, async t => {
+          const { element, client } = await subscribedWidget(t, true);
+          const value = roomState(true); value.me.role = 'controller'; value.controllerId = 'me';
+          const target = { ...value.me, participantId: 'target', role: 'speaker' as const }; value.speakers = [value.me, target];
+          await state(client, value); emit(client, 'quality', report());
+          const row = element['stageManagementRows'].get('target')!;
+          const close = t.mock.method(client, 'closeRoom', async () => {}), transfer = t.mock.method(client, 'transferControl', async () => {});
+          let stored = Reflect.get(element['quality'], property), armed = false, lost = false;
+          Object.defineProperty(element['quality'], property, { configurable: true, get: () => stored, set: next => {
+            stored = next;
+            if (armed) {
+              armed = false; emit(client, 'quality', report(115)); lost = true;
+              if (loss === 'status') client['currentStatus'] = 'reconnecting'; else client.state!.me.participantId = 'different';
+            } else if (lost) {
+              lost = false; client['currentStatus'] = 'live'; client.state!.me.participantId = 'me';
+            }
+          } });
+          t.after(() => Object.defineProperty(element['quality'], property, { configurable: true, writable: true, value: stored }));
+          const confirm = t.mock.method(window, 'confirm', () => {
+            armed = true; emit(client, 'quality', report(114)); hidden(element); return true;
+          });
+          click(action === 'close' ? element['roomClose'] : row.transfer); await settle();
+          assert.equal(confirm.mock.callCount(), 1); assert.equal(close.mock.callCount(), 0); assert.equal(transfer.mock.callCount(), 0);
+          emit(client, 'quality', report(116)); hidden(element);
+          await state(client, value); emit(client, 'quality', report(117)); shown(element, 117);
+        });
+      }
+    }
+  }
+
+  it('keeps unconditional normal hidden-then-text writes even when metrics are unchanged', async t => {
+    const { element, client } = await subscribedWidget(t, true); emit(client, 'quality', report(118));
+    const writes: string[] = [], values = { hidden: element['quality'].hidden, textContent: element['quality'].textContent };
+    for (const property of ['hidden', 'textContent'] as const) {
+      let stored = values[property];
+      Object.defineProperty(element['quality'], property, { configurable: true, get: () => stored, set: next => { stored = next; writes.push(property); } });
+      t.after(() => Object.defineProperty(element['quality'], property, { configurable: true, writable: true, value: stored }));
+    }
+    emit(client, 'quality', report(118)); shown(element, 118);
+    assert.ok(writes.length >= 2);
+    for (let i = 0; i < writes.length; i += 2) assert.deepEqual(writes.slice(i, i + 2), ['hidden', 'textContent']);
+  });
+
+  for (const property of ['hidden', 'textContent'] as const) {
+    it(`${property} setter cannot repaint through nested terminal teardown or retire a later valid tenure`, async t => {
+      const { element, client } = await subscribedWidget(t, true);
+      const accepted = report(120);
+      const restore = setter(element['quality'], property, () => { void client['receive']({ type: 'room:closed', roomId: 'one' }); }); t.after(restore);
+      emit(client, 'quality', accepted); hidden(element); assert.equal(client.state, null); await settle();
+      await state(client); emit(client, 'quality', accepted); hidden(element);
+      emit(client, 'quality', report(121)); shown(element, 121);
+    });
+
+    it(`${property} setter entry replacement stays clear and old terminal callbacks cannot touch its new report`, async t => {
+      const { element, client, socket, sockets, hello } = await socketJoinedWidget(t, roomState(true));
+      const restore = setter(element['quality'], property, () => { element.setAttribute('room', 'replacement'); }); t.after(restore);
+      socket.deliver({ type: 'quality', ...report(122) }); hidden(element); await settle(); await settle();
+      const next = sockets[1]!, join = await hello(next);
+      next.deliver({ type: 'room:state', ...roomState(true, 'replacement') }); next.deliver({ type: 'ok', requestId: join.requestId }); await settle();
+      next.deliver({ type: 'quality', ...report(123) }); shown(element, 123);
+      emit(client, 'closed', { roomId: 'one' }); emit(client, 'kicked', { roomId: 'one' }); emit(client, 'status', 'disconnected');
+      shown(element, 123); assert.notEqual(element.client, client);
+    });
+  }
+
+  for (const getter of ['state', 'status'] as const) {
+    it(`${getter} getter tail preserves a newer authoritative entry rather than retiring it with the old owner`, async t => {
+      const { element, client } = await subscribedWidget(t, true); emit(client, 'quality', report(124));
+      const read = Object.getOwnPropertyDescriptor(StageClient.prototype, getter)!.get!;
+      let armed = true;
+      Object.defineProperty(client, getter, { configurable: true, get() {
+        const result: unknown = read.call(client);
+        if (armed) {
+          armed = false; const replacement = roomState(true, 'replacement'); replacement.me.participantId = 'replacement';
+          void state(client, replacement); emit(client, 'quality', { participants: [{ participantId: 'replacement', rttMs: 125 }] });
+        }
+        return result;
+      } });
+      t.after(() => Reflect.deleteProperty(client, getter));
+      element['syncQualityOwner'](); shown(element, 125); assert.equal(client.state!.roomId, 'replacement');
+    });
+  }
+
+  it('a quality receipt rejected for an offstage seat cannot be replayed after promotion', async t => {
+    const { element, client } = await subscribedWidget(t, false), rejected = report(126);
+    emit(client, 'quality', rejected); hidden(element); await state(client);
+    emit(client, 'quality', rejected); hidden(element); emit(client, 'quality', report(126)); shown(element, 126);
+  });
+
+  for (const participants of [[], [{ participantId: 'other', rttMs: 1000 }]]) {
+    it(`replaying a previously accepted ${participants.length ? 'foreign-only' : 'empty'} full replacement set cannot clear a newer report`, async t => {
+      const { element, client } = await subscribedWidget(t, true), empty = { participants };
+      emit(client, 'quality', report(127)); shown(element, 127); emit(client, 'quality', empty); hidden(element);
+      emit(client, 'quality', report(128)); shown(element, 128); emit(client, 'quality', empty); shown(element, 128);
+    });
+  }
+
+  for (const event of ['quality', 'state', 'status', 'micerror', 'micready', 'role', 'transferred', 'speaking', 'error'] as const) {
+    it(`preserves ordinary ${event} quality setter trace without additional paints`, async t => {
+      const { element, client } = await subscribedWidget(t, true); emit(client, 'quality', report(100));
+      const writes: string[] = [], node = element['quality'];
+      for (const property of ['hidden', 'textContent'] as const) {
+        let value = Reflect.get(node, property);
+        Object.defineProperty(node, property, { configurable: true, get: () => value, set: next => { value = next; writes.push(property); } });
+        t.after(() => Object.defineProperty(node, property, { configurable: true, writable: true, value }));
+      }
+      if (event === 'quality') emit(client, event, report(101));
+      else if (event === 'state') await state(client);
+      else if (event === 'status') client['setStatus']('waiting');
+      else if (event === 'micerror') emit(client, event, { name: 'NotFoundError', message: 'Unavailable' });
+      else if (event === 'micready') emit(client, event, undefined);
+      else if (event === 'role') emit(client, event, { participantId: 'me', role: 'controller' });
+      else if (event === 'transferred') emit(client, event, { fromId: 'host', toId: 'me' });
+      else if (event === 'speaking') emit(client, event, { participantIds: ['me'] });
+      else emit(client, event, new Error('Unrelated'));
+      const expected = event === 'quality' ? ['hidden', 'textContent']
+        : event === 'state' || event === 'status' ? ['hidden', 'textContent', 'hidden', 'textContent']
+        : event === 'micerror' ? ['textContent', 'hidden'] : [];
+      assert.deepEqual(writes, expected);
+    });
+  }
+
+
+  for (const boundary of ['closed', 'status', 'role', 'stageleft'] as const) {
+    for (const getter of ['state', 'status'] as const) {
+      it(`${boundary} pure retirement precedes ${getter} getter reentry without preventing a later new tenure`, async t => {
+        const { element, client } = await subscribedWidget(t, true); emit(client, 'quality', report(129));
+        const read = Object.getOwnPropertyDescriptor(StageClient.prototype, getter)!.get!, rejected = report(130);
+        let armed = true;
+        Object.defineProperty(client, getter, { configurable: true, get() {
+          const result: unknown = read.call(client);
+          if (armed) { armed = false; emit(client, 'quality', rejected); }
+          return result;
+        } });
+        t.after(() => Reflect.deleteProperty(client, getter));
+        emit(client, boundary, boundary === 'closed' ? { roomId: 'one' } : boundary === 'status' ? 'reconnecting'
+          : { participantId: 'me', ...(boundary === 'role' ? { role: 'audience' } : {}) });
+        hidden(element); await state(client); emit(client, 'quality', rejected); hidden(element);
+        emit(client, 'quality', report(131)); shown(element, 131);
+      });
+    }
+  }
+
+  it('early pure terminal retirement preserves a genuine new state and report admitted by a getter callback', async t => {
+    const { element, client } = await subscribedWidget(t, true); emit(client, 'quality', report(132));
+    const read = Object.getOwnPropertyDescriptor(StageClient.prototype, 'state')!.get!; let armed = true;
+    Object.defineProperty(client, 'state', { configurable: true, get() {
+      const result: unknown = read.call(client);
+      if (armed) { armed = false; void state(client); emit(client, 'quality', report(133)); }
+      return result;
+    } });
+    t.after(() => Reflect.deleteProperty(client, 'state'));
+    emit(client, 'closed', { roomId: 'one' }); shown(element, 133);
+  });
+
+});
