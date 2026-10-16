@@ -61,7 +61,7 @@ button.primary { background: var(--stage-accent, #2563eb); border-color: transpa
  * later snapshots update its accepted-name display, not the draft or the `name` attribute.
  * The controller's room-name draft follows the same rule while control is retained.
  * A controller can explicitly approve or reject the snapshot's hand requests; the server owns admission.
- * Controllers can lock/unlock other speakers' mute or remove them from the stage without removing them from the room.
+ * Controllers can lock/unlock other speakers' mute, remove them from the stage, or confirm a connected speaker's control handoff.
  * The microphone picker is an explicit draft, never an indicator of the actual capture device.
  * The output picker is also a draft; explicit refresh and submission never imply audible playback.
  * Style through `::part(panel|status|quality|speaking|hand-rejection|audio-recovery|audio-retry|actions|name|room-name|hands|stage-management|playback|microphone|output-device)` and the
@@ -106,10 +106,11 @@ export class StageElement extends HTMLElement {
   private readonly stageManagementSummary: HTMLElement;
   private readonly stageManagementNotice: HTMLParagraphElement;
   private readonly stageManagementList: HTMLUListElement;
-  private stageManagementOwner: { client: StageClient; roomId: string; participantId: string; generation: number } | undefined;
+  private stageManagementOwner: { client: StageClient; roomId: string; participantId: string; generation: number; transferRevision: number; transferAwaitingState: boolean } | undefined;
   private stageManagementTerminalClient: StageClient | undefined;
   private readonly stageManagementPending = new Map<string, object>();
-  private readonly stageManagementRows = new Map<string, { node: HTMLLIElement; name: HTMLSpanElement; mute: HTMLButtonElement; remove: HTMLButtonElement }>();
+  private stageTransferAttempt: { id: string; node: HTMLLIElement; revision: number; invalid: boolean } | undefined;
+  private readonly stageManagementRows = new Map<string, { node: HTMLLIElement; name: HTMLSpanElement; mute: HTMLButtonElement; remove: HTMLButtonElement; transfer: HTMLButtonElement }>();
   private stageManagementOrder: string[] = [];
   private readonly unlock: HTMLButtonElement;
   private playbackOwner: { client: StageClient; roomId: string; participantId: string; notice: number } | undefined;
@@ -437,6 +438,7 @@ export class StageElement extends HTMLElement {
           if (type === 'state' || type === 'status' || type === 'closed' || type === 'kicked') this.syncNameOwner();
           if (type === 'state' || type === 'status' || type === 'closed' || type === 'kicked') this.syncRoomNameOwner();
           if (type === 'state' || type === 'status' || type === 'closed' || type === 'kicked') this.syncHandQueue();
+          this.noteStageTransferEvent(type, detail);
           this.syncStageManagement();
           const ownId = client.me?.participantId;
           if (type === 'closed' || type === 'kicked'
@@ -806,9 +808,9 @@ export class StageElement extends HTMLElement {
   }
 
   private retireStageManagement(): void {
-    this.stageManagementOwner = undefined; this.stageManagementPending.clear();
+    this.stageManagementOwner = undefined; this.stageManagementPending.clear(); this.stageTransferAttempt = undefined;
     for (const row of this.stageManagementRows.values()) {
-      for (const control of [row.mute, row.remove]) { control.disabled = true; control.setAttribute('aria-busy', 'false'); }
+      for (const control of [row.mute, row.remove, row.transfer]) { control.disabled = true; control.setAttribute('aria-busy', 'false'); }
     }
     if (this.stageManagementRows.size) this.stageManagementList.replaceChildren();
     this.stageManagementRows.clear(); this.stageManagementOrder = [];
@@ -829,7 +831,7 @@ export class StageElement extends HTMLElement {
       this.retireStageManagement();
       // Reconnecting retains an existing controller tenure, never establishes a different one.
       if (!active) return;
-      this.stageManagementOwner = { client, roomId: state.roomId, participantId: me.participantId, generation: this.generation };
+      this.stageManagementOwner = { client, roomId: state.roomId, participantId: me.participantId, generation: this.generation, transferRevision: 0, transferAwaitingState: false };
     }
     const seen = new Set<string>();
     const people = (state.speakers ?? []).filter(person => {
@@ -841,33 +843,38 @@ export class StageElement extends HTMLElement {
     this.stageManagementPanel.hidden = false;
     this.stageManagementSummary.textContent = `舞台管理（${people.length}）${reconnecting ? ' · 上次收到' : ''}`;
     this.stageManagementNotice.textContent = `${reconnecting ? '重新連線中，暫時不能管理舞台。'
-      : people.length ? '僅管理其他台上發言者。' : '目前沒有其他台上發言者。'}解除靜音鎖定會保留對方自行靜音設定；移下台後仍留在房間。`;
+      : people.length ? '僅管理其他台上發言者。' : '目前沒有其他台上發言者。'}解除靜音鎖定會保留對方自行靜音設定；移下台後仍留在房間。移交控制權後會失去主控權限，但保留目前台位並留在房間。`;
     for (const person of people) {
       const id = person.participantId;
       let row = this.stageManagementRows.get(id);
       if (!row) {
         const node = document.createElement('li'), name = document.createElement('span');
-        const mute = document.createElement('button'), remove = document.createElement('button');
-        mute.type = remove.type = 'button'; remove.textContent = '移下台';
-        row = { node, name, mute, remove };
+        const mute = document.createElement('button'), remove = document.createElement('button'), transfer = document.createElement('button');
+        mute.type = remove.type = transfer.type = 'button'; remove.textContent = '移下台'; transfer.textContent = '移交控制權';
+        row = { node, name, mute, remove, transfer };
         const currentRow = row;
         mute.onclick = () => this.moderateStage(id, currentRow.node, false);
         remove.onclick = () => this.moderateStage(id, currentRow.node, true);
-        node.append(name, mute, remove); this.stageManagementRows.set(id, row);
+        transfer.onclick = () => this.transferStageControl(id, currentRow.node);
+        node.append(name, mute, remove, transfer); this.stageManagementRows.set(id, row);
       }
       const name = decodeName(person.name);
       row.name.textContent = `${name} · ${person.muted ? '已靜音' : '未靜音'}${person.forceMuted ? ' · 已鎖定靜音' : ''}${person.connected ? '' : ' · 暫時離線（席位保留中）'}`;
       row.mute.textContent = person.forceMuted ? '解除靜音鎖定' : '鎖定靜音';
       row.mute.setAttribute('aria-label', person.forceMuted ? `解除 ${name} 的靜音鎖定` : `鎖定 ${name} 靜音`);
       row.remove.setAttribute('aria-label', `將 ${name} 移下台`);
+      row.transfer.setAttribute('aria-label', `將控制權移交給 ${name}`);
       const pending = this.stageManagementPending.has(id);
       // A retained offline seat can still be moderated; the server decides whether it remains valid.
       for (const control of [row.mute, row.remove]) {
-        control.disabled = reconnecting || pending; control.setAttribute('aria-busy', String(pending));
+        control.disabled = reconnecting || pending || Boolean(this.stageTransferAttempt); control.setAttribute('aria-busy', String(pending));
       }
+      row.transfer.hidden = typeof client.transferControl !== 'function';
+      row.transfer.disabled = Boolean(this.stageTransferAttempt) || !this.canTransferStage(id, row.node);
+      row.transfer.setAttribute('aria-busy', String(Boolean(this.stageTransferAttempt)));
     }
     for (const [id, row] of this.stageManagementRows) if (!seen.has(id)) {
-      for (const control of [row.mute, row.remove]) { control.disabled = true; control.setAttribute('aria-busy', 'false'); }
+      for (const control of [row.mute, row.remove, row.transfer]) { control.disabled = true; control.setAttribute('aria-busy', 'false'); }
       this.stageManagementRows.delete(id);
       // Keep an admitted operation reserved until settlement, even if this ID returns on stage.
     }
@@ -876,13 +883,16 @@ export class StageElement extends HTMLElement {
       this.stageManagementList.replaceChildren(...order.map(id => this.stageManagementRows.get(id)!.node));
       this.stageManagementOrder = order;
     }
+    // Observed ineligibility cannot be undone by a nested callback restoring the old snapshot.
+    const attempt = this.stageTransferAttempt;
+    if (attempt && !this.canTransferStage(attempt.id, attempt.node)) attempt.invalid = true;
   }
 
   private moderateStage(id: string, node: HTMLLIElement, remove: boolean): void {
     this.syncStageManagement();
     const owner = this.stageManagementOwner, row = this.stageManagementRows.get(id);
     if (!owner || !row || row.node !== node || this.stageManagementPanel.hidden
-      || (owner.client.status !== 'waiting' && owner.client.status !== 'live') || this.stageManagementPending.has(id)) return;
+      || (owner.client.status !== 'waiting' && owner.client.status !== 'live') || this.stageManagementPending.has(id) || this.stageTransferAttempt) return;
     const target = owner.client.state?.speakers.find(person => person.participantId === id && person.role === 'speaker' && person.onStage);
     if (!target) return;
     // Resolve the branch from the authoritative snapshot, not the label of a retained button.
@@ -898,6 +908,60 @@ export class StageElement extends HTMLElement {
       try { await (remove ? owner.client.removeFromStage(id) : forceMuted ? owner.client.forceUnmute(id) : owner.client.forceMute(id)); }
       catch (error) { if (current() && this.stageManagementRows.get(id)?.node === node) this.show(error); }
       finally { if (current()) { this.stageManagementPending.delete(id); this.syncStageManagement(); } }
+    })();
+  }
+
+  private noteStageTransferEvent(type: keyof StageEventMap, detail: StageEventMap[keyof StageEventMap]): void {
+    const owner = this.stageManagementOwner;
+    if (!owner) return;
+    if (type === 'state') { owner.transferAwaitingState = false; return; }
+    const role = type === 'role' ? detail as StageEventMap['role'] : undefined;
+    const left = type === 'stageleft' ? detail as StageEventMap['stageleft'] : undefined;
+    const transferred = type === 'transferred' ? detail as StageEventMap['transferred'] : undefined;
+    const managed = (id: string): boolean => this.stageManagementRows.has(id) || this.stageTransferAttempt?.id === id;
+    if ((role && (role.participantId === owner.participantId ? role.role !== 'controller' : role.role !== 'speaker' && managed(role.participantId)))
+      || (left && managed(left.participantId))
+      || (transferred && transferred.fromId === owner.participantId && transferred.toId !== owner.participantId)) {
+      // These SDK notifications precede their snapshot; fence handoffs without inventing role state.
+      owner.transferRevision++; owner.transferAwaitingState = true;
+      if (this.stageTransferAttempt) this.stageTransferAttempt.invalid = true;
+    }
+  }
+
+  private canTransferStage(id: string, node: HTMLLIElement): boolean {
+    const owner = this.stageManagementOwner, client = owner?.client;
+    return Boolean(owner && client && !owner.transferAwaitingState && this.stageManagementPending.size === 0
+      && !this.stageManagementPanel.hidden && this.stageManagementRows.get(id)?.node === node
+      && (client.status === 'waiting' || client.status === 'live') && client.me?.connected === true
+      && typeof client.transferControl === 'function' && typeof window.confirm === 'function'
+      && id !== owner.participantId && client.state?.speakers.find(person => person.participantId === id
+        && person.role === 'speaker' && person.onStage)?.connected === true);
+  }
+
+  private transferStageControl(id: string, node: HTMLLIElement): void {
+    this.syncStageManagement();
+    const owner = this.stageManagementOwner;
+    if (!owner || this.stageTransferAttempt || !this.canTransferStage(id, node)) return;
+    const attempt = { id, node, revision: owner.transferRevision, invalid: false };
+    this.stageTransferAttempt = attempt; this.syncStageManagement();
+    const current = (): boolean => {
+      if (this.stageManagementOwner !== owner || this.stageTransferAttempt !== attempt) return false;
+      this.syncStageManagement();
+      return this.stageManagementOwner === owner && this.stageTransferAttempt === attempt;
+    };
+    const eligible = (): boolean => current() && !attempt.invalid && owner.transferRevision === attempt.revision && this.canTransferStage(id, node);
+    void (async () => {
+      try {
+        if (!eligible()) return;
+        const target = owner.client.state!.speakers.find(person => person.participantId === id && person.role === 'speaker' && person.onStage)!;
+        if (!window.confirm(`確定將控制權移交給 ${decodeName(target.name)}？你將失去主控權限，但保留目前台位並留在房間。`) || !eligible()) return;
+        this.hideError();
+        await owner.client.transferControl(id);
+      } catch (error) {
+        if (current() && !attempt.invalid && this.stageManagementRows.get(id)?.node === node) this.show(error);
+      } finally {
+        if (current()) { this.stageTransferAttempt = undefined; this.syncStageManagement(); }
+      }
     })();
   }
 
