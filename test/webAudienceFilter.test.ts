@@ -232,7 +232,7 @@ it('whole sample distinguishes empty audience from no matches without changing s
   const h = await setup(t), state = controllerState(); state.audienceCount = 9; h.sdk.snapshot(state);
   const stage = rowsIn(panel(h, '舞台 ·')), hands = rowsIn(panel(h, '舉手佇列 ·'));
   type(h, 'no result'); assertCount(h, 0, 5); assert.deepEqual(visibleIds(h), []);
-  assert.match(panel(h, '觀眾 ·').textContent, /觀眾 · 9\/300/);
+  assert.match(panel(h, '觀眾 ·').textContent, /觀眾 · 9 人/);
   assert.ok(h.app.descendants().some(node => !node.hidden && /沒有符合|找不到符合/.test(node.textContent)
     && node.children.length === 0), 'visible no-match message');
   assert.equal([...stage, ...hands].every(row => !row.hidden), true);

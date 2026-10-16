@@ -396,6 +396,11 @@ client.on('micready', () => {
 });
 navigator.mediaDevices?.addEventListener('devicechange', () => { void refreshDevices().catch(() => {}); });
 void refreshDevices().catch(() => {});
+// Reserve public snapshot ownership before existing UI callbacks can reenter the SDK.
+client.on('state', prepareOccupancyState);
+client.on('status', prepareOccupancyStatus);
+client.on('closed', retireOccupancy);
+client.on('kicked', retireOccupancy);
 /** Muted room microphones have a known zero level; only previews or unmuted stage mics need polling. */
 let meterTimer: ReturnType<typeof setInterval> | undefined;
 /** Only preview capture is abortable here, never setInputDevice or the room microphone. */
@@ -550,7 +555,8 @@ function runLanding(operation: 'create' | 'join', action: (isCancelled: () => bo
   if (signaling.error) { showError(signaling.error); return; }
   const revision = landingRevision;
   const entry = { operation, revision, cancelled: false, entered: false };
-  landingEntry = entry; busy = true; syncLandingActions();
+  retireOccupancy();
+  landingEntry = entry; busy = true; syncLandingActions(); renderOccupancy();
   void run(() => action(() => entry.cancelled), undefined, undefined, () => !entry.cancelled, error => {
     const message = error instanceof Error ? error.message : '操作失敗，請稍後再試。';
     if (landingEntry !== entry || entry.entered || client.state || revision !== landingRevision
@@ -584,6 +590,7 @@ function field(form: HTMLFormElement, label: string, name: string, value = '', r
   return input;
 }
 function landing(): void {
+  retireOccupancy();
   // Drop ownership before any reset can synchronously deliver another speaking callback.
   resetSpeaking();
   handRejectionRoomActive = false; retireHandRejection();
@@ -645,15 +652,16 @@ function landing(): void {
   cancel.id = 'landing-cancel'; cancel.type = 'button'; cancel.dataset.landingCancel = 'true';
   cancel.onclick = () => {
     if (!cancel.isConnected || !canCancelLanding()) return;
+    retireOccupancy();
     landingEntry!.cancelled = true;
-    syncLandingActions();
+    syncLandingActions(); renderOccupancy();
     void run(() => client.disconnect());
   };
   const progress = element('p', 'muted');
   progress.id = 'landing-progress'; progress.dataset.landingProgress = 'true';
   progress.setAttribute('role', 'status'); progress.setAttribute('aria-live', 'polite');
   content.replaceChildren(intro, grid, progress, cancel);
-  syncLandingActions(); renderNotices();
+  syncLandingActions(); renderNotices(); renderOccupancy();
 }
 function syncMicRetry(): void {
   if (!micRetryButton) return;
@@ -756,6 +764,95 @@ function syncAudienceFilter(state: RoomStatePayload): void {
   audienceFilter.hidden = false; audienceSearch.disabled = false;
   applyAudienceFilter();
 }
+const roomOccupancy = element('p', 'muted room-occupancy');
+roomOccupancy.id = 'room-occupancy'; roomOccupancy.hidden = true;
+interface OccupancyReport {
+  roomId: string; participantId: string;
+  room: number; stage: number; audience: number; maxAudience: number; maxSpeakers: number;
+  controllerOnStage: boolean; stale: boolean;
+}
+let occupancyReport: OccupancyReport | undefined;
+let occupancyRevision = 0;
+let occupancyPainting = false;
+const occupancyReceipts = new WeakSet<object>();
+// Logical retirement is separate from painting so existing action ownership changes run first.
+function retireOccupancy(): void { occupancyRevision++; occupancyReport = undefined; }
+function projectOccupancy(state: RoomStatePayload): OccupancyReport | undefined {
+  const roomId = state.roomId, participantId = state.me?.participantId, controllerId = state.controllerId;
+  const limits = state.limits, audience = state.audienceCount;
+  const maxAudience = limits?.maxAudience, maxSpeakers = limits?.maxSpeakers, speakers = state.speakers;
+  if (typeof roomId !== 'string' || !roomId.trim() || typeof participantId !== 'string' || !participantId.trim()
+    || typeof controllerId !== 'string' || !controllerId.trim() || !Array.isArray(speakers)
+    || !limits || typeof limits !== 'object' || Array.isArray(limits)
+    || !Number.isSafeInteger(audience) || audience < 0 || !Number.isSafeInteger(maxAudience) || maxAudience <= 0
+    || !Number.isSafeInteger(maxSpeakers) || maxSpeakers <= 0) return;
+  const ids = new Set<string>();
+  let controllerOnStage = false;
+  for (const person of speakers) {
+    if (!person || typeof person.participantId !== 'string' || !person.participantId.trim() || ids.has(person.participantId)
+      || person.onStage !== true || (person.role !== 'speaker' && person.role !== 'controller')
+      || (person.role === 'controller') !== (person.participantId === controllerId)) return;
+    ids.add(person.participantId);
+    if (person.participantId === controllerId) controllerOnStage = true;
+  }
+  const stage = ids.size - Number(controllerOnStage), room = audience + stage;
+  if (!Number.isSafeInteger(room) || room > maxAudience || stage > maxSpeakers) return;
+  return { roomId, participantId, room, stage, audience, maxAudience, maxSpeakers, controllerOnStage, stale: false };
+}
+function reconcileOccupancy(): void {
+  const report = occupancyReport;
+  if (!report) return;
+  if (report.roomId !== client.state?.roomId || report.participantId !== client.state?.me?.participantId
+    || !['waiting', 'live', 'reconnecting'].includes(client.status)) { retireOccupancy(); return; }
+  if (client.status === 'reconnecting' && !report.stale) { report.stale = true; occupancyRevision++; }
+}
+function prepareOccupancyState({ detail }: { detail: RoomStatePayload }): void {
+  const revision = ++occupancyRevision;
+  const object = detail && typeof detail === 'object', unseen = object && !occupancyReceipts.has(detail);
+  if (object) occupancyReceipts.add(detail);
+  if (!unseen || detail !== client.state || (client.status !== 'waiting' && client.status !== 'live')) {
+    reconcileOccupancy(); return;
+  }
+  const report = projectOccupancy(detail);
+  // Public getters can synchronously replace this receipt or retire the room.
+  if (revision !== occupancyRevision || detail !== client.state
+    || (client.status !== 'waiting' && client.status !== 'live')) return;
+  occupancyReport = report;
+}
+function prepareOccupancyStatus(): void { occupancyRevision++; reconcileOccupancy(); }
+function renderOccupancy(): void {
+  if (occupancyPainting) return;
+  occupancyPainting = true;
+  try {
+    // Nested callbacks reserve their output first; drain finite changes without trusting a paint cache.
+    for (;;) {
+      reconcileOccupancy();
+      // A predecessor UI setter may emit status before the new state reaches renderRoom.
+      // Retire old-room commands before this independent paragraph exposes the new seat.
+      const identity = client.state ? JSON.stringify([client.state.roomId, client.state.me.participantId]) : '';
+      if (identity !== roomActionIdentity) { resetRoomActions(identity); continue; }
+      const revision = occupancyRevision, report = occupancyReport, connectionStatus = client.status;
+      const roomId = client.state?.roomId, participantId = client.state?.me?.participantId;
+      const current = (): boolean => {
+        if (connectionStatus !== client.status || roomId !== client.state?.roomId
+          || participantId !== client.state?.me?.participantId) {
+          // A host setter can alter public ownership without an SDK event. Fence old actions first.
+          reconcileOccupancy();
+          resetRoomActions(client.state ? JSON.stringify([client.state.roomId, client.state.me.participantId]) : '');
+          syncRoomActions();
+          return false;
+        }
+        return revision === occupancyRevision && report === occupancyReport;
+      };
+      const freshness = connectionStatus === 'reconnecting' ? '重新連線中，上次快照' : report?.stale ? '上次快照' : '最近快照';
+      const text = report ? `房間席位（${freshness}）：主控以外 ${report.room} / ${report.maxAudience} 人，其中台上 ${report.stage} / ${report.maxSpeakers} 人、觀眾 ${report.audience} 人；主控另計 1 人（${report.controllerOnStage ? '台上' : '台下'}）。含斷線保留席位。` : '';
+      if (!report && !roomOccupancy.hidden) { roomOccupancy.hidden = true; if (!current()) continue; }
+      if (roomOccupancy.textContent !== text) { roomOccupancy.textContent = text; if (!current()) continue; }
+      if (report && roomOccupancy.hidden) { roomOccupancy.hidden = false; if (!current()) continue; }
+      if (current()) return;
+    }
+  } finally { occupancyPainting = false; }
+}
 let speakingDirtyIds = new Set<string>();
 let speakingRowsRevision = 0;
 let speakingPaintRevision: number | undefined;
@@ -824,7 +921,7 @@ function renderRoom(state: RoomStatePayload): void {
   const roomCode = state.code ?? (createdRoom?.roomId === state.roomId ? createdRoom.code : undefined);
   // Separate already-applied overlays from structural state; dirty sliders still reset to server state.
   const { audienceCount, ...roomStructure } = state;
-  const audienceTitle = `觀眾 · ${audienceCount}/${state.limits.maxAudience}`;
+  const audienceTitle = `觀眾 · ${audienceCount} 人`;
   const signature = JSON.stringify([roomStructure, roomCode, client.status]);
   const currentSpeaking = new Set(speakingRetired ? speakingIds : client.speaking);
   const speakingSignature = JSON.stringify([...currentSpeaking]);
@@ -928,12 +1025,14 @@ function renderRoom(state: RoomStatePayload): void {
     actions.append(cooldownButton);
   }
   actions.append(button('離開房間', async () => {
+    retireOccupancy();
     handRejectionRoomActive = false; retireHandRejection();
     // Leaving after a pre-ACK snapshot also retires that entry's local feedback.
     if (landingEntry) landingEntry.cancelled = true;
     micTest?.stop(); micTest = null;
     testButton.textContent = '測試麥克風'; testButton.setAttribute('aria-pressed', 'false');
-    await client.disconnect(); createdRoom = null; micNotice = invitation = ''; landing();
+    const disconnect = client.disconnect(); renderOccupancy();
+    await disconnect; createdRoom = null; micNotice = invitation = ''; landing();
   }));
   if (controller) actions.append(roomButton('close', '關閉房間', async () => {
     if (window.confirm('確定關閉房間並讓所有人離場？')) await client.closeRoom();
@@ -1081,7 +1180,7 @@ client.on('state', ({ detail }) => {
   // Only a new current snapshot resolves early loss; status/report sync still sees the old seat.
   if (detail === client.state && detail !== stageQualitySuppressedState) stageQualitySuppressedState = undefined;
   if (landingEntry) landingEntry.entered = true;
-  renderRoom(detail);
+  try { renderRoom(detail); } finally { renderOccupancy(); }
 });
 client.on('status', ({ detail }) => {
   if (detail === 'disconnected' && !client.state) resetSpeaking();
@@ -1202,6 +1301,9 @@ function stopRoomTimers(): void {
 }
 client.on('state', syncRoomTimers);
 client.on('status', syncRoomTimers);
+client.on('status', renderOccupancy);
+client.on('closed', renderOccupancy);
+client.on('kicked', renderOccupancy);
 // Page-lifetime listener, like the client/device listeners; landing previews also use it.
 document.addEventListener('visibilitychange', () => {
   connectionResultWatermark = ++connectionPollSequence; // Retire pending UI results without resetting SDK delta baselines.
@@ -1209,5 +1311,7 @@ document.addEventListener('visibilitychange', () => {
   // A resumed SDK sample can span the hidden interval since the last completed stats sample.
   if (!document.hidden) refreshConnectionLine();
 });
+// Keep this passive paragraph outside the retained room tree and existing live notices.
+app.append(roomOccupancy, content, stageQuality, settings);
 landing();
 if (signaling.error) showError(signaling.error);
