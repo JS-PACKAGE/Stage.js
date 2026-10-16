@@ -6,6 +6,7 @@ import { after, afterEach, describe, it } from 'node:test';
 import type { TestContext } from 'node:test';
 import { StageClient } from '../src/index.ts';
 import type { ClientMessage, RoomStatePayload, ServerMessage } from '../../../shared/protocol.ts';
+import { Room } from '../../../src/model/room.ts';
 import { parseClientMessage, ValidationError } from '../../../src/ws/validate.ts';
 
 /** Minimal DOM surface for widget state tests; this does not simulate a browser layout or input system. */
@@ -7238,6 +7239,199 @@ describe('widget controller hand request panel', () => {
   function error(socket: { deliver(message: ServerMessage): void }, message = 'Existing widget error'): void {
     socket.deliver({ type: 'error', code: 'conflict', message });
   }
+
+  /** Observe only mounted hand-row setters/methods, not render calls or elapsed time. */
+  function rowWrites(t: TestContext, rows: Node[]) {
+    const writes = { text: 0, attribute: 0, disabled: 0 }, changes = { ...writes };
+    for (const row of rows) {
+      const name = row.children.find(node => node.tagName === 'SPAN'); assert.ok(name);
+      let label = name.textContent;
+      Object.defineProperty(name, 'textContent', { configurable: true, get: () => label, set: (value: string) => {
+        writes.text++; if (label !== value) changes.text++; label = value;
+      } });
+      t.after(() => { Object.defineProperty(name, 'textContent', { configurable: true, writable: true, value: label }); });
+      for (const button of Object.values(buttons(row))) {
+        let disabled = button.disabled;
+        Object.defineProperty(button, 'disabled', { configurable: true, get: () => disabled, set: (value: boolean) => {
+          writes.disabled++; if (disabled !== value) changes.disabled++; disabled = value;
+        } });
+        t.after(() => { Object.defineProperty(button, 'disabled', { configurable: true, writable: true, value: disabled }); });
+        const setAttribute = button.setAttribute;
+        t.mock.method(button, 'setAttribute', function (this: Node, key: string, value: string): void {
+          if (key === 'aria-label' || key === 'aria-busy') {
+            writes.attribute++; if (this.getAttribute(key) !== value) changes.attribute++;
+          }
+          setAttribute.call(this, key, value);
+        });
+      }
+    }
+    const reset = () => { for (const key of ['text', 'attribute', 'disabled'] as const) writes[key] = changes[key] = 0; };
+    const expect = (text = 0, attribute = 0, disabled = 0) => {
+      assert.deepEqual({ ...writes }, { text, attribute, disabled }, 'only necessary current-value hand-row writes');
+      assert.deepEqual({ ...changes }, { ...writes }, 'each guarded write changes its current DOM value');
+      reset();
+    };
+    const snapshot = () => ({ writes: { ...writes }, changes: { ...changes } });
+    return { writes, changes, reset, expect, snapshot };
+  }
+
+  for (const shape of [
+    { hands: 20, speakers: 8, audience: 40 }, { hands: 20, speakers: 8, audience: 292 },
+    { hands: 292, speakers: 8, audience: 292 }, { hands: 300, speakers: 0, audience: 300 },
+  ]) {
+    it(`hand-row writes: skips unchanged actual Room/SDK events for ${shape.hands} hands among ${shape.speakers + shape.audience + 1} participants`, async t => {
+      const room = new Room({ roomId: 'one', name: 'Room', code: '', codeRequired: false, now: 0,
+        limits: { maxSpeakers: 8, maxAudience: 300 }, controller: { participantId: 'me', name: 'Host', resumeToken: 'host-token' } });
+      for (let i = 0; i < shape.speakers; i++) {
+        const participantId = `speaker-${i}`;
+        room.join({ participantId, name: `Speaker ${i}`, resumeToken: `token-${participantId}` }, i + 1);
+        room.raiseHand(participantId); room.approve('me', participantId, i + 1);
+      }
+      for (let i = 0; i < shape.audience; i++) {
+        const participantId = `audience-${i}`;
+        room.join({ participantId, name: `Listener ${i} &amp; safe`, resumeToken: `token-${participantId}` }, i + 10);
+        if (i < shape.hands) room.raiseHand(participantId);
+      }
+      const { element, socket, client } = await socketJoinedWidget(t, room.snapshot('me'));
+      const original = [...queue(element).rows], observed = rowWrites(t, original);
+      const replaceRows = t.mock.method(queue(element).list, 'replaceChildren');
+      let states = 0, mics = 0;
+      element.addEventListener('stage-state', () => { states++; });
+      element.addEventListener('stage-mic', () => { mics++; });
+      for (let i = 0; i < 100; i++) {
+        for (const event of i % 2 ? room.unmute('me') : room.mute('me')) socket.deliver(event);
+        socket.deliver({ type: 'room:state', ...room.snapshot('me') });
+      }
+      observed.expect();
+      assert.equal(states, 100); assert.equal(mics, 100, 'event forwarding is not skipped');
+      assert.deepEqual(queue(element).rows, original); assert.equal(replaceRows.mock.callCount(), 0);
+      assert.equal(client.state!.hands.length, shape.hands); room.assertInvariants();
+    });
+  }
+
+  it('hand-row writes: updates decoded names and offline text without rewriting unchanged controls', async t => {
+    const initial = state(), { element, socket } = await socketJoinedWidget(t, initial);
+    const first = queue(element).rows[0]!, observed = rowWrites(t, [first]), other = rowWrites(t, [queue(element).rows[1]!]);
+    const next = structuredClone(initial); next.hands[0]!.name = 'Renamed &lt;safe&gt; &amp; text';
+    socket.deliver({ type: 'room:state', ...next }); observed.expect(1, 2); other.expect();
+    assert.equal(first.children[0]!.textContent, 'Renamed <safe> & text');
+    assert.equal(buttons(first).approve.getAttribute('aria-label'), '核准 Renamed <safe> & text 上台');
+    assert.equal(buttons(first).reject.getAttribute('aria-label'), '婉拒 Renamed <safe> & text 的舉手申請');
+    next.hands[0]!.connected = false;
+    socket.deliver({ type: 'room:state', ...next }); observed.expect(1); other.expect();
+    assert.equal(first.children[0]!.textContent, 'Renamed <safe> & text（暫時離線）'); busy(first, false);
+    next.hands[0]!.name = 'Renamed <safe> & text';
+    socket.deliver({ type: 'room:state', ...next }); observed.expect(); other.expect();
+    next.hands[0]!.connected = true;
+    socket.deliver({ type: 'room:state', ...next }); observed.expect(1); other.expect();
+  });
+
+  for (const action of ['approve', 'reject'] as const) for (const outcome of ['ok', 'error'] as const) {
+    it(`hand-row writes: changes only pending ${action} controls through actual SDK ${outcome} settlement`, async t => {
+      const { element, socket, tick } = await socketJoinedWidget(t, state());
+      const first = queue(element).rows[0]!, observed = rowWrites(t, [first]), other = rowWrites(t, [queue(element).rows[1]!]);
+      press(buttons(first)[action]); observed.expect(0, 2, 2); other.expect(); busy(first, true);
+      socket.deliver({ type: 'room:state', ...state() }); observed.expect(); other.expect();
+      await tick(100); const sent = request(socket); assert.equal(sent.type, `stage:${action}`);
+      if (outcome === 'ok') socket.deliver({ type: 'ok', requestId: sent.requestId });
+      else socket.deliver({ type: 'error', requestId: sent.requestId, code: 'conflict', message: 'Try again' });
+      await settle(); observed.expect(0, 2, 2); other.expect(); busy(first, false);
+      socket.deliver({ type: 'room:state', ...state() }); observed.expect(); other.expect();
+    });
+  }
+
+  it('hand-row writes: preserves pending/reconnection policy and updates only changed values on resume', async t => {
+    const { element, client, socket, sockets, tick, hello } = await socketJoinedWidget(t, state());
+    const first = queue(element).rows[0]!, pending = deferred();
+    t.mock.method(client, 'approve', () => pending.promise);
+    const observed = rowWrites(t, [...queue(element).rows]);
+    press(buttons(first).approve); observed.expect(0, 2, 2);
+    socket.close(); await settle(); observed.expect(0, 0, 2);
+    busy(first, true); busy(queue(element).rows[1]!, false, true);
+    pending.resolve(); await settle(); observed.expect(0, 2);
+    busy(first, false, true);
+    await tick(500); const next = sockets[1]!, resume = await hello(next); observed.expect();
+    next.deliver({ type: 'room:state', ...state() }); next.deliver({ type: 'ok', requestId: resume.requestId });
+    await settle(); observed.expect(0, 0, 4); busy(first, false); busy(queue(element).rows[1]!, false);
+    assert.equal(queue(element).rows[0], first);
+    next.deliver({ type: 'room:state', ...state() }); observed.expect();
+  });
+
+  it('hand-row writes: retains row order/removal behavior without rewriting surviving rows', async t => {
+    const { element, socket } = await socketJoinedWidget(t, state());
+    const [first, second] = queue(element).rows; assert.ok(first && second);
+    const removed = rowWrites(t, [first]), survivor = rowWrites(t, [second]);
+    const replacements = t.mock.method(queue(element).list, 'replaceChildren');
+    socket.deliver({ type: 'room:state', ...state(['second', 'first']) });
+    removed.expect(); survivor.expect(); assert.deepEqual(queue(element).rows, [second, first]);
+    assert.equal(replacements.mock.callCount(), 1);
+    socket.deliver({ type: 'room:state', ...state(['second']) });
+    survivor.expect(); assert.deepEqual(queue(element).rows, [second]); assert.equal(replacements.mock.callCount(), 2);
+    // Retirement deliberately keeps its existing unconditional safety writes outside the guarded loop.
+    assert.deepEqual(removed.writes, { text: 0, attribute: 2, disabled: 2 });
+    assert.deepEqual(removed.changes, { text: 0, attribute: 0, disabled: 2 }); removed.reset();
+    busy(first, false, true);
+    socket.deliver({ type: 'room:state', ...state() });
+    removed.expect(); survivor.expect(); assert.equal(queue(element).rows[1], second); assert.notEqual(queue(element).rows[0], first);
+  });
+
+  it('hand-row writes: repairs all seven host-edited DOM values on an otherwise unchanged snapshot', async t => {
+    const initial = state(), { element, socket } = await socketJoinedWidget(t, initial);
+    const first = queue(element).rows[0]!, observed = rowWrites(t, [first]), other = rowWrites(t, [queue(element).rows[1]!]);
+    first.children[0]!.textContent = 'Host-edited label';
+    for (const button of Object.values(buttons(first))) {
+      button.setAttribute('aria-label', 'Host-edited action'); button.disabled = true; button.removeAttribute('aria-busy');
+    }
+    observed.reset(); socket.deliver({ type: 'room:state', ...initial });
+    observed.expect(1, 4, 2); other.expect(); busy(first, false);
+    assert.equal(first.children[0]!.textContent, 'Private queued first');
+    assert.equal(buttons(first).approve.getAttribute('aria-label'), '核准 Private queued first 上台');
+    assert.equal(buttons(first).reject.getAttribute('aria-label'), '婉拒 Private queued first 的舉手申請');
+    socket.deliver({ type: 'room:state', ...initial }); observed.expect(); other.expect();
+  });
+
+  it('hand-row writes: reconciles same-snapshot and DOM mutations after a forwarded callback', async t => {
+    const initial = state(), { element, client, socket } = await socketJoinedWidget(t, initial);
+    const first = queue(element).rows[0]!, observed = rowWrites(t, [first]);
+    const labels: string[] = [], observations: ReturnType<typeof observed.snapshot>[] = [];
+    element.addEventListener('stage-state', () => {
+      labels.push(first.children[0]!.textContent); observations.push(observed.snapshot()); observed.reset();
+      client.state!.hands[0]!.name = 'Callback &amp; name'; client.state!.hands[0]!.connected = false;
+      for (const button of Object.values(buttons(first))) {
+        button.setAttribute('aria-label', 'Host edit'); button.disabled = true; button.setAttribute('aria-busy', 'true');
+      }
+      observed.reset();
+    }, { once: true });
+    const next = structuredClone(initial); next.hands[0]!.name = 'Outer name';
+    socket.deliver({ type: 'room:state', ...next });
+    assert.deepEqual(labels, ['Outer name']);
+    const expected = { text: 1, attribute: 2, disabled: 0 };
+    assert.deepEqual(observations, [{ writes: expected, changes: expected }]); observed.expect(1, 4, 2);
+    assert.equal(first.children[0]!.textContent, 'Callback & name（暫時離線）'); busy(first, false);
+    assert.equal(buttons(first).approve.getAttribute('aria-label'), '核准 Callback & name 上台');
+    assert.equal(buttons(first).reject.getAttribute('aria-label'), '婉拒 Callback & name 的舉手申請');
+  });
+
+  it('hand-row writes: preserves a newer nested state instead of restoring the outer callback snapshot', async t => {
+    const initial = state(), { element, client, socket } = await socketJoinedWidget(t, initial);
+    const first = queue(element).rows[0]!, observed = rowWrites(t, [first]);
+    const outer = structuredClone(initial), nested = structuredClone(initial);
+    outer.hands[0]!.name = 'Outer'; nested.hands[0]!.name = 'Nested &amp; current'; nested.hands[0]!.connected = false;
+    const labels: string[] = [], observations: ReturnType<typeof observed.snapshot>[] = [];
+    element.addEventListener('stage-state', () => {
+      labels.push(first.children[0]!.textContent); observations.push(observed.snapshot()); observed.reset();
+      socket.deliver({ type: 'room:state', ...nested });
+      labels.push(first.children[0]!.textContent); observations.push(observed.snapshot()); observed.reset();
+    }, { once: true });
+    socket.deliver({ type: 'room:state', ...outer }); observed.expect();
+    assert.deepEqual(labels, ['Outer', 'Nested & current（暫時離線）']);
+    const expected = { text: 1, attribute: 2, disabled: 0 };
+    assert.deepEqual(observations, [{ writes: expected, changes: expected }, { writes: expected, changes: expected }]);
+    assert.equal(client.state!.hands[0]!.name, nested.hands[0]!.name);
+    assert.equal(first.children[0]!.textContent, 'Nested & current（暫時離線）');
+    assert.equal(buttons(first).approve.getAttribute('aria-label'), '核准 Nested & current 上台');
+    assert.equal(buttons(first).reject.getAttribute('aria-label'), '婉拒 Nested & current 的舉手申請');
+  });
 
   it('keeps audience and speakers private, then exposes a collapsed onstage/offstage controller queue and ordinary empty state', async t => {
     const unjoined = new StageElement(); widgets.push(unjoined); retired(unjoined);

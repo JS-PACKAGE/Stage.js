@@ -784,3 +784,6 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 
 
 203. **Widget 明確控制權移交（第181批，2026-10-16）：** published179完整widget＋公開SDK→validator→Hub基線證明台上／台下主控皆可移交給現有台上speaker，保留雙方席位且舊主控失權，但widget缺少入口。沿用舞台管理列加入具名明確確認，只接受其他已連線台上speaker，不新增觀眾名單或server／SDK／protocol能力。獨立全列表attempt在confirm前reserve；任何既有moderation未完成不接納移交，移交期間所有transfer／mute／remove互鎖，平時逐目標moderation並行保持。取消不清錯誤，確認後重驗owner／generation／room／pid／原列與目標資格；transfer-only通知fence等待權威state，確認途中觀測到資格中斷不可因即刻恢復而沿用舊確認，不改moderation原snapshot窗口。state-before-ACK可正常退役失權owner，catch／finally按token身分隔離，沒有樂觀角色或成功提示、自動重試、timer、storage或額外capture／play。送出後目標下台而仍connected的未觀測競態依既有server權限可移交給觀眾，不新增條件式protocol。宿主直接SDK不受UI鎖控制，SDK全域wire error政策保持。證據限受控DOM/socket、公開SDK／validator／Hub與MockMediaTransport，原生dialog／鍵盤／焦點／AT／硬體音訊未驗收。
+
+
+204. **Widget 舉手列避免不變 DOM 寫入（第182批，2026-10-16）：** 對syncHandQueue既有列的姓名textContent、兩個aria-label、disabled與aria-busy採目前DOM值相等檢查，未變時省略寫入。保留所有owner／pending／row identity與順序、事件轉送前後同步及重入檢查，不以snapshot identity跳過、不快取衍生狀態或合併事件；宿主修改列值仍會在下次同步修復。published181基線與候選經公開SDK JSON ingress→完整widget、真Room生成合法快照的受控DOM操作計數與48項差異對照；100次主控mute／unmute事件加state，在20／292／300舉手名單的不變列寫入由42000／613200／630000降為0（固定工作量，非每秒流量或實際速度宣稱）。正式回歸守不變列零寫入及實際變更／pending／重連／重入／清理語義，不以脆弱計時門檻當測試。沒有SDK／server／protocol／media／依賴變更；操作次數降低不等同原生瀏覽器CPU／layout／latency或容量改善，native browser／AT／硬體音訊未驗收。

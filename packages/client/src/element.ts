@@ -769,12 +769,16 @@ export class StageElement extends HTMLElement {
         node.append(name, approve, reject); this.handQueueRows.set(id, row);
       }
       const name = decodeName(person.name);
-      row.name.textContent = `${name}${person.connected ? '' : '（暫時離線）'}`;
-      row.approve.setAttribute('aria-label', `核准 ${name} 上台`);
-      row.reject.setAttribute('aria-label', `婉拒 ${name} 的舉手申請`);
+      const label = `${name}${person.connected ? '' : '（暫時離線）'}`;
+      if (row.name.textContent !== label) row.name.textContent = label;
+      const approveLabel = `核准 ${name} 上台`, rejectLabel = `婉拒 ${name} 的舉手申請`;
+      if (row.approve.getAttribute('aria-label') !== approveLabel) row.approve.setAttribute('aria-label', approveLabel);
+      if (row.reject.getAttribute('aria-label') !== rejectLabel) row.reject.setAttribute('aria-label', rejectLabel);
       const pending = this.handQueuePending.has(id);
       for (const control of [row.approve, row.reject]) {
-        control.disabled = reconnecting || pending; control.setAttribute('aria-busy', String(pending));
+        const disabled = reconnecting || pending, busy = String(pending);
+        if (control.disabled !== disabled) control.disabled = disabled;
+        if (control.getAttribute('aria-busy') !== busy) control.setAttribute('aria-busy', busy);
       }
     }
     for (const [id, row] of this.handQueueRows) if (!seen.has(id)) {
