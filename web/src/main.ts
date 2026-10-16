@@ -164,29 +164,55 @@ const stageQualityList = element('ul', 'stage-quality-list');
 stageQuality.append(stageQualitySummary, stageQualityStatus, stageQualityList);
 app.append(stageQuality);
 let stageQualityIdentity = '';
+let stageQualitySuppressedState: RoomStatePayload | undefined;
+let stageQualityRevision = 0;
 let stageQualityReconnecting = false;
 let stageQualityReports = new Map<string, ConnectionQuality>();
 const stageQualityRows = new Map<string, HTMLLIElement>();
 let stageQualityOrder: string[] = [];
+function qualityDetailsUpdate(): () => boolean {
+  const revision = ++stageQualityRevision, state = client.state, generation = roomActionGeneration;
+  return () => revision === stageQualityRevision && state === client.state && generation === roomActionGeneration;
+}
 function clearQualityDetailsReports(): void {
   stageQualityReports.clear(); stageQualityRows.clear(); stageQualityOrder = [];
   stageQualityList.replaceChildren();
 }
-function resetQualityDetails(): void {
+function resetQualityDetails(current = qualityDetailsUpdate()): boolean {
   stageQualityIdentity = ''; stageQualityReconnecting = false;
-  stageQuality.hidden = true; stageQuality.removeAttribute('open');
-  stageQualityStatus.textContent = ''; clearQualityDetailsReports();
+  stageQualityReports.clear(); stageQualityRows.clear(); stageQualityOrder = [];
+  stageQuality.hidden = true;
+  if (!current()) return false;
+  stageQuality.removeAttribute('open');
+  if (!current()) return false;
+  stageQualityStatus.textContent = '';
+  if (!current()) return false;
+  stageQualityList.replaceChildren();
+  return current();
+}
+function suppressQualityDetails(): void {
+  const state = client.state;
+  if (!state || stageQualitySuppressedState === state) return;
+  // Role/stage deltas precede their snapshot; reserve loss before any observable reset.
+  stageQualitySuppressedState = state;
+  resetQualityDetails();
 }
 /** Reports have no timestamp or room epoch; accept them only in the current eligible view. */
 function syncQualityDetails(reports?: readonly ConnectionQuality[]): void {
-  const state = client.state, me = state?.me;
-  if (!state || !me || (me.role !== 'controller' && !me.onStage)) { resetQualityDetails(); return; }
+  const state = client.state, me = state?.me, current = qualityDetailsUpdate();
+  if (stageQualitySuppressedState || !state || !me || (me.role !== 'controller' && !me.onStage)) {
+    resetQualityDetails(current); return;
+  }
   const identity = JSON.stringify([state.roomId, me.participantId]);
-  if (identity !== stageQualityIdentity) { resetQualityDetails(); stageQualityIdentity = identity; }
+  if (identity !== stageQualityIdentity) {
+    if (!resetQualityDetails(current)) return;
+    stageQualityIdentity = identity;
+  }
   stageQuality.hidden = false;
-  const reconnecting = client.status === 'reconnecting';
-  if (reconnecting && !stageQualityReconnecting) clearQualityDetailsReports();
+  if (!current()) return;
+  const reconnecting = client.status === 'reconnecting', clearReports = reconnecting && !stageQualityReconnecting;
   stageQualityReconnecting = reconnecting;
+  if (clearReports) { clearQualityDetailsReports(); if (!current()) return; }
   const speakers = state.speakers.filter(person => person.onStage);
   const ids = new Set(speakers.map(person => person.participantId));
   if (reports !== undefined && !reconnecting) {
@@ -208,11 +234,13 @@ function syncQualityDetails(reports?: readonly ConnectionQuality[]): void {
     if (!row) { row = element('li'); row.dataset.participantId = person.participantId; stageQualityRows.set(person.participantId, row); }
     const text = `${decodeName(person.name)}：上行掉包 ${percent(report.uplinkLossPercent)} · 下行掉包 ${percent(report.downlinkLossPercent)} · RTT ${rtt(report.rttMs)}`;
     if (row.textContent !== text) row.textContent = text;
+    if (!current()) return;
   }
   for (const id of stageQualityRows.keys()) if (!order.includes(id)) stageQualityRows.delete(id);
   if (order.length !== stageQualityOrder.length || order.some((id, index) => id !== stageQualityOrder[index])) {
-    stageQualityList.replaceChildren(...order.map(id => stageQualityRows.get(id)!));
     stageQualityOrder = order;
+    stageQualityList.replaceChildren(...order.map(id => stageQualityRows.get(id)!));
+    if (!current()) return;
   }
   stageQualityStatus.textContent = order.length
     ? '最近收到的伺服器回報；RTT 不是端到端音訊延遲。'
@@ -558,7 +586,7 @@ function field(form: HTMLFormElement, label: string, name: string, value = '', r
 function landing(): void {
   handRejectionRoomActive = false; retireHandRejection();
   stopRoomTimers();
-  resetQualityDetails();
+  stageQualitySuppressedState = undefined; resetQualityDetails();
   stagePermissionOwner = undefined;
   landingRevision += 1;
   ownHandPosition.hidden = true; ownHandPosition.textContent = '';
@@ -728,9 +756,11 @@ function syncAudienceFilter(state: RoomStatePayload): void {
   applyAudienceFilter();
 }
 function renderRoom(state: RoomStatePayload): void {
-  syncQualityDetails();
   const generation = resetRoomActions(JSON.stringify([state.roomId, state.me.participantId]));
   if (generation !== roomActionGeneration) return;
+  const qualityState = client.state;
+  syncQualityDetails();
+  if (generation !== roomActionGeneration || qualityState !== client.state) return;
   if (!state.me.onStage) {
     if (micRetryPending) micNotice = '';
     micRetryAvailable = micRetryPending = false;
@@ -989,7 +1019,12 @@ function scheduleCooldown(remaining: number): void {
     cooldownTimer = timer; cooldownDue = due;
   }
 }
-client.on('state', ({ detail }) => { if (landingEntry) landingEntry.entered = true; renderRoom(detail); });
+client.on('state', ({ detail }) => {
+  // Only a new current snapshot resolves early loss; status/report sync still sees the old seat.
+  if (detail === client.state && detail !== stageQualitySuppressedState) stageQualitySuppressedState = undefined;
+  if (landingEntry) landingEntry.entered = true;
+  renderRoom(detail);
+});
 client.on('status', ({ detail }) => {
   if (detail === 'reconnecting' || detail === 'disconnected') {
     retireHandRejection(); audioRetryNotice.hidden = true; audioRetryNotice.textContent = '';
@@ -1007,8 +1042,16 @@ client.on('status', ({ detail }) => {
 });
 client.on('hand', ({ detail }) => { if (detail.raised && detail.participantId === client.me?.participantId) retireHandRejection(); });
 client.on('stagejoined', ({ detail }) => { if (detail.participantId === client.me?.participantId) retireHandRejection(); });
-client.on('role', ({ detail }) => { if (detail.role !== 'audience' && detail.participantId === client.me?.participantId) retireHandRejection(); });
-client.on('transferred', ({ detail }) => { if (detail.toId === client.me?.participantId) retireHandRejection(); });
+client.on('role', ({ detail }) => {
+  if (detail.participantId !== client.me?.participantId) return;
+  if (detail.role === 'audience') suppressQualityDetails();
+  else retireHandRejection();
+});
+client.on('transferred', ({ detail }) => {
+  const me = client.me;
+  if (detail.fromId === me?.participantId && !me.onStage) suppressQualityDetails();
+  if (detail.toId === client.me?.participantId) retireHandRejection();
+});
 client.on('handrejected', ({ detail }) => {
   // Events carry no raise identifier; copy the current-seat ownership before observable work.
   const generation = roomActionGeneration;
@@ -1031,6 +1074,7 @@ client.on('invite', ({ detail }) => {
   }
 });
 client.on('stageleft', ({ detail }) => {
+  if (detail.participantId === client.me?.participantId && detail.role !== 'controller') suppressQualityDetails();
   if (detail.participantId === client.me?.participantId) { stagePermissionOwner = undefined; invitation = detail.reason === 'removed' ? '主控已將你移出舞台，你仍可收聽。' : ''; renderNotices(); }
 });
 client.on('micerror', ({ detail }) => { micRetryPending = false; micRetryAvailable = Boolean(client.me?.onStage); micNotice = `${detail.message}（${detail.name}）`; renderNotices(); });
