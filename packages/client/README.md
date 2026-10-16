@@ -241,6 +241,7 @@ WebSocket 建構失敗、hello 逾時或尚未進房的連線關閉，也會釋�
 - 舉手／收回與麥克風靜音按鈕在接納 click 前重查目前席位、重連、冷卻與強制靜音限制。即使主頁的 `stage-state`／`stage-status` listener 在畫面重繪前同步點擊舊的 enabled 按鈕，已失效操作也不進入 pending、不清除目前錯誤、不送請求或占用 SDK 舉手冷卻；隱藏的這兩種控制同時停用。有效操作仍沿用目前快照選擇 raise／withdraw 或 mute／unmute，並保留各自等待 ACK 與錯誤處理。
 - 連線結束提示：呼叫 `element.client.disconnect()` 會顯示「未連線」並隱藏房內操作；一般關房、被移出與伺服器維護／重啟各有提示，收聽偏好變更不會清掉提示。換房或重新掛載後清除舊提示，舊 client 的遲到事件不更新或重新派發到新 widget。
 - 事件：所有 client 事件以 `stage-<type>` 從元素派發（`bubbles`、`composed`，`detail` 相同），例如 `stage-state`、`stage-hand`、`stage-kicked`。
+- 本機播放控制僅對收聽 `aria-pressed` 與音量 `aria-valuetext` 做目前屬性值比較，等值時不重寫，缺失／錯誤值仍修復。hidden／disabled 的原始屬性修復、textContent 替換及 input.value 賦值照常；每次完整重繪增加兩次屬性讀取／比較，每次單獨音量同步增加一次。普通受控 SDK／Hub 72 次重繪省去 144 次等值 ARIA 寫入，四次滑桿輸入保留四次必要變更、移除四次等值寫入；安靜 keepalive 不產生此收益。這是 setter 計數，不是瀏覽器時間、CPU 或 AT 改善保證；等值 attribute observer 通知減少，不承諾任意宿主 getter／setter 副作用等價。
 - 樣式：`::part(panel)`、`::part(status)`、`::part(error)`、`::part(error-dismiss)`、`::part(actions)`、`::part(playback)`、`::part(name)`、`::part(room-name)`、`::part(quality)`、`::part(speaking)`、`::part(connection-stats)`、`::part(audio-retry)`、`::part(audio-recovery)`，以及 CSS 變數 `--stage-fg`、`--stage-bg`、`--stage-border`、`--stage-radius`、`--stage-button-bg`、`--stage-accent`、`--stage-accent-fg`、`--stage-error`。
 - 自訂標籤名：`import { defineStageElement } from 'https://host/lib/stage-element.js'` 後呼叫 `defineStageElement('my-stage')`（`stage-client` 已於載入時註冊，多個自訂標籤可並存）。每個自訂標籤使用 `StageElement` 的獨立子類別，因此仍是 `instanceof StageElement`，但 constructor 不與預設／其他標籤相同；重複註冊同名標籤為 no-op，既有其他元件不被覆寫。
 

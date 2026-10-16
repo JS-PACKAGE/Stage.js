@@ -14074,3 +14074,250 @@ describe('widget stats preserves observed consent loss', () => {
   }
 
 });
+
+describe('widget local playback live ARIA guards', () => {
+  type Widget = InstanceType<typeof StageElement>;
+  type Field = 'listen' | 'volume';
+  const attribute = (field: Field) => field === 'listen' ? 'aria-pressed' : 'aria-valuetext';
+  const raw = (element: Widget, field: Field) => Node.prototype.getAttribute.call(element[field], attribute(field));
+  const corrupt = (element: Widget, field: Field, value: string | null) => {
+    const node = element[field] as unknown as Node;
+    if (value === null) node.attributes.delete(attribute(field)); else node.attributes.set(attribute(field), value);
+  };
+  function audit(t: TestContext, element: Widget) {
+    const counts = { reads: 0, writes: 0, changed: 0, listenText: 0, volumeValue: 0, volumeText: 0 };
+    for (const field of ['listen', 'volume'] as const) {
+      const node = element[field], key = attribute(field), get = node.getAttribute.bind(node), set = node.setAttribute.bind(node);
+      let setting = false;
+      t.mock.method(node, 'getAttribute', (name: string) => {
+        if (name === key && !setting) counts.reads++;
+        return get(name);
+      });
+      t.mock.method(node, 'setAttribute', (name: string, value: string) => {
+        if (name === key) { counts.writes++; if (get(name) !== value) counts.changed++; }
+        setting = true; try { set(name, value); } finally { setting = false; }
+      });
+    }
+    for (const [node, key, count] of [
+      [element['listen'], 'textContent', 'listenText'], [element['volume'], 'value', 'volumeValue'],
+      [element['volumeValue'], 'textContent', 'volumeText'],
+    ] as const) {
+      let value = Reflect.get(node, key);
+      Object.defineProperty(node, key, { configurable: true, get: () => value,
+        set: (next: string) => { counts[count]++; value = next; } });
+    }
+    return counts;
+  }
+  function once(t: TestContext, element: Widget, field: Field, method: 'getAttribute' | 'setAttribute', action: () => void) {
+    const node = element[field], original = node[method].bind(node);
+    let armed = true, calls = 0;
+    if (method === 'getAttribute') {
+      t.mock.method(node, 'getAttribute', (name: string) => {
+        if (armed && name === attribute(field)) { armed = false; calls++; action(); }
+        return (original as (name: string) => string | null)(name);
+      });
+    } else {
+      t.mock.method(node, 'setAttribute', (name: string, value: string) => {
+        if (armed && name === attribute(field)) { armed = false; calls++; action(); }
+        return (original as (name: string, value: string) => void)(name, value);
+      });
+    }
+    return () => calls;
+  }
+
+  it('adds exactly two live reads per full render while retaining every text and value setter', async t => {
+    const { element, client } = await subscribedWidget(t), counts = audit(t, element);
+    element['render']();
+    assert.deepEqual(counts, { reads: 2, writes: 0, changed: 0, listenText: 1, volumeValue: 1, volumeText: 1 });
+    element['renderVolume']();
+    assert.deepEqual(counts, { reads: 3, writes: 0, changed: 0, listenText: 1, volumeValue: 2, volumeText: 2 });
+    const before = client.playbackVolume;
+    for (const value of [null, '', 'FALSE', 'incorrect']) {
+      corrupt(element, 'listen', value); corrupt(element, 'volume', value);
+      const writes = counts.writes, reads = counts.reads; element['render']();
+      assert.equal(counts.writes - writes, 2); assert.equal(counts.reads - reads, 2);
+      assert.equal(raw(element, 'listen'), 'false'); assert.equal(raw(element, 'volume'), '100%');
+    }
+    assert.equal(counts.writes, counts.changed); assert.equal(client.playbackVolume, before);
+  });
+
+  it('preserves preference getter and unconditional setter ordering at both guarded sites', async t => {
+    const { element } = await subscribedWidget(t), log: string[] = [];
+    const muted = Object.getOwnPropertyDescriptor(StageElement.prototype, 'playbackMuted')!.get!;
+    Object.defineProperty(element, 'playbackMuted', { configurable: true, get: () => { log.push('muted'); return muted.call(element); } });
+    let text = element['listen'].textContent;
+    Object.defineProperty(element['listen'], 'textContent', { configurable: true, get: () => text,
+      set: (value: string) => { log.push('listen text'); text = value; } });
+    const get = element['listen'].getAttribute.bind(element['listen']);
+    t.mock.method(element['listen'], 'getAttribute', (name: string) => { if (name === 'aria-pressed') log.push('pressed read'); return get(name); });
+    element['render'](); assert.deepEqual(log, ['muted', 'listen text', 'muted', 'pressed read']);
+    log.length = 0;
+    const volume = Object.getOwnPropertyDescriptor(StageElement.prototype, 'playbackVolume')!.get!;
+    Object.defineProperty(element, 'playbackVolume', { configurable: true, get: () => { log.push('volume'); return volume.call(element); } });
+    Object.defineProperty(element['volume'], 'value', { configurable: true, get: () => '100', set: () => { log.push('range value'); } });
+    Object.defineProperty(element['volumeValue'], 'textContent', { configurable: true, get: () => '100%', set: () => { log.push('visible text'); } });
+    const rangeGet = element['volume'].getAttribute.bind(element['volume']);
+    t.mock.method(element['volume'], 'getAttribute', (name: string) => { if (name === 'aria-valuetext') log.push('value text read'); return rangeGet(name); });
+    element['renderVolume'](); assert.deepEqual(log, ['volume', 'range value', 'value text read', 'visible text']);
+  });
+
+  it('keeps boolean playback-muted presence and exact fractional volume preferences across rounded displays', async t => {
+    const { element, client } = await subscribedWidget(t), counts = audit(t, element);
+    element.setAttribute('playback-muted', 'false');
+    assert.equal(element.playbackMuted, true); assert.equal(client.playbackMuted, true); assert.equal(raw(element, 'listen'), 'true');
+    for (const value of [0, .0049, .005, .371, .372, .373, .374, .3749, .375, .99949, 1]) {
+      const before = raw(element, 'volume'), writes = counts.writes;
+      element.playbackVolume = value;
+      const desired = `${Math.round(value * 100)}%`;
+      assert.equal(raw(element, 'volume'), desired); assert.equal(counts.writes - writes, before === desired ? 0 : 1);
+      assert.equal(client.playbackVolume, value); assert.equal(element.getAttribute('playback-volume'), String(value));
+    }
+    for (const value of ['', ' ', '\t\n', 'NaN', 'Infinity', '-Infinity', '1e309', 'invalid', '0.5oops', '-0.01', '1.01']) {
+      element.playbackVolume = .25; element.setAttribute('playback-volume', value);
+      assert.equal(raw(element, 'volume'), '100%'); assert.equal(element.playbackVolume, 1); assert.equal(client.playbackVolume, 1);
+    }
+    element.playbackVolume = .25;
+    for (const value of [NaN, Infinity, -Infinity, -.01, 1.01, '0.4', '', null, undefined, true, false, {}, [], 0n]) {
+      const before = { ...counts };
+      assert.throws(() => { element.playbackVolume = value as number; }, RangeError);
+      assert.deepEqual(counts, before); assert.equal(raw(element, 'volume'), '25%');
+    }
+  });
+
+  it('retains equal-text descendant replacement and same-value range dirty-setter effects', async t => {
+    const { element, client } = await subscribedWidget(t);
+    for (const target of [element['listen'], element['volumeValue']]) {
+      const node = target as unknown as Node; let text = node.textContent;
+      node.append(new Node());
+      Object.defineProperty(node, 'textContent', { configurable: true, get: () => text,
+        set: (value: string) => { text = value; node.replaceChildren(); } });
+    }
+    let value = element['volume'].value, dirty = false, writes = 0;
+    Object.defineProperty(element['volume'], 'value', { configurable: true, get: () => value,
+      set: (next: string) => { value = next; dirty = true; writes++; } });
+    await client['receive']({ type: 'room:state', ...roomState() });
+    assert.equal((element['listen'] as unknown as Node).children.length, 0);
+    assert.equal((element['volumeValue'] as unknown as Node).children.length, 0);
+    assert.equal(dirty, true); assert.ok(writes > 0);
+  });
+
+  it('retains all five boolean literal canonicalizers including until-found and pending unlock', async t => {
+    const { element, client } = await subscribedWidget(t), pending = deferred();
+    t.mock.method(client, 'unlockAudio', () => pending.promise);
+    client.dispatchEvent(new CustomEvent('audioblocked', { detail: {} })); click(element['unlock']);
+    // Only these reflected properties are modeled; this is not a browser DOM implementation.
+    function reflect(node: HTMLElement, key: 'hidden' | 'disabled') {
+      const attributes = (node as unknown as Node).attributes;
+      if (Reflect.get(node, key)) attributes.set(key, ''); else attributes.delete(key);
+      Object.defineProperty(node, key, { configurable: true,
+        get: () => key === 'hidden' && attributes.get(key)?.toLowerCase() === 'until-found' ? 'until-found' : attributes.has(key),
+        set: (value: unknown) => { if (value) attributes.set(key, ''); else attributes.delete(key); } });
+      return attributes;
+    }
+    const unlockAttributes = reflect(element['unlock'], 'disabled'); unlockAttributes.set('disabled', 'false');
+    assert.equal(element['unlock'].disabled, true); element['render'](); assert.equal(element['unlock'].getAttribute('disabled'), '');
+    pending.resolve(); await settle();
+    Object.assign(element, { isConnected: false }); element.disconnectedCallback(); await settle();
+    for (const [field, key] of [['listen', 'hidden'], ['playback', 'hidden'], ['listen', 'disabled'], ['volume', 'disabled']] as const) {
+      const node = element[field], attributes = reflect(node, key); attributes.set(key, 'not-canonical');
+      assert.equal(Reflect.get(node, key), true); element['render'](); assert.equal(node.getAttribute(key), '');
+      if (key === 'hidden') { attributes.set(key, 'until-found'); element['render'](); assert.equal(node.getAttribute(key), ''); }
+    }
+  });
+
+  it('does not admit a second listening action from its new live ARIA read while the first is pending', async t => {
+    const { element, client } = await subscribedWidget(t), apply = t.mock.method(client, 'setPlaybackMuted');
+    const calls = once(t, element, 'listen', 'getAttribute', () => {
+      assert.equal(element['pendingActions'].has(element['listen']), true); click(element['listen']);
+    });
+    click(element['listen']); assert.equal(calls(), 1); assert.equal(apply.mock.callCount(), 1);
+    await settle(); assert.equal(element['listen'].disabled, false); assert.equal(raw(element, 'listen'), 'true');
+  });
+
+  for (const outcome of ['resolve', 'reject', 'throw'] as const) {
+    it(`retains synchronous unlock admission and ${outcome} settlement through redundant-render suppression`, async t => {
+      const { element, client } = await subscribedWidget(t), pending = deferred(); let inside = true;
+      const unlock = t.mock.method(client, 'unlockAudio', () => {
+        assert.equal(inside, true); if (outcome === 'throw') throw new Error('Unlock failure'); return pending.promise;
+      });
+      client.dispatchEvent(new CustomEvent('audioblocked', { detail: {} })); click(element['unlock']); inside = false;
+      if (outcome !== 'throw') {
+        const attempt = element['unlockAttempt']; assert.ok(attempt);
+        await client['receive']({ type: 'room:state', ...roomState() });
+        assert.equal(element['unlockAttempt'], attempt); assert.equal(element['unlock'].disabled, true); click(element['unlock']);
+        client.dispatchEvent(new CustomEvent('audioblocked', { detail: {} }));
+        if (outcome === 'resolve') pending.resolve(); else pending.reject(new Error('Unlock failure'));
+      }
+      await settle(); assert.equal(unlock.mock.callCount(), 1); assert.equal(element['unlockAttempt'], undefined);
+      assert.equal(element['unlock'].disabled, false); assert.equal(element['unlock'].hidden, false);
+      if (outcome !== 'resolve') assert.match(element['error'].textContent!, /Unlock failure/);
+    });
+  }
+
+  for (const field of ['listen', 'volume'] as const) for (const method of ['getAttribute', 'setAttribute'] as const)
+    for (const cause of ['disconnect', 'detach', 'leave', 'room', 'name', 'code', 'url', 'preference'] as const) {
+      it(`${field} ${method} ${cause} reentry preserves command ownership and repairs on the next current snapshot`, async t => {
+        const { element, client } = await subscribedWidget(t);
+        const commands = [t.mock.method(client, 'raiseHand', async () => {}), t.mock.method(client, 'mute', async () => {}),
+          t.mock.method(client, 'leaveStage', async () => {}), t.mock.method(client, 'unlockAudio', async () => {})];
+        const request = t.mock.method(client as unknown as { request(): never }, 'request', () => assert.fail('no request'));
+        const capture = t.mock.method(client as unknown as { acquireMic(): never }, 'acquireMic', () => assert.fail('no capture'));
+        const negotiate = t.mock.method(client as unknown as { negotiate(): never }, 'negotiate', () => assert.fail('no negotiation'));
+        const play = t.mock.method(client['audio'], 'play');
+        const timeout = t.mock.method(globalThis, 'setTimeout'), interval = t.mock.method(globalThis, 'setInterval');
+        if (method === 'setAttribute') corrupt(element, field, 'host-corrupt');
+        const calls = once(t, element, field, method, () => {
+          if (cause === 'disconnect') void client.disconnect();
+          else if (cause === 'detach') { Object.assign(element, { isConnected: false }); element.disconnectedCallback(); }
+          else if (cause === 'leave') click(element['roomAction']);
+          else if (cause === 'preference') { element.playbackMuted = true; element.playbackVolume = .37; }
+          else element.setAttribute(cause, cause === 'url' ? 'wss://replacement.invalid/ws' : 'replacement');
+          if (cause !== 'preference') {
+            for (const field of ['hand', 'mic', 'leaveStage', 'unlock'] as const) click(element[field]);
+          }
+        });
+        element['render'](); await settle(); await settle(); assert.equal(calls(), 1);
+        for (const spy of [...commands, request, capture, negotiate, play, timeout, interval]) assert.equal(spy.mock.callCount(), 0);
+        // Host-overridden getters may nest renders; no atomic paint contract is asserted for that case.
+        const current = element.client;
+        if (current && cause !== 'disconnect') await current['receive']({ type: 'room:state', ...roomState() });
+        else element['render']();
+        assert.equal(raw(element, 'listen'), String(element.playbackMuted));
+        assert.equal(raw(element, 'volume'), `${Math.round(element.playbackVolume * 100)}%`);
+        if (cause === 'preference') {
+          assert.equal(client.playbackMuted, true); assert.equal(client.playbackVolume, .37);
+        } else if (current !== client) {
+          const before = [raw(element, 'listen'), raw(element, 'volume'), element['listen'].hidden, element['volume'].disabled];
+          const render = t.mock.method(element as unknown as { render(): void }, 'render');
+          for (const [type, detail] of [['state', roomState()], ['status', 'disconnected'], ['audioblocked', {}]] as const)
+            client.dispatchEvent(new CustomEvent(type, { detail }));
+          assert.equal(render.mock.callCount(), 0);
+          assert.deepEqual([raw(element, 'listen'), raw(element, 'volume'), element['listen'].hidden, element['volume'].disabled], before);
+        }
+      });
+    }
+
+  for (const action of ['close', 'transfer'] as const) for (const invalid of [false, true]) {
+    it(`${action} ${invalid ? 'lost' : 'valid'} consent stays authoritative when both equal ARIA setters are omitted`, async t => {
+      const { element, client } = await subscribedWidget(t), state = roomState(true);
+      state.me.role = 'controller'; state.controllerId = 'me';
+      state.speakers = [{ ...state.me }, { ...state.me, participantId: 'target', name: 'Speaker', role: 'speaker' }];
+      await client['receive']({ type: 'room:state', ...state });
+      const button = action === 'close' ? element['roomClose'] : element['stageManagementRows'].get('target')!.transfer;
+      const send = t.mock.method(client, action === 'close' ? 'closeRoom' : 'transferControl', async () => {});
+      const counts = audit(t, element);
+      t.mock.method(window, 'confirm', () => {
+        const token = action === 'close' ? element['roomCloseAttempt'] : element['stageTransferAttempt']; assert.ok(token);
+        element['render'](); element['render'](); assert.equal(counts.writes, 0); assert.equal(token.invalid, false);
+        if (invalid) {
+          client.dispatchEvent(new CustomEvent('status', { detail: 'reconnecting' }));
+          client.dispatchEvent(new CustomEvent('status', { detail: 'live' }));
+          assert.equal(token.invalid, true);
+        }
+        return true;
+      });
+      click(button); await settle(); assert.equal(send.mock.callCount(), invalid ? 0 : 1);
+      assert.equal(counts.writes, 0); assert.ok(counts.reads >= 4);
+    });
+  }
+});

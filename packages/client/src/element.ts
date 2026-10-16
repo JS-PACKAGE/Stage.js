@@ -2132,7 +2132,8 @@ export class StageElement extends HTMLElement {
   private renderVolume(): void {
     const percent = Math.round(this.playbackVolume * 100);
     this.volume.value = String(percent);
-    this.volume.setAttribute('aria-valuetext', `${percent}%`);
+    const valueText = `${percent}%`;
+    if (this.volume.getAttribute('aria-valuetext') !== valueText) this.volume.setAttribute('aria-valuetext', valueText);
     this.volumeValue.textContent = `${percent}%`;
   }
 
@@ -2247,7 +2248,8 @@ export class StageElement extends HTMLElement {
     this.listen.hidden = !me;
     this.listen.disabled = !client || this.pendingActions.has(this.listen);
     this.listen.textContent = this.playbackMuted ? '恢復收聽' : '靜音收聽';
-    this.listen.setAttribute('aria-pressed', String(this.playbackMuted));
+    const pressed = String(this.playbackMuted);
+    if (this.listen.getAttribute('aria-pressed') !== pressed) this.listen.setAttribute('aria-pressed', pressed);
     this.playback.hidden = !me;
     this.volume.disabled = !client || !me;
     this.renderVolume();
