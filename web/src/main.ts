@@ -447,13 +447,18 @@ async function run(action: () => Promise<unknown>, target?: HTMLButtonElement, g
   finally { if (target?.isConnected) target.disabled = false; updateCooldown(); syncMeter(); }
 }
 /** Room controls retain their pending state when snapshots replace their DOM nodes. */
-function resetRoomActions(identity: string): void {
-  if (roomActionIdentity === identity) return;
-  roomActionIdentity = identity; roomActionGeneration++; pendingRoomActions.clear();
+function resetRoomActions(identity: string): number {
+  if (roomActionIdentity === identity) return roomActionGeneration;
+  roomActionIdentity = identity; const generation = ++roomActionGeneration; pendingRoomActions.clear();
   audioRetryNotice.hidden = true; audioRetryNotice.textContent = '';
   handRejectionRoomActive = identity !== ''; retireHandRejection();
   pendingAudioUnlock = undefined;
   micRetryAvailable = micRetryPending = false; micNotice = '';
+  // Retire the previous seat's history only after its actions and polls have lost ownership.
+  if (generation !== roomActionGeneration) return generation;
+  connectionLine.textContent = '';
+  if (generation === roomActionGeneration) connectionLine.classList.toggle('error', false);
+  return generation;
 }
 function roomButton(key: string, label: string, action: () => Promise<unknown>, className = '', canAct?: () => boolean): HTMLButtonElement {
   const node = element('button', className, label);
@@ -724,7 +729,8 @@ function syncAudienceFilter(state: RoomStatePayload): void {
 }
 function renderRoom(state: RoomStatePayload): void {
   syncQualityDetails();
-  resetRoomActions(JSON.stringify([state.roomId, state.me.participantId]));
+  const generation = resetRoomActions(JSON.stringify([state.roomId, state.me.participantId]));
+  if (generation !== roomActionGeneration) return;
   if (!state.me.onStage) {
     if (micRetryPending) micNotice = '';
     micRetryAvailable = micRetryPending = false;
@@ -744,7 +750,6 @@ function renderRoom(state: RoomStatePayload): void {
   }
   renderedGainInputs.length = 0; audienceFilterRows.length = 0;
   personRows.clear(); speakingIds = new Set(client.speaking);
-  const generation = roomActionGeneration;
   brand.textContent = decodeName(state.name);
   status.textContent = statusLabels[client.status];
   cooldownButton = null;

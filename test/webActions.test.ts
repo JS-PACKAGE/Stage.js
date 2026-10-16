@@ -60,7 +60,7 @@ function setup(): Harness {
         const visit = node => { if (node.dataset.roomAction) nodes.push(node); for (const child of node.children) visit(child); };
         children.forEach(visit);
       } };
-    const brand = {}, status = {}, connectionLine = { dataset: {}, children: [] };
+    const brand = {}, status = {}, connectionLine = { dataset: {}, children: [], classList: { toggle() {} } };
     const audioRetryNotice = { hidden: true, textContent: '', dataset: {}, children: [] };
     const ownHandPosition = { hidden: true, textContent: '', dataset: {}, children: [] };
     const statusLabels = {}, roleLabels = {}, createdRoom = null;
