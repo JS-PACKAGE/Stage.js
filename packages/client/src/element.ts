@@ -13,6 +13,8 @@ const STYLE = `
 [part=status] { margin: 0; }
 .room-occupancy { margin: 0; overflow-wrap: anywhere; }
 [part=quality] { margin: 0; font-size: .875em; }
+[part=connection-stats][hidden] { display: none; }
+[part=connection-stats] p { margin: .5rem 0 0; font-size: .875em; overflow-wrap: anywhere; }
 [part=speaking] { margin: 0; font-size: .875em; }
 [part=hand-rejection] { margin: 0; }
 [part=audio-recovery] { margin: 0; font-size: .875em; }
@@ -68,7 +70,7 @@ button.primary { background: var(--stage-accent, #2563eb); border-color: transpa
  * Controllers can lock/unlock other speakers' mute, explicitly apply a room-mix gain draft, remove them from the stage, or confirm a connected speaker's control handoff.
  * The microphone picker is an explicit draft, never an indicator of the actual capture device.
  * The output picker is also a draft; explicit refresh and submission never imply audible playback.
- * Style through `::part(panel|status|quality|speaking|hand-rejection|audio-recovery|audio-retry|actions|name|room-name|hands|stage-management|playback|microphone|output-device)` and the
+ * Style through `::part(panel|status|quality|connection-stats|speaking|hand-rejection|audio-recovery|audio-retry|actions|name|room-name|hands|stage-management|playback|microphone|output-device)` and the
  * `--stage-*` custom properties.
  */
 export class StageElement extends HTMLElement {
@@ -91,6 +93,16 @@ export class StageElement extends HTMLElement {
   // Extra callback reconciliation repaints only changed projection; original paint triggers stay unconditional.
   private qualityPaintedRevision = -1;
   private qualityClearFirst = true;
+  private readonly connectionStatsPanel: HTMLDivElement;
+  private readonly connectionStatsUpdate: HTMLButtonElement;
+  private readonly connectionStatsText: HTMLParagraphElement;
+  private connectionStatsOwner: { client: StageClient; roomId: string; participantId: string; generation: number } | undefined;
+  private connectionStatsTerminalClient: StageClient | undefined;
+  private connectionStatsAttempt: object | undefined;
+  private connectionStatsReport: { inbound: { loss: number | undefined; rtt: number | undefined; buffer: number | undefined } | null;
+    outbound: { loss: number | undefined; rtt: number | undefined } | null } | undefined;
+  private connectionStatsFailed = false;
+  private connectionStatsLeaving = false;
   private readonly speaking: HTMLParagraphElement;
   private speakingOwner: { client: StageClient; roomId: string; participantId: string; generation: number } | undefined;
   private speakingReport: { ids: Set<string>; empty: boolean } | undefined;
@@ -213,6 +225,15 @@ export class StageElement extends HTMLElement {
     this.quality = document.createElement('p');
     this.quality.part.add('quality');
     this.quality.hidden = true;
+    this.connectionStatsPanel = document.createElement('div');
+    this.connectionStatsPanel.part.add('connection-stats');
+    this.connectionStatsPanel.hidden = true;
+    this.connectionStatsUpdate = document.createElement('button');
+    this.connectionStatsUpdate.type = 'button';
+    this.connectionStatsUpdate.textContent = '更新我的連線統計';
+    this.connectionStatsUpdate.onclick = () => this.refreshConnectionStats();
+    this.connectionStatsText = document.createElement('p');
+    this.connectionStatsPanel.append(this.connectionStatsUpdate, this.connectionStatsText);
     this.speaking = document.createElement('p');
     this.speaking.part.add('speaking');
     this.speaking.hidden = true;
@@ -376,7 +397,7 @@ export class StageElement extends HTMLElement {
     this.retry = this.button('重試加入', () => { if (this.canRetry()) this.rejoin(); });
     this.cancelJoin = this.button('取消加入', () => this.cancelInitial?.());
     actions.append(this.unlock, this.listen, this.hand, this.mic, this.micRetry, this.audioRetry, this.leaveStage, this.roomAction, this.roomClose, this.retry, this.cancelJoin);
-    panel.append(this.status, this.occupancy, this.quality, this.speaking, this.handRejection, this.error, this.errorDismiss, this.namePanel, this.roomNamePanel, this.handQueuePanel, this.stageManagementPanel, actions, this.roomCloseNotice, this.audioRecovery, this.microphonePanel, this.outputDevicePanel, this.playback);
+    panel.append(this.status, this.occupancy, this.quality, this.connectionStatsPanel, this.speaking, this.handRejection, this.error, this.errorDismiss, this.namePanel, this.roomNamePanel, this.handQueuePanel, this.stageManagementPanel, actions, this.roomCloseNotice, this.audioRecovery, this.microphonePanel, this.outputDevicePanel, this.playback);
     root.append(style, panel);
     this.render();
   }
@@ -468,6 +489,11 @@ export class StageElement extends HTMLElement {
           if (generation !== this.generation || this.current !== client) return;
           const speakingEvent = this.rememberSpeakingEvent(type, detail);
           const qualityEvent = this.rememberQualityEvent(type, detail);
+          // Retire the manual read before public authority getters can admit a genuine new entry.
+          if (type === 'closed' || type === 'kicked') this.connectionStatsTerminalClient = client;
+          else if (type === 'state') this.connectionStatsTerminalClient = undefined;
+          if (type === 'closed' || type === 'kicked'
+            || (type === 'status' && (detail === 'reconnecting' || detail === 'disconnected'))) this.retireConnectionStats();
           if (type === 'closed' || type === 'kicked') this.stageManagementTerminalClient = client;
           else if (type === 'state') this.stageManagementTerminalClient = undefined;
           // Own-role deltas precede their snapshot. Fence both dialogs before any DOM setter can reenter.
@@ -538,10 +564,12 @@ export class StageElement extends HTMLElement {
           this.syncOccupancy();
           this.syncQualityOwner(false);
           this.syncSpeakingOwner(false);
+          this.syncConnectionStats();
           this.dispatchEvent(new CustomEvent(`stage-${type}`, { detail, bubbles: true, composed: true }));
           this.syncOccupancy();
           this.syncQualityOwner(false);
           this.syncSpeakingOwner(false);
+          this.syncConnectionStats();
           // Application callbacks may retire this seat or mutate its exposed snapshot.
           this.syncMicrophoneOwner();
           this.syncOutputDeviceOwner();
@@ -590,6 +618,7 @@ export class StageElement extends HTMLElement {
     ++this.generation;
     const exit = {};
     this.leftRoom = true; this.roomExit = exit;
+    this.retireConnectionStats();
     this.retireOccupancy();
     this.retireQualityOwner();
     this.retireSpeakingOwner();
@@ -604,6 +633,8 @@ export class StageElement extends HTMLElement {
   }
 
   private async leave(): Promise<void> {
+    this.connectionStatsLeaving = true;
+    this.retireConnectionStats();
     this.retireOccupancy();
     this.retireQualityOwner();
     this.retireSpeakingOwner();
@@ -631,6 +662,8 @@ export class StageElement extends HTMLElement {
     this.cooldownTimer = undefined; this.cooldownDue = 0;
     const client = this.current;
     this.current = null;
+    this.connectionStatsLeaving = false;
+    this.connectionStatsTerminalClient = undefined;
     this.unlock.hidden = true;
     this.render();
     await client?.disconnect();
@@ -826,6 +859,166 @@ export class StageElement extends HTMLElement {
           this.roomCloseAttempt = undefined;
           try { this.syncRoomClose(); } catch { /* Release the exact token even if a host setter throws. */ }
         }
+      }
+    })();
+  }
+
+  private retireConnectionStats(): void {
+    this.connectionStatsOwner = undefined; this.connectionStatsAttempt = undefined;
+    this.connectionStatsReport = undefined; this.connectionStatsFailed = false;
+  }
+
+  private connectionStatsMounted(): boolean {
+    return this.isConnected && this.connectionStatsPanel.isConnected && this.connectionStatsUpdate.isConnected
+      && this.connectionStatsText.isConnected && this.widgetRoot.contains(this.connectionStatsPanel)
+      && this.connectionStatsPanel.contains(this.connectionStatsUpdate) && this.connectionStatsPanel.contains(this.connectionStatsText);
+  }
+
+  /** Manual readership needs a current seat, not a publisher, microphone, or new passive report. */
+  private reconcileConnectionStats(): void {
+    for (;;) {
+      const owner = this.connectionStatsOwner, client = this.current, generation = this.generation;
+      const state = client?.state, me = client?.me, status = client?.status;
+      const roomId = state?.roomId, participantId = me?.participantId;
+      if (owner !== this.connectionStatsOwner || client !== this.current || generation !== this.generation
+        || state !== client?.state || status !== client?.status || roomId !== client?.state?.roomId
+        || participantId !== client?.me?.participantId) continue;
+      const eligible = Boolean(client && state && me && typeof roomId === 'string' && typeof participantId === 'string'
+        && (status === 'waiting' || status === 'live') && this.connectionStatsTerminalClient !== client
+        && !this.connectionStatsLeaving && !this.leftRoom && !this.roomExit && this.connectionStatsMounted());
+      const lost = Boolean(owner && (!eligible || owner.client !== client || owner.generation !== generation
+        || owner.roomId !== roomId || owner.participantId !== participantId));
+      if (lost) this.retireConnectionStats();
+      const retained = this.connectionStatsOwner;
+      const authorities = [this.roomCloseOwner, this.stageManagementOwner];
+      const authorityLost = authorities.some(authority => authority && (!eligible || authority.client !== client
+        || authority.generation !== generation || authority.roomId !== roomId || authority.participantId !== participantId
+        || me?.role !== 'controller' || me.connected !== true));
+      // Preserve ordinary helper traces; only observed loss needs corrective authority notes.
+      if (lost || authorityLost) {
+        this.noteRoomCloseEvent('status', status ?? 'disconnected');
+        this.noteStageTransferEvent('status', status ?? 'disconnected');
+      }
+      this.reconcileRoomClose();
+      const transfer = this.stageTransferAttempt;
+      if (transfer && !this.canTransferStage(transfer.id, transfer.node)) transfer.invalid = true;
+      if (retained !== this.connectionStatsOwner || client !== this.current || generation !== this.generation
+        || state !== client?.state || status !== client?.status || roomId !== client?.state?.roomId
+        || participantId !== client?.me?.participantId || eligible !== Boolean(client && state && me
+          && typeof roomId === 'string' && typeof participantId === 'string'
+          && (status === 'waiting' || status === 'live') && this.connectionStatsTerminalClient !== client
+          && !this.connectionStatsLeaving && !this.leftRoom && !this.roomExit && this.connectionStatsMounted())) continue;
+      if (eligible && !retained) this.connectionStatsOwner = { client: client!, generation, roomId: roomId!, participantId: participantId! };
+      return;
+    }
+  }
+
+  private connectionStatsMessage(): string {
+    const report = this.connectionStatsReport;
+    if (!report) return this.connectionStatsFailed ? '無法讀取連線統計，請稍後手動再試。' : '尚未手動讀取連線統計。';
+    const loss = (value: number | undefined): string => value === undefined ? '—' : value.toFixed(1);
+    const ms = (value: number | undefined): string => value === undefined ? '—' : String(Math.round(value));
+    const inbound = report.inbound, outbound = report.outbound;
+    const receive = inbound ? `接收掉包 ${loss(inbound.loss)}% · 接收 RTT ${ms(inbound.rtt)} ms · 接收緩衝 ${ms(inbound.buffer)} ms` : '接收：暫無統計';
+    const send = outbound ? `傳送掉包 ${loss(outbound.loss)}% · 傳送 RTT ${ms(outbound.rtt)} ms` : '傳送：暫無統計';
+    return `上次手動讀取（SDK 取樣區間）：${receive}；${send}。RTT 不是端到端音訊延遲；不保證資料即時或目前可聽。`
+      + (this.connectionStatsFailed ? '本次讀取失敗，仍顯示上次手動讀取結果。' : '');
+  }
+
+  private syncConnectionStats(): void {
+    for (;;) {
+      // Existing leave teardown has earlier host callbacks; defer new DOM until its current=null fence.
+      if (this.current && (this.connectionStatsLeaving || this.leftRoom || this.roomExit)) {
+        this.retireConnectionStats(); return;
+      }
+      this.reconcileConnectionStats();
+      const owner = this.connectionStatsOwner, attempt = this.connectionStatsAttempt;
+      const report = this.connectionStatsReport, failed = this.connectionStatsFailed;
+      const hidden = !owner, busy = Boolean(attempt), disabled = hidden || busy;
+      const text = hidden ? '' : this.connectionStatsMessage();
+      // Reproject after every changed setter, including a stale outer setter that overwrites a nested winner.
+      if (hidden && !this.connectionStatsPanel.hidden) { this.connectionStatsPanel.hidden = true; continue; }
+      if (this.connectionStatsText.textContent !== text) { this.connectionStatsText.textContent = text; continue; }
+      if (this.connectionStatsUpdate.disabled !== disabled) { this.connectionStatsUpdate.disabled = disabled; continue; }
+      if (this.connectionStatsUpdate.getAttribute('aria-busy') !== String(busy)) {
+        this.connectionStatsUpdate.setAttribute('aria-busy', String(busy)); continue;
+      }
+      const label = busy ? '讀取中…' : '更新我的連線統計';
+      if (this.connectionStatsUpdate.textContent !== label) { this.connectionStatsUpdate.textContent = label; continue; }
+      if (this.connectionStatsPanel.hidden !== hidden) { this.connectionStatsPanel.hidden = hidden; continue; }
+      this.reconcileConnectionStats();
+      if (owner === this.connectionStatsOwner && attempt === this.connectionStatsAttempt
+        && report === this.connectionStatsReport && failed === this.connectionStatsFailed) return;
+    }
+  }
+
+  private projectConnectionStats(raw: unknown, current: () => boolean): StageElement['connectionStatsReport'] {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error();
+    const direction = (key: 'inbound' | 'outbound') => {
+      const value: unknown = (raw as Record<string, unknown>)[key];
+      if (!current()) return undefined;
+      if (value === null || value === undefined) return null;
+      if (typeof value !== 'object' || Array.isArray(value)) throw new Error();
+      return value as Record<string, unknown>;
+    };
+    const numeric = (value: unknown, max = Infinity, factor = 1): number | undefined => {
+      if (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > max) return undefined;
+      const converted = value * factor;
+      return Number.isFinite(converted) ? converted : undefined;
+    };
+    const inbound = direction('inbound');
+    if (!current()) return undefined;
+    let receive: NonNullable<StageElement['connectionStatsReport']>['inbound'] = null;
+    if (inbound) {
+      const loss = numeric(inbound.lossPercent, 100); if (!current()) return undefined;
+      const rtt = numeric(inbound.rtt, Infinity, 1000); if (!current()) return undefined;
+      const buffer = numeric(inbound.bufferMs); if (!current()) return undefined;
+      receive = { loss, rtt, buffer };
+    }
+    const outbound = direction('outbound');
+    if (!current()) return undefined;
+    let send: NonNullable<StageElement['connectionStatsReport']>['outbound'] = null;
+    if (outbound) {
+      const loss = numeric(outbound.lossPercent, 100); if (!current()) return undefined;
+      const rtt = numeric(outbound.rtt, Infinity, 1000); if (!current()) return undefined;
+      send = { loss, rtt };
+    }
+    return { inbound: receive, outbound: send };
+  }
+
+  private refreshConnectionStats(): void {
+    if (this.connectionStatsLeaving || this.leftRoom || this.roomExit) return;
+    if (this.connectionStatsUpdate.disabled || this.connectionStatsUpdate.hidden || this.connectionStatsPanel.hidden
+      || !this.connectionStatsMounted()) return;
+    this.syncConnectionStats();
+    const owner = this.connectionStatsOwner;
+    if (!owner || this.connectionStatsAttempt) return;
+    // Reserve before any getStats lookup or DOM callback can invoke the retained handler again.
+    const attempt = this.connectionStatsAttempt = {};
+    this.connectionStatsFailed = false;
+    const current = (): boolean => {
+      this.syncConnectionStats();
+      return this.connectionStatsOwner === owner && this.connectionStatsAttempt === attempt;
+    };
+    void (async () => {
+      try {
+        if (!current()) return;
+        const read = owner.client.getStats;
+        if (!current()) return;
+        if (typeof read !== 'function') throw new Error();
+        const pending = read.call(owner.client);
+        const active = current();
+        // Consume even a retired native promise; UI retirement does not cancel SDK sampling or its deltas.
+        const raw: unknown = await pending;
+        if (!current() || !active) return;
+        const report = this.projectConnectionStats(raw, current);
+        if (!current() || !report) return;
+        this.connectionStatsReport = report;
+      } catch {
+        if (current()) this.connectionStatsFailed = true;
+      } finally {
+        if (this.connectionStatsOwner === owner && this.connectionStatsAttempt === attempt) this.connectionStatsAttempt = undefined;
+        this.syncConnectionStats();
       }
     })();
   }
@@ -2000,6 +2193,7 @@ export class StageElement extends HTMLElement {
     this.syncRoomClose();
     this.syncQualityOwner();
     this.syncSpeakingOwner();
+    this.syncConnectionStats();
     this.syncHandRejection();
     const client = this.current;
     const me = client?.me ?? null;

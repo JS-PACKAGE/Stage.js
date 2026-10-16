@@ -13478,3 +13478,427 @@ describe('widget speaking receipt ownership and reentry', () => {
     });
   }
 });
+
+describe('widget manual own connection statistics', () => {
+  type Widget = InstanceType<typeof StageElement>;
+  type Entry = Record<string, unknown>;
+  const emit = (client: StageClient, type: string, detail?: unknown) => client.dispatchEvent(new CustomEvent(type, { detail }));
+  const text = (element: Widget) => element['connectionStatsText'].textContent!;
+  const refresh = (element: Widget) => click(element['connectionStatsUpdate']);
+  const report = (...entries: Entry[]) => new Map(entries.map(entry => [String(entry.id), entry])) as unknown as RTCStatsReport;
+  const inbound = (timestamp: number, extra: Entry = {}): Entry => ({ id: 'in', type: 'inbound-rtp', kind: 'audio', timestamp,
+    packetsReceived: 100, packetsLost: 2, bytesReceived: 1000, jitterBufferDelay: 2, jitterBufferEmittedCount: 100, ...extra });
+  const stats = (rtt = .04) => ({ inbound: { lossPercent: 4, rtt, bufferMs: 20 }, outbound: { lossPercent: 12.5, rtt: .09 } });
+  function pending<T>() {
+    let resolve!: (value: T) => void, reject!: (error: unknown) => void;
+    const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject };
+  }
+  function fake(t: TestContext, client: StageClient, read: () => unknown) {
+    return t.mock.method(client as unknown as { getStats(): unknown }, 'getStats', read);
+  }
+  function setter(t: TestContext, node: object, property: string, action: () => void, late = false) {
+    let value = Reflect.get(node, property), armed = true;
+    Object.defineProperty(node, property, { configurable: true, get: () => value, set: next => {
+      if (!late) value = next;
+      if (armed) { armed = false; action(); }
+      if (late) value = next;
+    } });
+    t.after(() => Object.defineProperty(node, property, { configurable: true, writable: true, value }));
+  }
+  const hidden = (element: Widget) => {
+    assert.equal(element['connectionStatsPanel'].hidden, true); assert.equal(text(element), '');
+    assert.equal(element['connectionStatsUpdate'].disabled, true); assert.equal(element['connectionStatsUpdate'].getAttribute('aria-busy'), 'false');
+    assert.equal(element['connectionStatsReport'], undefined); assert.equal(element['connectionStatsAttempt'], undefined);
+  };
+  const busy = (element: Widget, value: boolean) => {
+    assert.equal(element['connectionStatsUpdate'].disabled, value);
+    assert.equal(element['connectionStatsUpdate'].getAttribute('aria-busy'), String(value));
+  };
+  async function controller(t: TestContext) {
+    const f = await subscribedWidget(t), state = roomState(true);
+    state.me.role = 'controller'; state.controllerId = 'me';
+    state.speakers = [{ ...state.me }, { ...state.me, participantId: 'target', name: 'Speaker', role: 'speaker' }];
+    await f.client['receive']({ type: 'room:state', ...state }); return f;
+  }
+
+  it('has one independent ordinary panel, one explicit button, and no passive read', async t => {
+    const { element, client } = await subscribedWidget(t), read = fake(t, client, async () => stats());
+    const panel = element['connectionStatsPanel'] as unknown as Node;
+    assert.ok(panel.part.has('connection-stats')); assert.equal(panel.hidden, false);
+    assert.deepEqual(panel.children.map(node => node.tagName), ['BUTTON', 'P']);
+    assert.equal(element['connectionStatsUpdate'].textContent, '更新我的連線統計');
+    assert.equal(element['connectionStatsUpdate'].type, 'button');
+    for (const node of [panel, ...panel.children]) { assert.equal(node.getAttribute('role'), null); assert.equal(node.getAttribute('aria-live'), null); }
+    assert.equal(text(element), '尚未手動讀取連線統計。'); busy(element, false);
+    element['render'](); client['setStatus']('waiting'); emit(client, 'quality', { participants: [] }); emit(client, 'speaking', { participantIds: [] });
+    await settle(); assert.equal(read.mock.callCount(), 0); assert.equal(element['quality'].hidden, true);
+    refresh(element); await settle(); assert.equal(read.mock.callCount(), 1);
+    assert.match(text(element), /上次手動讀取（SDK 取樣區間）/); assert.match(text(element), /RTT 不是端到端音訊延遲/);
+  });
+
+  it('uses actual SDK getStats units, first and shared sample deltas, and last audio direction without aggregation', async t => {
+    const { element, client } = await subscribedWidget(t); let calls = 0;
+    const pair = { id: 'pair', type: 'candidate-pair', state: 'succeeded', nominated: true, currentRoundTripTime: .04 };
+    const send = { id: 'out', type: 'outbound-rtp', kind: 'audio', remoteId: 'remote' };
+    const remote = { id: 'remote', type: 'remote-inbound-rtp', fractionLost: .125, roundTripTime: .09 };
+    let entries = report(inbound(1000), pair, send, remote);
+    client['pc'] = { getStats: async () => { calls++; return entries; }, close() {} } as unknown as RTCPeerConnection;
+    refresh(element); await settle(); assert.equal(calls, 1);
+    assert.match(text(element), /接收掉包 —% · 接收 RTT 40 ms · 接收緩衝 — ms；傳送掉包 12.5% · 傳送 RTT 90 ms/);
+    entries = report(inbound(2000, { packetsReceived: 148, packetsLost: 4, jitterBufferDelay: 3, jitterBufferEmittedCount: 150 }), pair, send, remote);
+    refresh(element); await settle(); assert.match(text(element), /接收掉包 4.0% · 接收 RTT 40 ms · 接收緩衝 20 ms/);
+    entries = report(inbound(3000, { packetsReceived: 198, packetsLost: 4, jitterBufferDelay: 4, jitterBufferEmittedCount: 200 }), pair);
+    await client.getStats();
+    entries = report(inbound(4000, { packetsReceived: 297, packetsLost: 5, jitterBufferDelay: 4.5, jitterBufferEmittedCount: 300 }), pair);
+    refresh(element); await settle(); assert.equal(calls, 4); assert.match(text(element), /接收掉包 1.0% · 接收 RTT 40 ms · 接收緩衝 5 ms/);
+    assert.match(text(element), /傳送：暫無統計/);
+    entries = report(inbound(5000, { remoteId: 'a' }), inbound(5000, { id: 'last', remoteId: 'b' }),
+      { id: 'a', roundTripTime: .111 }, { id: 'b', roundTripTime: .222 }, { id: 'video', type: 'inbound-rtp', kind: 'video', rtt: 99 });
+    refresh(element); await settle(); assert.match(text(element), /接收 RTT 222 ms/); assert.doesNotMatch(text(element), /111|333/);
+    assert.equal(element['quality'].hidden, true, 'audience manual read does not invent a publisher quality report');
+  });
+
+  it('actual SDK no peer, no audio, partial, reset and repeated counters never invent zero loss', async t => {
+    const { element, client } = await subscribedWidget(t);
+    refresh(element); await settle(); assert.match(text(element), /接收：暫無統計；傳送：暫無統計/);
+    let entries = report({ id: 'video', type: 'inbound-rtp', kind: 'video' });
+    client['pc'] = { getStats: async () => entries, close() {} } as unknown as RTCPeerConnection;
+    refresh(element); await settle(); assert.match(text(element), /接收：暫無統計/);
+    entries = report({ id: 'in', type: 'inbound-rtp', kind: 'audio' });
+    refresh(element); await settle(); assert.match(text(element), /接收掉包 —% · 接收 RTT — ms · 接收緩衝 — ms/);
+    for (const stamp of [1000, 1000, 500]) {
+      entries = report(inbound(stamp)); refresh(element); await settle(); assert.match(text(element), /接收掉包 —%/);
+    }
+    entries = report(inbound(2000, { packetsReceived: 1, packetsLost: 0, jitterBufferDelay: 0, jitterBufferEmittedCount: 1 }));
+    refresh(element); await settle(); assert.match(text(element), /接收掉包 —%/);
+  });
+
+  for (const role of ['audience', 'speaker', 'controller'] as const) for (const onStage of [false, true]) {
+    it(`allows explicit ${role} onStage=${onStage} read without mic or connected-seat gate`, async t => {
+      const { element, client } = await subscribedWidget(t), state = roomState(onStage);
+      state.me.role = role; state.me.connected = false; state.me.forceMuted = true;
+      await client['receive']({ type: 'room:state', ...state }); client['setStatus']('waiting');
+      const read = fake(t, client, async () => stats()); refresh(element); await settle(); assert.equal(read.mock.callCount(), 1);
+    });
+  }
+
+  for (const invalid of [undefined, null, '1', -1, NaN, Infinity, -Infinity, {}, 101]) {
+    it(`validates each numeric field without coercion (${String(invalid)})`, async t => {
+      const { element, client } = await subscribedWidget(t);
+      fake(t, client, async () => ({ inbound: { lossPercent: invalid, rtt: invalid, bufferMs: invalid }, outbound: { lossPercent: invalid, rtt: invalid } }));
+      refresh(element); await settle();
+      assert.match(text(element), /接收掉包 —%/); assert.match(text(element), /傳送掉包 —%/);
+      if (invalid !== 101) assert.match(text(element), /接收 RTT — ms · 接收緩衝 — ms；傳送掉包 —% · 傳送 RTT — ms/);
+      assert.doesNotMatch(text(element), /NaN|Infinity|\[object Object\]/);
+    });
+  }
+  it('preserves zero, caps percent at100, rounds consistently and rejects seconds-to-ms overflow', async t => {
+    const { element, client } = await subscribedWidget(t); let result: unknown = { inbound: { lossPercent: 0, rtt: 0, bufferMs: 0 }, outbound: { lossPercent: 100, rtt: 0 } };
+    fake(t, client, async () => result); refresh(element); await settle();
+    assert.match(text(element), /接收掉包 0.0% · 接收 RTT 0 ms · 接收緩衝 0 ms；傳送掉包 100.0% · 傳送 RTT 0 ms/);
+    result = { inbound: { lossPercent: 1.26, rtt: .0126, bufferMs: 20.6 }, outbound: { lossPercent: 2.34, rtt: Number.MAX_VALUE } };
+    refresh(element); await settle(); assert.match(text(element), /接收掉包 1.3% · 接收 RTT 13 ms · 接收緩衝 21 ms；傳送掉包 2.3% · 傳送 RTT — ms/);
+  });
+
+  for (const malformed of [null, undefined, false, 42, 'secret', [], { inbound: [] }, { outbound: 1 }, { inbound: () => 1 }]) {
+    it(`retains history on malformed result ${JSON.stringify(malformed)}`, async t => {
+      const { element, client } = await subscribedWidget(t); let result: unknown = stats(); fake(t, client, async () => result);
+      refresh(element); await settle(); const historical = text(element); result = malformed;
+      refresh(element); await settle(); assert.equal(text(element), historical + '本次讀取失敗，仍顯示上次手動讀取結果。'); busy(element, false);
+    });
+  }
+  for (const field of ['inbound', 'outbound', 'lossPercent', 'rtt', 'bufferMs']) {
+    it(`uses fixed local failure on throwing ${field} getter without coercing its exception`, async t => {
+      const { element, client } = await subscribedWidget(t); const raw = stats(), secret = { toString() { assert.fail('no exception coercion'); } };
+      const target = field === 'inbound' || field === 'outbound' ? raw : raw.inbound;
+      Object.defineProperty(target, field, { get() { throw secret; } });
+      fake(t, client, async () => raw); refresh(element); await settle();
+      assert.equal(text(element), '無法讀取連線統計，請稍後手動再試。'); assert.equal(element['error'].hidden, true); busy(element, false);
+    });
+  }
+  it('reads only five metrics, copies numbers, and never renders arbitrary RTC/exception data', async t => {
+    const { element, client } = await subscribedWidget(t), raw = stats();
+    for (const object of [raw, raw.inbound, raw.outbound]) for (const key of ['address', 'mimeType', 'jitter', 'bitrateKbps', 'packetsLost', 'timestamp', 'ssrc', 'token', 'toString']) {
+      Object.defineProperty(object, key, { get() { assert.fail(`unused ${key}`); } });
+    }
+    fake(t, client, async () => raw); refresh(element); await settle(); const before = text(element);
+    raw.inbound.rtt = 999; raw.outbound.lossPercent = 88; element['syncConnectionStats'](); assert.equal(text(element), before);
+    assert.equal((before.match(/掉包| RTT \d|緩衝/g) ?? []).length, 5);
+  });
+
+  it('preserves historical result while busy, and keeps global error/quality/speaking independent on failure/retry', async t => {
+    const { element, client } = await subscribedWidget(t, true); const work = pending<unknown>(); let count = 0;
+    fake(t, client, () => ++count === 1 ? Promise.resolve(stats()) : work.promise);
+    emit(client, 'error', new Error('Existing error')); emit(client, 'quality', { participants: [{ participantId: 'me', rttMs: 77 }] });
+    emit(client, 'speaking', { participantIds: [] });
+    const unaffected = [element['error'].textContent, element['error'].hidden, element['quality'].textContent, element['speaking'].textContent];
+    refresh(element); await settle(); const historical = text(element); refresh(element); busy(element, true); assert.equal(text(element), historical);
+    refresh(element); element['connectionStatsUpdate'].disabled = false; refresh(element); assert.equal(count, 2); busy(element, true);
+    work.reject({ message: 'private address/token' }); await settle();
+    assert.equal(text(element), historical + '本次讀取失敗，仍顯示上次手動讀取結果。');
+    assert.deepEqual([element['error'].textContent, element['error'].hidden, element['quality'].textContent, element['speaking'].textContent], unaffected);
+    fake(t, client, async () => ({ inbound: null, outbound: null })); refresh(element); await settle();
+    assert.match(text(element), /接收：暫無統計；傳送：暫無統計/); assert.doesNotMatch(text(element), /失敗|40 ms/);
+  });
+  for (const mode of ['missing', 'noncallable', 'sync', 'reject', 'getter']) {
+    it(`handles ${mode} capability failure locally and permits a new explicit attempt`, async t => {
+      const { element, client } = await subscribedWidget(t);
+      Object.defineProperty(client, 'getStats', { configurable: true, ...(mode === 'getter' ? { get() { throw 'private'; } }
+        : { value: mode === 'missing' ? undefined : mode === 'noncallable' ? 1 : () => { if (mode === 'sync') throw 'private'; return Promise.reject('private'); } }) });
+      refresh(element); await settle(); assert.equal(text(element), '無法讀取連線統計，請稍後手動再試。'); busy(element, false);
+      Object.defineProperty(client, 'getStats', { configurable: true, value: async () => stats() }); refresh(element); await settle(); assert.match(text(element), /40 ms/);
+      t.after(() => Reflect.deleteProperty(client, 'getStats'));
+    });
+  }
+
+  it('reserves before reentrant method lookup and before thenable assimilation', async t => {
+    const { element, client } = await subscribedWidget(t); let getters = 0, calls = 0, thenReads = 0;
+    Object.defineProperty(client, 'getStats', { configurable: true, get() {
+      getters++; element['connectionStatsUpdate'].disabled = false; refresh(element);
+      return () => { calls++; return { get then() { thenReads++; element['connectionStatsUpdate'].disabled = false; refresh(element);
+        return (resolve: (value: unknown) => void) => resolve(stats()); } }; };
+    } });
+    t.after(() => Reflect.deleteProperty(client, 'getStats'));
+    refresh(element); await settle(); assert.deepEqual([getters, calls, thenReads], [1, 1, 1]); busy(element, false); assert.match(text(element), /40 ms/);
+  });
+  for (const boundary of ['getter', 'call', 'result']) {
+    it(`${boundary} reentry retires old token and cannot release a newer pending attempt`, async t => {
+      const { element, client } = await subscribedWidget(t), newer = pending<unknown>(); let calls = 0, entered = false;
+      const replace = () => {
+        if (entered) return; entered = true; client['setStatus']('reconnecting'); client['setStatus']('live'); refresh(element);
+      };
+      Object.defineProperty(client, 'getStats', { configurable: true, get() {
+        if (boundary === 'getter' && !entered) { replace(); return () => { assert.fail('retired getter cannot be called'); }; }
+        return () => {
+          calls++; if (entered) return newer.promise;
+          if (boundary === 'call') replace();
+          const value = stats();
+          if (boundary === 'result') Object.defineProperty(value, 'inbound', { get() { replace(); return stats().inbound; } });
+          return Promise.resolve(value);
+        };
+      } });
+      t.after(() => Reflect.deleteProperty(client, 'getStats'));
+      refresh(element); await settle(); assert.ok(entered); assert.equal(calls, boundary === 'getter' ? 1 : 2); busy(element, true);
+      assert.doesNotMatch(text(element), /40 ms/); newer.resolve(stats(.123)); await settle(); busy(element, false); assert.match(text(element), /123 ms/);
+    });
+  }
+
+  for (const cause of ['reconnecting', 'disconnected', 'closed', 'kicked', 'room', 'participant', 'client', 'unmount', 'leave']) {
+    for (const outcome of ['resolve', 'reject']) {
+      it(`${cause} retires history and ignores late ${outcome}`, async t => {
+        const { element, client } = await subscribedWidget(t), old = pending<unknown>(); let count = 0;
+        fake(t, client, () => ++count === 1 ? Promise.resolve(stats()) : old.promise);
+        refresh(element); await settle(); refresh(element); busy(element, true);
+        if (cause === 'reconnecting' || cause === 'disconnected') client['setStatus'](cause);
+        else if (cause === 'closed' || cause === 'kicked') emit(client, cause, { roomId: 'one' });
+        else if (cause === 'room') { client.state!.roomId = 'other'; element['render'](); }
+        else if (cause === 'participant') { client.me!.participantId = 'other'; element['render'](); }
+        else if (cause === 'client') { element['current'] = null; element['render'](); }
+        else if (cause === 'unmount') { Object.assign(element, { isConnected: false }); element.disconnectedCallback(); }
+        else click(element['roomAction']);
+        await settle(); assert.equal(element['connectionStatsReport'], undefined); assert.equal(element['connectionStatsAttempt'], undefined);
+        if (outcome === 'resolve') old.resolve(stats(.999)); else old.reject(new Error('private'));
+        await settle(); assert.doesNotMatch(text(element), /999|40 ms|失敗/);
+        if (cause !== 'room' && cause !== 'participant') hidden(element);
+      });
+    }
+  }
+  it('reconnect permits fresh explicit same-seat read without a distinct passive state and stale finally cannot unlock it', async t => {
+    const { element, client } = await subscribedWidget(t), old = pending<unknown>(), newer = pending<unknown>(); let calls = 0;
+    fake(t, client, () => ++calls === 1 ? old.promise : newer.promise); const originalState = client.state;
+    refresh(element); client['setStatus']('reconnecting'); hidden(element); client['setStatus']('live');
+    assert.equal(client.state, originalState); assert.equal(calls, 1); refresh(element); busy(element, true);
+    old.reject('private'); await settle(); busy(element, true); assert.doesNotMatch(text(element), /失敗/);
+    newer.resolve(stats(.073)); await settle(); busy(element, false); assert.match(text(element), /73 ms/);
+  });
+  for (const terminal of ['closed', 'kicked', 'disconnect']) {
+    it(`genuine same-client rejoin after ${terminal} admits only a fresh manual result`, async t => {
+      const { element, client } = await subscribedWidget(t), old = pending<unknown>(); let calls = 0;
+      fake(t, client, () => ++calls === 1 ? old.promise : Promise.resolve(stats(.088))); refresh(element);
+      if (terminal === 'disconnect') await client.disconnect(); else emit(client, terminal, { roomId: 'one' });
+      hidden(element); await client['receive']({ type: 'room:state', ...roomState() });
+      assert.equal(calls, 1); refresh(element); await settle(); assert.equal(calls, 2); assert.match(text(element), /88 ms/);
+      old.resolve(stats(.999)); await settle(); assert.match(text(element), /88 ms/); assert.doesNotMatch(text(element), /999/);
+    });
+  }
+  it('same-seat role/stage/mic changes preserve pending read and historical result', async t => {
+    const { element, client } = await subscribedWidget(t), work = pending<unknown>(); const read = fake(t, client, () => work.promise);
+    refresh(element); const owner = element['connectionStatsOwner'], attempt = element['connectionStatsAttempt'];
+    for (const onStage of [true, false]) {
+      await client['receive']({ type: 'room:state', ...roomState(onStage) });
+      emit(client, 'micerror', new Error('mic denied')); emit(client, 'micready'); emit(client, 'role', { participantId: 'me', role: 'controller' });
+      emit(client, 'stageleft', { participantId: 'me' });
+      assert.equal(element['connectionStatsOwner'], owner); assert.equal(element['connectionStatsAttempt'], attempt); busy(element, true);
+    }
+    work.resolve(stats()); await settle(); const before = text(element); await client['receive']({ type: 'room:state', ...roomState(true) });
+    assert.equal(text(element), before); assert.equal(read.mock.callCount(), 1);
+  });
+
+  for (const kind of ['disabled', 'button-hidden', 'panel-hidden', 'button-detached', 'panel-detached', 'reparented']) {
+    it(`rejects retained ${kind} synthetic click`, async t => {
+      const { element, client } = await subscribedWidget(t), read = fake(t, client, async () => stats());
+      if (kind === 'disabled') element['connectionStatsUpdate'].disabled = true;
+      if (kind === 'button-hidden') element['connectionStatsUpdate'].hidden = true;
+      if (kind === 'panel-hidden') element['connectionStatsPanel'].hidden = true;
+      if (kind === 'button-detached') Object.assign(element['connectionStatsUpdate'], { isConnected: false });
+      if (kind === 'panel-detached') Object.assign(element['connectionStatsPanel'], { isConnected: false });
+      if (kind === 'reparented') element['connectionStatsPanel'].replaceChildren();
+      refresh(element); await settle(); assert.equal(read.mock.callCount(), 0);
+    });
+  }
+  for (const property of ['disabled', 'textContent', 'aria-busy', 'hidden']) {
+    it(`revalidates ${property} setter reentry, including stale outer writes after nested recovery`, async t => {
+      const { element, client } = await subscribedWidget(t), newer = pending<unknown>(); let reads = 0;
+      fake(t, client, () => { reads++; return newer.promise; });
+      const reenter = () => { client['setStatus']('reconnecting'); client['setStatus']('live'); refresh(element); };
+      if (property === 'aria-busy') {
+        const set = element['connectionStatsUpdate'].setAttribute.bind(element['connectionStatsUpdate']); let armed = true;
+        t.mock.method(element['connectionStatsUpdate'], 'setAttribute', (name: string, value: string) => {
+          if (name === 'aria-busy' && armed) { armed = false; reenter(); } set(name, value);
+        });
+      } else if (property === 'hidden') {
+        client['setStatus']('reconnecting'); setter(t, element['connectionStatsPanel'], 'hidden', reenter, true); client['setStatus']('live');
+      } else setter(t, element['connectionStatsUpdate'], property, reenter, true);
+      refresh(element); await settle(); assert.equal(reads, 1); busy(element, true);
+      newer.resolve(stats(.081)); await settle(); busy(element, false); assert.match(text(element), /81 ms/);
+    });
+  }
+  it('repairs host-corrupted text/visibility/busy values and makes no unchanged writes to its own panel', async t => {
+    const { element, client } = await subscribedWidget(t); fake(t, client, async () => stats()); refresh(element); await settle();
+    const before = text(element), writes: string[] = [];
+    for (const [node, property] of [[element['connectionStatsText'], 'textContent'], [element['connectionStatsPanel'], 'hidden'],
+      [element['connectionStatsUpdate'], 'textContent'], [element['connectionStatsUpdate'], 'disabled']] as const) {
+      let value = Reflect.get(node, property); Object.defineProperty(node, property, { configurable: true, get: () => value, set: next => { value = next; writes.push(property); } });
+      t.after(() => Object.defineProperty(node, property, { configurable: true, writable: true, value }));
+    }
+    const attributes = t.mock.method(element['connectionStatsUpdate'], 'setAttribute');
+    element['syncConnectionStats'](); element['syncConnectionStats'](); assert.deepEqual(writes, []); assert.equal(attributes.mock.callCount(), 0);
+    element['connectionStatsText'].textContent = 'host'; element['connectionStatsPanel'].hidden = true;
+    element['connectionStatsUpdate'].textContent = 'host'; element['connectionStatsUpdate'].disabled = true;
+    element['connectionStatsUpdate'].setAttribute('aria-busy', 'true'); element['syncConnectionStats']();
+    assert.equal(text(element), before); assert.equal(element['connectionStatsPanel'].hidden, false); busy(element, false);
+  });
+
+  for (const action of ['close', 'transfer']) for (const lose of [false, true]) {
+    it(`${action} consent ${lose ? 'is retired before corrective stats DOM can restore silent reconnect' : 'survives ordinary read'}`, async t => {
+      const { element, client } = await controller(t);
+      const close = t.mock.method(client, 'closeRoom', async () => {}), transfer = t.mock.method(client, 'transferControl', async () => {});
+      Object.defineProperty(client, 'getStats', { configurable: true, get() {
+        if (lose) client['currentStatus'] = 'reconnecting'; return async () => stats();
+      } });
+      t.after(() => Reflect.deleteProperty(client, 'getStats'));
+      if (lose) setter(t, element['connectionStatsPanel'], 'hidden', () => { client['currentStatus'] = 'live'; });
+      t.mock.method(window, 'confirm', () => { refresh(element); return true; });
+      click(action === 'close' ? element['roomClose'] : element['stageManagementRows'].get('target')!.transfer); await settle();
+      assert.equal(close.mock.callCount(), !lose && action === 'close' ? 1 : 0);
+      assert.equal(transfer.mock.callCount(), !lose && action === 'transfer' ? 1 : 0);
+    });
+  }
+  for (const cause of ['leave', 'unmount', 'rejoin']) {
+    it(`${cause} fences diagnostics before existing teardown DOM can reclick a retained button`, async t => {
+      const { element, client } = await subscribedWidget(t), read = fake(t, client, async () => stats());
+      const node = cause === 'leave' ? element['error'] : element['nameInput'];
+      setter(t, node, cause === 'leave' ? 'hidden' : 'value', () => refresh(element));
+      if (cause === 'leave') click(element['roomAction']);
+      else if (cause === 'unmount') element.disconnectedCallback();
+      else element.setAttribute('name', 'Replacement');
+      await settle(); assert.equal(read.mock.callCount(), 0);
+    });
+  }
+  it('actual retained peer read may advance SDK history after reconnect, but cannot repaint retired UI', async t => {
+    const { element, client } = await subscribedWidget(t), old = pending<RTCStatsReport>(); let calls = 0;
+    let entries = report(inbound(1000));
+    client['pc'] = { close() {}, getStats: () => ++calls === 2 ? old.promise : Promise.resolve(entries) } as unknown as RTCPeerConnection;
+    refresh(element); await settle(); refresh(element); client['setStatus']('reconnecting'); client['setStatus']('live');
+    old.resolve(report(inbound(2000, { packetsReceived: 198, packetsLost: 4 }))); await settle();
+    assert.doesNotMatch(text(element), /2.0%/); assert.equal(calls, 2);
+    entries = report(inbound(3000, { packetsReceived: 297, packetsLost: 5 })); refresh(element); await settle();
+    assert.match(text(element), /接收掉包 1.0%/); assert.equal(calls, 3);
+  });
+  it('actual SDK read adds no timer, command, permission, capture, playback or negotiation operation', async t => {
+    const { element, client } = await subscribedWidget(t); let calls = 0;
+    client['pc'] = { getStats: async () => { calls++; return report(inbound(1000)); }, close() {} } as unknown as RTCPeerConnection;
+    const request = t.mock.method(client as unknown as { request(): never }, 'request', () => assert.fail('no request'));
+    const capture = t.mock.method(client as unknown as { acquireMic(): never }, 'acquireMic', () => assert.fail('no capture'));
+    const negotiate = t.mock.method(client as unknown as { negotiate(): never }, 'negotiate', () => assert.fail('no negotiation'));
+    const play = t.mock.method(client['audio'], 'play'), pause = t.mock.method(client['audio'], 'pause');
+    const timeout = t.mock.method(globalThis, 'setTimeout'), interval = t.mock.method(globalThis, 'setInterval');
+    refresh(element); await settle(); assert.equal(calls, 1);
+    for (const spy of [request, capture, negotiate, play, pause, timeout, interval]) assert.equal(spy.mock.callCount(), 0);
+  });
+  for (const result of ['resolve', 'reject']) {
+    it(`actual SDK ${result} from replaced peer cannot affect new widget report or baseline with reused RTP ID`, async t => {
+      const { element, client } = await subscribedWidget(t), old = pending<RTCStatsReport>();
+      client['pc'] = { getStats: () => old.promise, close() {} } as unknown as RTCPeerConnection;
+      refresh(element); await client.disconnect(); await client['receive']({ type: 'room:state', ...roomState() });
+      let entries = report(inbound(3000, { packetsReceived: 300, packetsLost: 3 }));
+      client['pc'] = { getStats: async () => entries, close() {} } as unknown as RTCPeerConnection;
+      refresh(element); await settle(); const newer = text(element);
+      if (result === 'resolve') old.resolve(report(inbound(9000, { packetsReceived: 9000, packetsLost: 90 })));
+      else old.reject('private old native failure');
+      await settle(); assert.equal(text(element), newer); busy(element, false);
+      entries = report(inbound(4000, { packetsReceived: 399, packetsLost: 4 })); refresh(element); await settle();
+      assert.match(text(element), /接收掉包 1.0%/);
+    });
+  }
+  it('actual SDK newer external completion suppresses older pending widget data without inventing a failure', async t => {
+    const { element, client } = await subscribedWidget(t), old = pending<RTCStatsReport>(); let calls = 0;
+    client['pc'] = { getStats: () => ++calls === 1 ? old.promise : Promise.resolve(report(inbound(2000))), close() {} } as unknown as RTCPeerConnection;
+    refresh(element); await client.getStats(); old.resolve(report(inbound(1000))); await settle();
+    assert.match(text(element), /接收：暫無統計；傳送：暫無統計/); assert.doesNotMatch(text(element), /失敗/); busy(element, false);
+  });
+  for (const boundary of ['result getter', 'result setter']) {
+    it(`${boundary} reconciles nested newer attempt followed by silent loss, even after an outer stale write`, async t => {
+      const { element, client } = await subscribedWidget(t), newer = pending<unknown>(); let calls = 0;
+      const replaceThenLose = () => {
+        client['setStatus']('reconnecting'); client['setStatus']('live'); refresh(element);
+        client['currentStatus'] = 'disconnected';
+      };
+      fake(t, client, () => {
+        if (++calls > 1) return newer.promise;
+        const result = stats();
+        if (boundary === 'result getter') Object.defineProperty(result, 'inbound', { get() { replaceThenLose(); return stats().inbound; } });
+        return Promise.resolve(result);
+      });
+      if (boundary === 'result setter') setter(t, element['connectionStatsText'], 'textContent', replaceThenLose, true);
+      refresh(element); await settle(); assert.equal(calls, 2); hidden(element);
+      newer.resolve(stats(.999)); await settle(); hidden(element);
+      client['setStatus']('live'); assert.equal(text(element), '尚未手動讀取連線統計。'); assert.equal(calls, 2);
+    });
+  }
+  for (const terminal of ['closed', 'kicked']) {
+    it(`${terminal} outer getter preserves a genuinely new same-client entry and explicit read`, async t => {
+      const { element, client } = await subscribedWidget(t), read = fake(t, client, async () => stats(.064));
+      const get = Object.getOwnPropertyDescriptor(StageClient.prototype, 'state')!.get!; let armed = true;
+      Object.defineProperty(client, 'state', { configurable: true, get() {
+        const value: unknown = get.call(client);
+        if (armed) { armed = false; void client['receive']({ type: 'room:state', ...roomState() }); refresh(element); }
+        return value;
+      } });
+      t.after(() => Reflect.deleteProperty(client, 'state'));
+      emit(client, terminal, { roomId: 'one' }); await settle();
+      assert.equal(read.mock.callCount(), 1); assert.equal(element['connectionStatsPanel'].hidden, false); assert.match(text(element), /64 ms/);
+    });
+  }
+  for (const cause of ['leave', 'unmount', 'rejoin']) for (const action of ['close', 'transfer']) {
+    it(`${cause} defers stats DOM until current=null so an early host reclick cannot admit ${action}`, async t => {
+      const { element, client } = await controller(t), row = element['stageManagementRows'].get('target')!;
+      const close = t.mock.method(client, 'closeRoom', async () => {}), transfer = t.mock.method(client, 'transferControl', async () => {});
+      const read = fake(t, client, async () => stats()); t.mock.method(window, 'confirm', () => true);
+      let earlyPaints = 0;
+      setter(t, element['connectionStatsPanel'], 'hidden', () => {
+        if (element.client !== client) return; earlyPaints++;
+        const button = action === 'close' ? element['roomClose'] : row.transfer;
+        button.disabled = false; click(button);
+      });
+      setter(t, cause === 'leave' ? element['error'] : element['nameInput'], cause === 'leave' ? 'hidden' : 'value', () => {
+        refresh(element); element['syncConnectionStats']();
+      });
+      if (cause === 'leave') click(element['roomAction']);
+      else if (cause === 'unmount') element.disconnectedCallback();
+      else element.setAttribute('name', 'Replacement');
+      await settle(); assert.equal(earlyPaints, 0); assert.equal(read.mock.callCount(), 0);
+      assert.equal(close.mock.callCount(), 0); assert.equal(transfer.mock.callCount(), 0);
+    });
+  }
+});
