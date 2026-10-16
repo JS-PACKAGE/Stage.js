@@ -908,6 +908,17 @@ function updateSpeaking(ids: Set<string>): void {
     if (speakingPaintRevision === revision) speakingPaintRevision = undefined;
   }
 }
+function effectiveRoomCode(state: RoomStatePayload): string | undefined {
+  return state.code ?? (createdRoom?.roomId === state.roomId ? createdRoom.code : undefined);
+}
+function invitationUrl(state: RoomStatePayload, roomCode = effectiveRoomCode(state)): URL {
+  const link = new URL(location.origin);
+  link.pathname = location.pathname;
+  link.searchParams.set('room', state.roomId);
+  if (signaling.path !== '/ws') link.searchParams.set('wsPath', signaling.path);
+  if (state.codeRequired && roomCode) link.searchParams.set('code', roomCode);
+  return link;
+}
 function renderRoom(state: RoomStatePayload): void {
   const generation = resetRoomActions(JSON.stringify([state.roomId, state.me.participantId]));
   if (generation !== roomActionGeneration) return;
@@ -918,7 +929,7 @@ function renderRoom(state: RoomStatePayload): void {
     if (micRetryPending) micNotice = '';
     micRetryAvailable = micRetryPending = false;
   }
-  const roomCode = state.code ?? (createdRoom?.roomId === state.roomId ? createdRoom.code : undefined);
+  const roomCode = effectiveRoomCode(state);
   // Separate already-applied overlays from structural state; dirty sliders still reset to server state.
   const { audienceCount, ...roomStructure } = state;
   const audienceTitle = `觀眾 · ${audienceCount} 人`;
@@ -952,15 +963,26 @@ function renderRoom(state: RoomStatePayload): void {
       await client.setRoomName(name);
     }, '', () => renameRoom.isConnected && canRenameRoom());
     summary.append(renameRoom);
-    const link = new URL(location.origin);
-    link.pathname = location.pathname;
-    link.searchParams.set('room', state.roomId);
-    if (signaling.path !== '/ws') link.searchParams.set('wsPath', signaling.path);
-    if (state.codeRequired && roomCode) link.searchParams.set('code', roomCode);
+    const link = invitationUrl(state, roomCode);
     const inviteLink = element('input', 'invite-link');
     inviteLink.value = link.href; inviteLink.readOnly = true;
     inviteLink.setAttribute('aria-label', '邀請連結');
-    const copy = button('複製邀請連結', async () => {
+    const copy = element('button', '', '複製邀請連結');
+    copy.type = 'button';
+    const canCopy = (requireIdle = false): boolean => {
+      try {
+        if (requireIdle && copy.disabled) return false;
+        const current = client.state;
+        if (!current || current.roomId !== titleRoomId || current.me.participantId !== titleParticipantId
+          || current.me.role !== 'controller' || invitationUrl(current).href !== link.href) return false;
+        return copy.isConnected && inviteLink.isConnected && copy.parentNode === inviteLink.parentNode
+          && content.querySelector<HTMLInputElement>('.invite-link') === inviteLink && inviteLink.value === link.href
+          && current === client.state && generation === roomActionGeneration && (!requireIdle || !copy.disabled);
+      } catch { return false; }
+    };
+    const copyInvitation = async () => {
+      // A host callback during run's DOM writes may have retired the admitted resource.
+      if (!canCopy()) return;
       const sequence = ++inviteCopySequence;
       let copied = false;
       try { await navigator.clipboard.writeText(link.href); copied = true; }
@@ -972,7 +994,12 @@ function renderRoom(state: RoomStatePayload): void {
       if (copied) invitation = '已複製邀請連結，請只分享給受邀者。';
       else { currentLink.focus(); currentLink.select(); invitation = '請長按或使用複製快捷鍵複製已選取的連結。'; }
       renderNotices();
-    });
+    };
+    copy.onclick = () => {
+      // SDK snapshots are installed before the sample's state listener replaces the old nodes.
+      if (!canCopy(true)) return;
+      void run(copyInvitation, copy);
+    };
     summary.append(inviteLink, copy);
     if (state.codeRequired) summary.append(roomButton('rotate-code', '更換房間代碼', async () => {
       if (!window.confirm('更換後舊代碼與舊邀請連結立即失效，已在房內的人不受影響。確定更換？')) return;
