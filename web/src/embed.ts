@@ -7,6 +7,7 @@ function input(id: string): HTMLInputElement {
 const status = document.querySelector<HTMLParagraphElement>('#status')!;
 const roomOccupancy = document.querySelector<HTMLParagraphElement>('#room-occupancy')!;
 const ownConnectionQuality = document.querySelector<HTMLParagraphElement>('#own-connection-quality')!;
+const speakingSummary = document.querySelector<HTMLParagraphElement>('#speaking-summary')!;
 const errorNotice = document.querySelector<HTMLDivElement>('#error-notice')!;
 const lastError = document.querySelector<HTMLParagraphElement>('#last-error')!;
 const handRejectionNotice = document.querySelector<HTMLParagraphElement>('#hand-rejected')!;
@@ -251,6 +252,141 @@ function renderQuality(): void {
   if (ownConnectionQuality.textContent !== text) { ownConnectionQuality.textContent = text; if (!valid()) return; }
   if (ownConnectionQuality.hidden) { ownConnectionQuality.hidden = false; if (!valid()) return; }
 }
+interface SpeakingSeat {
+  client: Client; generation: number; roomId: string; participantId: string;
+}
+interface SpeakingReport { ids: Set<string>; rawEmpty: boolean }
+let speakingSeat: SpeakingSeat | undefined;
+let speakingRoster = new Map<string, string>();
+let speakingSuppressed = new Set<string>();
+let speakingReport: SpeakingReport | undefined;
+let speakingRevision = 0;
+function retireSpeaking(): void {
+  speakingSeat = undefined; speakingRoster = new Map(); speakingSuppressed = new Set();
+  speakingReport = undefined; speakingRevision++;
+}
+function speakingIdentity(current: Client, generation: number): SpeakingSeat | undefined {
+  const state = current.state, roomId = state?.roomId, participantId = state?.me?.participantId;
+  if (current !== client || current !== controlsClient || generation !== entryGeneration
+    || occupancyRetiredGeneration === generation || (current.status !== 'waiting' && current.status !== 'live')
+    || typeof roomId !== 'string' || !roomId.trim() || typeof participantId !== 'string' || !participantId.trim()) return;
+  return { client: current, generation, roomId, participantId };
+}
+function reconcileSpeaking(): void {
+  if (client === controlsClient && client?.status === 'disconnected') occupancyRetiredGeneration = entryGeneration;
+  const seat = speakingSeat;
+  if (!seat) return;
+  let identity: SpeakingSeat | undefined;
+  try { identity = speakingIdentity(seat.client, seat.generation); } catch { /* Invalid public identity retires its reader. */ }
+  if (seat === speakingSeat && (!identity || identity.roomId !== seat.roomId || identity.participantId !== seat.participantId)) retireSpeaking();
+}
+// Invalidate both consents before a summary setter can restore an observed loss of authority.
+// Ordinary reports need no control rendering, and unrelated target loss must leave Close intact.
+function reconcileSpeakingConsents(): void {
+  const close = pendingRoomClose, closeOwner = roomCloseOwner;
+  if (close && !close.invalidated) {
+    try {
+      if (!closeOwner || close.revision !== closeOwner.revision || !eligibleRoomClose(closeOwner)) close.invalidated = true;
+    } catch { close.invalidated = true; }
+  }
+  const transfer = pendingTransfer, transferOwner = stageManagementOwner;
+  if (transfer && !transfer.invalidated) {
+    try {
+      if (!transferOwner || transfer.revision !== transferOwner.revision
+        || !eligibleTransfer(transferOwner, transfer.id, transfer.row)) transfer.invalidated = true;
+    } catch { transfer.invalidated = true; }
+  }
+}
+function projectSpeakingRoster(state: StageEventMap['state']): Map<string, string> | undefined {
+  const speakers: unknown = state.speakers;
+  if (!Array.isArray(speakers) || !decodeRoomName) return;
+  const roster = new Map<string, string>();
+  for (const person of speakers) {
+    if (!person || typeof person !== 'object' || Array.isArray(person)) continue;
+    const id: unknown = person.participantId;
+    if (typeof id !== 'string' || !id.trim() || roster.has(id) || person.onStage !== true) continue;
+    const role: unknown = person.role;
+    if (role !== 'speaker' && role !== 'controller') continue;
+    const name: unknown = person.name;
+    if (typeof name === 'string') roster.set(id, decodeRoomName(name));
+  }
+  return roster;
+}
+function receiveSpeakingState(current: Client, generation: number, detail: StageEventMap['state'], unseen: boolean): boolean {
+  reconcileSpeaking();
+  if (!unseen || detail !== current.state) return true;
+  const revision = speakingRevision, seat = speakingSeat;
+  let identity: SpeakingSeat | undefined, roster: Map<string, string> | undefined;
+  try {
+    identity = speakingIdentity(current, generation);
+    if (identity) roster = projectSpeakingRoster(detail);
+  } catch { /* Copy the complete projection before replacing history or releasing delta suppression. */ }
+  let live: SpeakingSeat | undefined, matches = false;
+  try {
+    live = speakingIdentity(current, generation);
+    matches = Boolean(identity && live && detail === current.state
+      && live.roomId === identity.roomId && live.participantId === identity.participantId);
+  } catch { /* An unreadable identity cannot admit a reader. */ }
+  reconcileSpeaking(); reconcileSpeakingConsents();
+  if (revision !== speakingRevision || seat !== speakingSeat || current !== client || generation !== entryGeneration
+    || !matches || !identity) return false;
+  speakingSeat = seat ?? identity;
+  speakingRoster = roster ?? new Map();
+  if (roster) {
+    speakingSuppressed = new Set();
+    if (speakingReport) speakingReport = { rawEmpty: speakingReport.rawEmpty,
+      ids: new Set([...speakingReport.ids].filter(id => roster.has(id))) };
+  } else speakingReport = undefined;
+  speakingRevision++;
+  return roster !== undefined;
+}
+function projectSpeakingReport(detail: unknown): SpeakingReport | undefined {
+  if (!detail || typeof detail !== 'object' || Array.isArray(detail)) return;
+  const participantIds: unknown = Reflect.get(detail, 'participantIds');
+  if (!Array.isArray(participantIds)) return;
+  const ids = new Set<string>(), rawEmpty = participantIds.length === 0;
+  for (const id of participantIds) {
+    if (typeof id !== 'string') return;
+    if (speakingRoster.has(id) && !speakingSuppressed.has(id)) ids.add(id);
+  }
+  return { ids, rawEmpty };
+}
+function pruneSpeaking(current: Client, generation: number, id: string): boolean {
+  reconcileSpeaking();
+  if (!speakingSeat || speakingSeat.client !== current || speakingSeat.generation !== generation
+    || typeof id !== 'string' || !id.trim() || !speakingRoster.has(id)) return false;
+  speakingSuppressed.add(id);
+  speakingReport?.ids.delete(id);
+  speakingRevision++;
+  return true;
+}
+function renderSpeaking(): void {
+  reconcileSpeaking(); reconcileSpeakingConsents();
+  const revision = speakingRevision, seat = speakingSeat, report = speakingReport;
+  const current = client, controls = controlsClient, generation = entryGeneration;
+  const valid = (): boolean => {
+    // Reconcile the winner even if a nested receipt already superseded this render.
+    reconcileSpeaking(); reconcileSpeakingConsents();
+    if (revision !== speakingRevision || seat !== speakingSeat || report !== speakingReport
+      || current !== client || controls !== controlsClient || generation !== entryGeneration) {
+      renderSpeaking(); return false;
+    }
+    return true;
+  };
+  if (!valid()) return;
+  if (!seat) {
+    if (!speakingSummary.hidden) { speakingSummary.hidden = true; if (!valid()) return; }
+    if (speakingSummary.textContent !== '') { speakingSummary.textContent = ''; if (!valid()) return; }
+    return;
+  }
+  const names = report ? [...speakingRoster].filter(([id]) => report.ids.has(id)).map(([, name]) => name) : [];
+  const text = !report ? '發言偵測：等待伺服器回報。'
+    : report.rawEmpty ? '最近收到的發言回報：未偵測到發言。'
+    : names.length ? `最近收到的發言回報：${names.join('、')}（${names.length} 人）。`
+    : '最近收到的發言回報：沒有可對應的台上成員。';
+  if (speakingSummary.textContent !== text) { speakingSummary.textContent = text; if (!valid()) return; }
+  if (speakingSummary.hidden) { speakingSummary.hidden = false; if (!valid()) return; }
+}
 let feedbackRevision = 0;
 let handRejectionOwner: { client: Client; roomId: string; participantId: string; generation: number } | undefined;
 function retireHandRejection(): void {
@@ -286,7 +422,7 @@ function retireControls(): void {
 }
 /** Retire initial-join feedback before user or terminal callbacks can start another entry. */
 function retireEntry(): number {
-  const generation = ++entryGeneration; retireOccupancy(); retireQuality();
+  const generation = ++entryGeneration; retireOccupancy(); retireQuality(); retireSpeaking();
   hideCancel();
   submit.disabled = false; submit.setAttribute('aria-busy', 'false');
   return generation;
@@ -1012,7 +1148,7 @@ function signalingUrl(host: URL, value: string): URL {
 join.onsubmit = (event) => {
   event.preventDefault();
   const previous = client, generation = ++entryGeneration;
-  retireOccupancy(); retireQuality();
+  retireOccupancy(); retireQuality(); retireSpeaking();
   clearError();
   const hostValue = input('host').value, pathValue = input('ws-path').value;
   const joinOptions = { roomId: input('room').value.trim(), code: input('code').value.trim() || undefined, name: input('name').value.trim() };
@@ -1021,6 +1157,7 @@ join.onsubmit = (event) => {
   let progress = true, receivedState = false, cancelledEntry = false;
   const occupancyReceipts = new WeakSet<object>();
   const qualityReceipts = new WeakSet<object>();
+  const speakingReceipts = new WeakSet<object>();
   let entryClient: Client | undefined;
   const showProgress = (message: string): void => {
     if (generation === entryGeneration && feedback === feedbackRevision && progress) status.textContent = message;
@@ -1036,6 +1173,7 @@ join.onsubmit = (event) => {
     syncMic(); syncStage(); syncMicRetry();
     renderOccupancy();
     if (cancelled === entryGeneration) renderQuality();
+    if (cancelled === entryGeneration) renderSpeaking();
     if (cancelled !== entryGeneration) return;
     try {
       const stopping = entryClient?.disconnect();
@@ -1053,6 +1191,7 @@ join.onsubmit = (event) => {
       hand.disabled = leave.disabled = true;
       renderOccupancy();
       if (generation === entryGeneration) renderQuality();
+      if (generation === entryGeneration) renderSpeaking();
       if (generation !== entryGeneration) return;
       await previous?.disconnect();
       if (generation !== entryGeneration) return;
@@ -1076,6 +1215,10 @@ join.onsubmit = (event) => {
         if (detail && typeof detail === 'object') occupancyReceipts.add(detail);
         if (client !== current || cancelledEntry || generation !== entryGeneration || occupancyRetiredGeneration === generation || controlsClient !== current) return;
         // SDK installs state before status; only its actual, previously unseen state receipt is fresh.
+        const speakingStateValid = receiveSpeakingState(current, generation, detail, Boolean(unseen));
+        if (!speakingStateValid) renderSpeaking();
+        // Public projection getters may have replaced this entry before legacy reconciliation.
+        if (client !== current || controlsClient !== current || generation !== entryGeneration || cancelledEntry) return;
         reconcileQuality();
         if (detail === current.state && unseen && eligibleQualitySeat(current) && !qualitySeat) {
           qualitySeat = { client: current, generation, roomId: detail.roomId, participantId: detail.me.participantId };
@@ -1103,6 +1246,7 @@ join.onsubmit = (event) => {
         if (renderingEntry === entryGeneration && client === current && controlsClient === current) {
           leave.disabled = false; renderOccupancy();
           if (renderingEntry === entryGeneration && client === current && controlsClient === current) renderQuality();
+          if (renderingEntry === entryGeneration && client === current && controlsClient === current) renderSpeaking();
         }
       });
       client.on('quality', ({ detail }) => {
@@ -1120,6 +1264,21 @@ join.onsubmit = (event) => {
         }
         renderQuality();
       });
+      client.on('speaking', ({ detail }) => {
+        const unseen = !detail || typeof detail !== 'object' || !speakingReceipts.has(detail);
+        if (detail && typeof detail === 'object') speakingReceipts.add(detail);
+        if (client !== current || cancelledEntry || generation !== entryGeneration || controlsClient !== current) return;
+        reconcileSpeaking();
+        const seat = speakingSeat, revision = speakingRevision;
+        if (unseen && seat) {
+          let projection: SpeakingReport | undefined;
+          try { projection = projectSpeakingReport(detail); } catch { /* Malformed reports mean unknown activity, not silence. */ }
+          reconcileSpeaking(); reconcileSpeakingConsents();
+          if (revision !== speakingRevision || seat !== speakingSeat || current !== client || generation !== entryGeneration) { renderSpeaking(); return; }
+          speakingReport = projection; speakingRevision++;
+        }
+        renderSpeaking();
+      });
       const retireOwnHandRejection = (participantId: string): void => {
         if (client === current && controlsClient === current && !cancelledEntry && generation === entryGeneration
           && participantId === current.me?.participantId) retireHandRejection();
@@ -1131,6 +1290,7 @@ join.onsubmit = (event) => {
       const ownsTransferEvents = (): boolean => client === current && controlsClient === current
         && !cancelledEntry && generation === entryGeneration && stageManagementOwner?.client === current;
       client.on('role', ({ detail }) => {
+        const speakingPruned = detail.role === 'audience' && pruneSpeaking(current, generation, detail.participantId);
         const closeFenced = detail.role !== 'controller' && fenceRoomClose(current, generation, detail.participantId);
         const transferFenced = ownsTransferEvents() && ((detail.participantId === stageManagementOwner!.participantId && detail.role !== 'controller')
           || (stageManagementRows.has(detail.participantId) && detail.role !== 'speaker'));
@@ -1142,6 +1302,7 @@ join.onsubmit = (event) => {
         if (closeFenced) syncRoomClose();
         if (transferFenced) syncStageManagement();
         if (ownDeparture && client === current && generation === entryGeneration) renderQuality();
+        if (speakingPruned && client === current && generation === entryGeneration) renderSpeaking();
       });
       client.on('transferred', ({ detail }) => {
         const closeFenced = fenceRoomClose(current, generation, detail.fromId);
@@ -1151,6 +1312,7 @@ join.onsubmit = (event) => {
         if (transferFenced) syncStageManagement();
       });
       client.on('stageleft', ({ detail }) => {
+        const speakingPruned = pruneSpeaking(current, generation, detail.participantId);
         const ownDeparture = client === current && controlsClient === current && !cancelledEntry && generation === entryGeneration
           && detail.participantId === current.me?.participantId;
         if (ownDeparture) retireQuality();
@@ -1158,6 +1320,7 @@ join.onsubmit = (event) => {
         if (transferFenced) fenceTransfer(false);
         if (transferFenced) syncStageManagement();
         if (ownDeparture && client === current && generation === entryGeneration) renderQuality();
+        if (speakingPruned && client === current && generation === entryGeneration) renderSpeaking();
       });
       client.on('handrejected', ({ detail }) => {
         // No per-raise identity is provided; feedback belongs only to the current eligible seat.
@@ -1183,8 +1346,12 @@ join.onsubmit = (event) => {
       });
       client.on('status', ({ detail }) => {
         if (client !== current || cancelledEntry || generation !== entryGeneration) return;
-        if (detail === 'disconnected') { occupancyRetiredGeneration = generation; retireOccupancy(); retireQuality(); }
-        else { reconcileOccupancy(); if (detail === 'reconnecting') retireQuality(); else reconcileQuality(); }
+        if (detail === 'disconnected') { occupancyRetiredGeneration = generation; retireOccupancy(); retireQuality(); retireSpeaking(); }
+        else {
+          reconcileOccupancy();
+          if (detail === 'reconnecting') { retireQuality(); retireSpeaking(); }
+          else { reconcileQuality(); reconcileSpeaking(); }
+        }
         const renderingEntry = entryGeneration;
         syncRoomClose();
         if (renderingEntry !== entryGeneration || client !== current) return;
@@ -1194,6 +1361,7 @@ join.onsubmit = (event) => {
         syncHand(); syncMic(); syncStage(); syncMicRetry(); syncRename(); syncRoomName(); syncHandQueue(); syncStageManagement(); syncRoomClose(); syncMicrophone(); syncAudioRetry(); syncOutput();
         if (renderingEntry === entryGeneration && client === current) renderOccupancy();
         if (renderingEntry === entryGeneration && client === current) renderQuality();
+        if (renderingEntry === entryGeneration && client === current) renderSpeaking();
       });
       client.on('error', ({ detail }) => { if (client !== current || cancelledEntry || generation !== entryGeneration) return; progress = false; report(detail); });
       client.on('audioblocked', () => { if (cancelledEntry) return; progress = false; status.textContent = '請點擊啟用音訊。'; });
@@ -1203,6 +1371,7 @@ join.onsubmit = (event) => {
         clearError(); retirePlayback(); retireControls(); syncHand(); syncMic(); syncStage(); syncMicRetry(); syncRename(); syncRoomName();
         renderOccupancy();
         if (retired === entryGeneration && client === current) renderQuality();
+        if (retired === entryGeneration && client === current) renderSpeaking();
         if (retired !== entryGeneration || client !== current) return;
         status.textContent = detail.reason === 'shutdown' ? '伺服器維護或重新啟動，房間已關閉。' : '房間已關閉。'; hand.disabled = leave.disabled = true;
       });
@@ -1212,6 +1381,7 @@ join.onsubmit = (event) => {
         clearError(); retirePlayback(); retireControls(); syncHand(); syncMic(); syncStage(); syncMicRetry(); syncRename(); syncRoomName();
         renderOccupancy();
         if (retired === entryGeneration && client === current) renderQuality();
+        if (retired === entryGeneration && client === current) renderSpeaking();
         if (retired !== entryGeneration || client !== current) return;
         status.textContent = '你已被主控移出房間。'; hand.disabled = leave.disabled = true;
       });
@@ -1426,6 +1596,7 @@ leave.onclick = () => {
   retireControls(); hand.setAttribute('aria-busy', 'false'); syncHand(); syncMic(); syncStage(); syncMicRetry();
   renderOccupancy();
   if (generation === entryGeneration && client === current) renderQuality();
+  if (generation === entryGeneration && client === current) renderSpeaking();
   if (generation !== entryGeneration || client !== current) return;
   void current?.disconnect().then(() => {
     if (generation !== entryGeneration || client !== current) return;
