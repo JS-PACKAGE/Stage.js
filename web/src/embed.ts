@@ -8,6 +8,10 @@ const status = document.querySelector<HTMLParagraphElement>('#status')!;
 const roomOccupancy = document.querySelector<HTMLParagraphElement>('#room-occupancy')!;
 const ownConnectionQuality = document.querySelector<HTMLParagraphElement>('#own-connection-quality')!;
 const speakingSummary = document.querySelector<HTMLParagraphElement>('#speaking-summary')!;
+const publicRosterPanel = document.querySelector<HTMLDetailsElement>('#public-roster')!;
+const publicRosterSummary = document.querySelector<HTMLElement>('#public-roster-summary')!;
+const publicRosterNotice = document.querySelector<HTMLParagraphElement>('#public-roster-notice')!;
+const publicRosterList = document.querySelector<HTMLUListElement>('#public-roster-list')!;
 const connectionStatsPanel = document.querySelector<HTMLDivElement>('#connection-stats-panel')!;
 const connectionStatsUpdate = document.querySelector<HTMLButtonElement>('#connection-stats-update')!;
 const connectionStatsText = document.querySelector<HTMLParagraphElement>('#connection-stats-text')!;
@@ -396,6 +400,167 @@ function renderSpeaking(): void {
   if (speakingSummary.textContent !== text) { speakingSummary.textContent = text; if (!valid()) return; }
   if (speakingSummary.hidden) { speakingSummary.hidden = false; if (!valid()) return; }
 }
+interface PublicRosterPerson {
+  id: string; name: string; role: 'controller' | 'speaker'; muted: boolean; forceMuted: boolean; connected: boolean;
+}
+interface PublicRosterOwner {
+  client: Client; generation: number; roomId: string; participantId: string;
+  people: PublicRosterPerson[]; stale: boolean; awaitingState: boolean; reconnecting: boolean;
+}
+let publicRosterOwner: PublicRosterOwner | undefined;
+let publicRosterEventRevision = 0, publicRosterRetirementRevision = 0;
+let publicRosterCollapse = true;
+const publicRosterRows = new Map<string, HTMLLIElement>();
+// Retirement is pure; the existing Close/Transfer fences run before this surface touches DOM.
+function retirePublicRoster(): void {
+  publicRosterOwner = undefined; publicRosterCollapse = true;
+  publicRosterRetirementRevision++;
+}
+function publicRosterMounted(): boolean {
+  return document.querySelector('#public-roster') === publicRosterPanel
+    && document.querySelector('#public-roster-summary') === publicRosterSummary
+    && document.querySelector('#public-roster-notice') === publicRosterNotice
+    && document.querySelector('#public-roster-list') === publicRosterList
+    && publicRosterPanel.contains(publicRosterSummary) && publicRosterPanel.contains(publicRosterNotice)
+    && publicRosterPanel.contains(publicRosterList);
+}
+function observePublicRoster(current: Client, generation: number, expected?: PublicRosterOwner) {
+  const event = publicRosterEventRevision, retirement = publicRosterRetirementRevision;
+  const close = pendingRoomClose, closeOwner = roomCloseOwner, transfer = pendingTransfer, transferOwner = stageManagementOwner;
+  const stable = (): boolean => event === publicRosterEventRevision && retirement === publicRosterRetirementRevision
+    && current === client && current === controlsClient && generation === entryGeneration;
+  const invalidate = (lost: (owner: { client: Client; generation: number; roomId: string; participantId: string }) => boolean): void => {
+    if (close && close === pendingRoomClose && closeOwner === roomCloseOwner && (!closeOwner || lost(closeOwner))) close.invalidated = true;
+    if (transfer && transfer === pendingTransfer && transferOwner === stageManagementOwner && (!transferOwner || lost(transferOwner))) transfer.invalidated = true;
+  };
+  const lose = (): undefined => { if (stable()) retirePublicRoster(); return undefined; };
+  try {
+    // Check both original consents before any new public projection or mount getter.
+    reconcileSpeakingConsents();
+    if (!stable()) return;
+    const state = current.state, status = current.status;
+    invalidate(owner => owner.client !== current || owner.generation !== generation || (status !== 'waiting' && status !== 'live'));
+    if (!stable()) return;
+    if (occupancyRetiredGeneration === generation || !['waiting', 'live', 'reconnecting'].includes(status)) return lose();
+    const roomId: unknown = state?.roomId;
+    invalidate(owner => owner.roomId !== roomId);
+    if (!stable()) return;
+    if (typeof roomId !== 'string' || !roomId.trim() || (expected && roomId !== expected.roomId)) return lose();
+    const participantId: unknown = state?.me?.participantId;
+    invalidate(owner => owner.participantId !== participantId);
+    if (!stable()) return;
+    if (typeof participantId !== 'string' || !participantId.trim() || (expected && participantId !== expected.participantId)) return lose();
+    const mounted = publicRosterMounted();
+    if (!stable()) return;
+    if (!mounted) return lose();
+    reconcileSpeakingConsents();
+    if (!stable()) return;
+    return { state, status, roomId, participantId };
+  } catch { invalidate(() => true); return lose(); }
+}
+function reconcilePublicRoster(): void {
+  for (;;) {
+    const owner = publicRosterOwner;
+    if (!owner) return;
+    if (owner.client !== client || owner.client !== controlsClient || owner.generation !== entryGeneration) { retirePublicRoster(); return; }
+    const event = publicRosterEventRevision, retirement = publicRosterRetirementRevision;
+    const identity = observePublicRoster(owner.client, owner.generation, owner);
+    if (event !== publicRosterEventRevision || retirement !== publicRosterRetirementRevision || owner !== publicRosterOwner) continue;
+    if (!identity) return;
+    owner.reconnecting = identity.status === 'reconnecting';
+    if (owner.reconnecting) owner.stale = true;
+    return;
+  }
+}
+function projectPublicRoster(state: StageEventMap['state']): PublicRosterPerson[] | undefined {
+  const speakers: unknown = state.speakers, controllerId: unknown = state.controllerId, limits = state.limits;
+  const limit: unknown = limits?.maxSpeakers;
+  if (!Array.isArray(speakers) || !limits || typeof limits !== 'object' || Array.isArray(limits)
+    || typeof controllerId !== 'string' || !controllerId.trim() || !decodeRoomName
+    || typeof limit !== 'number' || !Number.isSafeInteger(limit) || limit <= 0) return;
+  const ids = new Set<string>(), people: PublicRosterPerson[] = [];
+  let controllers = 0, others = 0;
+  for (const person of speakers) {
+    if (!person || typeof person !== 'object' || Array.isArray(person)) return;
+    const id: unknown = person.participantId, name: unknown = person.name, role: unknown = person.role;
+    const onStage: unknown = person.onStage, muted: unknown = person.muted, forceMuted: unknown = person.forceMuted, connected: unknown = person.connected;
+    if (typeof id !== 'string' || !id.trim() || ids.has(id) || typeof name !== 'string' || onStage !== true
+      || (role !== 'controller' && role !== 'speaker') || (role === 'controller') !== (id === controllerId)
+      || typeof muted !== 'boolean' || typeof forceMuted !== 'boolean' || typeof connected !== 'boolean' || (forceMuted && !muted)) return;
+    ids.add(id);
+    if (role === 'controller') controllers++; else others++;
+    if (controllers > 1 || others > limit) return;
+    people.push({ id, name: decodeRoomName(name), role, muted, forceMuted, connected });
+  }
+  return people;
+}
+function receivePublicRoster(current: Client, generation: number, detail: StageEventMap['state'], unseen: boolean,
+  event: number, entryRetirement: number): void {
+  let retirement = entryRetirement;
+  const stable = (): boolean => event === publicRosterEventRevision && retirement === publicRosterRetirementRevision
+    && current === client && current === controlsClient && generation === entryGeneration;
+  if (!stable() || !unseen) { renderPublicRoster(); return; }
+  // Keep the callback-entry retirement token across earlier surfaces and all projection getters.
+  const identity = observePublicRoster(current, generation);
+  if (!stable() || !identity || identity.state !== detail || identity.status === 'reconnecting') { renderPublicRoster(); return; }
+  const previous = publicRosterOwner;
+  if (previous && (previous.roomId !== identity.roomId || previous.participantId !== identity.participantId)) {
+    // Only this explicit, validated new-seat reset may advance the admission retirement token.
+    retirePublicRoster(); retirement++;
+    renderPublicRoster();
+    if (!stable()) return;
+  }
+  const owner: PublicRosterOwner = { client: current, generation, roomId: identity.roomId, participantId: identity.participantId,
+    people: [], stale: false, awaitingState: false, reconnecting: false };
+  let people: PublicRosterPerson[] | undefined;
+  try { people = projectPublicRoster(detail); } catch { /* A partial projection never replaces an accepted snapshot. */ }
+  if (!stable()) { renderPublicRoster(); return; }
+  const checked = observePublicRoster(current, generation, owner);
+  if (!stable()) { renderPublicRoster(); return; }
+  if (!checked || checked.state !== detail || checked.status === 'reconnecting') { retirePublicRoster(); renderPublicRoster(); return; }
+  if (!people) retirePublicRoster();
+  else { owner.people = people; publicRosterOwner = owner; }
+  renderPublicRoster();
+}
+function renderPublicRoster(): void {
+  for (;;) {
+    reconcileSpeakingConsents(); reconcilePublicRoster();
+    const owner = publicRosterOwner, event = publicRosterEventRevision, retirement = publicRosterRetirementRevision;
+    const stable = (): boolean => owner === publicRosterOwner && event === publicRosterEventRevision && retirement === publicRosterRetirementRevision;
+    const hidden = !owner;
+    if (hidden && !publicRosterPanel.hidden) { publicRosterPanel.hidden = true; continue; }
+    if (publicRosterCollapse && publicRosterPanel.open) { publicRosterPanel.open = false; continue; }
+    if (!stable()) continue;
+    publicRosterCollapse = false;
+    const summary = owner ? `台上成員快照（${owner.people.length}）` : '台上成員快照';
+    const freshness = owner?.reconnecting ? '重新連線中，上次快照。' : (owner?.stale || owner?.awaitingState) ? '上次快照。' : '最近收到的快照。';
+    const notice = owner ? `${freshness}${owner.awaitingState ? '成員狀態變更，等待伺服器快照。' : ''}${owner.people.length ? '' : '目前沒有台上成員。'}含斷線保留席位；不代表目前發言中或可聽見聲音。` : '';
+    if (publicRosterSummary.textContent !== summary) { publicRosterSummary.textContent = summary; continue; }
+    if (publicRosterNotice.textContent !== notice) { publicRosterNotice.textContent = notice; continue; }
+    if (!stable()) continue;
+    const ids = new Set(owner?.people.map(person => person.id));
+    for (const id of publicRosterRows.keys()) if (!ids.has(id)) publicRosterRows.delete(id);
+    let changed = false;
+    for (const person of owner?.people ?? []) {
+      let row = publicRosterRows.get(person.id);
+      if (!row) {
+        row = document.createElement('li');
+        if (!stable()) { changed = true; break; }
+        publicRosterRows.set(person.id, row);
+      }
+      const text = `${person.name} · ${person.role === 'controller' ? '主控' : '發言者'} · ${person.muted ? '已靜音' : '未靜音'} · ${person.forceMuted ? '靜音已鎖定' : '靜音未鎖定'} · ${person.connected ? '控制連線已連接' : '控制連線中斷（保留席位）'}`;
+      if (row.textContent !== text) { row.textContent = text; changed = true; break; }
+      if (!stable()) { changed = true; break; }
+    }
+    if (changed || !stable()) continue;
+    const rows = owner?.people.map(person => publicRosterRows.get(person.id)!) ?? [];
+    const children = Array.from(publicRosterList.children);
+    if (!stable()) continue;
+    if (children.length !== rows.length || children.some((node, index) => node !== rows[index])) { publicRosterList.replaceChildren(...rows); continue; }
+    if (publicRosterPanel.hidden !== hidden) { publicRosterPanel.hidden = hidden; continue; }
+    if (stable()) return;
+  }
+}
 interface ConnectionStatsBinding { client: Client; generation: number }
 interface ConnectionStatsOwner extends ConnectionStatsBinding { roomId: string; participantId: string }
 interface ConnectionStatsReport {
@@ -618,6 +783,7 @@ function hideCancel(): void {
   cancelEntry = undefined; cancelJoin.hidden = cancelJoin.disabled = true;
 }
 function retireControls(): void {
+  retirePublicRoster();
   retireMicTestBinding();
   retireConnectionStatsBinding();
   controlsClient = undefined; roomCloseFence = undefined; retireRoomClose(); retireHandRejection(); retireHandQueue(); retireStageManagement();
@@ -628,7 +794,7 @@ function retireControls(): void {
 /** Retire initial-join feedback before user or terminal callbacks can start another entry. */
 function retireEntry(): number {
   retireConnectionStatsBinding();
-  const generation = ++entryGeneration; retireMicTestBinding(); retireOccupancy(); retireQuality(); retireSpeaking();
+  const generation = ++entryGeneration; retireMicTestBinding(); retireOccupancy(); retireQuality(); retireSpeaking(); retirePublicRoster();
   hideCancel();
   submit.disabled = false; submit.setAttribute('aria-busy', 'false');
   return generation;
@@ -1530,7 +1696,7 @@ join.onsubmit = (event) => {
   event.preventDefault();
   const previous = client, generation = ++entryGeneration;
   retireMicTestBinding();
-  retireOccupancy(); retireQuality(); retireSpeaking();
+  retireOccupancy(); retireQuality(); retireSpeaking(); retirePublicRoster();
   clearError();
   const hostValue = input('host').value, pathValue = input('ws-path').value;
   const joinOptions = { roomId: input('room').value.trim(), code: input('code').value.trim() || undefined, name: input('name').value.trim() };
@@ -1556,6 +1722,7 @@ join.onsubmit = (event) => {
     renderOccupancy();
     if (cancelled === entryGeneration) renderQuality();
     if (cancelled === entryGeneration) renderSpeaking();
+    if (cancelled === entryGeneration) renderPublicRoster();
     finishConnectionStatsTeardown(cancelled);
     if (cancelled !== entryGeneration) return;
     try {
@@ -1575,6 +1742,7 @@ join.onsubmit = (event) => {
       renderOccupancy();
       if (generation === entryGeneration) renderQuality();
       if (generation === entryGeneration) renderSpeaking();
+      if (generation === entryGeneration) renderPublicRoster();
       finishConnectionStatsTeardown(generation);
       if (generation !== entryGeneration) return;
       await previous?.disconnect();
@@ -1600,6 +1768,7 @@ join.onsubmit = (event) => {
         const unseen = detail && typeof detail === 'object' && !occupancyReceipts.has(detail);
         if (detail && typeof detail === 'object') occupancyReceipts.add(detail);
         if (client !== current || cancelledEntry || generation !== entryGeneration || occupancyRetiredGeneration === generation || controlsClient !== current) return;
+        const rosterEvent = ++publicRosterEventRevision, rosterRetirement = publicRosterRetirementRevision;
         if (detail === current.state && unseen) micTestFence = undefined;
         reconcileMicTest();
         // SDK installs state before status; only its actual, previously unseen state receipt is fresh.
@@ -1636,6 +1805,7 @@ join.onsubmit = (event) => {
           if (renderingEntry === entryGeneration && client === current && controlsClient === current) renderQuality();
           if (renderingEntry === entryGeneration && client === current && controlsClient === current) renderSpeaking();
           if (renderingEntry === entryGeneration && client === current && controlsClient === current) syncConnectionStats();
+          receivePublicRoster(current, generation, detail, Boolean(unseen), rosterEvent, rosterRetirement);
         }
       });
       client.on('quality', ({ detail }) => {
@@ -1651,7 +1821,7 @@ join.onsubmit = (event) => {
           reconcileQuality();
           if (seat === qualitySeat) { qualityReport = projection; qualityRevision++; }
         }
-        renderQuality();
+        renderQuality(); renderPublicRoster();
       });
       client.on('speaking', ({ detail }) => {
         const unseen = !detail || typeof detail !== 'object' || !speakingReceipts.has(detail);
@@ -1666,7 +1836,7 @@ join.onsubmit = (event) => {
           if (revision !== speakingRevision || seat !== speakingSeat || current !== client || generation !== entryGeneration) { renderSpeaking(); return; }
           speakingReport = projection; speakingRevision++;
         }
-        renderSpeaking();
+        renderSpeaking(); renderPublicRoster();
       });
       const retireOwnHandRejection = (participantId: string): void => {
         if (client === current && controlsClient === current && !cancelledEntry && generation === entryGeneration
@@ -1736,11 +1906,13 @@ join.onsubmit = (event) => {
       });
       client.on('status', ({ detail }) => {
         if (client !== current || cancelledEntry || generation !== entryGeneration) return;
+        publicRosterEventRevision++;
+        if (detail === 'reconnecting' && publicRosterOwner) { publicRosterOwner.stale = true; publicRosterOwner.reconnecting = true; }
         if (detail === 'disconnected') retireMicTestBinding();
         else if (detail === 'reconnecting') retireMicTest();
         if (detail === 'disconnected') retireConnectionStatsBinding();
         else if (detail === 'reconnecting') retireConnectionStats();
-        if (detail === 'disconnected') { occupancyRetiredGeneration = generation; retireOccupancy(); retireQuality(); retireSpeaking(); }
+        if (detail === 'disconnected') { occupancyRetiredGeneration = generation; retireOccupancy(); retireQuality(); retireSpeaking(); retirePublicRoster(); }
         else {
           reconcileOccupancy();
           if (detail === 'reconnecting') { retireQuality(); retireSpeaking(); }
@@ -1756,7 +1928,15 @@ join.onsubmit = (event) => {
         if (renderingEntry === entryGeneration && client === current) renderOccupancy();
         if (renderingEntry === entryGeneration && client === current) renderQuality();
         if (renderingEntry === entryGeneration && client === current) renderSpeaking();
+        if (renderingEntry === entryGeneration && client === current) renderPublicRoster();
         if (renderingEntry === entryGeneration && client === current) finishConnectionStatsTeardown(renderingEntry);
+      });
+      // Original role/stage Close/Transfer fences above run before this passive notification reader.
+      for (const type of ['role', 'stagejoined', 'stageleft', 'transferred', 'mic'] as const) current.on(type, () => {
+        if (client !== current || controlsClient !== current || cancelledEntry || generation !== entryGeneration) return;
+        publicRosterEventRevision++;
+        if (publicRosterOwner) publicRosterOwner.awaitingState = true;
+        renderPublicRoster();
       });
       client.on('error', ({ detail }) => { if (client !== current || cancelledEntry || generation !== entryGeneration) return; progress = false; report(detail); });
       client.on('audioblocked', () => { if (cancelledEntry) return; progress = false; status.textContent = '請點擊啟用音訊。'; });
@@ -1767,6 +1947,7 @@ join.onsubmit = (event) => {
         renderOccupancy();
         if (retired === entryGeneration && client === current) renderQuality();
         if (retired === entryGeneration && client === current) renderSpeaking();
+        if (retired === entryGeneration && client === current) renderPublicRoster();
         if (retired === entryGeneration && client === current) finishConnectionStatsTeardown(retired);
         if (retired !== entryGeneration || client !== current) return;
         status.textContent = detail.reason === 'shutdown' ? '伺服器維護或重新啟動，房間已關閉。' : '房間已關閉。'; hand.disabled = leave.disabled = true;
@@ -1778,6 +1959,7 @@ join.onsubmit = (event) => {
         renderOccupancy();
         if (retired === entryGeneration && client === current) renderQuality();
         if (retired === entryGeneration && client === current) renderSpeaking();
+        if (retired === entryGeneration && client === current) renderPublicRoster();
         if (retired === entryGeneration && client === current) finishConnectionStatsTeardown(retired);
         if (retired !== entryGeneration || client !== current) return;
         status.textContent = '你已被主控移出房間。'; hand.disabled = leave.disabled = true;
@@ -1994,6 +2176,7 @@ leave.onclick = () => {
   renderOccupancy();
   if (generation === entryGeneration && client === current) renderQuality();
   if (generation === entryGeneration && client === current) renderSpeaking();
+  if (generation === entryGeneration && client === current) renderPublicRoster();
   if (generation === entryGeneration && client === current) finishConnectionStatsTeardown(generation);
   if (generation !== entryGeneration || client !== current) return;
   void current?.disconnect().then(() => {
