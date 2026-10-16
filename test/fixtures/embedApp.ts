@@ -6,7 +6,7 @@ import type { ParticipantView } from '../../shared/protocol.ts';
 
 type Status = 'waiting' | 'live' | 'reconnecting' | 'disconnected';
 type Me = Pick<ParticipantView, 'participantId' | 'name' | 'role' | 'onStage' | 'handRaised' | 'muted' | 'forceMuted'>;
-interface State { roomId: string; name: string; me: Me; hands: ParticipantView[] }
+interface State { roomId: string; name: string; me: Me; hands: ParticipantView[]; speakers: ParticipantView[] }
 interface JoinOptions { roomId: string; code?: string; name: string }
 interface ClientOptions { url: string; audioElement: EmbedNode }
 type Action = 'raise' | 'withdraw' | 'mute' | 'unmute' | 'leaveStage' | 'returnToStage';
@@ -107,6 +107,13 @@ export class EmbedSdk {
   readonly moderations: { kind: 'approve' | 'reject'; id: string; work: Deferred }[] = [];
   approve(id: string): Promise<void> { const work = new Deferred(); this.moderations.push({ kind: 'approve', id, work }); return work.promise; }
   reject(id: string): Promise<void> { const work = new Deferred(); this.moderations.push({ kind: 'reject', id, work }); return work.promise; }
+  readonly stageModerations: { kind: 'forceMute' | 'forceUnmute' | 'removeFromStage'; id: string; work: Deferred }[] = [];
+  forceMute(id: string): Promise<void> { return this.moderateStage('forceMute', id); }
+  forceUnmute(id: string): Promise<void> { return this.moderateStage('forceUnmute', id); }
+  removeFromStage(id: string): Promise<void> { return this.moderateStage('removeFromStage', id); }
+  private moderateStage(kind: 'forceMute' | 'forceUnmute' | 'removeFromStage', id: string): Promise<void> {
+    const work = new Deferred(); this.stageModerations.push({ kind, id, work }); return work.promise;
+  }
   readonly roomRenames: { name: string; work: Deferred }[] = [];
   setRoomName(name: string): Promise<void> { const work = new Deferred(); this.roomRenames.push({ name, work }); return work.promise; }
   private readonly listeners = new Map<string, ((event: { detail: unknown }) => void)[]>();
@@ -120,7 +127,7 @@ export class EmbedSdk {
   setStatus(status: Status): void { this.status = status; this.emit('status', status); }
   snapshot(overrides: Partial<Me> = {}): void {
     this.me = { participantId: 'listener', name: '測試聽眾', role: 'audience', onStage: false, handRaised: false, muted: false, forceMuted: false, ...this.me, ...overrides };
-    this.state = { roomId: 'same-room', name: '測試舞台', me: this.me, hands: [] };
+    this.state = { roomId: 'same-room', name: '測試舞台', me: this.me, hands: [], speakers: [] };
     this.emit('state', this.state);
   }
   async connect(): Promise<void> { this.setStatus('waiting'); }
@@ -143,7 +150,7 @@ export class EmbedSdk {
 export const flush = async (): Promise<void> => { for (let i = 0; i < 16; i++) await Promise.resolve(); };
 
 export function embedApp(options: { libraryLoad?: Promise<void> | ((url: string, attempt: number) => Promise<void>); source?: string; search?: string } = {}) {
-  const nodes = new Map(['host', 'ws-path', 'room', 'code', 'name', 'status', 'hand-rejected', 'error-notice', 'last-error', 'error-dismiss', 'join', 'hand', 'mic', 'rename', 'room-name-panel', 'room-name-current', 'room-name-draft', 'room-name-update', 'hand-queue', 'hand-queue-summary', 'hand-queue-notice', 'hand-queue-list', 'stage', 'mic-retry', 'audio-retry', 'audio-retry-status', 'microphone-panel', 'microphone-device', 'microphone-refresh', 'microphone-apply', 'microphone-draft-notice', 'output-panel', 'output-device', 'output-refresh', 'output-apply', 'output-draft-notice', 'output-support', 'cancel-join', 'leave', 'audio', 'unlock'].map(id => [id, new EmbedNode()]));
+  const nodes = new Map(['host', 'ws-path', 'room', 'code', 'name', 'status', 'hand-rejected', 'error-notice', 'last-error', 'error-dismiss', 'join', 'hand', 'mic', 'rename', 'room-name-panel', 'room-name-current', 'room-name-draft', 'room-name-update', 'hand-queue', 'hand-queue-summary', 'hand-queue-notice', 'hand-queue-list', 'stage-management', 'stage-management-summary', 'stage-management-notice', 'stage-management-list', 'stage', 'mic-retry', 'audio-retry', 'audio-retry-status', 'microphone-panel', 'microphone-device', 'microphone-refresh', 'microphone-apply', 'microphone-draft-notice', 'output-panel', 'output-device', 'output-refresh', 'output-apply', 'output-draft-notice', 'output-support', 'cancel-join', 'leave', 'audio', 'unlock'].map(id => [id, new EmbedNode()]));
   const node = (id: string): EmbedNode => { const found = nodes.get(id); assert.ok(found, `unmodeled node: ${id}`); return found; };
   node('error-notice').hidden = true; node('hand-rejected').hidden = true;
   const cancel = node('cancel-join'); cancel.hidden = cancel.disabled = true; cancel.textContent = '取消連線';
@@ -233,10 +240,10 @@ export function embedApp(options: { libraryLoad?: Promise<void> | ((url: string,
       assert.equal(sdk.joins.length, 1); sdk.snapshot(overrides); assert.equal(submit.disabled, false); return sdk;
     },
     async cleanup(): Promise<void> {
-      for (const sdk of clients) for (const action of [...sdk.actions, ...sdk.renames, ...sdk.roomRenames, ...sdk.inputSelections, ...sdk.moderations]) if (!action.work.settled) action.work.resolve();
+      for (const sdk of clients) for (const action of [...sdk.actions, ...sdk.renames, ...sdk.roomRenames, ...sdk.inputSelections, ...sdk.moderations, ...sdk.stageModerations]) if (!action.work.settled) action.work.resolve();
       for (const sdk of clients) for (const work of sdk.deviceLists) if (!work.settled) work.resolve();
       await flush(); timers.clear(); retired.clear();
-      assert.ok(clients.every(sdk => [...sdk.actions, ...sdk.renames, ...sdk.roomRenames, ...sdk.inputSelections, ...sdk.moderations].every(action => action.work.settled)), 'all command promises must settle');
+      assert.ok(clients.every(sdk => [...sdk.actions, ...sdk.renames, ...sdk.roomRenames, ...sdk.inputSelections, ...sdk.moderations, ...sdk.stageModerations].every(action => action.work.settled)), 'all command promises must settle');
       assert.equal(timers.size, 0);
     },
   };

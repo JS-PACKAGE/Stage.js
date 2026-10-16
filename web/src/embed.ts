@@ -21,6 +21,10 @@ const handQueuePanel = document.querySelector<HTMLDetailsElement>('#hand-queue')
 const handQueueSummary = document.querySelector<HTMLElement>('#hand-queue-summary')!;
 const handQueueNotice = document.querySelector<HTMLParagraphElement>('#hand-queue-notice')!;
 const handQueueList = document.querySelector<HTMLUListElement>('#hand-queue-list')!;
+const stageManagementPanel = document.querySelector<HTMLDetailsElement>('#stage-management')!;
+const stageManagementSummary = document.querySelector<HTMLElement>('#stage-management-summary')!;
+const stageManagementNotice = document.querySelector<HTMLParagraphElement>('#stage-management-notice')!;
+const stageManagementList = document.querySelector<HTMLUListElement>('#stage-management-list')!;
 const roomNamePanel = document.querySelector<HTMLDivElement>('#room-name-panel')!;
 const roomNameCurrent = document.querySelector<HTMLParagraphElement>('#room-name-current')!;
 const roomNameDraft = input('room-name-draft');
@@ -60,6 +64,13 @@ let handQueueOwner: { client: Client; roomId: string; participantId: string; gen
 const handQueueRows = new Map<string, HandQueueRow>();
 const handQueuePending = new Map<string, object>();
 let handQueueOrder: string[] = [];
+interface StageManagementRow {
+  node: HTMLLIElement; name: HTMLSpanElement; mute: HTMLButtonElement; remove: HTMLButtonElement;
+}
+let stageManagementOwner: { client: Client; roomId: string; participantId: string; generation: number } | undefined;
+const stageManagementRows = new Map<string, StageManagementRow>();
+const stageManagementPending = new Map<string, object>();
+let stageManagementOrder: string[] = [];
 let decodeRoomName: typeof StageLibrary.decodeName | undefined;
 let micRetryParticipant: string | undefined;
 let pendingMicRetry: { client: Client } | undefined;
@@ -106,7 +117,7 @@ function hideCancel(): void {
   cancelEntry = undefined; cancelJoin.hidden = cancelJoin.disabled = true;
 }
 function retireControls(): void {
-  controlsClient = undefined; retireHandRejection(); retireHandQueue();
+  controlsClient = undefined; retireHandRejection(); retireHandQueue(); retireStageManagement();
   pendingHand = undefined; pendingMic = undefined; pendingStage = undefined;
   micRetryParticipant = undefined; pendingMicRetry = undefined;
   pendingRename = undefined; syncRename(); retireRoomName(); retireMicrophone(); retireAudioRetry(); retireOutput();
@@ -268,6 +279,111 @@ function moderateHand(id: string, row: HandQueueRow, kind: 'approve' | 'reject')
       if (eligible()) report(error);
     } finally {
       if (current()) { handQueuePending.delete(id); syncHandQueue(); }
+    }
+  })();
+}
+function retireStageManagement(): void {
+  stageManagementOwner = undefined; stageManagementPending.clear();
+  for (const row of stageManagementRows.values()) {
+    for (const button of [row.mute, row.remove]) { button.disabled = true; button.setAttribute('aria-busy', 'false'); }
+  }
+  if (stageManagementRows.size) stageManagementList.replaceChildren();
+  stageManagementRows.clear(); stageManagementOrder = [];
+  stageManagementPanel.hidden = true; stageManagementPanel.open = false;
+  stageManagementSummary.textContent = ''; stageManagementNotice.textContent = '';
+}
+function syncStageManagement(): void {
+  const current = client, state = current?.state;
+  const active = current?.status === 'waiting' || current?.status === 'live';
+  if (!current || current !== controlsClient || !state || state.me.role !== 'controller' || !decodeRoomName
+    || (!active && current.status !== 'reconnecting')) { retireStageManagement(); return; }
+  const owner = stageManagementOwner;
+  if (!owner || owner.client !== current || owner.generation !== entryGeneration
+    || owner.roomId !== state.roomId || owner.participantId !== state.me.participantId) {
+    retireStageManagement();
+    // Reconnect can preserve an observed controller tenure, but cannot establish a new one.
+    if (!active) return;
+    stageManagementOwner = { client: current, roomId: state.roomId, participantId: state.me.participantId, generation: entryGeneration };
+  }
+  const seen = new Set<string>();
+  const people = state.speakers.filter(person => {
+    if (!person.participantId || person.participantId === state.me.participantId || seen.has(person.participantId)
+      || person.role !== 'speaker' || !person.onStage) return false;
+    seen.add(person.participantId); return true;
+  });
+  stageManagementPanel.hidden = false;
+  stageManagementSummary.textContent = `舞台管理（${people.length}）${active ? '' : ' · 上次收到'}`;
+  stageManagementNotice.textContent = `${active ? (people.length ? '' : '目前沒有其他台上發言者。') : '重新連線中，暫時不能管理舞台。'}解除靜音鎖定會保留對方自行靜音設定；移下台後仍留在房間。`;
+  for (const person of people) {
+    const id = person.participantId;
+    let row = stageManagementRows.get(id);
+    if (!row) {
+      const node = document.createElement('li'), name = document.createElement('span'), actions = document.createElement('div');
+      const mute = document.createElement('button'), remove = document.createElement('button');
+      node.className = 'person'; name.className = 'identity'; actions.className = 'actions';
+      mute.type = remove.type = 'button'; remove.textContent = '移下台';
+      row = { node, name, mute, remove };
+      const original = row;
+      mute.onclick = () => moderateStage(id, original, 'mute');
+      remove.onclick = () => moderateStage(id, original, 'remove');
+      actions.append(mute, remove); node.append(name, actions); stageManagementRows.set(id, row);
+    }
+    const name = decodeRoomName(person.name);
+    const label = `${name} · ${person.muted ? '已靜音' : '未靜音'} · ${person.forceMuted ? '靜音已鎖定' : '靜音未鎖定'}${person.connected ? '' : ' · 暫時離線（保留席位）'}`;
+    if (row.name.textContent !== label) row.name.textContent = label;
+    const muteLabel = person.forceMuted ? '解除靜音鎖定' : '鎖定靜音';
+    if (row.mute.textContent !== muteLabel) row.mute.textContent = muteLabel;
+    const labels = { mute: `${muteLabel}：${name}`, remove: `將 ${name} 移下台` };
+    for (const kind of ['mute', 'remove'] as const) {
+      const button = row[kind], pending = stageManagementPending.has(id);
+      const method = kind === 'remove' ? 'removeFromStage' : person.forceMuted ? 'forceUnmute' : 'forceMute';
+      if (button.getAttribute('aria-label') !== labels[kind]) button.setAttribute('aria-label', labels[kind]);
+      const disabled = !active || pending || typeof current[method] !== 'function', busy = String(pending);
+      if (button.disabled !== disabled) button.disabled = disabled;
+      if (button.getAttribute('aria-busy') !== busy) button.setAttribute('aria-busy', busy);
+    }
+  }
+  for (const [id, row] of stageManagementRows) if (!seen.has(id)) {
+    for (const button of [row.mute, row.remove]) { button.disabled = true; button.setAttribute('aria-busy', 'false'); }
+    stageManagementRows.delete(id);
+  }
+  const order = people.map(person => person.participantId);
+  if (order.length !== stageManagementOrder.length || order.some((id, index) => id !== stageManagementOrder[index])) {
+    stageManagementList.replaceChildren(...order.map(id => stageManagementRows.get(id)!.node)); stageManagementOrder = order;
+  }
+}
+function currentStageRow(id: string, row: StageManagementRow, kind: 'mute' | 'remove'): boolean {
+  return stageManagementRows.get(id) === row && row.node.parentElement === stageManagementList
+    && row.node.contains(row[kind]) && !stageManagementPanel.hidden;
+}
+function moderateStage(id: string, row: StageManagementRow, kind: 'mute' | 'remove'): void {
+  syncStageManagement();
+  const owner = stageManagementOwner;
+  if (!owner || !currentStageRow(id, row, kind) || stageManagementPending.has(id)
+    || (owner.client.status !== 'waiting' && owner.client.status !== 'live')) return;
+  const person = owner.client.state?.speakers.find(person => person.participantId === id && person.role === 'speaker' && person.onStage);
+  if (!person || id === owner.participantId) return;
+  const method = kind === 'remove' ? 'removeFromStage' : person.forceMuted ? 'forceUnmute' : 'forceMute';
+  if (typeof owner.client[method] !== 'function') return;
+  // State may remove and re-add the same ID before ACK; the token outlives its original row.
+  const attempt = {};
+  stageManagementPending.set(id, attempt); syncStageManagement();
+  const current = (): boolean => {
+    if (stageManagementOwner !== owner || stageManagementPending.get(id) !== attempt) return false;
+    syncStageManagement();
+    return stageManagementOwner === owner && stageManagementPending.get(id) === attempt;
+  };
+  const eligible = (): boolean => current() && currentStageRow(id, row, kind)
+    && (owner.client.status === 'waiting' || owner.client.status === 'live');
+  void (async () => {
+    try {
+      if (!eligible() || typeof owner.client[method] !== 'function') return;
+      await owner.client[method](id);
+    } catch (error) {
+      // Original-row feedback is isolated; SDK global wire errors keep their existing policy.
+      if (eligible()) report(error);
+    } finally {
+      if (current()) { stageManagementPending.delete(id); syncStageManagement(); }
     }
   })();
 }
@@ -545,7 +661,7 @@ join.onsubmit = (event) => {
         if (generation === entryGeneration) hideCancel();
         progress = false;
         status.textContent = `${library.decodeName(detail.name)} · ${library.decodeName(detail.me.name)} · ${detail.me.onStage ? '已上台' : '收聽中'}`;
-        syncHand(); syncMic(); syncStage(); syncMicRetry(); syncRename(); syncRoomName(); syncHandQueue(); syncMicrophone(); syncAudioRetry(); syncOutput();
+        syncHand(); syncMic(); syncStage(); syncMicRetry(); syncRename(); syncRoomName(); syncHandQueue(); syncStageManagement(); syncMicrophone(); syncAudioRetry(); syncOutput();
         leave.disabled = false;
       });
       const retireOwnHandRejection = (participantId: string): void => {
@@ -583,7 +699,7 @@ join.onsubmit = (event) => {
         if (current.state) { receivedState = true; if (generation === entryGeneration) hideCancel(); }
         if (detail === 'reconnecting') { retireHandRejection(); progress = false; status.textContent = '重新連線中'; hand.disabled = true; }
         else if (detail === 'disconnected') { progress = false; retirePlayback(); retireControls(); status.textContent = '未連線'; hand.disabled = leave.disabled = true; }
-        syncHand(); syncMic(); syncStage(); syncMicRetry(); syncRename(); syncRoomName(); syncHandQueue(); syncMicrophone(); syncAudioRetry(); syncOutput();
+        syncHand(); syncMic(); syncStage(); syncMicRetry(); syncRename(); syncRoomName(); syncHandQueue(); syncStageManagement(); syncMicrophone(); syncAudioRetry(); syncOutput();
       });
       client.on('error', ({ detail }) => { if (client !== current || cancelledEntry || generation !== entryGeneration) return; progress = false; report(detail); });
       client.on('audioblocked', () => { if (cancelledEntry) return; progress = false; status.textContent = '請點擊啟用音訊。'; });
@@ -804,4 +920,4 @@ leave.onclick = () => {
   });
 };
 replaceOutputOptions([]);
-syncHand(); syncMic(); syncStage(); syncMicRetry(); syncRename(); syncRoomName(); syncHandQueue(); syncMicrophone(); syncAudioRetry(); syncOutput(); syncUnlock();
+syncHand(); syncMic(); syncStage(); syncMicRetry(); syncRename(); syncRoomName(); syncHandQueue(); syncStageManagement(); syncMicrophone(); syncAudioRetry(); syncOutput(); syncUnlock();
