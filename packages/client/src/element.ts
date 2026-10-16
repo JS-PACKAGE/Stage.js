@@ -1,4 +1,4 @@
-import { StageClient, decodeName, MAX_GAIN_DB, type ConnectionQuality, type StageEventMap } from './index.ts';
+import { StageClient, decodeName, MAX_GAIN_DB, type ConnectionQuality, type MicTest, type StageEventMap } from './index.ts';
 
 /** Every StageClient event, re-dispatched from the element as `stage-<type>`. */
 const EVENTS: (keyof StageEventMap)[] = [
@@ -40,6 +40,9 @@ const STYLE = `
 [part=microphone][hidden] { display: none; }
 [part=microphone] p { flex-basis: 100%; margin: 0; font-size: .875em; }
 [part=microphone] select { font: inherit; max-width: 100%; }
+[part=mic-test] { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; }
+[part=mic-test][hidden] { display: none; }
+[part=mic-test] p { flex-basis: 100%; margin: 0; font-size: .875em; }
 [part=output-device] { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; }
 [part=output-device][hidden] { display: none; }
 [part=output-device] p { flex-basis: 100%; margin: 0; font-size: .875em; }
@@ -70,7 +73,7 @@ button.primary { background: var(--stage-accent, #2563eb); border-color: transpa
  * Controllers can lock/unlock other speakers' mute, explicitly apply a room-mix gain draft, remove them from the stage, or confirm a connected speaker's control handoff.
  * The microphone picker is an explicit draft, never an indicator of the actual capture device.
  * The output picker is also a draft; explicit refresh and submission never imply audible playback.
- * Style through `::part(panel|status|quality|connection-stats|speaking|hand-rejection|audio-recovery|audio-retry|actions|name|room-name|hands|stage-management|playback|microphone|output-device)` and the
+ * Style through `::part(panel|status|quality|connection-stats|speaking|hand-rejection|audio-recovery|audio-retry|actions|name|room-name|hands|stage-management|playback|microphone|mic-test|output-device)` and the
  * `--stage-*` custom properties.
  */
 export class StageElement extends HTMLElement {
@@ -168,6 +171,34 @@ export class StageElement extends HTMLElement {
   private microphoneTerminalClient: StageClient | undefined;
   private refreshAttempt: object | undefined;
   private inputDeviceAttempt: object | undefined;
+  private readonly micTestPanel: HTMLDivElement;
+  private readonly micTestStart: HTMLButtonElement;
+  private readonly micTestCancel: HTMLButtonElement;
+  private readonly micTestStop: HTMLButtonElement;
+  private readonly micTestMeter: HTMLMeterElement;
+  private readonly micTestStatus: HTMLParagraphElement;
+  // A binding is installed with a new client, never reconstructed from current during teardown.
+  private micTestBinding: { client: StageClient; generation: number; blocked: boolean; early: Set<string> } | undefined;
+  private micTestOwner: { binding: NonNullable<StageElement['micTestBinding']>; roomId: string; participantId: string } | undefined;
+  private micTestAttempt: { owner: NonNullable<StageElement['micTestOwner']>; controller: AbortController;
+    pending: boolean; retired: boolean; handle?: MicTest } | undefined;
+  private micTestMessage = '尚未開始麥克風音量測試。';
+  private micTestValue = 0;
+  private micTestTimer: ReturnType<typeof setTimeout> | undefined;
+  private micTestCleanup = 0;
+  private micTestPageHidden = false;
+  private micTestDocument: Document | undefined;
+  private micTestWindow: Window | undefined;
+  private readonly micTestStates = new WeakSet<object>();
+  private readonly micTestEarlyStates = new WeakSet<object>();
+  private readonly micTestVisibility = () => {
+    if (this.micTestDocument?.hidden) this.retireMicTest(true);
+    this.syncMicTest();
+  };
+  private readonly micTestPageHide = () => {
+    this.micTestPageHidden = true; this.retireMicTest(true); this.syncMicTest();
+  };
+  private readonly micTestPageShow = () => { this.micTestPageHidden = false; this.syncMicTest(); };
   private readonly outputDevicePanel: HTMLDivElement;
   private readonly outputDeviceSelect: HTMLSelectElement;
   private readonly outputDeviceRefresh: HTMLButtonElement;
@@ -329,6 +360,28 @@ export class StageElement extends HTMLElement {
     microphoneNotice.id = 'microphone-draft-notice';
     microphoneNotice.textContent = '草稿不代表目前實際擷取裝置；麥克風失敗後需另按「重試麥克風」。重新整理清單不會開啟麥克風；預設選項沿用 SDK 設定。';
     this.microphonePanel.append(microphoneLabel, this.microphoneSelect, this.microphoneRefresh, this.microphoneApply, microphoneNotice);
+    this.micTestPanel = document.createElement('div');
+    this.micTestPanel.id = 'mic-test-panel'; this.micTestPanel.part.add('mic-test');
+    this.micTestStart = document.createElement('button');
+    this.micTestStart.id = 'mic-test-start'; this.micTestStart.type = 'button'; this.micTestStart.textContent = '測試麥克風音量';
+    this.micTestStart.onclick = () => this.startMicTest();
+    this.micTestCancel = document.createElement('button');
+    this.micTestCancel.id = 'mic-test-cancel'; this.micTestCancel.type = 'button'; this.micTestCancel.textContent = '取消麥克風測試';
+    this.micTestCancel.onclick = () => this.stopMicTest();
+    this.micTestStop = document.createElement('button');
+    this.micTestStop.id = 'mic-test-stop'; this.micTestStop.type = 'button'; this.micTestStop.textContent = '停止麥克風測試';
+    this.micTestStop.onclick = () => this.stopMicTest();
+    const micTestLabel = document.createElement('label');
+    micTestLabel.textContent = '本機麥克風測試音量'; micTestLabel.setAttribute('for', 'mic-test-meter');
+    this.micTestMeter = document.createElement('meter');
+    this.micTestMeter.id = 'mic-test-meter'; this.micTestMeter.min = 0; this.micTestMeter.max = 1; this.micTestMeter.value = 0;
+    this.micTestMeter.setAttribute('aria-describedby', 'mic-test-notice');
+    this.micTestStatus = document.createElement('p'); this.micTestStatus.id = 'mic-test-status';
+    this.micTestStatus.setAttribute('role', 'status'); this.micTestStatus.setAttribute('aria-live', 'polite');
+    const micTestNotice = document.createElement('p'); micTestNotice.id = 'mic-test-notice';
+    micTestNotice.textContent = '僅量測本機音量，不會播放或傳送到舞台；不保證實際裝置或收音正常。測試使用已送出的選擇，未送出草稿不影響測試。取消無法關閉瀏覽器的權限提示。';
+    this.micTestPanel.append(this.micTestStart, this.micTestCancel, this.micTestStop, micTestLabel,
+      this.micTestMeter, this.micTestStatus, micTestNotice);
     this.outputDevicePanel = document.createElement('div');
     this.outputDevicePanel.part.add('output-device');
     const outputDeviceLabel = document.createElement('label');
@@ -397,7 +450,7 @@ export class StageElement extends HTMLElement {
     this.retry = this.button('重試加入', () => { if (this.canRetry()) this.rejoin(); });
     this.cancelJoin = this.button('取消加入', () => this.cancelInitial?.());
     actions.append(this.unlock, this.listen, this.hand, this.mic, this.micRetry, this.audioRetry, this.leaveStage, this.roomAction, this.roomClose, this.retry, this.cancelJoin);
-    panel.append(this.status, this.occupancy, this.quality, this.connectionStatsPanel, this.speaking, this.handRejection, this.error, this.errorDismiss, this.namePanel, this.roomNamePanel, this.handQueuePanel, this.stageManagementPanel, actions, this.roomCloseNotice, this.audioRecovery, this.microphonePanel, this.outputDevicePanel, this.playback);
+    panel.append(this.status, this.occupancy, this.quality, this.connectionStatsPanel, this.speaking, this.handRejection, this.error, this.errorDismiss, this.namePanel, this.roomNamePanel, this.handQueuePanel, this.stageManagementPanel, actions, this.roomCloseNotice, this.audioRecovery, this.microphonePanel, this.micTestPanel, this.outputDevicePanel, this.playback);
     root.append(style, panel);
     this.render();
   }
@@ -421,7 +474,11 @@ export class StageElement extends HTMLElement {
   }
 
   connectedCallback(): void { if (this.leftRoom) this.render(); else this.rejoin(); }
-  disconnectedCallback(): void { ++this.generation; void this.leave(); }
+  disconnectedCallback(): void {
+    const cleanup = this.retireMicTestBinding(), generation = ++this.generation;
+    this.detachMicTestListeners(); cleanup();
+    if (generation === this.generation) void this.leave();
+  }
   attributeChangedCallback(name: string, previous: string | null, next: string | null): void {
     if (previous === next) return;
     if (name === 'playback-volume') { this.current?.setPlaybackVolume(this.playbackVolume); this.renderVolume(); return; }
@@ -460,8 +517,10 @@ export class StageElement extends HTMLElement {
   }
 
   private rejoin(): void {
-    const generation = ++this.generation;
+    const cleanup = this.retireMicTestBinding(), generation = ++this.generation;
     this.leftRoom = false; this.roomExit = undefined;
+    cleanup();
+    if (generation !== this.generation) return;
     void this.leave().then(async () => {
       const room = this.getAttribute('room')?.trim(), name = this.getAttribute('name')?.trim();
       if (generation !== this.generation || !this.isConnected || !room || !name) { this.render(); return; }
@@ -469,6 +528,8 @@ export class StageElement extends HTMLElement {
       client.setPlaybackMuted(this.playbackMuted);
       client.setPlaybackVolume(this.playbackVolume);
       this.current = client;
+      this.micTestBinding = { client, generation, blocked: false, early: new Set() };
+      this.attachMicTestListeners();
       this.joinPhase = 'connecting';
       let receivedState = false;
       let terminal = false;
@@ -477,6 +538,7 @@ export class StageElement extends HTMLElement {
         if (generation !== this.generation || this.current !== client || !this.isConnected
           || !this.joinPhase || receivedState || terminal || client.state || client.status === 'reconnecting') return;
         cancelled = true;
+        this.detachMicTestListeners();
         this.hideCancel();
         this.joinPhase = undefined;
         this.retryAvailable = true;
@@ -487,6 +549,7 @@ export class StageElement extends HTMLElement {
       for (const type of EVENTS) {
         client.on(type, ({ detail }) => {
           if (generation !== this.generation || this.current !== client) return;
+          this.markMicTestEvent(client, type, detail);
           const speakingEvent = this.rememberSpeakingEvent(type, detail);
           const qualityEvent = this.rememberQualityEvent(type, detail);
           // Retire the manual read before public authority getters can admit a genuine new entry.
@@ -499,6 +562,7 @@ export class StageElement extends HTMLElement {
           // Own-role deltas precede their snapshot. Fence both dialogs before any DOM setter can reenter.
           this.noteRoomCloseEvent(type, detail);
           this.noteStageTransferEvent(type, detail);
+          this.noteMicTestEvent(client, type, detail);
           this.reconcileRoomClose();
           this.noteQualityEvent(client, generation, type, detail, qualityEvent);
           this.noteSpeakingEvent(client, generation, type, detail, speakingEvent);
@@ -565,11 +629,13 @@ export class StageElement extends HTMLElement {
           this.syncQualityOwner(false);
           this.syncSpeakingOwner(false);
           this.syncConnectionStats();
+          this.syncMicTest();
           this.dispatchEvent(new CustomEvent(`stage-${type}`, { detail, bubbles: true, composed: true }));
           this.syncOccupancy();
           this.syncQualityOwner(false);
           this.syncSpeakingOwner(false);
           this.syncConnectionStats();
+          this.syncMicTest();
           // Application callbacks may retire this seat or mutate its exposed snapshot.
           this.syncMicrophoneOwner();
           this.syncOutputDeviceOwner();
@@ -615,9 +681,11 @@ export class StageElement extends HTMLElement {
       return;
     }
     if (!this.current?.state || !this.current.me) return;
-    ++this.generation;
+    const cleanup = this.retireMicTestBinding(), generation = ++this.generation;
     const exit = {};
     this.leftRoom = true; this.roomExit = exit;
+    cleanup();
+    if (generation !== this.generation || this.roomExit !== exit) return;
     this.retireConnectionStats();
     this.retireOccupancy();
     this.retireQualityOwner();
@@ -633,7 +701,10 @@ export class StageElement extends HTMLElement {
   }
 
   private async leave(): Promise<void> {
+    const cleanup = this.retireMicTestBinding(), generation = this.generation;
     this.connectionStatsLeaving = true;
+    this.detachMicTestListeners(); cleanup();
+    if (generation !== this.generation) return;
     this.retireConnectionStats();
     this.retireOccupancy();
     this.retireQualityOwner();
@@ -1886,6 +1957,228 @@ export class StageElement extends HTMLElement {
       && !this.current?.state && this.current?.status !== 'reconnecting';
   }
 
+  private attachMicTestListeners(): void {
+    if (this.micTestDocument) return;
+    this.micTestPageHidden = false;
+    this.micTestDocument = document; this.micTestWindow = window;
+    document.addEventListener?.('visibilitychange', this.micTestVisibility);
+    window.addEventListener('pagehide', this.micTestPageHide);
+    window.addEventListener('pageshow', this.micTestPageShow);
+  }
+
+  private detachMicTestListeners(): void {
+    const doc = this.micTestDocument, win = this.micTestWindow;
+    this.micTestDocument = undefined; this.micTestWindow = undefined;
+    doc?.removeEventListener?.('visibilitychange', this.micTestVisibility);
+    win?.removeEventListener('pagehide', this.micTestPageHide);
+    win?.removeEventListener('pageshow', this.micTestPageShow);
+  }
+
+  private retireMicTestBinding(): () => void {
+    this.micTestBinding = undefined;
+    // Departing-client cleanup must not recreate controller consent under the new generation.
+    this.roomCloseTerminalClient = this.current ?? undefined;
+    this.stageManagementTerminalClient = this.current ?? undefined;
+    this.retireRoomClose();
+    if (this.stageTransferAttempt) this.stageTransferAttempt.invalid = true;
+    return this.revokeMicTest(true);
+  }
+
+  private disposeMicTest(handle: MicTest): void {
+    ++this.micTestCleanup;
+    try { handle.stop(); } catch { /* A retired handle cannot report into a newer test. */ }
+    finally { --this.micTestCleanup; }
+  }
+
+  private retireMicTest(dropOwner: boolean, message = '麥克風音量測試已停止。'): void {
+    this.revokeMicTest(dropOwner, message)();
+  }
+
+  private revokeMicTest(dropOwner: boolean, message = '麥克風音量測試已停止。'): () => void {
+    const attempt = this.micTestAttempt, handle = attempt?.handle;
+    // Retire all authority before abort, stop, or a host DOM callback can reenter.
+    if (dropOwner) this.micTestOwner = undefined;
+    this.micTestValue = 0; this.micTestMessage = message;
+    const timer = this.micTestTimer; this.micTestTimer = undefined;
+    if (attempt) {
+      attempt.retired = true; attempt.handle = undefined;
+      if (!attempt.pending) this.micTestAttempt = undefined;
+    }
+    return () => {
+      ++this.micTestCleanup;
+      try {
+        clearTimeout(timer);
+        try { attempt?.controller.abort(); } catch { /* Stop the owned handle even if an abort listener fails. */ }
+        if (handle) this.disposeMicTest(handle);
+      } finally { --this.micTestCleanup; }
+    };
+  }
+
+  private micTestMounted(): boolean {
+    return this.isConnected && Boolean(this.micTestDocument) && this.micTestPanel.isConnected
+      && this.widgetRoot.contains(this.micTestPanel)
+      && [this.micTestStart, this.micTestCancel, this.micTestStop, this.micTestMeter, this.micTestStatus]
+        .every(node => node.isConnected && this.micTestPanel.contains(node));
+  }
+
+  private readMicTestOwner(): StageElement['micTestOwner'] {
+    const binding = this.micTestBinding;
+    const valid = () => Boolean(binding && this.micTestBinding === binding && this.current === binding.client
+      && this.generation === binding.generation && !binding.blocked
+      && !this.micTestCleanup && !this.leftRoom && !this.roomExit && !this.connectionStatsLeaving
+      && !this.micTestPageHidden && !this.micTestDocument?.hidden && this.micTestMounted());
+    if (!binding || !valid()) return;
+    // Preserve existing dialog invalidation when a public getter exposes a transient identity loss.
+    const read = this.connectionStatsIdentityReader(), client = binding.client;
+    const state = read('state', () => client.state); if (!valid() || !state) return;
+    const me = read('me', () => client.me); if (!valid() || !me) return;
+    const status = read('status', () => client.status); if (!valid() || (status !== 'waiting' && status !== 'live')) return;
+    const roomId = read('roomId', () => state.roomId); if (!valid() || typeof roomId !== 'string' || !roomId.trim()) return;
+    const participantId = read('participantId', () => me.participantId);
+    if (!valid() || typeof participantId !== 'string' || !participantId.trim() || binding.early.has(participantId)) return;
+    const connected = me.connected; if (!valid() || connected !== true) return;
+    const onStage = me.onStage; if (!valid() || onStage !== false) return;
+    if (read('state', () => client.state) !== state || !valid()
+      || read('me', () => client.me) !== me || !valid()
+      || read('status', () => client.status) !== status || !valid()
+      || read('roomId', () => state.roomId) !== roomId || !valid()
+      || read('participantId', () => me.participantId) !== participantId || !valid()
+      || me.connected !== true || !valid() || me.onStage !== false || !valid() || binding.early.has(participantId)) return;
+    return { binding, roomId, participantId };
+  }
+
+  private markMicTestEvent(client: StageClient, type: keyof StageEventMap, detail: StageEventMap[keyof StageEventMap]): void {
+    const binding = this.micTestBinding;
+    if (!binding || binding.client !== client || binding.generation !== this.generation) return;
+    // Notification fences precede all authority getters; cleanup follows the existing consent fences.
+    if (type === 'closed' || type === 'kicked'
+      || (type === 'status' && (detail === 'reconnecting' || detail === 'disconnected'))) binding.blocked = true;
+    if (type === 'invite' || type === 'stagejoined') binding.early.add((detail as StageEventMap['stagejoined']).participantId);
+  }
+
+  private noteMicTestEvent(client: StageClient, type: keyof StageEventMap, detail: StageEventMap[keyof StageEventMap]): void {
+    const binding = this.micTestBinding;
+    if (!binding || binding.client !== client || binding.generation !== this.generation) return;
+    if (type === 'closed' || type === 'kicked' || (type === 'status' && detail === 'disconnected')) this.detachMicTestListeners();
+    if (type === 'invite' || type === 'stagejoined') {
+      // A status callback can deliver this notice before its already-installed snapshot emits state.
+      const state = this.connectionStatsIdentityReader()('state', () => client.state);
+      if (state && this.micTestBinding === binding) this.micTestEarlyStates.add(state);
+    }
+    if (binding.blocked || (this.micTestOwner && binding.early.has(this.micTestOwner.participantId))) {
+      this.retireMicTest(true);
+    }
+    if (type === 'state'  && detail && typeof detail === 'object' && !this.micTestStates.has(detail)) {
+      const state = this.connectionStatsIdentityReader()('state', () => client.state);
+      if (this.micTestBinding === binding && this.current === client && this.generation === binding.generation && state === detail) {
+        this.attachMicTestListeners();
+        if (this.micTestBinding !== binding || this.current !== client || this.generation !== binding.generation) return;
+        this.micTestStates.add(detail); binding.blocked = false;
+        if (!this.micTestEarlyStates.has(detail)) binding.early.clear();
+      }
+    }
+    this.syncMicTest();
+  }
+
+  private syncMicTest(): void {
+    for (;;) {
+      const before = this.micTestOwner;
+      let observed: StageElement['micTestOwner'];
+      try { observed = this.readMicTestOwner(); } catch { observed = undefined; }
+      if (before !== this.micTestOwner) continue;
+      if (!observed || (before && (before.binding !== observed.binding
+        || before.roomId !== observed.roomId || before.participantId !== observed.participantId))) {
+        if (before) { this.retireMicTest(true); continue; }
+      } else if (!before) {
+        this.micTestOwner = observed; this.micTestMessage = '尚未開始麥克風音量測試。'; this.micTestValue = 0;
+      }
+      const owner = this.micTestOwner, attempt = this.micTestAttempt;
+      const pending = Boolean(attempt?.pending && !attempt.retired && attempt.owner === owner);
+      const active = Boolean(attempt?.handle && !attempt.retired && attempt.owner === owner);
+      const hidden = !owner, busy = Boolean(attempt?.pending);
+      const disabled = hidden || Boolean(attempt) || Boolean(this.inputDeviceAttempt) || Boolean(this.micTestCleanup);
+      const message = hidden ? '' : pending ? '等待麥克風權限；可取消本次測試。'
+        : active ? '正在量測本機麥克風音量。' : busy ? '正在取消麥克風測試，請稍候。' : this.micTestMessage;
+      // Recompute after every changed setter so a stale outer paint cannot overwrite a nested entry.
+      if (hidden && !this.micTestPanel.hidden) { this.micTestPanel.hidden = true; continue; }
+      if (this.micTestStart.disabled !== disabled) { this.micTestStart.disabled = disabled; continue; }
+      if (this.micTestStart.getAttribute('aria-busy') !== String(busy)) { this.micTestStart.setAttribute('aria-busy', String(busy)); continue; }
+      if (this.micTestCancel.hidden !== !pending) { this.micTestCancel.hidden = !pending; continue; }
+      if (this.micTestCancel.disabled !== !pending) { this.micTestCancel.disabled = !pending; continue; }
+      if (this.micTestStop.hidden !== !active) { this.micTestStop.hidden = !active; continue; }
+      if (this.micTestStop.disabled !== !active) { this.micTestStop.disabled = !active; continue; }
+      if (Number(this.micTestMeter.value) !== this.micTestValue) { this.micTestMeter.value = this.micTestValue; continue; }
+      if (this.micTestStatus.textContent !== message) { this.micTestStatus.textContent = message; continue; }
+      if (this.micTestPanel.hidden !== hidden) { this.micTestPanel.hidden = hidden; continue; }
+      return;
+    }
+  }
+
+  private currentMicTest(attempt: NonNullable<StageElement['micTestAttempt']>): boolean {
+    this.syncMicTest();
+    return this.micTestAttempt === attempt && !attempt.retired && this.micTestOwner === attempt.owner;
+  }
+
+  private startMicTest(): void {
+    if (this.micTestCleanup || this.inputDeviceAttempt || this.micTestAttempt) return;
+    this.syncMicTest();
+    const owner = this.micTestOwner;
+    if (!owner || this.micTestStart.disabled || this.micTestPanel.hidden || this.micTestAttempt || this.inputDeviceAttempt) return;
+    const attempt = this.micTestAttempt = { owner, controller: new AbortController(), pending: true, retired: false } as NonNullable<StageElement['micTestAttempt']>;
+    void (async () => {
+      try {
+        if (!this.currentMicTest(attempt) || this.inputDeviceAttempt) return;
+        const start = owner.binding.client.startMicTest;
+        if (!this.currentMicTest(attempt) || this.inputDeviceAttempt) return;
+        if (typeof start !== 'function') throw new Error();
+        const handle = await start.call(owner.binding.client, { signal: attempt.controller.signal });
+        if (!this.currentMicTest(attempt)) { this.disposeMicTest(handle); return; }
+        attempt.pending = false; attempt.handle = handle;
+        this.sampleMicTest(attempt);
+      } catch {
+        if (this.currentMicTest(attempt)) this.retireMicTest(false, '無法完成麥克風音量測試，請手動再試。');
+      } finally {
+        attempt.pending = false;
+        if (this.micTestAttempt === attempt && !attempt.handle) this.micTestAttempt = undefined;
+        this.syncMicTest();
+      }
+    })();
+  }
+
+  private stopMicTest(): void {
+    const attempt = this.micTestAttempt;
+    if (!attempt || !this.currentMicTest(attempt)) return;
+    this.retireMicTest(false); this.syncMicTest();
+  }
+
+  private sampleMicTest(attempt: NonNullable<StageElement['micTestAttempt']>): void {
+    try {
+      if (!this.currentMicTest(attempt) || !attempt.handle) return;
+      const handle = attempt.handle, stopped = handle.stopped;
+      if (!this.currentMicTest(attempt)) return;
+      if (stopped) { this.retireMicTest(false, '麥克風音量測試已結束。'); this.syncMicTest(); return; }
+      const level = handle.level;
+      if (!this.currentMicTest(attempt)) return;
+      const value = level.call(handle);
+      if (!this.currentMicTest(attempt)) return;
+      const ended = handle.stopped;
+      if (!this.currentMicTest(attempt)) return;
+      if (ended) { this.retireMicTest(false, '麥克風音量測試已結束。'); this.syncMicTest(); return; }
+      this.micTestValue = typeof value === 'number' && Number.isFinite(value) ? Math.min(1, Math.max(0, value)) : 0;
+      this.syncMicTest();
+      if (!this.currentMicTest(attempt)) return;
+      const timer = setTimeout(() => {
+        if (this.micTestTimer !== timer) return;
+        this.micTestTimer = undefined; this.sampleMicTest(attempt);
+      }, 100);
+      this.micTestTimer = timer;
+    } catch {
+      if (this.currentMicTest(attempt)) {
+        this.retireMicTest(false, '無法完成麥克風音量測試，請手動再試。'); this.syncMicTest();
+      }
+    }
+  }
+
   private replaceMicrophoneOptions(inputs: readonly MediaDeviceInfo[], draft: string): void {
     const initial = document.createElement('option');
     initial.value = ''; initial.textContent = '預設（依 SDK 設定）';
@@ -1972,19 +2265,25 @@ export class StageElement extends HTMLElement {
       || this.refreshAttempt || this.inputDeviceAttempt) return;
     const draft = this.microphoneSelect.value;
     const attempt = this.inputDeviceAttempt = {};
-    this.syncMicrophoneOwner(); this.hideError();
+    this.retireMicTest(false);
+    this.syncMicrophoneOwner(); this.syncMicTest(); this.hideError();
     const current = () => {
       if (this.microphoneOwner !== owner || this.inputDeviceAttempt !== attempt) return false;
       this.syncMicrophoneOwner();
       return this.microphoneOwner === owner && this.inputDeviceAttempt === attempt;
     };
     void (async () => {
-      try { await owner.client.setInputDevice(draft); }
+      try {
+        if (!current()) return;
+        const apply = owner.client.setInputDevice;
+        if (!current()) return;
+        await apply.call(owner.client, draft);
+      }
       catch (error) { if (current()) this.show(error); }
       finally {
         if (current()) {
           // Fulfillment can be a stage-transition no-op. Neither it nor shared micready proves capture.
-          this.inputDeviceAttempt = undefined; this.syncMicrophoneOwner();
+          this.inputDeviceAttempt = undefined; this.syncMicrophoneOwner(); this.syncMicTest();
         }
       }
     })();
@@ -2204,6 +2503,7 @@ export class StageElement extends HTMLElement {
     this.syncPlaybackOwner();
     this.syncMicRetry();
     this.syncMicrophoneOwner();
+    this.syncMicTest();
     this.syncOutputDeviceOwner();
     this.syncNameOwner();
     this.syncRoomNameOwner();

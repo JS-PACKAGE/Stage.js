@@ -242,7 +242,7 @@ WebSocket 建構失敗、hello 逾時或尚未進房的連線關閉，也會釋�
 - 連線結束提示：呼叫 `element.client.disconnect()` 會顯示「未連線」並隱藏房內操作；一般關房、被移出與伺服器維護／重啟各有提示，收聽偏好變更不會清掉提示。換房或重新掛載後清除舊提示，舊 client 的遲到事件不更新或重新派發到新 widget。
 - 事件：所有 client 事件以 `stage-<type>` 從元素派發（`bubbles`、`composed`，`detail` 相同），例如 `stage-state`、`stage-hand`、`stage-kicked`。
 - 本機播放控制僅對收聽 `aria-pressed` 與音量 `aria-valuetext` 做目前屬性值比較，等值時不重寫，缺失／錯誤值仍修復。hidden／disabled 的原始屬性修復、textContent 替換及 input.value 賦值照常；每次完整重繪增加兩次屬性讀取／比較，每次單獨音量同步增加一次。普通受控 SDK／Hub 72 次重繪省去 144 次等值 ARIA 寫入，四次滑桿輸入保留四次必要變更、移除四次等值寫入；安靜 keepalive 不產生此收益。這是 setter 計數，不是瀏覽器時間、CPU 或 AT 改善保證；等值 attribute observer 通知減少，不承諾任意宿主 getter／setter 副作用等價。
-- 樣式：`::part(panel)`、`::part(status)`、`::part(error)`、`::part(error-dismiss)`、`::part(actions)`、`::part(playback)`、`::part(name)`、`::part(room-name)`、`::part(quality)`、`::part(speaking)`、`::part(connection-stats)`、`::part(audio-retry)`、`::part(audio-recovery)`，以及 CSS 變數 `--stage-fg`、`--stage-bg`、`--stage-border`、`--stage-radius`、`--stage-button-bg`、`--stage-accent`、`--stage-accent-fg`、`--stage-error`。
+- 樣式：`::part(panel)`、`::part(status)`、`::part(error)`、`::part(error-dismiss)`、`::part(actions)`、`::part(playback)`、`::part(name)`、`::part(room-name)`、`::part(quality)`、`::part(speaking)`、`::part(connection-stats)`、`::part(mic-test)`、`::part(audio-retry)`、`::part(audio-recovery)`，以及 CSS 變數 `--stage-fg`、`--stage-bg`、`--stage-border`、`--stage-radius`、`--stage-button-bg`、`--stage-accent`、`--stage-accent-fg`、`--stage-error`。
 - 自訂標籤名：`import { defineStageElement } from 'https://host/lib/stage-element.js'` 後呼叫 `defineStageElement('my-stage')`（`stage-client` 已於載入時註冊，多個自訂標籤可並存）。每個自訂標籤使用 `StageElement` 的獨立子類別，因此仍是 `instanceof StageElement`，但 constructor 不與預設／其他標籤相同；重複註冊同名標籤為 no-op，既有其他元件不被覆寫。
 
 `<stage-client>` 的舉手、麥克風、離開／返回舞台與音訊解鎖按鈕在各自請求完成前保持停用並標示 `aria-busy`，不會被冷卻倒數或新 state 的重新繪製提前解鎖。失敗後顯示錯誤並重新套用目前冷卻／強制靜音限制；切換房間或移除元件時，舊請求不會改動新房間的按鈕狀態。
@@ -273,3 +273,10 @@ WebSocket 建構失敗、hello 逾時或尚未進房的連線關閉，也會釋�
 ### 最小 embed 的台下麥克風音量測試
 
 最小 embed 另提供台下的「測試麥克風音量」：只有已進房且目前離台時，明確按鈕才呼叫既有 `startMicTest({ signal })`，可能要求瀏覽器麥克風權限。它只顯示本機音量，不回放、不送上舞台，也不保證他人能聽見。等待時可取消，取得音軌後可停止；取消不會關閉原生權限視窗，但稍後授權取得的測試音軌會由 SDK 釋放。測試中約每 100 ms 讀取一次音量，停止、自然結束、上台、重連、離房／換席、送出麥克風選擇、頁面隱藏或離開都清理測試與讀取排程，不停止正常舞台麥克風。返回前景或選擇裝置後不自動重啟，必須再按測試。裝置草稿並未套用時，測試仍沿用 SDK 目前輸入設定。失敗只在測試區顯示固定提示，可手動重試；舊 SDK 缺少方法時同樣安全失敗，不改用其他擷取方式。原生按鈕與標籤支援標準操作語意，但受控 DOM／SDK 測試不等同實際權限視窗、鍵盤／焦點、AT 或硬體音訊驗收。
+
+
+### Web Component 的台下麥克風音量測試
+
+可用 `::part(mic-test)` 設定此區外觀。
+
+Web Component 也提供台下的「測試麥克風音量」，僅由已進房的使用者明確按下按鈕後開始本機測試，可能要求麥克風權限；它不回放、不發布到舞台，也不保證他人能聽見。等待可取消，開始後可停止；取消保留等待狀態至 SDK 請求結束，晚到授權的測試音軌會釋放，但不會關閉原生權限視窗。測試中約每 100 ms 更新音量，失敗只在測試區提示。上台、重連、離房／換席、元件卸載、送出麥克風選擇、頁面隱藏或離開都停止該元件自己的測試與讀取排程，不停止正常舞台麥克風或其他元件的測試；回到前景、重新掛載與更換輸入後不自動重啟。尚未送出的裝置草稿不改變測試輸入；一般收聽屬性變更維持原 client 與有效測試，變更加入設定則退役舊測試。自然結束後可明確重新測試；舊 SDK 缺少方法時顯示固定失敗，不另行擷取。原生按鈕、meter 標籤與控制順序經靜態檢查；實際權限視窗、鍵盤／焦點、AT 與硬體音訊尚未驗收。
