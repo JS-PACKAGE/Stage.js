@@ -5,6 +5,7 @@ function input(id: string): HTMLInputElement {
   return document.querySelector<HTMLInputElement>(`#${id}`)!;
 }
 const status = document.querySelector<HTMLParagraphElement>('#status')!;
+const roomOccupancy = document.querySelector<HTMLParagraphElement>('#room-occupancy')!;
 const errorNotice = document.querySelector<HTMLDivElement>('#error-notice')!;
 const lastError = document.querySelector<HTMLParagraphElement>('#last-error')!;
 const handRejectionNotice = document.querySelector<HTMLParagraphElement>('#hand-rejected')!;
@@ -102,6 +103,76 @@ let outputOwner: { client: Client; roomId: string; participantId: string; genera
 let playbackGeneration = 0;
 let pendingUnlock: { client: Client | null; generation: number } | undefined;
 let entryGeneration = 0;
+interface OccupancyReport {
+  client: Client; generation: number; roomId: string; participantId: string;
+  room: number; stage: number; audience: number; maxAudience: number; maxSpeakers: number;
+  controllerOnStage: boolean; stale: boolean;
+}
+let occupancyReport: OccupancyReport | undefined;
+let occupancyRevision = 0;
+let occupancyRetiredGeneration = -1;
+// Retirement is pure: existing action authority must be reconciled before the new DOM surface runs.
+function retireOccupancy(): void { occupancyReport = undefined; occupancyRevision++; }
+function projectOccupancy(current: Client, generation: number, state: StageEventMap['state']): OccupancyReport | undefined {
+  const roomId = state.roomId, participantId = state.me?.participantId, controllerId = state.controllerId;
+  const audience = state.audienceCount, maxAudience = state.limits?.maxAudience, maxSpeakers = state.limits?.maxSpeakers;
+  if (typeof roomId !== 'string' || !roomId.trim() || typeof participantId !== 'string' || !participantId.trim()
+    || typeof controllerId !== 'string' || !controllerId.trim() || !Array.isArray(state.speakers)
+    || !state.limits || typeof state.limits !== 'object' || Array.isArray(state.limits)
+    || !Number.isSafeInteger(audience) || audience < 0 || !Number.isSafeInteger(maxAudience) || maxAudience <= 0
+    || !Number.isSafeInteger(maxSpeakers) || maxSpeakers <= 0) return;
+  const ids = new Set<string>();
+  let controllerOnStage = false;
+  for (const person of state.speakers) {
+    if (!person || typeof person.participantId !== 'string' || !person.participantId.trim() || ids.has(person.participantId)
+      || person.onStage !== true || (person.role !== 'speaker' && person.role !== 'controller')
+      || (person.role === 'controller') !== (person.participantId === controllerId)) return;
+    ids.add(person.participantId);
+    if (person.participantId === controllerId) controllerOnStage = true;
+  }
+  const stage = ids.size - Number(controllerOnStage), room = audience + stage;
+  if (!Number.isSafeInteger(room) || room > maxAudience || stage > maxSpeakers) return;
+  return { client: current, generation, roomId, participantId, room, stage, audience, maxAudience, maxSpeakers,
+    controllerOnStage, stale: false };
+}
+function reconcileOccupancy(): void {
+  const report = occupancyReport, current = client;
+  if (current?.status === 'disconnected') occupancyRetiredGeneration = entryGeneration;
+  if (!report) return;
+  if (current !== report.client || current !== controlsClient || report.generation !== entryGeneration
+    || current.state?.roomId !== report.roomId || current.state.me?.participantId !== report.participantId
+    || !['waiting', 'live', 'reconnecting'].includes(current.status)) { retireOccupancy(); return; }
+  if (current.status === 'reconnecting' && !report.stale) { report.stale = true; occupancyRevision++; }
+}
+function renderOccupancy(): void {
+  const revision = occupancyRevision, report = occupancyReport, current = client, controls = controlsClient;
+  const generation = entryGeneration, connectionStatus = current?.status;
+  const roomId = current?.state?.roomId, participantId = current?.state?.me?.participantId;
+  const valid = (): boolean => {
+    if (revision !== occupancyRevision || report !== occupancyReport || current !== client
+      || controls !== controlsClient || generation !== entryGeneration) return false;
+    if (connectionStatus === current?.status && roomId === current?.state?.roomId
+      && participantId === current?.state?.me?.participantId) return true;
+    // A setter can change public SDK identity/status without dispatching an event.
+    // Retire both pending consents before any corrective DOM can restore their eligibility.
+    reconcileOccupancy();
+    if (pendingRoomClose && !eligibleRoomClose(roomCloseOwner)) pendingRoomClose.invalidated = true;
+    invalidateTransfer(); syncRoomClose(); syncStageManagement();
+    renderOccupancy(); return false;
+  };
+  if (!report) {
+    if (!roomOccupancy.hidden) { roomOccupancy.hidden = true; if (!valid()) return; }
+    if (roomOccupancy.textContent !== '') { roomOccupancy.textContent = ''; if (!valid()) return; }
+    return;
+  }
+  if (report.client !== current || current !== controls || report.generation !== generation
+    || report.roomId !== roomId || report.participantId !== participantId
+    || !['waiting', 'live', 'reconnecting'].includes(connectionStatus!)) return;
+  const freshness = connectionStatus === 'reconnecting' ? '重新連線中，上次快照' : report.stale ? '上次快照' : '最近快照';
+  const text = `房間席位（${freshness}）：主控以外 ${report.room} / ${report.maxAudience} 人，其中台上 ${report.stage} / ${report.maxSpeakers} 人、觀眾 ${report.audience} 人；主控另計 1 人（${report.controllerOnStage ? '台上' : '台下'}）。含斷線保留席位。`;
+  if (roomOccupancy.textContent !== text) { roomOccupancy.textContent = text; if (!valid()) return; }
+  if (roomOccupancy.hidden) { roomOccupancy.hidden = false; if (!valid()) return; }
+}
 let feedbackRevision = 0;
 let handRejectionOwner: { client: Client; roomId: string; participantId: string; generation: number } | undefined;
 function retireHandRejection(): void {
@@ -137,9 +208,10 @@ function retireControls(): void {
 }
 /** Retire initial-join feedback before user or terminal callbacks can start another entry. */
 function retireEntry(): number {
+  const generation = ++entryGeneration; retireOccupancy();
   hideCancel();
   submit.disabled = false; submit.setAttribute('aria-busy', 'false');
-  return ++entryGeneration;
+  return generation;
 }
 let handTimer: ReturnType<typeof setTimeout> | undefined;
 let handTimerDue = 0;
@@ -861,12 +933,15 @@ function signalingUrl(host: URL, value: string): URL {
 }
 join.onsubmit = (event) => {
   event.preventDefault();
+  const previous = client, generation = ++entryGeneration;
+  retireOccupancy();
   clearError();
   const hostValue = input('host').value, pathValue = input('ws-path').value;
   const joinOptions = { roomId: input('room').value.trim(), code: input('code').value.trim() || undefined, name: input('name').value.trim() };
   retirePlayback(); scheduleHandCooldown(0);
-  const generation = ++entryGeneration, feedback = feedbackRevision;
+  const feedback = feedbackRevision;
   let progress = true, receivedState = false, cancelledEntry = false;
+  const occupancyReceipts = new WeakSet<object>();
   let entryClient: Client | undefined;
   const showProgress = (message: string): void => {
     if (generation === entryGeneration && feedback === feedbackRevision && progress) status.textContent = message;
@@ -880,6 +955,8 @@ join.onsubmit = (event) => {
     retirePlayback(); scheduleHandCooldown(0); retireControls();
     hand.disabled = leave.disabled = true; hand.setAttribute('aria-busy', 'false');
     syncMic(); syncStage(); syncMicRetry();
+    renderOccupancy();
+    if (cancelled !== entryGeneration) return;
     try {
       const stopping = entryClient?.disconnect();
       if (cancelled === entryGeneration) status.textContent = '已取消連線。';
@@ -894,7 +971,9 @@ join.onsubmit = (event) => {
       stage.hidden = stage.disabled = true; stage.setAttribute('aria-busy', 'false'); syncMicRetry();
       hand.setAttribute('aria-busy', 'false');
       hand.disabled = leave.disabled = true;
-      await client?.disconnect();
+      renderOccupancy();
+      if (generation !== entryGeneration) return;
+      await previous?.disconnect();
       if (generation !== entryGeneration) return;
       const host = new URL(hostValue);
       if (!['https:', 'http:'].includes(host.protocol)) throw new Error('請輸入 HTTP 或 HTTPS 主機網址。');
@@ -911,7 +990,15 @@ join.onsubmit = (event) => {
         ? library.MAX_GAIN_DB : undefined;
       syncUnlock();
       client.on('state', ({ detail }: CustomEvent<StageEventMap['state']>) => {
-        if (client !== current || cancelledEntry) return;
+        if (client !== current || cancelledEntry || generation !== entryGeneration || occupancyRetiredGeneration === generation || controlsClient !== current) return;
+        // SDK installs state before status; only its actual, previously unseen state receipt is fresh.
+        const unseen = detail && typeof detail === 'object' && !occupancyReceipts.has(detail);
+        if (detail && typeof detail === 'object') occupancyReceipts.add(detail);
+        reconcileOccupancy();
+        if (detail === current.state && unseen
+          && (current.status === 'waiting' || current.status === 'live')) {
+          occupancyReport = projectOccupancy(current, generation, detail); occupancyRevision++;
+        }
         if (generation === entryGeneration && controlsClient === current && stageManagementOwner?.client === current)
           stageManagementOwner.transferFenced = false;
         if (generation === entryGeneration && controlsClient === current) {
@@ -926,7 +1013,9 @@ join.onsubmit = (event) => {
         progress = false;
         status.textContent = `${library.decodeName(detail.name)} · ${library.decodeName(detail.me.name)} · ${detail.me.onStage ? '已上台' : '收聽中'}`;
         syncHand(); syncMic(); syncStage(); syncMicRetry(); syncRename(); syncRoomName(); syncHandQueue(); syncStageManagement(); syncRoomClose(); syncMicrophone(); syncAudioRetry(); syncOutput();
-        if (renderingEntry === entryGeneration && client === current && controlsClient === current) leave.disabled = false;
+        if (renderingEntry === entryGeneration && client === current && controlsClient === current) {
+          leave.disabled = false; renderOccupancy();
+        }
       });
       const retireOwnHandRejection = (participantId: string): void => {
         if (client === current && controlsClient === current && !cancelledEntry && generation === entryGeneration
@@ -980,7 +1069,9 @@ join.onsubmit = (event) => {
         if (retrying) { progress = false; status.textContent = '已取得麥克風。'; }
       });
       client.on('status', ({ detail }) => {
-        if (client !== current || cancelledEntry) return;
+        if (client !== current || cancelledEntry || generation !== entryGeneration) return;
+        if (detail === 'disconnected') { occupancyRetiredGeneration = generation; retireOccupancy(); }
+        else reconcileOccupancy();
         const renderingEntry = entryGeneration;
         syncRoomClose();
         if (renderingEntry !== entryGeneration || client !== current) return;
@@ -988,11 +1079,26 @@ join.onsubmit = (event) => {
         if (detail === 'reconnecting') { retireHandRejection(); progress = false; status.textContent = '重新連線中'; hand.disabled = true; }
         else if (detail === 'disconnected') { progress = false; retirePlayback(); retireControls(); status.textContent = '未連線'; hand.disabled = leave.disabled = true; }
         syncHand(); syncMic(); syncStage(); syncMicRetry(); syncRename(); syncRoomName(); syncHandQueue(); syncStageManagement(); syncRoomClose(); syncMicrophone(); syncAudioRetry(); syncOutput();
+        if (renderingEntry === entryGeneration && client === current) renderOccupancy();
       });
       client.on('error', ({ detail }) => { if (client !== current || cancelledEntry || generation !== entryGeneration) return; progress = false; report(detail); });
       client.on('audioblocked', () => { if (cancelledEntry) return; progress = false; status.textContent = '請點擊啟用音訊。'; });
-      client.on('closed', ({ detail }) => { if (client !== current || cancelledEntry || generation !== entryGeneration) return; retireEntry(); clearError(); retirePlayback(); retireControls(); syncHand(); syncMic(); syncStage(); syncMicRetry(); syncRename(); syncRoomName(); status.textContent = detail.reason === 'shutdown' ? '伺服器維護或重新啟動，房間已關閉。' : '房間已關閉。'; hand.disabled = leave.disabled = true; });
-      client.on('kicked', () => { if (client !== current || cancelledEntry || generation !== entryGeneration) return; retireEntry(); clearError(); retirePlayback(); retireControls(); syncHand(); syncMic(); syncStage(); syncMicRetry(); syncRename(); syncRoomName(); status.textContent = '你已被主控移出房間。'; hand.disabled = leave.disabled = true; });
+      client.on('closed', ({ detail }) => {
+        if (client !== current || cancelledEntry || generation !== entryGeneration) return;
+        const retired = retireEntry();
+        clearError(); retirePlayback(); retireControls(); syncHand(); syncMic(); syncStage(); syncMicRetry(); syncRename(); syncRoomName();
+        renderOccupancy();
+        if (retired !== entryGeneration || client !== current) return;
+        status.textContent = detail.reason === 'shutdown' ? '伺服器維護或重新啟動，房間已關閉。' : '房間已關閉。'; hand.disabled = leave.disabled = true;
+      });
+      client.on('kicked', () => {
+        if (client !== current || cancelledEntry || generation !== entryGeneration) return;
+        const retired = retireEntry();
+        clearError(); retirePlayback(); retireControls(); syncHand(); syncMic(); syncStage(); syncMicRetry(); syncRename(); syncRoomName();
+        renderOccupancy();
+        if (retired !== entryGeneration || client !== current) return;
+        status.textContent = '你已被主控移出房間。'; hand.disabled = leave.disabled = true;
+      });
       showProgress('連線中…');
       await current.connect();
       if (generation !== entryGeneration) return;
@@ -1198,10 +1304,12 @@ micRetry.onclick = () => {
   }
 };
 leave.onclick = () => {
-  const generation = retireEntry(), current = client;
+  const current = client, generation = retireEntry();
   clearError();
   retirePlayback(); scheduleHandCooldown(0);
-  retireControls(); hand.setAttribute('aria-busy', 'false'); syncMic(); syncStage(); syncMicRetry();
+  retireControls(); hand.setAttribute('aria-busy', 'false'); syncHand(); syncMic(); syncStage(); syncMicRetry();
+  renderOccupancy();
+  if (generation !== entryGeneration || client !== current) return;
   void current?.disconnect().then(() => {
     if (generation !== entryGeneration || client !== current) return;
     status.textContent = '已離開。'; hand.disabled = leave.disabled = true;
