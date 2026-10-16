@@ -8,6 +8,9 @@ const status = document.querySelector<HTMLParagraphElement>('#status')!;
 const roomOccupancy = document.querySelector<HTMLParagraphElement>('#room-occupancy')!;
 const ownConnectionQuality = document.querySelector<HTMLParagraphElement>('#own-connection-quality')!;
 const speakingSummary = document.querySelector<HTMLParagraphElement>('#speaking-summary')!;
+const connectionStatsPanel = document.querySelector<HTMLDivElement>('#connection-stats-panel')!;
+const connectionStatsUpdate = document.querySelector<HTMLButtonElement>('#connection-stats-update')!;
+const connectionStatsText = document.querySelector<HTMLParagraphElement>('#connection-stats-text')!;
 const errorNotice = document.querySelector<HTMLDivElement>('#error-notice')!;
 const lastError = document.querySelector<HTMLParagraphElement>('#last-error')!;
 const handRejectionNotice = document.querySelector<HTMLParagraphElement>('#hand-rejected')!;
@@ -387,6 +390,200 @@ function renderSpeaking(): void {
   if (speakingSummary.textContent !== text) { speakingSummary.textContent = text; if (!valid()) return; }
   if (speakingSummary.hidden) { speakingSummary.hidden = false; if (!valid()) return; }
 }
+interface ConnectionStatsBinding { client: Client; generation: number }
+interface ConnectionStatsOwner extends ConnectionStatsBinding { roomId: string; participantId: string }
+interface ConnectionStatsReport {
+  inbound: { loss: number | undefined; rtt: number | undefined; buffer: number | undefined } | null;
+  outbound: { loss: number | undefined; rtt: number | undefined } | null;
+}
+let connectionStatsBinding: ConnectionStatsBinding | undefined;
+let connectionStatsOwner: ConnectionStatsOwner | undefined;
+let connectionStatsAttempt: object | undefined;
+let connectionStatsReport: ConnectionStatsReport | undefined;
+let connectionStatsFailed = false;
+let connectionStatsTeardown = false;
+let connectionStatsRevision = 0;
+function retireConnectionStats(): void {
+  connectionStatsOwner = undefined; connectionStatsAttempt = undefined;
+  connectionStatsReport = undefined; connectionStatsFailed = false; connectionStatsRevision++;
+}
+// Pure departure fence: legacy Close/Transfer teardown must run before any new surface setter.
+function retireConnectionStatsBinding(): void {
+  connectionStatsBinding = undefined; connectionStatsTeardown = true; retireConnectionStats();
+}
+function connectionStatsMounted(): boolean {
+  return document.querySelector('#connection-stats-panel') === connectionStatsPanel
+    && document.querySelector('#connection-stats-update') === connectionStatsUpdate
+    && document.querySelector('#connection-stats-text') === connectionStatsText
+    && connectionStatsPanel.contains(connectionStatsUpdate) && connectionStatsPanel.contains(connectionStatsText);
+}
+function reconcileConnectionStats(): void {
+  for (;;) {
+    const binding = connectionStatsBinding, owner = connectionStatsOwner, revision = connectionStatsRevision;
+    const current = client, controls = controlsClient, generation = entryGeneration;
+    const closeAttempt = pendingRoomClose, closeAuthority = roomCloseOwner;
+    const transferAttempt = pendingTransfer, transferAuthority = stageManagementOwner;
+    const stable = (): boolean => binding === connectionStatsBinding && owner === connectionStatsOwner
+      && revision === connectionStatsRevision && current === client && controls === controlsClient && generation === entryGeneration;
+    // Observed authority loss is sticky before any next public getter can restore it.
+    // Exact captured tokens cannot invalidate a genuinely newer nested consent.
+    const invalidateObserved = (lost: (authority: ConnectionStatsOwner) => boolean): void => {
+      if (closeAttempt && pendingRoomClose === closeAttempt && roomCloseOwner === closeAuthority
+        && (!closeAuthority || lost(closeAuthority))) closeAttempt.invalidated = true;
+      if (transferAttempt && pendingTransfer === transferAttempt && stageManagementOwner === transferAuthority
+        && (!transferAuthority || lost(transferAuthority))) transferAttempt.invalidated = true;
+    };
+    const observe = () => {
+      const state = current?.state ?? null, status = current?.status ?? 'disconnected';
+      invalidateObserved(authority => authority.client !== current || current !== controls || authority.generation !== generation
+        || (status !== 'waiting' && status !== 'live'));
+      if (stable() && current && status === 'disconnected' && binding?.client === current) {
+        connectionStatsBinding = undefined; retireConnectionStats();
+      } else if (stable() && owner && status !== 'waiting' && status !== 'live') retireConnectionStats();
+      const room: unknown = state?.roomId;
+      invalidateObserved(authority => authority.roomId !== room);
+      if (stable() && owner && owner.roomId !== room) retireConnectionStats();
+      const participant: unknown = state?.me?.participantId;
+      invalidateObserved(authority => authority.participantId !== participant);
+      if (stable() && owner && owner.participantId !== participant) retireConnectionStats();
+      return { state, status, room, participant };
+    };
+    try {
+      const identity = observe();
+      if (!stable()) continue;
+      const { room, participant, status } = identity;
+      const eligible = Boolean(binding && binding.client === current && binding.generation === generation && current === controls
+        && typeof room === 'string' && room.trim() && typeof participant === 'string' && participant.trim()
+        && (status === 'waiting' || status === 'live') && connectionStatsMounted());
+      if (!stable()) continue;
+      if (owner && (!eligible || owner.client !== current || owner.generation !== generation)) { retireConnectionStats(); continue; }
+      // Role/connected/target eligibility belongs to the existing pure consent check.
+      reconcileSpeakingConsents();
+      if (!stable()) continue;
+      const checked = observe();
+      if (!stable() || identity.state !== checked.state || status !== checked.status
+        || room !== checked.room || participant !== checked.participant) continue;
+      if (eligible && !connectionStatsMounted()) continue;
+      if (!stable()) continue;
+      if (eligible && !owner) {
+        connectionStatsOwner = { client: current!, generation, roomId: room as string, participantId: participant as string };
+        connectionStatsRevision++;
+      }
+      return;
+    } catch {
+      invalidateObserved(() => true);
+      if (!stable()) continue;
+      if (owner) { retireConnectionStats(); continue; }
+      return;
+    }
+  }
+}
+function connectionStatsMessage(): string {
+  const report = connectionStatsReport;
+  if (!report) return connectionStatsFailed ? '無法讀取連線統計，請稍後手動再試。' : '尚未手動讀取連線統計。';
+  const loss = (value: number | undefined): string => value === undefined ? '—' : value.toFixed(1);
+  const ms = (value: number | undefined): string => value === undefined ? '—' : String(Math.round(value));
+  const inbound = report.inbound, outbound = report.outbound;
+  const receive = inbound ? `接收掉包 ${loss(inbound.loss)}% · 接收 RTT ${ms(inbound.rtt)} ms · 接收緩衝 ${ms(inbound.buffer)} ms` : '接收：暫無統計';
+  const send = outbound ? `傳送掉包 ${loss(outbound.loss)}% · 傳送 RTT ${ms(outbound.rtt)} ms` : '傳送：暫無統計';
+  return `上次手動讀取（SDK 取樣區間）：${receive}；${send}。RTT 不是端到端音訊延遲；不保證資料即時或目前可聽。`
+    + (connectionStatsFailed ? '本次讀取失敗，仍顯示上次手動讀取結果。' : '');
+}
+function syncConnectionStats(): void {
+  for (;;) {
+    if (connectionStatsTeardown) return;
+    reconcileConnectionStats();
+    if (connectionStatsTeardown) return;
+    const revision = connectionStatsRevision, owner = connectionStatsOwner, attempt = connectionStatsAttempt;
+    const hidden = !owner, busy = Boolean(attempt), disabled = hidden || busy;
+    const text = hidden ? '' : connectionStatsMessage();
+    // Reconcile after every changed setter, even when an old setter completes after a nested render.
+    if (hidden && !connectionStatsPanel.hidden) { connectionStatsPanel.hidden = true; continue; }
+    if (connectionStatsText.textContent !== text) { connectionStatsText.textContent = text; continue; }
+    if (connectionStatsUpdate.disabled !== disabled) { connectionStatsUpdate.disabled = disabled; continue; }
+    if (connectionStatsUpdate.getAttribute('aria-busy') !== String(busy)) {
+      connectionStatsUpdate.setAttribute('aria-busy', String(busy)); continue;
+    }
+    const label = busy ? '讀取中…' : '更新我的連線統計';
+    if (connectionStatsUpdate.textContent !== label) { connectionStatsUpdate.textContent = label; continue; }
+    if (connectionStatsPanel.hidden !== hidden) { connectionStatsPanel.hidden = hidden; continue; }
+    reconcileConnectionStats();
+    if (revision === connectionStatsRevision && owner === connectionStatsOwner && attempt === connectionStatsAttempt) return;
+  }
+}
+function finishConnectionStatsTeardown(generation: number): void {
+  if (generation !== entryGeneration) return;
+  connectionStatsTeardown = false; syncConnectionStats();
+}
+function projectConnectionStats(raw: unknown, current: () => boolean): ConnectionStatsReport | undefined {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error();
+  const direction = (key: 'inbound' | 'outbound') => {
+    const value: unknown = (raw as Record<string, unknown>)[key];
+    if (!current()) return undefined;
+    if (value === null || value === undefined) return null;
+    if (typeof value !== 'object' || Array.isArray(value)) throw new Error();
+    return value as Record<string, unknown>;
+  };
+  const numeric = (value: unknown, max = Infinity, factor = 1): number | undefined => {
+    if (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > max) return undefined;
+    const converted = value * factor;
+    return Number.isFinite(converted) ? converted : undefined;
+  };
+  const inbound = direction('inbound');
+  if (!current()) return;
+  let receive: ConnectionStatsReport['inbound'] = null;
+  if (inbound) {
+    const loss = numeric(inbound.lossPercent, 100); if (!current()) return;
+    const rtt = numeric(inbound.rtt, Infinity, 1000); if (!current()) return;
+    const buffer = numeric(inbound.bufferMs); if (!current()) return;
+    receive = { loss, rtt, buffer };
+  }
+  const outbound = direction('outbound');
+  if (!current()) return;
+  let send: ConnectionStatsReport['outbound'] = null;
+  if (outbound) {
+    const loss = numeric(outbound.lossPercent, 100); if (!current()) return;
+    const rtt = numeric(outbound.rtt, Infinity, 1000); if (!current()) return;
+    send = { loss, rtt };
+  }
+  return { inbound: receive, outbound: send };
+}
+function refreshConnectionStats(): void {
+  if (connectionStatsTeardown || connectionStatsUpdate.disabled || connectionStatsUpdate.hidden || connectionStatsPanel.hidden
+    || !connectionStatsMounted()) return;
+  syncConnectionStats();
+  const owner = connectionStatsOwner;
+  if (!owner || connectionStatsAttempt || connectionStatsTeardown) return;
+  // Reserve before the public method getter, invocation, or busy setters can reenter.
+  const attempt = connectionStatsAttempt = {};
+  connectionStatsFailed = false; connectionStatsRevision++;
+  const current = (): boolean => {
+    syncConnectionStats();
+    return connectionStatsOwner === owner && connectionStatsAttempt === attempt && !connectionStatsTeardown;
+  };
+  void (async () => {
+    try {
+      if (!current()) return;
+      const read = owner.client.getStats;
+      if (!current()) return;
+      if (typeof read !== 'function') throw new Error();
+      const pending = read.call(owner.client);
+      const active = current();
+      // Consume retired native work: a retained peer can still advance the SDK's shared delta baseline.
+      const raw: unknown = await pending;
+      if (!current() || !active) return;
+      const report = projectConnectionStats(raw, current);
+      if (!current() || !report) return;
+      connectionStatsReport = report; connectionStatsRevision++;
+    } catch { if (current()) { connectionStatsFailed = true; connectionStatsRevision++; } }
+    finally {
+      if (connectionStatsOwner === owner && connectionStatsAttempt === attempt) {
+        connectionStatsAttempt = undefined; connectionStatsRevision++;
+      }
+      syncConnectionStats();
+    }
+  })();
+}
 let feedbackRevision = 0;
 let handRejectionOwner: { client: Client; roomId: string; participantId: string; generation: number } | undefined;
 function retireHandRejection(): void {
@@ -415,6 +612,7 @@ function hideCancel(): void {
   cancelEntry = undefined; cancelJoin.hidden = cancelJoin.disabled = true;
 }
 function retireControls(): void {
+  retireConnectionStatsBinding();
   controlsClient = undefined; roomCloseFence = undefined; retireRoomClose(); retireHandRejection(); retireHandQueue(); retireStageManagement();
   pendingHand = undefined; pendingMic = undefined; pendingStage = undefined;
   micRetryParticipant = undefined; pendingMicRetry = undefined;
@@ -422,6 +620,7 @@ function retireControls(): void {
 }
 /** Retire initial-join feedback before user or terminal callbacks can start another entry. */
 function retireEntry(): number {
+  retireConnectionStatsBinding();
   const generation = ++entryGeneration; retireOccupancy(); retireQuality(); retireSpeaking();
   hideCancel();
   submit.disabled = false; submit.setAttribute('aria-busy', 'false');
@@ -1146,6 +1345,7 @@ function signalingUrl(host: URL, value: string): URL {
   return url;
 }
 join.onsubmit = (event) => {
+  retireConnectionStatsBinding();
   event.preventDefault();
   const previous = client, generation = ++entryGeneration;
   retireOccupancy(); retireQuality(); retireSpeaking();
@@ -1174,6 +1374,7 @@ join.onsubmit = (event) => {
     renderOccupancy();
     if (cancelled === entryGeneration) renderQuality();
     if (cancelled === entryGeneration) renderSpeaking();
+    finishConnectionStatsTeardown(cancelled);
     if (cancelled !== entryGeneration) return;
     try {
       const stopping = entryClient?.disconnect();
@@ -1192,6 +1393,7 @@ join.onsubmit = (event) => {
       renderOccupancy();
       if (generation === entryGeneration) renderQuality();
       if (generation === entryGeneration) renderSpeaking();
+      finishConnectionStatsTeardown(generation);
       if (generation !== entryGeneration) return;
       await previous?.disconnect();
       if (generation !== entryGeneration) return;
@@ -1206,6 +1408,7 @@ join.onsubmit = (event) => {
       // This compact UI has no room-level meter; explicit preview APIs remain available.
       client = new library.StageClient({ url: ws.href, audioElement: audio, enableMicMeter: false });
       const current = client; controlsClient = current; entryClient = current; decodeRoomName = library.decodeName;
+      connectionStatsBinding = { client: current, generation }; connectionStatsTeardown = false;
       maxGainDb = typeof library.MAX_GAIN_DB === 'number' && Number.isFinite(library.MAX_GAIN_DB) && library.MAX_GAIN_DB > 0
         ? library.MAX_GAIN_DB : undefined;
       syncUnlock();
@@ -1247,6 +1450,7 @@ join.onsubmit = (event) => {
           leave.disabled = false; renderOccupancy();
           if (renderingEntry === entryGeneration && client === current && controlsClient === current) renderQuality();
           if (renderingEntry === entryGeneration && client === current && controlsClient === current) renderSpeaking();
+          if (renderingEntry === entryGeneration && client === current && controlsClient === current) syncConnectionStats();
         }
       });
       client.on('quality', ({ detail }) => {
@@ -1346,6 +1550,8 @@ join.onsubmit = (event) => {
       });
       client.on('status', ({ detail }) => {
         if (client !== current || cancelledEntry || generation !== entryGeneration) return;
+        if (detail === 'disconnected') retireConnectionStatsBinding();
+        else if (detail === 'reconnecting') retireConnectionStats();
         if (detail === 'disconnected') { occupancyRetiredGeneration = generation; retireOccupancy(); retireQuality(); retireSpeaking(); }
         else {
           reconcileOccupancy();
@@ -1362,6 +1568,7 @@ join.onsubmit = (event) => {
         if (renderingEntry === entryGeneration && client === current) renderOccupancy();
         if (renderingEntry === entryGeneration && client === current) renderQuality();
         if (renderingEntry === entryGeneration && client === current) renderSpeaking();
+        if (renderingEntry === entryGeneration && client === current) finishConnectionStatsTeardown(renderingEntry);
       });
       client.on('error', ({ detail }) => { if (client !== current || cancelledEntry || generation !== entryGeneration) return; progress = false; report(detail); });
       client.on('audioblocked', () => { if (cancelledEntry) return; progress = false; status.textContent = '請點擊啟用音訊。'; });
@@ -1372,6 +1579,7 @@ join.onsubmit = (event) => {
         renderOccupancy();
         if (retired === entryGeneration && client === current) renderQuality();
         if (retired === entryGeneration && client === current) renderSpeaking();
+        if (retired === entryGeneration && client === current) finishConnectionStatsTeardown(retired);
         if (retired !== entryGeneration || client !== current) return;
         status.textContent = detail.reason === 'shutdown' ? '伺服器維護或重新啟動，房間已關閉。' : '房間已關閉。'; hand.disabled = leave.disabled = true;
       });
@@ -1382,6 +1590,7 @@ join.onsubmit = (event) => {
         renderOccupancy();
         if (retired === entryGeneration && client === current) renderQuality();
         if (retired === entryGeneration && client === current) renderSpeaking();
+        if (retired === entryGeneration && client === current) finishConnectionStatsTeardown(retired);
         if (retired !== entryGeneration || client !== current) return;
         status.textContent = '你已被主控移出房間。'; hand.disabled = leave.disabled = true;
       });
@@ -1597,6 +1806,7 @@ leave.onclick = () => {
   renderOccupancy();
   if (generation === entryGeneration && client === current) renderQuality();
   if (generation === entryGeneration && client === current) renderSpeaking();
+  if (generation === entryGeneration && client === current) finishConnectionStatsTeardown(generation);
   if (generation !== entryGeneration || client !== current) return;
   void current?.disconnect().then(() => {
     if (generation !== entryGeneration || client !== current) return;
@@ -1605,3 +1815,6 @@ leave.onclick = () => {
 };
 replaceOutputOptions([]);
 syncHand(); syncMic(); syncStage(); syncMicRetry(); syncRename(); syncRoomName(); syncHandQueue(); syncStageManagement(); syncRoomClose(); syncMicrophone(); syncAudioRetry(); syncOutput(); syncUnlock();
+
+connectionStatsUpdate.onclick = refreshConnectionStats;
+syncConnectionStats();
