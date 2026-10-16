@@ -73,7 +73,7 @@ button.primary { background: var(--stage-accent, #2563eb); border-color: transpa
  * Controllers can lock/unlock other speakers' mute, explicitly apply a room-mix gain draft, remove them from the stage, or confirm a connected speaker's control handoff.
  * The microphone picker is an explicit draft, never an indicator of the actual capture device.
  * The output picker is also a draft; explicit refresh and submission never imply audible playback.
- * Style through `::part(panel|status|quality|connection-stats|speaking|hand-rejection|audio-recovery|audio-retry|actions|name|room-name|hands|stage-management|playback|microphone|mic-test|output-device)` and the
+ * Style through `::part(panel|status|quality|connection-stats|public-roster|speaking|hand-rejection|audio-recovery|audio-retry|actions|name|room-name|hands|stage-management|playback|microphone|mic-test|output-device)` and the
  * `--stage-*` custom properties.
  */
 export class StageElement extends HTMLElement {
@@ -86,6 +86,18 @@ export class StageElement extends HTMLElement {
   // Weak identities fence re-emission of retired public snapshots without retaining their private data.
   private readonly occupancySnapshots = new WeakSet<object>();
   private occupancyRevision = 0;
+  private readonly publicRosterPanel: HTMLDetailsElement;
+  private readonly publicRosterSummary: HTMLElement;
+  private readonly publicRosterNotice: HTMLParagraphElement;
+  private readonly publicRosterList: HTMLUListElement;
+  private publicRosterOwner: { client: StageClient; roomId: string; participantId: string; generation: number } | undefined;
+  private publicRosterReport: { rows: { id: string; text: string }[]; last: boolean; awaiting: boolean } | undefined;
+  private readonly publicRosterSnapshots = new WeakSet<object>();
+  private publicRosterEventRevision = 0;
+  private publicRosterRevision = 0;
+  private publicRosterPaintedOwner: StageElement['publicRosterOwner'];
+  private readonly publicRosterRows = new Map<string, HTMLLIElement>();
+  private publicRosterOrder: string[] = [];
   private readonly quality: HTMLParagraphElement;
   private qualityOwner: { client: StageClient; roomId: string; participantId: string; generation: number } | undefined;
   private qualityReport: Omit<ConnectionQuality, 'participantId'> | undefined;
@@ -253,6 +265,14 @@ export class StageElement extends HTMLElement {
     this.occupancy = document.createElement('p');
     this.occupancy.className = 'room-occupancy';
     this.occupancy.hidden = true;
+    this.publicRosterPanel = document.createElement('details');
+    this.publicRosterPanel.part.add('public-roster');
+    this.publicRosterPanel.hidden = true;
+    this.publicRosterSummary = document.createElement('summary');
+    this.publicRosterSummary.textContent = '台上成員快照';
+    this.publicRosterNotice = document.createElement('p');
+    this.publicRosterList = document.createElement('ul');
+    this.publicRosterPanel.append(this.publicRosterSummary, this.publicRosterNotice, this.publicRosterList);
     this.quality = document.createElement('p');
     this.quality.part.add('quality');
     this.quality.hidden = true;
@@ -450,7 +470,7 @@ export class StageElement extends HTMLElement {
     this.retry = this.button('重試加入', () => { if (this.canRetry()) this.rejoin(); });
     this.cancelJoin = this.button('取消加入', () => this.cancelInitial?.());
     actions.append(this.unlock, this.listen, this.hand, this.mic, this.micRetry, this.audioRetry, this.leaveStage, this.roomAction, this.roomClose, this.retry, this.cancelJoin);
-    panel.append(this.status, this.occupancy, this.quality, this.connectionStatsPanel, this.speaking, this.handRejection, this.error, this.errorDismiss, this.namePanel, this.roomNamePanel, this.handQueuePanel, this.stageManagementPanel, actions, this.roomCloseNotice, this.audioRecovery, this.microphonePanel, this.micTestPanel, this.outputDevicePanel, this.playback);
+    panel.append(this.status, this.occupancy, this.publicRosterPanel, this.quality, this.connectionStatsPanel, this.speaking, this.handRejection, this.error, this.errorDismiss, this.namePanel, this.roomNamePanel, this.handQueuePanel, this.stageManagementPanel, actions, this.roomCloseNotice, this.audioRecovery, this.microphonePanel, this.micTestPanel, this.outputDevicePanel, this.playback);
     root.append(style, panel);
     this.render();
   }
@@ -549,6 +569,7 @@ export class StageElement extends HTMLElement {
       for (const type of EVENTS) {
         client.on(type, ({ detail }) => {
           if (generation !== this.generation || this.current !== client) return;
+          const publicRosterEvent = this.rememberPublicRosterEvent(type, detail);
           this.markMicTestEvent(client, type, detail);
           const speakingEvent = this.rememberSpeakingEvent(type, detail);
           const qualityEvent = this.rememberQualityEvent(type, detail);
@@ -630,6 +651,8 @@ export class StageElement extends HTMLElement {
           this.syncSpeakingOwner(false);
           this.syncConnectionStats();
           this.syncMicTest();
+          this.notePublicRosterEvent(client, generation, type, detail, publicRosterEvent);
+          this.syncPublicRoster();
           this.dispatchEvent(new CustomEvent(`stage-${type}`, { detail, bubbles: true, composed: true }));
           this.syncOccupancy();
           this.syncQualityOwner(false);
@@ -643,6 +666,7 @@ export class StageElement extends HTMLElement {
           this.syncRoomClose();
           this.syncHandRejection();
           this.syncAudioRecovery();
+          this.syncPublicRoster();
           if (type === 'state' || type === 'status' || type === 'mic' || type === 'closed' || type === 'kicked') this.render();
         });
       }
@@ -688,6 +712,7 @@ export class StageElement extends HTMLElement {
     if (generation !== this.generation || this.roomExit !== exit) return;
     this.retireConnectionStats();
     this.retireOccupancy();
+    this.retirePublicRoster();
     this.retireQualityOwner();
     this.retireSpeakingOwner();
     this.hideError();
@@ -707,6 +732,7 @@ export class StageElement extends HTMLElement {
     if (generation !== this.generation) return;
     this.retireConnectionStats();
     this.retireOccupancy();
+    this.retirePublicRoster();
     this.retireQualityOwner();
     this.retireSpeakingOwner();
     this.retireRoomClose();
@@ -738,6 +764,156 @@ export class StageElement extends HTMLElement {
     this.unlock.hidden = true;
     this.render();
     await client?.disconnect();
+  }
+
+  private retirePublicRoster(): void {
+    if (!this.publicRosterOwner && !this.publicRosterReport) return;
+    this.publicRosterOwner = undefined; this.publicRosterReport = undefined;
+    ++this.publicRosterRevision;
+  }
+
+  private rememberPublicRosterEvent(type: keyof StageEventMap, detail: StageEventMap[keyof StageEventMap]): { revision: number; unseen: boolean } {
+    const revision = ++this.publicRosterEventRevision;
+    const object = detail !== null && typeof detail === 'object';
+    const unseen = type === 'state' && object && !this.publicRosterSnapshots.has(detail);
+    // Reserve even rejected receipts without getters or DOM ahead of the existing consent fences.
+    if (type === 'state' && object) this.publicRosterSnapshots.add(detail);
+    if (type === 'closed' || type === 'kicked' || (type === 'status' && detail === 'disconnected')) this.retirePublicRoster();
+    else if (this.publicRosterReport && ((type === 'status' && detail === 'reconnecting')
+      || type === 'role' || type === 'stageleft' || type === 'stagejoined' || type === 'transferred' || type === 'mic')) {
+      this.publicRosterReport.last = true;
+      this.publicRosterReport.awaiting = type !== 'status';
+      ++this.publicRosterRevision;
+    }
+    return { revision, unseen };
+  }
+
+  private reconcilePublicRoster(): void {
+    for (;;) {
+      const owner = this.publicRosterOwner;
+      if (!owner) return;
+      const revision = this.publicRosterRevision, client = owner.client;
+      const state = client.state, status = client.status;
+      const roomId = state?.roomId, participantId = state?.me?.participantId;
+      if (owner !== this.publicRosterOwner || revision !== this.publicRosterRevision) continue;
+      // Observed identity loss retires this receipt even if a later getter restores old values.
+      if (!this.isConnected || this.current !== client || this.generation !== owner.generation
+        || roomId !== owner.roomId || participantId !== owner.participantId
+        || (status !== 'live' && status !== 'waiting' && status !== 'reconnecting')) {
+        this.retirePublicRoster();
+        this.noteRoomCloseEvent('status', status);
+        this.noteStageTransferEvent('status', status);
+        this.reconcileRoomClose();
+        continue;
+      }
+      if (state !== client.state || status !== client.status) continue;
+      if (owner !== this.publicRosterOwner || revision !== this.publicRosterRevision) continue;
+      if (status === 'reconnecting' && this.publicRosterReport && !this.publicRosterReport.last) {
+        this.publicRosterReport.last = true; ++this.publicRosterRevision;
+      }
+      return;
+    }
+  }
+
+  private notePublicRosterEvent(client: StageClient, generation: number, type: keyof StageEventMap,
+    detail: StageEventMap[keyof StageEventMap], event: { revision: number; unseen: boolean }): void {
+    this.reconcilePublicRoster();
+    if (type !== 'state' || !event.unseen || event.revision !== this.publicRosterEventRevision
+      || this.current !== client || this.generation !== generation) return;
+    const revision = this.publicRosterRevision;
+    const state = client.state, status = client.status;
+    const roomId = state?.roomId, participantId = state?.me?.participantId;
+    if (!state || state !== detail || !this.isConnected || (status !== 'live' && status !== 'waiting')
+      || typeof roomId !== 'string' || !roomId.trim() || typeof participantId !== 'string' || !participantId.trim()) return;
+    const current = (): boolean => {
+      this.reconcilePublicRoster();
+      return revision === this.publicRosterRevision && event.revision === this.publicRosterEventRevision && this.current === client && this.generation === generation
+        && this.isConnected && state === client.state && status === client.status
+        && roomId === state.roomId && participantId === state.me?.participantId
+        && revision === this.publicRosterRevision && event.revision === this.publicRosterEventRevision;
+    };
+    const limit = state.limits?.maxSpeakers, people = state.speakers, controllerId = state.controllerId;
+    const rows: { id: string; text: string }[] = [], seen = new Set<string>();
+    let controllers = 0, speakers = 0;
+    let valid = typeof limit === 'number' && Number.isSafeInteger(limit) && limit > 0
+      && Array.isArray(people) && people.length - 1 <= limit
+      && typeof controllerId === 'string' && Boolean(controllerId.trim());
+    if (valid) {
+      const length = people.length;
+      for (let index = 0; index < length; index++) {
+        const person = people[index];
+        if (!person || typeof person !== 'object') { valid = false; break; }
+        const id = person.participantId, name = person.name, role = person.role, onStage = person.onStage;
+        const muted = person.muted, forceMuted = person.forceMuted, connected = person.connected;
+        if (typeof id !== 'string' || !id.trim() || seen.has(id) || typeof name !== 'string'
+          || onStage !== true || (role !== 'controller' && role !== 'speaker')
+          || (id === controllerId) !== (role === 'controller') || typeof muted !== 'boolean'
+          || typeof forceMuted !== 'boolean' || typeof connected !== 'boolean' || (forceMuted && !muted)) {
+          valid = false; break;
+        }
+        seen.add(id);
+        if (role === 'controller') controllers++; else speakers++;
+        if (controllers > 1 || speakers > limit) { valid = false; break; }
+        rows.push({ id, text: `${decodeName(name)} · ${role === 'controller' ? '主控' : '發言者'} · ${forceMuted ? '主控鎖定靜音' : muted ? '已靜音' : '未靜音'} · ${connected ? '控制連線已連接' : '控制連線中斷，保留席位'}` });
+      }
+    }
+    if (!current()) return;
+    if (!valid) { this.retirePublicRoster(); return; }
+    if (!this.publicRosterOwner) this.publicRosterOwner = { client, generation, roomId, participantId };
+    this.publicRosterReport = { rows, last: false, awaiting: false };
+    ++this.publicRosterRevision;
+  }
+
+  /** Only admitted state receipts read the public roster; ordinary paints use copied text. */
+  private syncPublicRoster(repair = false): void {
+    this.reconcilePublicRoster();
+    const owner = this.publicRosterOwner, report = this.publicRosterReport, revision = this.publicRosterRevision;
+    const current = (): boolean => {
+      this.reconcilePublicRoster();
+      if (revision !== this.publicRosterRevision || owner !== this.publicRosterOwner) {
+        // A host setter can finish an old write after the nested winner has already painted.
+        this.syncPublicRoster(true); return false;
+      }
+      return true;
+    };
+    if (!report || owner !== this.publicRosterPaintedOwner) {
+      if (!this.publicRosterPanel.hidden) this.publicRosterPanel.hidden = true;
+      if (!current()) return;
+      if (this.publicRosterPanel.open) this.publicRosterPanel.open = false;
+      if (!current()) return;
+      if (this.publicRosterRows.size || this.publicRosterOrder.length || repair) {
+        this.publicRosterRows.clear(); this.publicRosterOrder = [];
+        this.publicRosterList.replaceChildren();
+        if (!current()) return;
+      }
+      this.publicRosterPaintedOwner = owner;
+    }
+    const status = owner?.client.status;
+    if (!current()) return;
+    const notice = !report ? '' : `${report.last ? status === 'reconnecting' ? '重新連線中，上次快照' : report.awaiting ? '上次快照，等待新快照' : '上次快照' : '最近快照'}：${report.rows.length ? '依台上順序列出成員。' : '沒有台上成員。'}靜音與控制連線旗標僅代表收到的快照，包含斷線保留席位，不代表正在發言或可聽見音訊。`;
+    if (this.publicRosterNotice.textContent !== notice) this.publicRosterNotice.textContent = notice;
+    if (!current()) return;
+    const rows = report?.rows ?? [];
+    for (const item of rows) {
+      let row = this.publicRosterRows.get(item.id);
+      if (!row) {
+        row = document.createElement('li');
+        if (!current()) return;
+        this.publicRosterRows.set(item.id, row);
+      }
+      if (row.textContent !== item.text) row.textContent = item.text;
+      if (!current()) return;
+    }
+    const order = rows.map(item => item.id);
+    if (repair || order.length !== this.publicRosterOrder.length || order.some((id, index) => id !== this.publicRosterOrder[index])) {
+      this.publicRosterOrder = order;
+      const retained = new Set(order);
+      for (const id of this.publicRosterRows.keys()) if (!retained.has(id)) this.publicRosterRows.delete(id);
+      this.publicRosterList.replaceChildren(...order.map(id => this.publicRosterRows.get(id)!));
+      if (!current()) return;
+    }
+    if (report && this.publicRosterPanel.hidden) this.publicRosterPanel.hidden = false;
+    current();
   }
 
   private retireOccupancy(): void {
@@ -2563,6 +2739,7 @@ export class StageElement extends HTMLElement {
     this.mic.setAttribute('aria-pressed', String(Boolean(me?.muted)));
     this.leaveStage.textContent = me?.onStage ? '離開舞台' : '返回舞台';
     this.leaveStage.disabled = !this.canUseStage() || this.pendingActions.has(this.leaveStage);
+    this.syncPublicRoster();
   }
 }
 
