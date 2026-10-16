@@ -808,3 +808,6 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 
 
 211. **Embed 講者混音增益草稿（第189批，2026-10-16）：** immutable188完整embed＋公開SDK→validator→Hub十例重證既有setGain權限、±MAX_GAIN_DB界限與一位小數正規化，舞台列尚無接受值或入口。只在其他目前台上speaker列新增權威gainDb與原生number草稿／明確套用，台上／台下主控及離線保留台位可用；本決策僅追加206先前排除的gain，不擴至widget／觀眾／自我管理。輸入不送命令、空白／非有限／超界拒絕，不clamp；同列快照／重連保留草稿，權威值獨立更新，列退役清草稿。共用原per-target pending及transfer全舞台互鎖，先reserve防同步重入；同ID回台不提前解鎖，舊owner／row／token隔離catch／finally，不由ACK樂觀改值。缺少setGain或有效exported MAX_GAIN_DB只停用新增控制，不改原moderation通知窗口或SDK全域error。混音增益不等於本機音量／硬體增益、不解除mute；送出後目標下台仍可能合法接受並於回台沿用，無取消或原子onStage保證。不改SDK／server／protocol／media，不加timer／storage／capture／play／協商；受控全模組與實際SDK／Hub證據不代表原生輸入／版面／鍵盤／焦點／AT／ICE或硬體聲音驗收。
+
+
+212. **Widget 舞台列避免等值寫入（第191批，2026-10-16）：** published189完整StageElement經公開SDK→validator→Hub的24次合法gain／roomName更新，1／3／8講者等值列寫入864／2592／6912，受控候選降0。只在element.ts原舞台列12個text／attribute／disabled／hidden寫入比較目前DOM值；每次仍重算desired label與原資格／pending，保留canTransferStage原時點及短路，不加signaturecache、事件合併或提前跳過sync。panel／summary／notice、列創建／移除／排序／退役、callback與權限路徑不改；宿主改值可修正，失敗寫入下次重試，不新增歷史狀態。兩版原本皆保留列／按鈕／handler身分，無新增identity效益；變更／重入／重連／同ID與舊promise隔離須回歸。無SDK／server／protocol／media／依賴變更，不宣稱原生browser時間／記憶體／layout／焦點／AT或硬體音訊改善。

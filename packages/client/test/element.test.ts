@@ -8911,7 +8911,7 @@ describe('widget controller stage management panel', () => {
     const fixture = await socketJoinedWidget(t, successor.s.last('room:state')!);
     const flush = () => { for (const timer of h.timers.filter(timer => !timer.cleared && timer.ms === 0)) { timer.cleared = true; timer.fn(); } };
     const deliver = () => { flush(); fixture.socket.deliver(successor.s.last('room:state')!); };
-    const relay = async (message: StageRequest) => {
+    const relay = async (message: StageRequest | Extract<ClientMessage, { type: 'mic:gain' | 'room:rename' }>) => {
       const start = successor.s.inbox.length; await h.hub.handle(successor.s, parseClientMessage(JSON.stringify(message), config.limits)); flush();
       const replies = successor.s.inbox.slice(start);
       for (const reply of replies) if (reply.type !== 'ok' && reply.type !== 'error') fixture.socket.deliver(reply);
@@ -8924,6 +8924,210 @@ describe('widget controller stage management panel', () => {
     };
     return { ...fixture, h, config, host, successor, first, second, deliver, relay, target };
   }
+
+  /** Count mounted stage-row writes only; DOM, transport, clocks and media are controlled test surfaces. */
+  function rowWrites(t: TestContext, rows: Node[]) {
+    const writes = { text: 0, attribute: 0, disabled: 0, hidden: 0 }, changes = { ...writes };
+    for (const row of rows) {
+      const controls = buttons(row), name = row.children[0]!;
+      const fields: [Node, 'textContent' | 'disabled' | 'hidden', 'text' | 'disabled' | 'hidden'][] = [
+        [name, 'textContent', 'text'], [controls.mute, 'textContent', 'text'],
+        ...Object.values(controls).map((button): [Node, 'disabled', 'disabled'] => [button, 'disabled', 'disabled']),
+        [controls.transfer, 'hidden', 'hidden'],
+      ];
+      for (const [node, key, counter] of fields) {
+        let value = node[key];
+        Object.defineProperty(node, key, { configurable: true, get: () => value, set: (next: string | boolean) => {
+          writes[counter]++; if (value !== next) changes[counter]++; value = next;
+        } });
+        t.after(() => { Object.defineProperty(node, key, { configurable: true, writable: true, value }); });
+      }
+      for (const button of Object.values(controls)) {
+        const original = button.setAttribute;
+        t.mock.method(button, 'setAttribute', function (this: Node, key: string, value: string): void {
+          if (key === 'aria-label' || key === 'aria-busy') {
+            writes.attribute++; if (this.getAttribute(key) !== value) changes.attribute++;
+          }
+          original.call(this, key, value);
+        });
+      }
+    }
+    const reset = () => { for (const key of ['text', 'attribute', 'disabled', 'hidden'] as const) writes[key] = changes[key] = 0; };
+    const expect = (text = 0, attribute = 0, disabled = 0, hidden = 0) => {
+      assert.deepEqual({ ...writes }, { text, attribute, disabled, hidden }, 'only necessary current-value stage-row writes');
+      assert.deepEqual({ ...changes }, { ...writes }, 'each guarded write changes its current DOM value');
+      reset();
+    };
+    const snapshot = () => ({ writes: { ...writes }, changes: { ...changes } });
+    return { reset, expect, snapshot };
+  }
+
+  for (const managedRows of [1, 3, 8]) for (const workload of ['gain', 'room-title'] as const) {
+    it(`stage-row writes: actual SDK validator Hub ${workload} changes preserve ${managedRows} unchanged rows`, async t => {
+      const f = await hubWidget(t);
+      if (managedRows === 1) {
+        for (const id of [f.host.id, f.second.id]) assert.equal(await f.h.req(f.successor.s, { type: 'stage:remove', targetId: id }), 'ok');
+      }
+      for (let i = 3; i < managedRows; i++) {
+        const person = await f.h.join(f.host.roomId, f.host.code, `Extra speaker ${i}`);
+        assert.equal(await f.h.req(person.s, { type: 'hand:raise' }), 'ok');
+        assert.equal(await f.h.req(f.successor.s, { type: 'stage:approve', targetId: person.id }), 'ok');
+        assert.equal(await f.h.req(person.s, { type: 'rtc:offer', payload: SENDRECV_OFFER }), 'ok');
+      }
+      f.deliver(); await settle();
+      const current = view(f.element), rows = [...current.rows]; assert.equal(rows.length, managedRows);
+      current.disclosure.open = true;
+      const controls = rows.map(row => Object.values(buttons(row))), callbacks = controls.flat().map(button => button.onclick);
+      const observed = rowWrites(t, rows), replaces = t.mock.method(current.list, 'replaceChildren');
+      const client = f.client, socket = f.socket, pending = client['pending'].size;
+      const media = f.h.transport.rooms.get(f.host.roomId)!, peer = media.peers.get(f.first.id), publisher = media.publishers.get(f.first.id);
+      assert.ok(peer && publisher);
+      const events: string[] = [];
+      for (const kind of ['state', 'mic', 'role', 'stageleft', 'transferred']) f.element.addEventListener(`stage-${kind}`, () => events.push(kind));
+      const startFrames = socket.sent.length;
+      for (let i = 0; i < 24; i++) {
+        const expected = i % 2 ? -3 : 3;
+        const work = workload === 'gain' ? client.setGain(f.first.id, expected) : client.setRoomName(`Session ${i}`);
+        await f.tick(100);
+        const sent = socket.sent.at(-1);
+        assert.ok(sent && (sent.type === 'mic:gain' || sent.type === 'room:rename'));
+        assert.equal(sent.type, workload === 'gain' ? 'mic:gain' : 'room:rename');
+        const { reply } = await f.relay(sent); assert.equal(reply.type, 'ok');
+        socket.deliver(reply); await work;
+        if (workload === 'gain') assert.equal(client.state!.speakers.find(person => person.participantId === f.first.id)!.gainDb, expected);
+        else assert.equal(client.state!.name, `Session ${i}`);
+      }
+      assert.deepEqual(events, Array<string>(24).fill('state'));
+      assert.deepEqual(view(f.element).rows, rows); assert.equal(replaces.mock.callCount(), 0);
+      assert.deepEqual(rows.map(row => Object.values(buttons(row))), controls);
+      assert.deepEqual(controls.flat().map(button => button.onclick), callbacks);
+      assert.equal(current.disclosure.open, true); assert.equal(f.element.client, client); assert.equal(f.sockets[0], socket);
+      assert.equal(socket.sent.length - startFrames, 24); assert.equal(client['pending'].size, pending);
+      assert.equal(media.peers.get(f.first.id), peer); assert.equal(media.publishers.get(f.first.id), publisher);
+      observed.expect();
+    });
+  }
+
+  it('stage-row writes: actual Hub lock then unlock changes presentation and retains request reservations', async t => {
+    const f = await hubWidget(t), row = f.target(), other = f.target(f.second.id);
+    const active = rowWrites(t, [row]), passive = rowWrites(t, [other]);
+    for (const lock of [true, false]) {
+      press(buttons(row).mute); press(buttons(row).mute); press(buttons(row).remove);
+      busy(row, true); busy(other, false, false, true);
+      await f.tick(100); const sent = request(f.socket), { reply } = await f.relay(sent);
+      assert.equal(sent.type, lock ? 'mic:force-mute' : 'mic:force-unmute'); assert.equal(reply.type, 'ok');
+      assert.equal(f.client.state!.speakers.find(person => person.participantId === f.first.id)!.forceMuted, lock);
+      busy(row, true); busy(other, false, false, true); assert.equal(f.target(), row);
+      f.socket.deliver(reply); await settle(); busy(row, false); busy(other, false);
+      assert.equal(buttons(row).mute.textContent, lock ? '解除靜音鎖定' : '鎖定靜音');
+    }
+    assert.equal(requests(f.socket).length, 2);
+    active.expect(4, 10, 12); passive.expect(0, 0, 4);
+  });
+
+  it('stage-row writes: repairs all twelve host-mutated row fields on an unchanged real Hub snapshot', async t => {
+    const f = await hubWidget(t), row = f.target(), controls = buttons(row), name = row.children[0]!;
+    const observed = rowWrites(t, [row]);
+    name.textContent = 'Host label'; controls.mute.textContent = 'Host mute'; controls.transfer.hidden = true;
+    for (const button of Object.values(controls)) {
+      button.disabled = true; button.setAttribute('aria-label', 'Host action'); button.setAttribute('aria-busy', 'host');
+    }
+    observed.reset(); f.deliver(); await settle(); observed.expect(2, 6, 3, 1);
+    assert.equal(name.textContent, 'Managed & <speaker> · 未靜音'); assert.equal(controls.mute.textContent, '鎖定靜音');
+    assert.equal(controls.mute.getAttribute('aria-label'), '鎖定 Managed & <speaker> 靜音');
+    assert.equal(controls.remove.getAttribute('aria-label'), '將 Managed & <speaker> 移下台');
+    assert.equal(controls.transfer.getAttribute('aria-label'), '將控制權移交給 Managed & <speaker>');
+    assert.equal(controls.transfer.hidden, false); busy(row, false); assert.equal(f.target(), row);
+    f.deliver(); await settle(); observed.expect();
+  });
+
+  it('stage-row writes: reconciles same-snapshot and DOM mutations after a forwarded callback', async t => {
+    const f = await hubWidget(t), row = f.target(), controls = buttons(row), observed = rowWrites(t, [row]);
+    const snapshots: RoomStatePayload[] = [], labels: string[] = [], counts: ReturnType<typeof observed.snapshot>[] = [];
+    f.element.addEventListener('stage-state', () => {
+      snapshots.push(f.client.state!); labels.push(row.children[0]!.textContent); counts.push(observed.snapshot());
+      f.client.state!.speakers.find(person => person.participantId === f.first.id)!.name = 'Callback &amp; speaker';
+      controls.remove.setAttribute('aria-label', 'Callback mutation'); observed.reset();
+    }, { once: true });
+    f.deliver(); await settle();
+    assert.deepEqual(labels, ['Managed & <speaker> · 未靜音']); assert.equal(snapshots[0], f.client.state);
+    const unchanged = { text: 0, attribute: 0, disabled: 0, hidden: 0 };
+    assert.deepEqual(counts, [{ writes: unchanged, changes: unchanged }]); observed.expect(1, 3);
+    assert.equal(row.children[0]!.textContent, 'Callback & speaker · 未靜音');
+    assert.equal(controls.mute.getAttribute('aria-label'), '鎖定 Callback & speaker 靜音');
+    assert.equal(controls.remove.getAttribute('aria-label'), '將 Callback & speaker 移下台');
+    assert.equal(controls.transfer.getAttribute('aria-label'), '將控制權移交給 Callback & speaker'); assert.equal(f.target(), row);
+  });
+
+  it('stage-row writes: preserves a newer nested state instead of restoring the outer callback snapshot', async t => {
+    const { element, client, socket } = await socketJoinedWidget(t, state(['first'])), row = view(element).rows[0]!;
+    const observed = rowWrites(t, [row]), outer = state(['first']), nested = state(['first']);
+    outer.speakers[0]!.name = 'Outer'; nested.speakers[0]!.name = 'Nested &amp; current'; nested.speakers[0]!.connected = false;
+    const labels: string[] = [], counts: ReturnType<typeof observed.snapshot>[] = [];
+    element.addEventListener('stage-state', () => {
+      labels.push(row.children[0]!.textContent); counts.push(observed.snapshot()); observed.reset();
+      socket.deliver({ type: 'room:state', ...nested });
+      labels.push(row.children[0]!.textContent); counts.push(observed.snapshot()); observed.reset();
+    }, { once: true });
+    socket.deliver({ type: 'room:state', ...outer }); observed.expect();
+    assert.deepEqual(labels, ['Outer · 未靜音', 'Nested & current · 未靜音 · 暫時離線（席位保留中）']);
+    const outerChanges = { text: 1, attribute: 3, disabled: 0, hidden: 0 }, nestedChanges = { ...outerChanges, disabled: 1 };
+    assert.deepEqual(counts, [{ writes: outerChanges, changes: outerChanges }, { writes: nestedChanges, changes: nestedChanges }]);
+    assert.equal(client.state!.speakers[0]!.name, nested.speakers[0]!.name); assert.equal(view(element).rows[0], row);
+    assert.equal(buttons(row).transfer.getAttribute('aria-label'), '將控制權移交給 Nested & current'); busy(row, false, false, true);
+  });
+
+  for (const field of ['name', 'mute text', 'mute label', 'remove label', 'transfer label', 'mute disabled', 'mute busy',
+    'remove disabled', 'remove busy', 'transfer hidden', 'transfer disabled', 'transfer busy'] as const) {
+    it(`stage-row writes: retries a failed ${field} write from live DOM and finishes remaining fields`, async t => {
+      const f = await hubWidget(t), row = f.target(), controls = buttons(row), name = row.children[0]!;
+      name.textContent = 'Host label'; controls.mute.textContent = 'Host mute'; controls.transfer.hidden = true;
+      for (const button of Object.values(controls)) {
+        button.disabled = true; button.setAttribute('aria-label', 'Host action'); button.setAttribute('aria-busy', 'host');
+      }
+      const node = field === 'name' ? name : field.startsWith('mute') ? controls.mute : field.startsWith('remove') ? controls.remove : controls.transfer;
+      let fail = true, attempts = 0;
+      if (field.endsWith('label') || field.endsWith('busy')) {
+        const key = field.endsWith('label') ? 'aria-label' : 'aria-busy', original = node.setAttribute;
+        t.mock.method(node, 'setAttribute', function (this: Node, attribute: string, value: string): void {
+          if (attribute === key) { attempts++; if (fail) throw new Error('Controlled DOM write failure'); }
+          original.call(this, attribute, value);
+        });
+      } else {
+        const key = field === 'name' || field.endsWith('text') ? 'textContent' : field.endsWith('hidden') ? 'hidden' : 'disabled';
+        let value = node[key];
+        Object.defineProperty(node, key, { configurable: true, get: () => value, set: (next: string | boolean) => {
+          attempts++; if (fail) throw new Error('Controlled DOM write failure'); value = next;
+        } });
+        t.after(() => { Object.defineProperty(node, key, { configurable: true, writable: true, value }); });
+      }
+      assert.throws(() => f.element['syncStageManagement'](), /Controlled DOM write failure/); assert.equal(attempts, 1);
+      fail = false; f.element['syncStageManagement'](); assert.equal(attempts, 2);
+      assert.equal(name.textContent, 'Managed & <speaker> · 未靜音'); assert.equal(controls.mute.textContent, '鎖定靜音');
+      assert.equal(controls.mute.getAttribute('aria-label'), '鎖定 Managed & <speaker> 靜音');
+      assert.equal(controls.remove.getAttribute('aria-label'), '將 Managed & <speaker> 移下台');
+      assert.equal(controls.transfer.getAttribute('aria-label'), '將控制權移交給 Managed & <speaker>');
+      assert.equal(controls.transfer.hidden, false); busy(row, false); assert.equal(f.target(), row);
+      f.element['syncStageManagement'](); assert.equal(attempts, 2, 'a completed value does not need another write');
+    });
+  }
+
+  it('stage-row writes: rechecks transfer eligibility on equal rows and preserves pending-attempt short-circuiting', async t => {
+    const { element, client } = await socketJoinedWidget(t, state()), rows = [...view(element).rows];
+    const original = element['canTransferStage'], calls: { id: string; node: HTMLLIElement }[] = [];
+    t.mock.method(element as unknown as { canTransferStage(id: string, node: HTMLLIElement): boolean }, 'canTransferStage',
+      function (this: Widget, id: string, node: HTMLLIElement): boolean { calls.push({ id, node }); return original.call(this, id, node); });
+    const expected = rows.map((row, index) => ({ id: ['first', 'second'][index]!, node: row }));
+    for (let pass = 0; pass < 2; pass++) { calls.length = 0; element['syncStageManagement'](); assert.deepEqual(calls, expected); }
+    const pending = deferred(); confirm(t); const transfer = t.mock.method(client, 'transferControl', () => pending.promise);
+    press(buttons(rows[0]!).transfer); transferBusy(element); assert.equal(transfer.mock.callCount(), 1);
+    for (let pass = 0; pass < 2; pass++) {
+      calls.length = 0; element['syncStageManagement'](); assert.deepEqual(calls, expected.slice(0, 1), 'only the existing post-row attempt-validity check runs');
+      transferBusy(element);
+    }
+    client.state!.speakers[0]!.connected = false; element['syncStageManagement'](); assert.equal(element['stageTransferAttempt']!.invalid, true);
+    pending.resolve(); await settle(); assert.equal(element['stageTransferAttempt'], undefined); busy(rows[0]!, false, false, true); busy(rows[1]!, false);
+  });
 
   for (const selfMuted of [false, true]) {
     it(`locks and unlocks a real Hub target with selfMuted=${selfMuted} from an offstage controller without relying on mic events`, async t => {

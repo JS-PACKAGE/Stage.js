@@ -863,19 +863,28 @@ export class StageElement extends HTMLElement {
         node.append(name, mute, remove, transfer); this.stageManagementRows.set(id, row);
       }
       const name = decodeName(person.name);
-      row.name.textContent = `${name} · ${person.muted ? '已靜音' : '未靜音'}${person.forceMuted ? ' · 已鎖定靜音' : ''}${person.connected ? '' : ' · 暫時離線（席位保留中）'}`;
-      row.mute.textContent = person.forceMuted ? '解除靜音鎖定' : '鎖定靜音';
-      row.mute.setAttribute('aria-label', person.forceMuted ? `解除 ${name} 的靜音鎖定` : `鎖定 ${name} 靜音`);
-      row.remove.setAttribute('aria-label', `將 ${name} 移下台`);
-      row.transfer.setAttribute('aria-label', `將控制權移交給 ${name}`);
+      const label = `${name} · ${person.muted ? '已靜音' : '未靜音'}${person.forceMuted ? ' · 已鎖定靜音' : ''}${person.connected ? '' : ' · 暫時離線（席位保留中）'}`;
+      if (row.name.textContent !== label) row.name.textContent = label;
+      const muteText = person.forceMuted ? '解除靜音鎖定' : '鎖定靜音';
+      if (row.mute.textContent !== muteText) row.mute.textContent = muteText;
+      const muteLabel = person.forceMuted ? `解除 ${name} 的靜音鎖定` : `鎖定 ${name} 靜音`;
+      const removeLabel = `將 ${name} 移下台`, transferLabel = `將控制權移交給 ${name}`;
+      if (row.mute.getAttribute('aria-label') !== muteLabel) row.mute.setAttribute('aria-label', muteLabel);
+      if (row.remove.getAttribute('aria-label') !== removeLabel) row.remove.setAttribute('aria-label', removeLabel);
+      if (row.transfer.getAttribute('aria-label') !== transferLabel) row.transfer.setAttribute('aria-label', transferLabel);
       const pending = this.stageManagementPending.has(id);
       // A retained offline seat can still be moderated; the server decides whether it remains valid.
       for (const control of [row.mute, row.remove]) {
-        control.disabled = reconnecting || pending || Boolean(this.stageTransferAttempt); control.setAttribute('aria-busy', String(pending));
+        const disabled = reconnecting || pending || Boolean(this.stageTransferAttempt), busy = String(pending);
+        if (control.disabled !== disabled) control.disabled = disabled;
+        if (control.getAttribute('aria-busy') !== busy) control.setAttribute('aria-busy', busy);
       }
-      row.transfer.hidden = typeof client.transferControl !== 'function';
-      row.transfer.disabled = Boolean(this.stageTransferAttempt) || !this.canTransferStage(id, row.node);
-      row.transfer.setAttribute('aria-busy', String(Boolean(this.stageTransferAttempt)));
+      const hidden = typeof client.transferControl !== 'function';
+      if (row.transfer.hidden !== hidden) row.transfer.hidden = hidden;
+      const disabled = Boolean(this.stageTransferAttempt) || !this.canTransferStage(id, row.node);
+      if (row.transfer.disabled !== disabled) row.transfer.disabled = disabled;
+      const busy = String(Boolean(this.stageTransferAttempt));
+      if (row.transfer.getAttribute('aria-busy') !== busy) row.transfer.setAttribute('aria-busy', busy);
     }
     for (const [id, row] of this.stageManagementRows) if (!seen.has(id)) {
       for (const control of [row.mute, row.remove, row.transfer]) { control.disabled = true; control.setAttribute('aria-busy', 'false'); }
