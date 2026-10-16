@@ -161,9 +161,10 @@ export class EmbedSdk {
 export const flush = async (): Promise<void> => { for (let i = 0; i < 16; i++) await Promise.resolve(); };
 
 export function embedApp(options: { libraryLoad?: Promise<void> | ((url: string, attempt: number) => Promise<void>); source?: string; search?: string; maxGainDb?: unknown; confirm?: ((message: string) => boolean) | null } = {}) {
-  const nodes = new Map(['host', 'ws-path', 'room', 'code', 'name', 'status', 'room-occupancy', 'own-connection-quality', 'speaking-summary', 'connection-stats-panel', 'connection-stats-update', 'connection-stats-text', 'hand-rejected', 'error-notice', 'last-error', 'error-dismiss', 'join', 'hand', 'mic', 'rename', 'room-name-panel', 'room-name-current', 'room-name-draft', 'room-name-update', 'hand-queue', 'hand-queue-summary', 'hand-queue-notice', 'hand-queue-list', 'stage-management', 'stage-management-summary', 'stage-management-notice', 'stage-management-list', 'stage', 'mic-retry', 'audio-retry', 'audio-retry-status', 'microphone-panel', 'microphone-device', 'microphone-refresh', 'microphone-apply', 'microphone-draft-notice', 'output-panel', 'output-device', 'output-refresh', 'output-apply', 'output-draft-notice', 'output-support', 'cancel-join', 'leave', 'close-room', 'audio', 'unlock'].map(id => [id, new EmbedNode()]));
+  const nodes = new Map(['host', 'ws-path', 'room', 'code', 'name', 'status', 'room-occupancy', 'own-connection-quality', 'speaking-summary', 'connection-stats-panel', 'connection-stats-update', 'connection-stats-text', 'hand-rejected', 'error-notice', 'last-error', 'error-dismiss', 'join', 'hand', 'mic', 'rename', 'room-name-panel', 'room-name-current', 'room-name-draft', 'room-name-update', 'hand-queue', 'hand-queue-summary', 'hand-queue-notice', 'hand-queue-list', 'stage-management', 'stage-management-summary', 'stage-management-notice', 'stage-management-list', 'stage', 'mic-retry', 'audio-retry', 'audio-retry-status', 'microphone-panel', 'microphone-device', 'microphone-refresh', 'microphone-apply', 'microphone-draft-notice', 'mic-test-panel', 'mic-test-start', 'mic-test-cancel', 'mic-test-stop', 'mic-test-meter', 'mic-test-status', 'mic-test-notice', 'output-panel', 'output-device', 'output-refresh', 'output-apply', 'output-draft-notice', 'output-support', 'cancel-join', 'leave', 'close-room', 'audio', 'unlock'].map(id => [id, new EmbedNode()]));
   const node = (id: string): EmbedNode => { const found = nodes.get(id); assert.ok(found, `unmodeled node: ${id}`); return found; };
   node('connection-stats-panel').append(node('connection-stats-update'), node('connection-stats-text'));
+  node('mic-test-panel').append(...['mic-test-start', 'mic-test-cancel', 'mic-test-stop', 'mic-test-meter', 'mic-test-status', 'mic-test-notice'].map(node));
   node('error-notice').hidden = true; node('hand-rejected').hidden = true; node('room-occupancy').hidden = true; node('own-connection-quality').hidden = true; node('speaking-summary').hidden = true;
   const cancel = node('cancel-join'); cancel.hidden = cancel.disabled = true; cancel.textContent = '取消連線';
   const hand = node('hand'), mic = node('mic'), stage = node('stage'), micRetry = node('mic-retry'), leave = node('leave'), form = node('join'), status = node('status');
@@ -231,9 +232,11 @@ export function embedApp(options: { libraryLoad?: Promise<void> | ((url: string,
   const executable = stripTypeScriptTypes(source.replace("import './styles.css';", '').replace(dynamicImport, 'loadLibrary(moduleUrl)'));
   assert.doesNotMatch(executable, /\bimport\s*(?:\(|['"])/, 'the fixture must never import a real external library');
   const confirmations: string[] = [];
+  const pageDocument = Object.assign(new EventTarget(), { hidden: false, createElement(tag: string) { assert.ok(['option', 'li', 'span', 'div', 'button', 'label', 'input'].includes(tag), `unmodeled element: ${tag}`); return new EmbedNode(tag); }, querySelector(selector: string) { assert.match(selector, /^#[a-z-]+$/); return node(selector.slice(1)); } });
+  const pageWindow = new EventTarget();
   runInNewContext(executable, {
     ...(options.confirm === null ? {} : { confirm: (message: string) => { confirmations.push(message); return options.confirm?.(message) ?? false; } }),
-    document: { createElement(tag: string) { assert.ok(['option', 'li', 'span', 'div', 'button', 'label', 'input'].includes(tag), `unmodeled element: ${tag}`); return new EmbedNode(tag); }, querySelector(selector: string) { assert.match(selector, /^#[a-z-]+$/); return node(selector.slice(1)); } },
+    document: pageDocument, window: pageWindow, AbortController,
     location: { search: options.search ?? '?host=https%3A%2F%2Fstage.example.test%2Fprefix&room=%20same-room%20&code=%20TEST42%20', origin: 'https://embed.example.test' },
     URL, URLSearchParams, Error, Promise, performance: { now: () => now },
     loadLibrary: async (url: string) => {
@@ -248,7 +251,7 @@ export function embedApp(options: { libraryLoad?: Promise<void> | ((url: string,
     clearTimeout: (id: number) => clear('timeout', id),
   }, { filename: 'web/src/embed.ts', timeout: 1000 });
   return {
-    hand, mic, stage, micRetry, leave, form, submit, status, clients, moduleUrls, node, tick, clock, confirmations,
+    hand, mic, stage, micRetry, leave, form, submit, status, clients, moduleUrls, node, tick, clock, confirmations, pageDocument, pageWindow,
     async join(overrides: Partial<Me> = {}): Promise<EmbedSdk> {
       const count = clients.length; form.submit(); assert.equal(submit.disabled, true); await flush();
       assert.equal(clients.length, count + 1); const sdk = clients.at(-1)!;

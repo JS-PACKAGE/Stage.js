@@ -213,9 +213,10 @@ for (const wsPath of ['/custom/stage', '/ws']) {
     } });
     const { StageClient, decodeName } = await import(new URL('../packages/client/src/index.ts', import.meta.url).href);
     const joined = Promise.withResolvers<RoomStatePayload>();
-    const nodes = new Map(['host', 'ws-path', 'room', 'code', 'name', 'status', 'room-occupancy', 'own-connection-quality', 'speaking-summary', 'connection-stats-panel', 'connection-stats-update', 'connection-stats-text', 'hand-rejected', 'error-notice', 'last-error', 'error-dismiss', 'join', 'hand', 'mic', 'rename', 'room-name-panel', 'room-name-current', 'room-name-draft', 'room-name-update', 'hand-queue', 'hand-queue-summary', 'hand-queue-notice', 'hand-queue-list', 'stage-management', 'stage-management-summary', 'stage-management-notice', 'stage-management-list', 'stage', 'mic-retry', 'audio-retry', 'audio-retry-status', 'microphone-panel', 'microphone-device', 'microphone-refresh', 'microphone-apply', 'microphone-draft-notice', 'output-panel', 'output-device', 'output-refresh', 'output-apply', 'output-draft-notice', 'output-support', 'cancel-join', 'leave', 'close-room', 'audio', 'unlock'].map(id => [id, new EmbedNode()]));
+    const nodes = new Map(['host', 'ws-path', 'room', 'code', 'name', 'status', 'room-occupancy', 'own-connection-quality', 'speaking-summary', 'connection-stats-panel', 'connection-stats-update', 'connection-stats-text', 'hand-rejected', 'error-notice', 'last-error', 'error-dismiss', 'join', 'hand', 'mic', 'rename', 'room-name-panel', 'room-name-current', 'room-name-draft', 'room-name-update', 'hand-queue', 'hand-queue-summary', 'hand-queue-notice', 'hand-queue-list', 'stage-management', 'stage-management-summary', 'stage-management-notice', 'stage-management-list', 'stage', 'mic-retry', 'audio-retry', 'audio-retry-status', 'microphone-panel', 'microphone-device', 'microphone-refresh', 'microphone-apply', 'microphone-draft-notice', 'mic-test-panel', 'mic-test-start', 'mic-test-cancel', 'mic-test-stop', 'mic-test-meter', 'mic-test-status', 'mic-test-notice', 'output-panel', 'output-device', 'output-refresh', 'output-apply', 'output-draft-notice', 'output-support', 'cancel-join', 'leave', 'close-room', 'audio', 'unlock'].map(id => [id, new EmbedNode()]));
     const node = (id: string): EmbedNode => { const value = nodes.get(id); assert.ok(value, `unmodeled node: ${id}`); return value; };
     node('connection-stats-panel').append(node('connection-stats-update'), node('connection-stats-text'));
+    node('mic-test-panel').append(...['mic-test-start', 'mic-test-cancel', 'mic-test-stop', 'mic-test-meter', 'mic-test-status', 'mic-test-notice'].map(node));
     node('error-notice').hidden = true; node('hand-rejected').hidden = true; node('room-occupancy').hidden = true; node('own-connection-quality').hidden = true; node('speaking-summary').hidden = true;
     node('join').submitButton = new EmbedNode(); node('name').value = '嵌入聽眾';
     Object.assign(node('audio'), { pause() {} });
@@ -226,8 +227,10 @@ for (const wsPath of ['/custom/stage', '/ws']) {
     assert.doesNotMatch(executable, /\bimport\s*(?:\(|['"])/, 'no HTTP module import or remote host is used');
     const params = new URLSearchParams({ host: `${origin}/ignored`, room: room.roomId });
     if (wsPath !== '/ws') params.set('wsPath', wsPath);
+    const pageDocument = Object.assign(new EventTarget(), { hidden: false, createElement(tag: string) { assert.equal(tag, 'option'); return new EmbedNode(); }, querySelector(selector: string) { assert.match(selector, /^#[a-z-]+$/); return node(selector.slice(1)); } });
+    const pageWindow = Reflect.get(globalThis, 'window') as EventTarget;
     runInNewContext(executable, {
-      document: { createElement(tag: string) { assert.equal(tag, 'option'); return new EmbedNode(); }, querySelector(selector: string) { assert.match(selector, /^#[a-z-]+$/); return node(selector.slice(1)); } },
+      document: pageDocument, window: pageWindow, AbortController,
       location: { search: `?${params}`, origin }, URL, URLSearchParams, Error, Promise, performance, setTimeout, clearTimeout,
       loadLibrary: async (moduleUrl: string) => {
         moduleUrls.push(moduleUrl); assert.equal(moduleUrl, `${origin}/lib/stage-client.js`);
