@@ -94,6 +94,9 @@ export class StageElement extends HTMLElement {
   private publicRosterReport: { rows: { id: string; text: string }[]; last: boolean; awaiting: boolean } | undefined;
   private readonly publicRosterSnapshots = new WeakSet<object>();
   private publicRosterEventRevision = 0;
+  private publicRosterPending: {
+    revision: number; detail: object; anchor: StageElement['publicRosterOwner']; transitioned: boolean; invalid: boolean;
+  } | undefined;
   private publicRosterRevision = 0;
   private publicRosterPaintedOwner: StageElement['publicRosterOwner'];
   private readonly publicRosterRows = new Map<string, HTMLLIElement>();
@@ -570,104 +573,108 @@ export class StageElement extends HTMLElement {
         client.on(type, ({ detail }) => {
           if (generation !== this.generation || this.current !== client) return;
           const publicRosterEvent = this.rememberPublicRosterEvent(type, detail);
-          this.markMicTestEvent(client, type, detail);
-          const speakingEvent = this.rememberSpeakingEvent(type, detail);
-          const qualityEvent = this.rememberQualityEvent(type, detail);
-          // Retire the manual read before public authority getters can admit a genuine new entry.
-          if (type === 'closed' || type === 'kicked') this.connectionStatsTerminalClient = client;
-          else if (type === 'state') this.connectionStatsTerminalClient = undefined;
-          if (type === 'closed' || type === 'kicked'
-            || (type === 'status' && (detail === 'reconnecting' || detail === 'disconnected'))) this.retireConnectionStats();
-          if (type === 'closed' || type === 'kicked') this.stageManagementTerminalClient = client;
-          else if (type === 'state') this.stageManagementTerminalClient = undefined;
-          // Own-role deltas precede their snapshot. Fence both dialogs before any DOM setter can reenter.
-          this.noteRoomCloseEvent(type, detail);
-          this.noteStageTransferEvent(type, detail);
-          this.noteMicTestEvent(client, type, detail);
-          this.reconcileRoomClose();
-          this.noteQualityEvent(client, generation, type, detail, qualityEvent);
-          this.noteSpeakingEvent(client, generation, type, detail, speakingEvent);
-          if (type === 'closed' || type === 'kicked') this.microphoneTerminalClient = client;
-          else if (type === 'state') this.microphoneTerminalClient = undefined;
-          if (type === 'closed' || type === 'kicked') this.outputDeviceTerminalClient = client;
-          else if (type === 'state') this.outputDeviceTerminalClient = undefined;
-          if (type === 'closed' || type === 'kicked' || (type === 'status' && detail === 'disconnected')) this.audioRecoveryTerminalClient = client;
-          else if (type === 'state') this.audioRecoveryTerminalClient = undefined;
-          this.syncOccupancy(type === 'state' ? detail as StageEventMap['state'] : undefined,
-            type === 'closed' || type === 'kicked' || (type === 'status' && detail === 'disconnected'));
-          this.syncAudioRecovery();
-          // Revoke picker admission before any forwarded callback can click an old control.
-          this.syncMicrophoneOwner();
-          this.syncOutputDeviceOwner();
-          const micLifecycle = type === 'state' || type === 'status' || type === 'micerror' || type === 'micready'
-            || type === 'closed' || type === 'kicked';
-          if (micLifecycle) this.syncMicRetry();
-          if (type === 'state' || type === 'status' || type === 'closed' || type === 'kicked' || type === 'audioblocked') this.syncPlaybackOwner();
-          if (type === 'state' || type === 'status' || type === 'closed' || type === 'kicked') this.syncNameOwner();
-          if (type === 'state' || type === 'status' || type === 'closed' || type === 'kicked') this.syncRoomNameOwner();
-          if (type === 'state' || type === 'status' || type === 'closed' || type === 'kicked') this.syncHandQueue();
-          this.syncStageManagement();
-          this.syncRoomClose();
-          const ownId = client.me?.participantId;
-          if (type === 'closed' || type === 'kicked'
-            || (type === 'status' && (detail === 'reconnecting' || detail === 'disconnected'))
-            || (type === 'hand' && (detail as StageEventMap['hand']).raised && (detail as StageEventMap['hand']).participantId === ownId)
-            || (type === 'stagejoined' && (detail as StageEventMap['stagejoined']).participantId === ownId)
-            || (type === 'role' && (detail as StageEventMap['role']).role !== 'audience' && (detail as StageEventMap['role']).participantId === ownId)
-            || (type === 'transferred' && (detail as StageEventMap['transferred']).toId === ownId)) this.retireHandRejection();
-          else this.syncHandRejection(type === 'handrejected' ? detail as StageEventMap['handrejected'] : undefined);
-          this.syncQualityOwner(type === 'quality' || type === 'state' || type === 'status' || type === 'closed'
-            || type === 'kicked' || type === 'micerror'
-            || (type === 'stageleft' && (detail as StageEventMap['stageleft']).participantId === ownId));
-          this.syncSpeakingOwner(type === 'speaking' || type === 'state' || type === 'status'
-            || type === 'closed' || type === 'kicked');
-          // SDK status precedes state; a forwarded status listener may disconnect immediately.
-          if (type === 'state' || client.state) { receivedState = true; this.hideRetry(); this.hideCancel(); }
-          if (type === 'closed' || type === 'kicked') { terminal = true; this.micFailure = undefined; this.hideRetry(); this.hideCancel(); }
-          if (type === 'state' || type === 'closed' || type === 'kicked'
-            || (type === 'status' && detail === 'disconnected')) this.joinPhase = undefined;
-          if (type === 'audioblocked' && this.playbackOwner) { this.playbackOwner.notice++; this.unlock.hidden = false; this.unlock.disabled = Boolean(this.unlockAttempt); }
-          if (type === 'status' && detail === 'disconnected') {
-            this.hideCancel();
-            this.status.textContent = cancelled && !receivedState && !terminal ? '已取消加入。' : STATUS_LABELS.disconnected;
+          try {
+            this.markMicTestEvent(client, type, detail);
+            const speakingEvent = this.rememberSpeakingEvent(type, detail);
+            const qualityEvent = this.rememberQualityEvent(type, detail);
+            // Retire the manual read before public authority getters can admit a genuine new entry.
+            if (type === 'closed' || type === 'kicked') this.connectionStatsTerminalClient = client;
+            else if (type === 'state') this.connectionStatsTerminalClient = undefined;
+            if (type === 'closed' || type === 'kicked'
+              || (type === 'status' && (detail === 'reconnecting' || detail === 'disconnected'))) this.retireConnectionStats();
+            if (type === 'closed' || type === 'kicked') this.stageManagementTerminalClient = client;
+            else if (type === 'state') this.stageManagementTerminalClient = undefined;
+            // Own-role deltas precede their snapshot. Fence both dialogs before any DOM setter can reenter.
+            this.noteRoomCloseEvent(type, detail);
+            this.noteStageTransferEvent(type, detail);
+            this.noteMicTestEvent(client, type, detail);
+            this.reconcileRoomClose();
+            this.noteQualityEvent(client, generation, type, detail, qualityEvent);
+            this.noteSpeakingEvent(client, generation, type, detail, speakingEvent);
+            if (type === 'closed' || type === 'kicked') this.microphoneTerminalClient = client;
+            else if (type === 'state') this.microphoneTerminalClient = undefined;
+            if (type === 'closed' || type === 'kicked') this.outputDeviceTerminalClient = client;
+            else if (type === 'state') this.outputDeviceTerminalClient = undefined;
+            if (type === 'closed' || type === 'kicked' || (type === 'status' && detail === 'disconnected')) this.audioRecoveryTerminalClient = client;
+            else if (type === 'state') this.audioRecoveryTerminalClient = undefined;
+            this.syncOccupancy(type === 'state' ? detail as StageEventMap['state'] : undefined,
+              type === 'closed' || type === 'kicked' || (type === 'status' && detail === 'disconnected'));
+            this.syncAudioRecovery();
+            // Revoke picker admission before any forwarded callback can click an old control.
+            this.syncMicrophoneOwner();
+            this.syncOutputDeviceOwner();
+            const micLifecycle = type === 'state' || type === 'status' || type === 'micerror' || type === 'micready'
+              || type === 'closed' || type === 'kicked';
+            if (micLifecycle) this.syncMicRetry();
+            if (type === 'state' || type === 'status' || type === 'closed' || type === 'kicked' || type === 'audioblocked') this.syncPlaybackOwner();
+            if (type === 'state' || type === 'status' || type === 'closed' || type === 'kicked') this.syncNameOwner();
+            if (type === 'state' || type === 'status' || type === 'closed' || type === 'kicked') this.syncRoomNameOwner();
+            if (type === 'state' || type === 'status' || type === 'closed' || type === 'kicked') this.syncHandQueue();
+            this.syncStageManagement();
+            this.syncRoomClose();
+            const ownId = client.me?.participantId;
+            if (type === 'closed' || type === 'kicked'
+              || (type === 'status' && (detail === 'reconnecting' || detail === 'disconnected'))
+              || (type === 'hand' && (detail as StageEventMap['hand']).raised && (detail as StageEventMap['hand']).participantId === ownId)
+              || (type === 'stagejoined' && (detail as StageEventMap['stagejoined']).participantId === ownId)
+              || (type === 'role' && (detail as StageEventMap['role']).role !== 'audience' && (detail as StageEventMap['role']).participantId === ownId)
+              || (type === 'transferred' && (detail as StageEventMap['transferred']).toId === ownId)) this.retireHandRejection();
+            else this.syncHandRejection(type === 'handrejected' ? detail as StageEventMap['handrejected'] : undefined);
+            this.syncQualityOwner(type === 'quality' || type === 'state' || type === 'status' || type === 'closed'
+              || type === 'kicked' || type === 'micerror'
+              || (type === 'stageleft' && (detail as StageEventMap['stageleft']).participantId === ownId));
+            this.syncSpeakingOwner(type === 'speaking' || type === 'state' || type === 'status'
+              || type === 'closed' || type === 'kicked');
+            // SDK status precedes state; a forwarded status listener may disconnect immediately.
+            if (type === 'state' || client.state) { receivedState = true; this.hideRetry(); this.hideCancel(); }
+            if (type === 'closed' || type === 'kicked') { terminal = true; this.micFailure = undefined; this.hideRetry(); this.hideCancel(); }
+            if (type === 'state' || type === 'closed' || type === 'kicked'
+              || (type === 'status' && detail === 'disconnected')) this.joinPhase = undefined;
+            if (type === 'audioblocked' && this.playbackOwner) { this.playbackOwner.notice++; this.unlock.hidden = false; this.unlock.disabled = Boolean(this.unlockAttempt); }
+            if (type === 'status' && detail === 'disconnected') {
+              this.hideCancel();
+              this.status.textContent = cancelled && !receivedState && !terminal ? '已取消加入。' : STATUS_LABELS.disconnected;
+            }
+            if (type === 'closed') this.status.textContent = (detail as StageEventMap['closed']).reason === 'shutdown'
+              ? '伺服器維護或重新啟動，房間已關閉。' : '房間已關閉。';
+            if (type === 'kicked') this.status.textContent = '你已被主控移出房間。';
+            if (type === 'error' || type === 'micerror') this.show(detail);
+            if (type === 'micerror' && client.state && client.me?.onStage) {
+              this.micFailure = { client, roomId: client.state.roomId, participantId: client.me.participantId,
+                errorRevision: this.errorRevision, pending: false };
+            }
+            if (type === 'micready' && this.micFailure?.client === client) {
+              // micready is shared with preview and precedes sender installation.
+              if (this.micFailure.errorRevision === this.errorRevision) this.hideError();
+              this.micFailure = undefined;
+            }
+            // Revoke stale action admission before application event listeners can reenter.
+            if (micLifecycle) this.syncMicRetry();
+            this.syncOccupancy();
+            this.syncQualityOwner(false);
+            this.syncSpeakingOwner(false);
+            this.syncConnectionStats();
+            this.syncMicTest();
+            this.notePublicRosterEvent(client, generation, type, detail, publicRosterEvent);
+            this.syncPublicRoster();
+            this.dispatchEvent(new CustomEvent(`stage-${type}`, { detail, bubbles: true, composed: true }));
+            this.syncOccupancy();
+            this.syncQualityOwner(false);
+            this.syncSpeakingOwner(false);
+            this.syncConnectionStats();
+            this.syncMicTest();
+            // Application callbacks may retire this seat or mutate its exposed snapshot.
+            this.syncMicrophoneOwner();
+            this.syncOutputDeviceOwner();
+            this.syncStageManagement();
+            this.syncRoomClose();
+            this.syncHandRejection();
+            this.syncAudioRecovery();
+            this.syncPublicRoster();
+            if (type === 'state' || type === 'status' || type === 'mic' || type === 'closed' || type === 'kicked') this.render();
+          } finally {
+            if (this.publicRosterPending === publicRosterEvent.pending) this.publicRosterPending = undefined;
           }
-          if (type === 'closed') this.status.textContent = (detail as StageEventMap['closed']).reason === 'shutdown'
-            ? '伺服器維護或重新啟動，房間已關閉。' : '房間已關閉。';
-          if (type === 'kicked') this.status.textContent = '你已被主控移出房間。';
-          if (type === 'error' || type === 'micerror') this.show(detail);
-          if (type === 'micerror' && client.state && client.me?.onStage) {
-            this.micFailure = { client, roomId: client.state.roomId, participantId: client.me.participantId,
-              errorRevision: this.errorRevision, pending: false };
-          }
-          if (type === 'micready' && this.micFailure?.client === client) {
-            // micready is shared with preview and precedes sender installation.
-            if (this.micFailure.errorRevision === this.errorRevision) this.hideError();
-            this.micFailure = undefined;
-          }
-          // Revoke stale action admission before application event listeners can reenter.
-          if (micLifecycle) this.syncMicRetry();
-          this.syncOccupancy();
-          this.syncQualityOwner(false);
-          this.syncSpeakingOwner(false);
-          this.syncConnectionStats();
-          this.syncMicTest();
-          this.notePublicRosterEvent(client, generation, type, detail, publicRosterEvent);
-          this.syncPublicRoster();
-          this.dispatchEvent(new CustomEvent(`stage-${type}`, { detail, bubbles: true, composed: true }));
-          this.syncOccupancy();
-          this.syncQualityOwner(false);
-          this.syncSpeakingOwner(false);
-          this.syncConnectionStats();
-          this.syncMicTest();
-          // Application callbacks may retire this seat or mutate its exposed snapshot.
-          this.syncMicrophoneOwner();
-          this.syncOutputDeviceOwner();
-          this.syncStageManagement();
-          this.syncRoomClose();
-          this.syncHandRejection();
-          this.syncAudioRecovery();
-          this.syncPublicRoster();
-          if (type === 'state' || type === 'status' || type === 'mic' || type === 'closed' || type === 'kicked') this.render();
         });
       }
       this.hideError();
@@ -766,18 +773,23 @@ export class StageElement extends HTMLElement {
     await client?.disconnect();
   }
 
-  private retirePublicRoster(): void {
+  private retirePublicRoster(preserved?: StageElement['publicRosterPending']): void {
+    if (this.publicRosterPending && this.publicRosterPending !== preserved) this.publicRosterPending.invalid = true;
     if (!this.publicRosterOwner && !this.publicRosterReport) return;
     this.publicRosterOwner = undefined; this.publicRosterReport = undefined;
     ++this.publicRosterRevision;
   }
 
-  private rememberPublicRosterEvent(type: keyof StageEventMap, detail: StageEventMap[keyof StageEventMap]): { revision: number; unseen: boolean } {
+  private rememberPublicRosterEvent(type: keyof StageEventMap, detail: StageEventMap[keyof StageEventMap]): {
+    revision: number; unseen: boolean; pending: StageElement['publicRosterPending'];
+  } {
     const revision = ++this.publicRosterEventRevision;
     const object = detail !== null && typeof detail === 'object';
     const unseen = type === 'state' && object && !this.publicRosterSnapshots.has(detail);
     // Reserve even rejected receipts without getters or DOM ahead of the existing consent fences.
     if (type === 'state' && object) this.publicRosterSnapshots.add(detail);
+    const pending = this.publicRosterPending = unseen
+      ? { revision, detail, anchor: this.publicRosterOwner, transitioned: false, invalid: false } : undefined;
     if (type === 'closed' || type === 'kicked' || (type === 'status' && detail === 'disconnected')) this.retirePublicRoster();
     else if (this.publicRosterReport && ((type === 'status' && detail === 'reconnecting')
       || type === 'role' || type === 'stageleft' || type === 'stagejoined' || type === 'transferred' || type === 'mic')) {
@@ -785,29 +797,47 @@ export class StageElement extends HTMLElement {
       this.publicRosterReport.awaiting = type !== 'status';
       ++this.publicRosterRevision;
     }
-    return { revision, unseen };
+    return { revision, unseen, pending };
   }
 
   private reconcilePublicRoster(): void {
     for (;;) {
-      const owner = this.publicRosterOwner;
+      const pending = this.publicRosterPending;
+      const owner = this.publicRosterOwner ?? (pending && !pending.invalid ? pending.anchor : undefined);
       if (!owner) return;
       const revision = this.publicRosterRevision, client = owner.client;
       const state = client.state, status = client.status;
       const roomId = state?.roomId, participantId = state?.me?.participantId;
-      if (owner !== this.publicRosterOwner || revision !== this.publicRosterRevision) continue;
+      const current = (): boolean => pending === this.publicRosterPending && revision === this.publicRosterRevision
+        && owner === (this.publicRosterOwner ?? (pending && !pending.invalid ? pending.anchor : undefined));
+      if (!current()) continue;
       // Observed identity loss retires this receipt even if a later getter restores old values.
       if (!this.isConnected || this.current !== client || this.generation !== owner.generation
         || roomId !== owner.roomId || participantId !== owner.participantId
         || (status !== 'live' && status !== 'waiting' && status !== 'reconnecting')) {
-        this.retirePublicRoster();
+        // Only the exact new receipt may replace its original owner once. Keep its new seat
+        // anchored while predecessor getters run, even though the old report has been cleared.
+        const transition = pending && !pending.invalid && !pending.transitioned && pending.anchor === owner
+          && owner === this.publicRosterOwner && pending.revision === this.publicRosterEventRevision
+          && this.isConnected && this.current === client && this.generation === owner.generation
+          && state === pending.detail && (status === 'live' || status === 'waiting')
+          && typeof roomId === 'string' && Boolean(roomId.trim())
+          && typeof participantId === 'string' && Boolean(participantId.trim())
+          && (roomId !== owner.roomId || participantId !== owner.participantId)
+          && state === client.state && status === client.status;
+        if (!current()) continue;
+        if (transition && pending) {
+          pending.anchor = { client, generation: owner.generation, roomId: roomId!, participantId: participantId! };
+          pending.transitioned = true;
+        }
+        this.retirePublicRoster(transition ? pending : undefined);
         this.noteRoomCloseEvent('status', status);
         this.noteStageTransferEvent('status', status);
         this.reconcileRoomClose();
         continue;
       }
       if (state !== client.state || status !== client.status) continue;
-      if (owner !== this.publicRosterOwner || revision !== this.publicRosterRevision) continue;
+      if (!current()) continue;
       if (status === 'reconnecting' && this.publicRosterReport && !this.publicRosterReport.last) {
         this.publicRosterReport.last = true; ++this.publicRosterRevision;
       }
@@ -816,9 +846,10 @@ export class StageElement extends HTMLElement {
   }
 
   private notePublicRosterEvent(client: StageClient, generation: number, type: keyof StageEventMap,
-    detail: StageEventMap[keyof StageEventMap], event: { revision: number; unseen: boolean }): void {
+    detail: StageEventMap[keyof StageEventMap], event: ReturnType<StageElement['rememberPublicRosterEvent']>): void {
     this.reconcilePublicRoster();
-    if (type !== 'state' || !event.unseen || event.revision !== this.publicRosterEventRevision
+    if (type !== 'state' || !event.unseen || !event.pending || event.pending.invalid
+      || event.pending !== this.publicRosterPending || event.revision !== this.publicRosterEventRevision
       || this.current !== client || this.generation !== generation) return;
     const revision = this.publicRosterRevision;
     const state = client.state, status = client.status;
@@ -827,10 +858,12 @@ export class StageElement extends HTMLElement {
       || typeof roomId !== 'string' || !roomId.trim() || typeof participantId !== 'string' || !participantId.trim()) return;
     const current = (): boolean => {
       this.reconcilePublicRoster();
-      return revision === this.publicRosterRevision && event.revision === this.publicRosterEventRevision && this.current === client && this.generation === generation
+      return !event.pending!.invalid && event.pending === this.publicRosterPending
+        && revision === this.publicRosterRevision && event.revision === this.publicRosterEventRevision && this.current === client && this.generation === generation
         && this.isConnected && state === client.state && status === client.status
         && roomId === state.roomId && participantId === state.me?.participantId
-        && revision === this.publicRosterRevision && event.revision === this.publicRosterEventRevision;
+        && revision === this.publicRosterRevision && event.revision === this.publicRosterEventRevision
+        && !event.pending!.invalid && event.pending === this.publicRosterPending;
     };
     const limit = state.limits?.maxSpeakers, people = state.speakers, controllerId = state.controllerId;
     const rows: { id: string; text: string }[] = [], seen = new Set<string>();
