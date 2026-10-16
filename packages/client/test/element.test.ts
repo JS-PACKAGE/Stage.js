@@ -12031,3 +12031,467 @@ describe('widget confirmed room closure', () => {
   });
 
 });
+
+describe('widget room occupancy summary', () => {
+  type Widget = InstanceType<typeof StageElement>;
+  const text = (room: number, stage: number, audience: number, controllerOnStage: boolean, maxAudience = 300, maxSpeakers = 8, freshness = '最近快照') =>
+    `房間席位（${freshness}）：主控以外 ${room} / ${maxAudience} 人，其中台上 ${stage} / ${maxSpeakers} 人、觀眾 ${audience} 人；主控另計 1 人（${controllerOnStage ? '台上' : '台下'}）。含斷線保留席位。`;
+  const hidden = (element: Widget) => { assert.equal(element['occupancy'].hidden, true); assert.equal(element['occupancy'].textContent, ''); };
+  const shown = (element: Widget, expected: string) => { assert.equal(element['occupancy'].hidden, false); assert.equal(element['occupancy'].textContent, expected); };
+  function state(audience = 2, stage = 1, controllerOnStage = true, viewer: 'audience' | 'speaker' | 'controller' = 'audience'): RoomStatePayload {
+    const value = roomState(); value.audienceCount = audience;
+    value.speakers = Array.from({ length: stage }, (_, i) => ({ ...value.me, participantId: `speaker-${i}`, name: 'Private stage name', role: 'speaker', onStage: true, connected: i !== 0 }));
+    const host = { ...value.me, participantId: value.controllerId, name: 'Private controller', role: 'controller' as const, onStage: controllerOnStage };
+    if (controllerOnStage) value.speakers.push(host);
+    if (viewer === 'controller') { value.me = host; value.audience = [{ ...roomState().me, name: 'SECRET audience <script>' }]; value.code = 'SECRET-CODE'; }
+    if (viewer === 'speaker') value.me = value.speakers[0]!;
+    value.resumeToken = 'SECRET-TOKEN';
+    return value;
+  }
+  async function receive(client: StageClient, value: RoomStatePayload) { await client['receive']({ type: 'room:state', ...value }); }
+  function setter<T extends 'textContent' | 'hidden'>(t: TestContext, node: HTMLParagraphElement, key: T, callback: () => void) {
+    let value = node[key];
+    Object.defineProperty(node, key, { configurable: true, get: () => value, set(next: typeof value) { value = next; callback(); } });
+    t.after(() => Object.defineProperty(node, key, { configurable: true, writable: true, value }));
+  }
+
+  it('creates one ordinary private wrapping paragraph and stays empty until an authoritative state', async t => {
+    const { element, connections } = deferredJoiningWidget(t); await settle();
+    const paragraph = element['occupancy'], node = paragraph as unknown as Node;
+    hidden(element); assert.equal(node.tagName, 'P'); assert.equal(node.part.size, 0); assert.equal(node.children.length, 0);
+    for (const attr of ['role', 'aria-live', 'tabindex', 'title']) assert.equal(paragraph.hasAttribute(attr), false);
+    const all = (item: Node): Node[] => [item, ...item.children.flatMap(all)];
+    assert.equal(all(element as unknown as Node).filter(item => item.className === 'room-occupancy').length, 1);
+    assert.match(all(element as unknown as Node).find(item => item.tagName === 'STYLE')!.textContent, /\.room-occupancy[^}]*overflow-wrap: anywhere/);
+    const client = connections[0]!.client;
+    client['setStatus']('live'); element['render'](); hidden(element);
+    await receive(client, state()); shown(element, text(3, 1, 2, true)); assert.equal(element['occupancy'], paragraph);
+  });
+
+  for (const controllerOnStage of [false, true]) {
+    it(`shows the empty valid controller-only room with controllerOnStage=${controllerOnStage}`, async t => {
+      const { element, client } = await subscribedWidget(t); const value = state(0, 0, controllerOnStage, 'controller'); value.status = 'waiting';
+      await receive(client, value); shown(element, text(0, 0, 0, controllerOnStage));
+    });
+    for (const viewer of ['audience', 'speaker', 'controller'] as const) it(`shows default maximum seats for ${viewer}, controllerOnStage=${controllerOnStage}, without private data`, async t => {
+      const { element, client } = await subscribedWidget(t); const value = state(292, 8, controllerOnStage, viewer);
+      value.hands = [{ ...roomState().me, name: 'SECRET hand name', handRaised: true, connected: false }];
+      for (const person of [...value.speakers, ...value.hands, ...(value.audience ?? [])]) Object.freeze(person);
+      Object.freeze(value.speakers); Object.freeze(value.hands); Object.freeze(value.limits); Object.freeze(value.me);
+      if (value.audience) Object.freeze(value.audience);
+      const before = JSON.stringify(value), details: unknown[] = [];
+      element.addEventListener('stage-state', event => details.push((event as CustomEvent).detail));
+      await receive(client, value); shown(element, text(300, 8, 292, controllerOnStage));
+      assert.equal(JSON.stringify(value), before); assert.equal(details[0], client.state);
+      assert.doesNotMatch(element['occupancy'].textContent!, /SECRET|Private|speaker-|host|script|undefined|NaN|Infinity/);
+      assert.deepEqual([...(element['occupancy'] as unknown as Node).attributes], []);
+      assert.equal(client.state!.speakers, value.speakers); assert.equal(client.state!.hands, value.hands);
+    });
+  }
+
+  it('copies validated primitives before forwarding mutable state and ignores non-snapshot deltas', async t => {
+    const { element, client } = await subscribedWidget(t); const value = state();
+    const rawDetails: unknown[] = [];
+    element.addEventListener('stage-state', event => { const detail = (event as CustomEvent<RoomStatePayload>).detail; rawDetails.push(detail); detail.audienceCount = 99; detail.limits.maxAudience = 999; });
+    await receive(client, value); shown(element, text(3, 1, 2, true)); assert.equal(rawDetails[0], client.state);
+    const messages: ServerMessage[] = [
+      { type: 'hand:raise', participantId: 'me' }, { type: 'hand:withdraw', participantId: 'me' },
+      { type: 'role:update', participantId: 'me', role: 'speaker' }, { type: 'control:transferred', fromId: 'host', toId: 'me' },
+      { type: 'stage:joined', participantId: 'me', role: 'speaker' }, { type: 'stage:left', participantId: 'me', role: 'audience' },
+      { type: 'mic:muted', participantId: 'speaker-0' },
+      { type: 'speaking', participantIds: ['speaker-0'] }, { type: 'quality', participants: [] },
+    ];
+    let writes = 0; setter(t, element['occupancy'], 'textContent', () => writes++);
+    for (const message of messages) { await client['receive'](message); shown(element, text(3, 1, 2, true)); }
+    client['emit']('micerror', { name: 'NotAllowedError', message: 'Synthetic pending capture failure' });
+    client['emit']('micready', undefined); element['render'](); shown(element, text(3, 1, 2, true)); assert.equal(writes, 0);
+    client['emit']('state', client.state!); shown(element, text(3, 1, 2, true)); assert.equal(writes, 0);
+  });
+
+  it('reuses its paragraph and avoids equal writes without changing frames, drafts, errors, busy state or preferences', async t => {
+    const f = await socketJoinedWidget(t, state()); const { element, client, socket } = f;
+    const paragraph = element['occupancy'], beforeFrames = socket.sent.length;
+    const nameDraft = element['nameInput']; nameDraft.value = 'Unsaved name';
+    element.playbackMuted = true; element.playbackVolume = 0.37;
+    const nameAttempt = {}; element['nameAttempt'] = nameAttempt; element['render']();
+    client['emit']('error', { name: 'StageError', code: 'forbidden', message: 'Keep this existing error' });
+    const beforeError = element['error'].textContent, beforePending = client['pending'].size;
+    let writes = 0; setter(t, paragraph, 'textContent', () => writes++);
+    for (let i = 0; i < 8; i++) { await receive(client, state()); client['emit']('quality', { participants: [] }); element['render'](); }
+    shown(element, text(3, 1, 2, true)); assert.equal(element['occupancy'], paragraph); assert.equal(writes, 0);
+    assert.equal(nameDraft.value, 'Unsaved name'); assert.equal(element['nameAttempt'], nameAttempt); assert.equal(element['nameUpdate'].disabled, true);
+    assert.equal(element['nameUpdate'].getAttribute('aria-busy'), 'true'); assert.equal(element['error'].textContent, beforeError);
+    assert.equal(element.playbackMuted, true); assert.equal(element.playbackVolume, 0.37); assert.equal(client['pending'].size, beforePending); assert.equal(socket.sent.length, beforeFrames);
+    await receive(client, state(1, 2, false)); shown(element, text(3, 2, 1, false)); assert.equal(writes, 1);
+  });
+
+  const malformed: [string, (value: RoomStatePayload) => void][] = [];
+  for (const cap of ['maxAudience', 'maxSpeakers'] as const) for (const value of [undefined, null, NaN, Infinity, -Infinity, '3', 1.5, -1, 0, Number.MAX_SAFE_INTEGER + 1])
+    malformed.push([`${cap}=${String(value)}`, state => { (state.limits as unknown as Record<string, unknown>)[cap] = value; }]);
+  for (const value of [undefined, null, NaN, Infinity, -Infinity, '2', 0.5, -1, Number.MAX_SAFE_INTEGER + 1])
+    malformed.push([`audience=${String(value)}`, state => { (state as unknown as Record<string, unknown>).audienceCount = value; }]);
+  for (const limits of [undefined, null]) malformed.push([`limits=${String(limits)}`, state => { (state as unknown as Record<string, unknown>).limits = limits; }]);
+  for (const controllerId of [undefined, null, '', ' ', 1]) malformed.push([`controllerId=${String(controllerId)}`, state => { (state as unknown as Record<string, unknown>).controllerId = controllerId; }]);
+  malformed.push(['above room cap', state => { state.limits.maxAudience = 2; }], ['above stage cap', state => { state.limits.maxSpeakers = 1; state.speakers.push({ ...state.speakers[0]!, participantId: 'second-speaker' }); }],
+    ['unsafe addition', state => { state.audienceCount = Number.MAX_SAFE_INTEGER; state.limits.maxAudience = Number.MAX_SAFE_INTEGER; }],
+    ['duplicate controller', state => { state.speakers.push({ ...state.speakers.at(-1)! }); }],
+    ['ambiguous controller', state => { state.speakers[0] = { ...state.speakers[0]!, role: 'controller' }; }],
+    ['mismatched controller id', state => { state.controllerId = 'different-controller'; }],
+    ['controller id on speaker', state => { state.speakers.at(-1)!.role = 'speaker'; }],
+    ['offstage entry', state => { state.speakers[0]!.onStage = false; }]);
+  for (const [label, mutate] of malformed) it(`locally hides malformed ${label}, preserves controls and event identity, then recovers on a new state`, async t => {
+    const { element, client } = await subscribedWidget(t); await receive(client, state());
+    const invalid = state(); mutate(invalid); let forwarded: unknown;
+    element.addEventListener('stage-state', event => { forwarded = (event as CustomEvent).detail; });
+    const before = structuredClone(invalid); await receive(client, invalid); hidden(element);
+    assert.equal(forwarded, client.state); assert.deepEqual(invalid, before); assert.equal(element['hand'].hidden, false); assert.equal(element['hand'].disabled, false);
+    assert.equal(element['nameInput'].disabled, false); assert.equal(element['error'].hidden, true);
+    element['render'](); hidden(element); await receive(client, state(0, 0, false)); shown(element, text(0, 0, 0, false));
+  });
+
+  for (const speakers of [null, undefined, {}, [null], new Array(1)]) it(`locally rejects structural speakers=${JSON.stringify(speakers)} without broad protocol validation`, async t => {
+    const { element, client } = await subscribedWidget(t);
+    const value = state(); (value as unknown as Record<string, unknown>).speakers = speakers;
+    // Existing panels assume protocol-valid arrays; isolate only the private projection under test.
+    client['snapshot'] = value; element['syncOccupancy'](value); hidden(element);
+    client['snapshot'] = roomState();
+  });
+
+  it('accepts state before ACK but retires an unestablished session on socket loss without reviving stale state', async t => {
+    const f = socketJoiningWidget(t); await settle(); const socket = f.sockets[0]!; await f.hello(socket); hidden(f.element);
+    socket.deliver({ type: 'room:state', ...state(), resumeToken: 'pre-ack' }); const client = f.element.client!, stale = client.state!;
+    shown(f.element, text(3, 1, 2, true)); socket.close(); await settle(); assert.equal(client.status, 'disconnected'); hidden(f.element);
+    client['setStatus']('live'); client['emit']('state', stale); f.element['render'](); hidden(f.element);
+    await f.tick(600); assert.equal(f.sockets.length, 1); hidden(f.element);
+  });
+
+  for (const outcome of ['rejected', 'timed out', 'cancelled'] as const) it(`never creates occupancy for an entry ${outcome} before any state`, async t => {
+    const f = socketJoiningWidget(t); await settle(); const socket = f.sockets[0]!, request = await f.hello(socket);
+    if (outcome === 'rejected') socket.deliver({ type: 'error', requestId: request.requestId, code: 'unauthorized', message: '無法加入房間。' });
+    else if (outcome === 'cancelled') click(f.element['cancelJoin']);
+    else await f.tick(20000);
+    await settle(); hidden(f.element); f.element['render'](); hidden(f.element);
+  });
+
+  it('keeps exact-owner reconnect counts last through status-only restoration and requires an unseen state to refresh', async t => {
+    const f = await socketJoinedWidget(t, state()), stale = f.client.state!;
+    f.socket.close(); await settle(); shown(f.element, text(3, 1, 2, true, 300, 8, '重新連線中，上次快照'));
+    f.client['emit']('state', stale); f.client['setStatus']('live'); shown(f.element, text(3, 1, 2, true, 300, 8, '上次快照'));
+    f.client['emit']('state', stale); f.element['render'](); shown(f.element, text(3, 1, 2, true, 300, 8, '上次快照'));
+    await receive(f.client, state(1, 2, false)); shown(f.element, text(3, 2, 1, false));
+    f.client['setStatus']('reconnecting'); const ineligible = state(0, 0, false); ineligible.roomId = 'other'; f.client['snapshot'] = ineligible;
+    f.client['emit']('state', ineligible); hidden(f.element); f.client['setStatus']('waiting'); f.client['emit']('state', ineligible); hidden(f.element);
+    await receive(f.client, state(0, 0, false)); shown(f.element, text(0, 0, 0, false));
+  });
+
+  for (const { title, message, event } of terminalCases) it(`clears before ${title} callbacks and rejects stale owner revival`, async t => {
+    const f = await socketJoinedWidget(t, state()), stale = f.client.state!; let observed = false;
+    f.element.addEventListener(`stage-${event}`, () => {
+      observed = true; hidden(f.element); f.client['snapshot'] = stale; f.client['setStatus']('live'); f.client['emit']('state', stale); f.element['render'](); hidden(f.element);
+    });
+    f.socket.deliver(message); await settle(); await settle(); assert.equal(observed, true); hidden(f.element);
+    await receive(f.client, state(0, 0, false)); shown(f.element, text(0, 0, 0, false));
+  });
+
+  it('supports direct public SDK disconnect and same-client same-ID fresh rejoin without stale socket revival', async t => {
+    const f = await socketJoinedWidget(t, state()); const stale = f.client.state!, oldMessage = f.socket.onmessage;
+    f.element.addEventListener('stage-status', event => { if ((event as CustomEvent).detail === 'disconnected') hidden(f.element); });
+    await f.client.disconnect(); hidden(f.element);
+    const connect = f.client.connect(); await settle(); const socket = f.sockets.at(-1)!; socket.hello(); await connect;
+    const joining = f.client.join({ roomId: 'one', name: 'Listener' }); await settle(); await f.tick(100); const request = f.joinRequest(socket);
+    hidden(f.element); socket.deliver({ type: 'room:state', ...state(0, 0, false), resumeToken: 'new-session' }); socket.deliver({ type: 'ok', requestId: request.requestId }); await joining;
+    shown(f.element, text(0, 0, 0, false)); oldMessage?.({ data: JSON.stringify({ type: 'room:state', ...stale }) }); shown(f.element, text(0, 0, 0, false));
+  });
+
+  for (const transition of ['room', 'name', 'manual leave', 'unmount'] as const) it(`clears synchronously for ${transition} and permits only the replacement ownership`, async t => {
+    const f = await socketJoinedWidget(t, state()); const old = f.client, stale = old.state!;
+    if (transition === 'room' || transition === 'name') f.element.setAttribute(transition, 'replacement');
+    else if (transition === 'manual leave') click(f.element['roomAction']);
+    else { Object.assign(f.element, { isConnected: false }); f.element.disconnectedCallback(); }
+    hidden(f.element); await settle(); old['emit']('state', stale); old['emit']('status', 'live'); hidden(f.element);
+    if (transition === 'manual leave') { await settle(); click(f.element['roomAction']); }
+    if (transition === 'unmount') { Object.assign(f.element, { isConnected: true }); f.element.connectedCallback(); }
+    await settle(); const socket = f.sockets.at(-1)!, request = await f.hello(socket), next = state(1, 0, false); if (transition === 'room') next.roomId = 'replacement';
+    socket.deliver({ type: 'room:state', ...next }); socket.deliver({ type: 'ok', requestId: request.requestId }); await settle(); shown(f.element, text(1, 0, 1, false));
+    old['emit']('state', stale); f.socket.deliver({ type: 'room:state', ...stale }); shown(f.element, text(1, 0, 1, false));
+  });
+
+  for (const event of ['state', 'status'] as const) for (const transition of ['disconnect', 'room', 'unmount'] as const)
+    it(`does not resurrect after reentrant stage-${event} ${transition}`, async t => {
+      const f = await socketJoinedWidget(t, state()); let acted = false;
+      f.element.addEventListener(`stage-${event}`, () => {
+        if (acted) return; acted = true;
+        if (transition === 'disconnect') void f.client.disconnect();
+        else if (transition === 'room') f.element.setAttribute('room', 'replacement');
+        else { Object.assign(f.element, { isConnected: false }); f.element.disconnectedCallback(); }
+        hidden(f.element);
+      });
+      const next = state(1, 0, false); next.status = event === 'status' ? 'waiting' : 'live'; await receive(f.client, next); await settle(); assert.equal(acted, true); hidden(f.element);
+    });
+
+  for (const key of ['textContent', 'hidden'] as const) for (const transition of ['unmount', 'new state'] as const)
+    it(`fences ${key} setter reentry that installs ${transition}`, async t => {
+      const { element, client } = await subscribedWidget(t); let acted = false;
+      if (key === 'hidden') { client['emit']('closed', { roomId: 'one' }); hidden(element); }
+      setter(t, element['occupancy'], key, () => {
+        if (acted) return; acted = true;
+        if (transition === 'unmount') { Object.assign(element, { isConnected: false }); element.disconnectedCallback(); }
+        else void receive(client, state(0, 0, false));
+      });
+      await receive(client, state()); await settle(); assert.equal(acted, true);
+      if (transition === 'unmount') hidden(element); else shown(element, text(0, 0, 0, false));
+    });
+
+async function occupancyHub(t: TestContext, maxSpeakers = 1, maxAudience = 3) {
+  let room: Room | undefined;
+  const original = Room.prototype.sharedSnapshot;
+  t.mock.method(Room.prototype, 'sharedSnapshot', function(this: Room) { room = this; return original.call(this); });
+  const config = testConfig(c => { c.limits.maxSpeakersPerRoom = maxSpeakers; c.limits.maxAudiencePerRoom = maxAudience;
+    c.limits.controlPerSecond = 2000; c.limits.handRaiseIntervalMs = 0; c.rooms.participantGraceMs = 15000;
+    c.rooms.presenceBroadcastMs = 0; c.rooms.qualityIntervalMs = 0; });
+  const h = harness(config);
+  t.after(async () => { await h.hub.shutdown(); await h.transport.close(); assert.equal(h.timers.filter(timer => !timer.cleared).length, 0); });
+  const host = await h.create('Hidden host', { codeRequired: false });
+  const fixture = socketJoiningWidget(t, { room: host.roomId });
+  await settle(); const socket = fixture.sockets[0]!;
+  const session = new FakeSession(); h.hub.attach(session);
+  socket.readyState = 1; socket.deliver(session.last('hello')!); await settle(); await fixture.tick(0);
+  let sessionRead = session.inbox.length;
+  const deliver = () => { for (const event of session.inbox.slice(sessionRead)) socket.deliver(event); sessionRead = session.inbox.length; };
+  const parsedFrames: string[] = [];
+  async function validated(s: FakeSession, message: ClientMessage) {
+    const parsed = parseClientMessage(JSON.stringify(message), config.limits); parsedFrames.push(parsed.type);
+    await h.hub.handle(s, parsed);
+    for (const timer of h.timers.filter(timer => !timer.cleared && timer.ms === 0)) { timer.cleared = true; timer.fn(); }
+    deliver(); await settle();
+    const requestId = 'requestId' in message ? message.requestId : undefined;
+    return [...s.inbox].reverse().find(event => (event.type === 'ok' || event.type === 'error') && event.requestId === requestId);
+  }
+  await validated(session, fixture.joinRequest(socket));
+  const client = fixture.element.client!; assert.ok(client.state); assert.ok(room);
+  let requestId = 1000;
+  async function server(s: FakeSession, message: object) { return validated(s, { ...message, requestId: `probe-${requestId++}` } as ClientMessage); }
+  async function command(type: string, action: () => Promise<void>, expected = 'ok') {
+    const start = socket.sent.length; const work = action().then(() => 'ok', error => error.code);
+    await fixture.tick(100);
+    const frame = socket.sent.slice(start).find(event => event.type === type); assert.ok(frame, `SDK emitted ${type}`);
+    const reply = await validated(session, frame); assert.ok(reply);
+    assert.equal(await work, expected);
+    return reply;
+  }
+  function counts() {
+    const state = client.state!; assert.ok(state);
+    const members = [...room!.participants.values()];
+    const speakerGuests = state.speakers.filter(person => person.role !== 'controller').length;
+    const controllerOnStage = state.speakers.some(person => person.role === 'controller');
+    assert.equal(speakerGuests, members.filter(person => person.role === 'speaker').length);
+    assert.equal(state.audienceCount, members.filter(person => person.role === 'audience').length);
+    assert.equal(state.audienceCount + speakerGuests, members.length - 1);
+    assert.equal(controllerOnStage, room!.get(room!.controllerId)!.onStage);
+    assert.ok(speakerGuests <= state.limits.maxSpeakers);
+    assert.ok(state.audienceCount + speakerGuests <= state.limits.maxAudience);
+    shown(fixture.element, text(members.length - 1, speakerGuests, state.audienceCount, controllerOnStage, state.limits.maxAudience, state.limits.maxSpeakers));
+    return [speakerGuests, state.audienceCount, members.length - 1, Number(controllerOnStage)];
+  }
+  return { ...fixture, socket, client, session, h, host, config, room: room!, command, server, deliver, counts, parsedFrames };
+}
+
+  it('SDK → validator → Hub proves offstage controller exclusion, asymmetrical caps, hand and stage boundaries', async t => {
+    const f = await occupancyHub(t); const { client, h, host, command, server } = f;
+    const extra = await h.join(host.roomId, '', 'Hidden guest');
+    const hand = await h.join(host.roomId, '', 'Hidden request'); f.deliver(); await settle();
+    assert.deepEqual(f.counts(), [0, 3, 3, 1]);
+    await server(host.s, { type: 'stage:leave' }); assert.deepEqual(f.counts(), [0, 3, 3, 0]);
+    await server(host.s, { type: 'control:transfer', targetId: client.me!.participantId });
+    assert.deepEqual(f.counts(), [0, 3, 3, 0]);
+    await command('stage:approve', () => client.returnToStage()); assert.deepEqual(f.counts(), [0, 3, 3, 1]);
+    await server(extra.s, { type: 'hand:raise' }); assert.deepEqual(f.counts(), [0, 3, 3, 1]);
+    await command('stage:approve', () => client.approve(extra.id)); assert.deepEqual(f.counts(), [1, 2, 3, 1]);
+    await server(hand.s, { type: 'hand:raise' }); assert.deepEqual(f.counts(), [1, 2, 3, 1]);
+    await command('stage:approve', () => client.approve(hand.id), 'stage_full');
+    const overflow = new FakeSession(); h.hub.attach(overflow);
+    const roomFull = await server(overflow, { type: 'join', roomId: host.roomId, name: 'Overflow' });
+    assert.equal(roomFull!.type, 'error'); assert.equal((roomFull as { code: string }).code, 'room_full');
+    assert.equal(client.state!.audienceCount, 2, 'room full despite audience 2 < maxAudience 3');
+    assert.equal(client.state!.speakers.length, 2, 'two on-stage seats despite maxSpeakers 1: controller seat is extra');
+    await command('stage:leave', () => client.leaveStage()); assert.deepEqual(f.counts(), [1, 2, 3, 0]);
+    await command('stage:approve', () => client.returnToStage()); assert.deepEqual(f.counts(), [1, 2, 3, 1]);
+    await command('stage:remove', () => client.removeFromStage(extra.id)); assert.deepEqual(f.counts(), [0, 3, 3, 1]);
+    assert.ok(f.parsedFrames.includes('stage:approve') && f.parsedFrames.includes('stage:leave'));
+    assert.equal(client['pending'].size, 0);
+  });
+
+  it('held offline audience, hands, speaker and controller retain seats; resume does not add a member; expiry removes', async t => {
+    const f = await occupancyHub(t); const { h, host, client, command, server } = f;
+    const guest = await h.join(host.roomId, '', 'Held member'); f.deliver(); await settle();
+    const token = guest.s.last('room:state')!.resumeToken!;
+    await command('hand:raise', () => client.raiseHand()); assert.deepEqual(f.counts(), [0, 2, 2, 1]);
+    await command('hand:withdraw', () => client.withdrawHand()); assert.deepEqual(f.counts(), [0, 2, 2, 1]);
+    await server(guest.s, { type: 'hand:raise' });
+    await h.hub.detach(guest.s); f.deliver(); await settle(); assert.deepEqual(f.counts(), [0, 2, 2, 1]);
+    assert.equal(client.state!.hands[0]!.connected, false);
+    const resumed = new FakeSession(); h.hub.attach(resumed);
+    await server(resumed, { type: 'join', roomId: host.roomId, name: 'Held member', resumeToken: token });
+    assert.equal(resumed.last('room:state')!.me.participantId, guest.id); assert.deepEqual(f.counts(), [0, 2, 2, 1]);
+    await server(host.s, { type: 'stage:approve', targetId: guest.id }); assert.deepEqual(f.counts(), [1, 1, 2, 1]);
+    await h.hub.detach(resumed); f.deliver(); await settle(); assert.deepEqual(f.counts(), [1, 1, 2, 1]);
+    assert.equal(client.state!.speakers.find(p => p.participantId === guest.id)!.connected, false);
+    await h.hub.detach(host.s); f.deliver(); await settle(); assert.deepEqual(f.counts(), [1, 1, 2, 1]);
+    assert.equal(client.state!.speakers.find(p => p.role === 'controller')!.connected, false);
+    const expiry = h.timers.find(timer => !timer.cleared && timer.ms === 15000)!;
+    expiry.cleared = true; expiry.fn(); await nextTurn(); f.deliver(); await settle(); assert.deepEqual(f.counts(), [0, 1, 1, 1]);
+    const controllerExpiry = h.timers.find(timer => !timer.cleared && timer.ms === f.config.rooms.controllerGraceMs)!;
+    controllerExpiry.cleared = true; controllerExpiry.fn(); await nextTurn(); f.deliver(); await settle();
+    assert.equal(client.me!.role, 'controller'); assert.deepEqual(f.counts(), [0, 0, 0, 0]);
+  });
+
+  it('control transfer changes which stage seat is capped, while total room membership stays fixed', async t => {
+    const f = await occupancyHub(t, 2, 3); const { h, host, client, server, command } = f;
+    const guest = await h.join(host.roomId, '', 'Other'); f.deliver(); await settle();
+    await server(host.s, { type: 'control:transfer', targetId: client.me!.participantId }); assert.deepEqual(f.counts(), [1, 1, 2, 0]);
+    await command('stage:approve', () => client.returnToStage()); assert.deepEqual(f.counts(), [1, 1, 2, 1]);
+    await command('control:transfer', () => client.transferControl(guest.id)); assert.deepEqual(f.counts(), [2, 0, 2, 0]);
+    await command('stage:leave', () => client.leaveStage()); assert.deepEqual(f.counts(), [1, 1, 2, 0]);
+    await server(guest.s, { type: 'stage:approve', targetId: guest.id }); assert.deepEqual(f.counts(), [1, 1, 2, 1]);
+  });
+
+  it('SDK reconnect → validated Hub resume preserves seat and clears before actual Hub terminal callbacks', async t => {
+    const f = await occupancyHub(t); const before = f.client.state!;
+    await f.h.hub.detach(f.session);
+    f.socket.close(); await settle(); assert.equal(f.client.status, 'reconnecting'); assert.equal(f.client.state, before);
+    shown(f.element, text(1, 0, 1, true, 3, 1, '重新連線中，上次快照'));
+    await f.tick(500); const resumeSocket = f.sockets.at(-1)!; assert.notEqual(resumeSocket, f.socket);
+    await f.hello(resumeSocket); const request = f.joinRequest(resumeSocket);
+    assert.equal(request.resumeToken, before.resumeToken);
+    const resumed = new FakeSession(); f.h.hub.attach(resumed);
+    let received = resumed.inbox.length;
+    await f.h.hub.handle(resumed, parseClientMessage(JSON.stringify(request), f.config.limits));
+    const resumeReplies = resumed.inbox.slice(received);
+    assert.ok(resumeReplies.findIndex(event => event.type === 'room:state') < resumeReplies.findIndex(event => event.type === 'ok'));
+    for (const event of resumeReplies) resumeSocket.deliver(event);
+    received = resumed.inbox.length; await settle(); await settle();
+    assert.equal(f.client.me!.participantId, before.me.participantId); assert.notEqual(f.client.state, before);
+    assert.deepEqual(f.counts(), [0, 1, 1, 1]);
+    assert.equal(f.h.timers.filter(timer => !timer.cleared && timer.ms === 15000).length, 0);
+    let observed = false;
+    f.element.addEventListener('stage-closed', () => { observed = true; hidden(f.element); assert.equal(f.client.state, null); assert.equal(f.client.status, 'disconnected'); });
+    await f.server(f.host.s, { type: 'room:close' });
+    for (const event of resumed.inbox.slice(received)) resumeSocket.deliver(event);
+    await settle(); await settle(); assert.equal(observed, true);
+  });
+  for (const controllerOnStage of [false, true]) for (const targetOnStage of [false, true])
+    it(`actual Hub transfer recomputes only its authoritative state, controllerOnStage=${controllerOnStage}, targetOnStage=${targetOnStage}`, async t => {
+      const f = await occupancyHub(t, 2, 3), target = f.client.me!.participantId;
+      if (!controllerOnStage) await f.server(f.host.s, { type: 'stage:leave' });
+      if (targetOnStage) { await f.command('hand:raise', () => f.client.raiseHand()); await f.server(f.host.s, { type: 'stage:approve', targetId: target }); }
+      f.counts(); const oldText = f.element['occupancy'].textContent; let deltas = 0;
+      for (const event of ['stage-role', 'stage-transferred']) f.element.addEventListener(event, () => { deltas++; assert.equal(f.element['occupancy'].textContent, oldText); });
+      await f.server(f.host.s, { type: 'control:transfer', targetId: target });
+      assert.ok(deltas > 0); assert.equal(f.client.me!.role, 'controller');
+      assert.deepEqual(f.counts(), [Number(controllerOnStage), Number(!controllerOnStage), 1, Number(targetOnStage)]);
+    });
+
+  it('keeps actual Hub stage_full rejection for an onstage-controller to offstage-target transfer at the stage cap', async t => {
+    const f = await occupancyHub(t), speaker = await f.h.join(f.host.roomId, '', 'Other speaker'); f.deliver(); await settle();
+    await f.server(speaker.s, { type: 'hand:raise' }); await f.server(f.host.s, { type: 'stage:approve', targetId: speaker.id }); f.counts();
+    const before = f.element['occupancy'].textContent, reply = await f.server(f.host.s, { type: 'control:transfer', targetId: f.client.me!.participantId });
+    assert.equal(reply?.type, 'error'); assert.equal((reply as { code: string }).code, 'stage_full'); assert.equal(f.element['occupancy'].textContent, before); f.counts();
+  });
+
+  it('actual Hub private controller audience and offstage seat stay separate while rejection, explicit leave and kick change only snapshots', async t => {
+    const f = await occupancyHub(t), guest = await f.h.join(f.host.roomId, '', 'SECRET guest'); f.deliver(); await settle(); f.counts();
+    await f.server(f.host.s, { type: 'control:transfer', targetId: f.client.me!.participantId }); f.counts();
+    assert.ok(f.client.state!.audience); assert.equal(f.client.me!.onStage, false); assert.doesNotMatch(f.element['occupancy'].textContent!, /SECRET|Private|host|speaker/);
+    await f.server(guest.s, { type: 'hand:raise' }); const before = f.element['occupancy'].textContent;
+    await f.command('stage:reject', () => f.client.reject(guest.id)); assert.equal(f.element['occupancy'].textContent, before); f.counts();
+    await f.h.hub.detach(guest.s, true); f.deliver(); await settle(); assert.deepEqual(f.counts(), [1, 0, 1, 0]);
+    const replacement = await f.h.join(f.host.roomId, '', 'Replacement'); f.deliver(); await settle(); f.counts();
+    await f.command('participant:kick', () => f.client.kick(replacement.id)); assert.deepEqual(f.counts(), [1, 0, 1, 0]);
+    let terminal = false; f.element.addEventListener('stage-closed', () => { terminal = true; hidden(f.element); });
+    await f.h.hub.shutdown(); f.deliver(); await settle(); assert.equal(terminal, true); hidden(f.element);
+  });
+
+  for (const field of ['roomId', 'participantId', 'status'] as const) for (const key of ['textContent', 'hidden'] as const)
+    it(`revalidates ${key} setter direct ${field} mutation before forwarding state`, async t => {
+      const { element, client } = await subscribedWidget(t); let armed = true;
+      if (key === 'hidden') client['emit']('closed', { roomId: 'one' });
+      setter(t, element['occupancy'], key, () => {
+        if (!armed) return; armed = false;
+        if (field === 'roomId') client.state!.roomId = 'changed-directly';
+        else if (field === 'participantId') client.state!.me.participantId = 'changed-directly';
+        else client['currentStatus'] = 'disconnected';
+      });
+      let observed = false; element.addEventListener('stage-state', () => { observed = true; hidden(element); });
+      await receive(client, state()); assert.equal(observed, true); assert.equal(armed, false); hidden(element);
+    });
+
+  for (const event of ['role', 'transferred'] as const) it(`preserves early close and transfer authority fences before occupancy setter during ${event}`, async t => {
+    const { element, client } = await subscribedWidget(t); const value = state(1, 1, true, 'controller'); value.speakers[0]!.connected = true;
+    await receive(client, value); const close = t.mock.method(client, 'closeRoom', async () => {}), transfer = t.mock.method(client, 'transferControl', async () => {});
+    const confirm = t.mock.method(window, 'confirm', () => true), row = element['stageManagementRows'].get('speaker-0')!;
+    element['occupancy'].textContent = 'Corrupted summary'; let acted = false;
+    setter(t, element['occupancy'], 'textContent', () => { if (acted) return; acted = true; click(element['roomClose']); click(row.transfer); });
+    if (event === 'role') client['emit']('role', { participantId: 'host', role: 'speaker' });
+    else client['emit']('transferred', { fromId: 'host', toId: 'speaker-0' });
+    assert.equal(acted, true); assert.equal(confirm.mock.callCount(), 0); assert.equal(close.mock.callCount(), 0); assert.equal(transfer.mock.callCount(), 0);
+  });
+
+  it('preserves accepted gain, its draft and pending moderation while counts change', async t => {
+    const { element, client } = await subscribedWidget(t); await receive(client, state(2, 1, true, 'controller'));
+    const row = element['stageManagementRows'].get('speaker-0')!, pending = {};
+    row.gainInput.value = '1.25'; element['stageManagementPending'].set('speaker-0', pending); element['render']();
+    const draft = row.gainInput.value, accepted = row.gainAccepted.textContent, disabled = row.gainInput.disabled, busy = row.gainApply.getAttribute('aria-busy');
+    await receive(client, state(1, 1, true, 'controller')); shown(element, text(2, 1, 1, true));
+    assert.equal(element['stageManagementRows'].get('speaker-0'), row); assert.equal(row.gainInput.value, draft); assert.equal(row.gainAccepted.textContent, accepted);
+    assert.equal(row.gainInput.disabled, disabled); assert.equal(row.gainApply.getAttribute('aria-busy'), busy); assert.equal(element['stageManagementPending'].get('speaker-0'), pending);
+  });
+
+  it('retires ownership before manual-leave error setter reentry and clears before a different panel forwards mutated ownership', async t => {
+    const f = await socketJoinedWidget(t, state()); let leaving = false;
+    setter(t, f.element['error'], 'hidden', () => { if (leaving) assert.equal(f.element['occupancyOwner'], undefined); });
+    leaving = true; click(f.element['roomAction']); hidden(f.element); leaving = false; await settle();
+    click(f.element['roomAction']); await settle(); const socket = f.sockets.at(-1)!, request = await f.hello(socket);
+    socket.deliver({ type: 'room:state', ...state() }); socket.deliver({ type: 'ok', requestId: request.requestId }); await settle();
+    const client = f.element.client!; let armed = true, observed = false;
+    setter(t, f.element['acceptedName'] as HTMLParagraphElement, 'textContent', () => { if (armed) { armed = false; client.state!.roomId = 'mutated-in-name-setter'; } });
+    f.element.addEventListener('stage-state', () => { observed = true; hidden(f.element); });
+    const next = state(); next.me.name = 'Another accepted name'; await receive(client, next); assert.equal(observed, true); hidden(f.element);
+  });
+
+  it('keeps stage seats during real SDK failed and pending capture without summary-triggered requests, timers or media work', async t => {
+    const descriptors = new Map(['navigator', 'RTCPeerConnection'].map(name => [name, Object.getOwnPropertyDescriptor(globalThis, name)]));
+    const captures: { promise: Promise<MediaStream>; reject: (error: unknown) => void }[] = [];
+    class Peer {
+      connectionState = 'connected'; signalingState = 'stable'; localDescription = null;
+      transceiver = { direction: 'recvonly', sender: { replaceTrack: async () => {} } };
+      addTransceiver() { return this.transceiver; } close() {}
+    }
+    Object.defineProperty(globalThis, 'RTCPeerConnection', { configurable: true, value: Peer });
+    Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { mediaDevices: { getUserMedia: () => {
+      let reject!: (error: unknown) => void; const promise = new Promise<MediaStream>((_, no) => { reject = no; }); captures.push({ promise, reject });
+      if (captures.length === 1) reject(new DOMException('Controlled denied capture', 'NotAllowedError'));
+      return promise;
+    } } } });
+    t.mock.method(StageClient.prototype as unknown as { negotiate(): void }, 'negotiate', () => {});
+    t.after(async () => { for (const capture of captures) capture.reject(new DOMException('Cleanup', 'AbortError')); await settle(); for (const [name, descriptor] of descriptors) { if (descriptor) Object.defineProperty(globalThis, name, descriptor); else Reflect.deleteProperty(globalThis, name); } });
+    const f = await socketJoinedWidget(t, state(1, 1, true, 'speaker'), true); await f.client['mediaTask'];
+    assert.equal(captures.length, 1); assert.equal(f.client['micFailed'], true); shown(f.element, text(2, 1, 1, true));
+    click(f.element['micRetry']); await settle(); assert.equal(captures.length, 2); assert.equal(f.element['micRetry'].disabled, true);
+    const timeout = t.mock.method(globalThis, 'setTimeout'), interval = t.mock.method(globalThis, 'setInterval');
+    const frames = [...f.socket.sent], pending = f.client['pending'].size, owner = f.element['micFailure'];
+    for (let i = 0; i < 3; i++) { await receive(f.client, state(2, 1, true, 'speaker')); f.element['render'](); shown(f.element, text(3, 1, 2, true)); }
+    assert.equal(captures.length, 2); assert.equal(f.element['micFailure'], owner); assert.equal(f.element['micRetry'].disabled, true);
+    assert.equal(timeout.mock.callCount(), 0); assert.equal(interval.mock.callCount(), 0); assert.deepEqual(f.socket.sent, frames); assert.equal(f.client['pending'].size, pending);
+    captures[1]!.reject(new DOMException('Controlled capture failure', 'NotFoundError')); await f.client['mediaTask']; shown(f.element, text(3, 1, 2, true));
+  });
+
+  for (const key of ['hidden', 'textContent'] as const) for (const action of ['close', 'transfer'] as const)
+    it(`does not introduce ${action} admission from the summary ${key} setter during manual leave`, async t => {
+      const { element, client } = await subscribedWidget(t); const value = state(1, 1, true, 'controller'); value.speakers[0]!.connected = true;
+      await receive(client, value); const row = element['stageManagementRows'].get('speaker-0')!;
+      const close = t.mock.method(client, 'closeRoom', async () => {}), transfer = t.mock.method(client, 'transferControl', async () => {}), confirm = t.mock.method(window, 'confirm', () => true);
+      let acted = false; setter(t, element['occupancy'], key, () => { if (acted) return; acted = true; click(action === 'close' ? element['roomClose'] : row.transfer); });
+      click(element['roomAction']); await settle(); assert.equal(acted, true); hidden(element);
+      assert.equal(confirm.mock.callCount(), 0); assert.equal(close.mock.callCount(), 0); assert.equal(transfer.mock.callCount(), 0);
+    });
+});

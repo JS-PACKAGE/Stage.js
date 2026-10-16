@@ -11,6 +11,7 @@ const STYLE = `
 :host { display: block; font: inherit; color: var(--stage-fg, inherit); }
 [part=panel] { display: grid; gap: .5rem; padding: .75rem; border: 1px solid var(--stage-border, #8884); border-radius: var(--stage-radius, .5rem); background: var(--stage-bg, transparent); }
 [part=status] { margin: 0; }
+.room-occupancy { margin: 0; overflow-wrap: anywhere; }
 [part=quality] { margin: 0; font-size: .875em; }
 [part=speaking] { margin: 0; font-size: .875em; }
 [part=hand-rejection] { margin: 0; }
@@ -74,6 +75,12 @@ export class StageElement extends HTMLElement {
   static readonly observedAttributes = ['url', 'room', 'code', 'name', 'playback-muted', 'playback-volume'];
   private current: StageClient | null = null;
   private readonly status: HTMLParagraphElement;
+  private readonly occupancy: HTMLParagraphElement;
+  private occupancyOwner: { client: StageClient; roomId: string; participantId: string; generation: number } | undefined;
+  private occupancyReport: { room: number; stage: number; audience: number; maxAudience: number; maxSpeakers: number; controllerOnStage: boolean; last: boolean } | undefined;
+  // Weak identities fence re-emission of retired public snapshots without retaining their private data.
+  private readonly occupancySnapshots = new WeakSet<object>();
+  private occupancyRevision = 0;
   private readonly quality: HTMLParagraphElement;
   private qualityOwner: { client: StageClient; roomId: string; participantId: string; generation: number } | undefined;
   private qualityReport: Omit<ConnectionQuality, 'participantId'> | undefined;
@@ -187,6 +194,9 @@ export class StageElement extends HTMLElement {
     this.status.part.add('status');
     this.status.setAttribute('role', 'status');
     this.status.setAttribute('aria-live', 'polite');
+    this.occupancy = document.createElement('p');
+    this.occupancy.className = 'room-occupancy';
+    this.occupancy.hidden = true;
     this.quality = document.createElement('p');
     this.quality.part.add('quality');
     this.quality.hidden = true;
@@ -353,7 +363,7 @@ export class StageElement extends HTMLElement {
     this.retry = this.button('重試加入', () => { if (this.canRetry()) this.rejoin(); });
     this.cancelJoin = this.button('取消加入', () => this.cancelInitial?.());
     actions.append(this.unlock, this.listen, this.hand, this.mic, this.micRetry, this.audioRetry, this.leaveStage, this.roomAction, this.roomClose, this.retry, this.cancelJoin);
-    panel.append(this.status, this.quality, this.speaking, this.handRejection, this.error, this.errorDismiss, this.namePanel, this.roomNamePanel, this.handQueuePanel, this.stageManagementPanel, actions, this.roomCloseNotice, this.audioRecovery, this.microphonePanel, this.outputDevicePanel, this.playback);
+    panel.append(this.status, this.occupancy, this.quality, this.speaking, this.handRejection, this.error, this.errorDismiss, this.namePanel, this.roomNamePanel, this.handQueuePanel, this.stageManagementPanel, actions, this.roomCloseNotice, this.audioRecovery, this.microphonePanel, this.outputDevicePanel, this.playback);
     root.append(style, panel);
     this.render();
   }
@@ -454,6 +464,8 @@ export class StageElement extends HTMLElement {
           else if (type === 'state') this.stageManagementTerminalClient = undefined;
           if (type === 'closed' || type === 'kicked' || (type === 'status' && detail === 'disconnected')) this.audioRecoveryTerminalClient = client;
           else if (type === 'state') this.audioRecoveryTerminalClient = undefined;
+          this.syncOccupancy(type === 'state' ? detail as StageEventMap['state'] : undefined,
+            type === 'closed' || type === 'kicked' || (type === 'status' && detail === 'disconnected'));
           this.syncAudioRecovery();
           // Revoke picker admission before any forwarded callback can click an old control.
           this.syncMicrophoneOwner();
@@ -509,7 +521,9 @@ export class StageElement extends HTMLElement {
           }
           // Revoke stale action admission before application event listeners can reenter.
           if (micLifecycle) this.syncMicRetry();
+          this.syncOccupancy();
           this.dispatchEvent(new CustomEvent(`stage-${type}`, { detail, bubbles: true, composed: true }));
+          this.syncOccupancy();
           // Application callbacks may retire this seat or mutate its exposed snapshot.
           this.syncMicrophoneOwner();
           this.syncOutputDeviceOwner();
@@ -558,6 +572,7 @@ export class StageElement extends HTMLElement {
     ++this.generation;
     const exit = {};
     this.leftRoom = true; this.roomExit = exit;
+    this.retireOccupancy();
     this.hideError();
     // Retire the event lane before disconnect can synchronously invoke application callbacks.
     void this.leave().catch(error => {
@@ -569,6 +584,7 @@ export class StageElement extends HTMLElement {
   }
 
   private async leave(): Promise<void> {
+    this.retireOccupancy();
     this.retireRoomClose();
     this.roomCloseAuthority = undefined; this.roomCloseTerminalClient = undefined;
     this.joinPhase = undefined;
@@ -598,6 +614,74 @@ export class StageElement extends HTMLElement {
     this.unlock.hidden = true;
     this.render();
     await client?.disconnect();
+  }
+
+  private retireOccupancy(): void {
+    ++this.occupancyRevision;
+    this.occupancyOwner = undefined; this.occupancyReport = undefined;
+  }
+
+  /** Counts come only from new authoritative states, never status or membership deltas. */
+  private syncOccupancy(snapshot?: StageEventMap['state'], terminal = false): void {
+    const revision = ++this.occupancyRevision;
+    const client = this.current, state = client?.state, me = state?.me;
+    const owner = this.occupancyOwner;
+    const sameOwner = owner && owner.client === client && owner.generation === this.generation
+      && owner.roomId === state?.roomId && owner.participantId === me?.participantId;
+    const active = client?.status === 'waiting' || client?.status === 'live';
+    const joined = this.isConnected && client && state && typeof state.roomId === 'string' && state.roomId.trim()
+      && typeof me?.participantId === 'string' && me.participantId.trim();
+    if (terminal || !joined || (!active && client.status !== 'reconnecting') || !sameOwner) {
+      this.occupancyOwner = undefined; this.occupancyReport = undefined;
+    }
+    const unseen = snapshot && !this.occupancySnapshots.has(snapshot);
+    if (snapshot) this.occupancySnapshots.add(snapshot);
+    if (!terminal && joined && active && snapshot === state && unseen) {
+      this.occupancyOwner = undefined; this.occupancyReport = undefined;
+      const limits = state.limits, audience = state.audienceCount;
+      const count = (value: unknown): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+      if (limits && typeof limits === 'object' && !Array.isArray(limits) && count(limits.maxAudience) && limits.maxAudience > 0
+        && count(limits.maxSpeakers) && limits.maxSpeakers > 0 && count(audience)
+        && typeof state.controllerId === 'string' && state.controllerId.trim() && Array.isArray(state.speakers)) {
+        const seen = new Set<string>();
+        let controllerOnStage = false, valid = true;
+        for (const person of state.speakers) {
+          if (!person || typeof person.participantId !== 'string' || !person.participantId.trim()
+            || seen.has(person.participantId) || person.onStage !== true
+            || (person.role !== 'controller' && person.role !== 'speaker')
+            || (person.participantId === state.controllerId) !== (person.role === 'controller')) { valid = false; break; }
+          seen.add(person.participantId);
+          if (person.role === 'controller') controllerOnStage = true;
+        }
+        const stage = state.speakers.length - Number(controllerOnStage), room = audience + stage;
+        if (valid && count(stage) && count(room) && stage <= limits.maxSpeakers && room <= limits.maxAudience) {
+          this.occupancyOwner = { client, roomId: state.roomId, participantId: me.participantId, generation: this.generation };
+          this.occupancyReport = { room, stage, audience, maxAudience: limits.maxAudience,
+            maxSpeakers: limits.maxSpeakers, controllerOnStage, last: false };
+        }
+      }
+    }
+    const report = this.occupancyReport;
+    if (report && client?.status === 'reconnecting') report.last = true;
+    const status = client?.status;
+    const current = (): boolean => {
+      if (revision !== this.occupancyRevision) return false;
+      const accepted = this.occupancyOwner;
+      if (report && (!accepted || !this.isConnected || this.current !== accepted.client
+        || this.generation !== accepted.generation || accepted.client.state?.roomId !== accepted.roomId
+        || accepted.client.me?.participantId !== accepted.participantId || accepted.client.status !== status)) {
+        this.syncOccupancy(); return false;
+      }
+      return true;
+    };
+    const text = report ? `房間席位（${report.last ? client?.status === 'reconnecting' ? '重新連線中，上次快照' : '上次快照' : '最近快照'}）：主控以外 ${report.room} / ${report.maxAudience} 人，其中台上 ${report.stage} / ${report.maxSpeakers} 人、觀眾 ${report.audience} 人；主控另計 1 人（${report.controllerOnStage ? '台上' : '台下'}）。含斷線保留席位。` : '';
+    if (!report && !this.occupancy.hidden) this.occupancy.hidden = true;
+    // A host setter can synchronously retire or replace the seat while this paragraph is painted.
+    if (!current()) return;
+    if (this.occupancy.textContent !== text) this.occupancy.textContent = text;
+    if (!current()) return;
+    if (report && this.occupancy.hidden) this.occupancy.hidden = false;
+    current();
   }
 
   private retireRoomClose(): void {
@@ -1709,6 +1793,7 @@ export class StageElement extends HTMLElement {
   }
 
   private render(): void {
+    this.syncOccupancy();
     this.syncAudioRecovery();
     this.syncPlaybackOwner();
     this.syncMicRetry();

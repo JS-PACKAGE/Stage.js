@@ -826,3 +826,6 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 
 
 217. **Widget 名稱編輯器等值屬性寫入保護（第196批，2026-10-16）：** published195完整元件、公開SDK／編輯按鈕→validator→Hub固定120次合法rename／roomName操作，兩元件各自本人／房名編輯器寫入5800→1560，省略4240次等值hidden／disabled／aria-busy，340次必要變更保持。僅四個既有sync／retire方法使用live DOM inequality guards，退役沿原鏈式順序先update.disabled再input.disabled；disabled與busy表達式在原本前序寫入之後求值。保留全部accepted textContent與draft value賦值、每次sync／owner／attempt／資格／authority fence、事件順序與error政策，不做signaturecache或skip sync。失敗必要寫入下次重試，宿主屬性破壞修復；pending ACK／錯誤／重連／失權與close／transfer早期fence回歸。等值setter呼叫減少且新增DOMread是明確可觀測差異，相關attribute mutation records可能減少但未量測native observer callback批次，不承諾任意宿主getter／setter副作用等價，也不宣稱native CPU／layout／focus／IME／AT或硬體音訊改善。無SDK／server／protocol／media／依賴變更。
+
+
+218. **Widget 房間席位摘要（第197批，2026-10-16）：** immutable196完整StageElement＋實際SDK→validator→Hub五例證明無房間席位顯示且容量語義不對稱：maxAudience限制全部非主控成員，maxSpeakers只限非主控台位，audienceCount不含台下主控。新增單一只讀原生paragraph，以公開state計算非主控總席位／上限、非主控台位／上限、觀眾與另計主控位置；不取私有名單、名稱、代碼或tokens，hands不重複計數、offline保留席位不過濾。只從當前權威state接受驗證後primitive projection，role／stage／hand／quality通知不推算；重連標示同owner上次快照，status單獨回復不當fresh。終止／斷線／離房／卸載／換client或席位先清空且隱藏，守generation與同步回呼替換，無舊owner復活。非法數值／上限／controller結構或超cap僅隱藏摘要，不擴SDK/server驗證或改其他控制。無新公有API／part／live-region／timer／網路命令／media操作，五檔範圍element源碼／測試＋三文件。席位快照可能合併延後，不代表在線／listeners／音訊可聽或即時入場承諾；原生layout／AT／硬體音訊未驗收。
