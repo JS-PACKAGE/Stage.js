@@ -12962,3 +12962,519 @@ describe('widget own quality observation window', () => {
   });
 
 });
+
+
+/** Full widget/SDK/Hub and isolated public-event controls; no native DOM or acoustic claim. */
+describe('widget speaking receipt ownership and reentry', () => {
+  type Widget = InstanceType<typeof StageElement>;
+  const WAITING = '發言偵測：等待伺服器回報。';
+  const EMPTY = '最近收到的發言回報：未偵測到發言。';
+  const UNMATCHED = '最近收到的發言回報：沒有可對應的台上成員。';
+  const label = (...names: string[]) => `最近收到的發言回報：${names.join('、')}（${names.length} 人）。`;
+  const view = (e: Widget) => ({ hidden: e['speaking'].hidden, text: e['speaking'].textContent });
+  const visible = (text: string) => ({ hidden: false, text });
+  const HIDDEN = { hidden: true, text: '' };
+  const report = (...participantIds: string[]) => ({ type: 'speaking' as const, participantIds });
+  const emit = (client: StageClient, type: string, detail?: unknown) => client.dispatchEvent(new CustomEvent(type, { detail }));
+  function state(): RoomStatePayload {
+    const s = roomState();
+    s.speakers = [{ ...s.me, participantId: 'host', role: 'controller', onStage: true, name: '甲' },
+      { ...s.me, participantId: 'speaker', role: 'speaker', onStage: true, name: '乙' }];
+    return s;
+  }
+  const receiveState = (client: StageClient, value = state()) => client['receive']({ type: 'room:state', ...value });
+  const shown = (element: Widget, text = label('甲', '乙')) => assert.deepEqual(view(element), visible(text));
+  const hidden = (element: Widget) => assert.deepEqual(view(element), HIDDEN);
+  async function joined(t: TestContext) {
+    const fixture = await subscribedWidget(t); await receiveState(fixture.client); return fixture;
+  }
+  function setter(t: TestContext, node: HTMLParagraphElement, property: 'hidden' | 'textContent', action: () => void): void {
+    let value = Reflect.get(node, property), armed = true;
+    Object.defineProperty(node, property, { configurable: true, get: () => value, set: next => {
+      value = next; if (armed) { armed = false; action(); }
+    } });
+    t.after(() => Object.defineProperty(node, property, { configurable: true, writable: true, value }));
+  }
+  it('actual widget button → SDK → validator → Hub removes own name before role and corrected mixer report', async t => {
+    const config = testConfig(c => { c.rooms.presenceBroadcastMs = 0; c.rooms.qualityIntervalMs = 0; });
+    const h = harness(config), sockets: BridgeSocket[] = [];
+    class BridgeSocket {
+      static OPEN = 1; readyState = 1;
+      onmessage: ((event: { data: string }) => void) | null = null;
+      onclose: (() => void) | null = null;
+      chain = Promise.resolve(); readonly session = new FakeSession(); readonly sent: ClientMessage[] = [];
+      constructor() {
+        sockets.push(this); const record = this.session.send.bind(this.session);
+        this.session.send = (message: ServerMessage, encoded?: string) => {
+          record(message, encoded);
+          if (this.readyState === BridgeSocket.OPEN) this.onmessage?.({ data: encoded ?? JSON.stringify(message) });
+        };
+        queueMicrotask(() => h.hub.attach(this.session));
+      }
+      send(data: string) { const message = parseClientMessage(data, config.limits); this.sent.push(message);
+        this.chain = this.chain.then(() => h.hub.handle(this.session, message)); }
+      close(code = 1006) { if (this.readyState !== BridgeSocket.OPEN) return; this.readyState = 3;
+        this.chain = this.chain.then(() => h.hub.detach(this.session, code === 1000)).then(() => this.onclose?.()); }
+    }
+    const original = Object.getOwnPropertyDescriptor(globalThis, 'WebSocket');
+    Object.defineProperty(globalThis, 'WebSocket', { configurable: true, value: BridgeSocket });
+    t.mock.method(StageClient.prototype as unknown as { createMedia(): void }, 'createMedia', () => {});
+    let now = 1000; t.mock.method(performance, 'now', () => now);
+    t.mock.timers.enable({ apis: ['setTimeout', 'setInterval'] });
+    const flush = async () => { for (let i = 0; i < 40; i++) await Promise.resolve(); };
+    let element: InstanceType<typeof StageElement> | undefined;
+    t.after(async () => {
+      element?.disconnectedCallback(); await flush(); await Promise.all(sockets.map(s => s.chain));
+      await h.hub.shutdown(); await h.transport.close();
+      if (original) Object.defineProperty(globalThis, 'WebSocket', original); else Reflect.deleteProperty(globalThis, 'WebSocket');
+    });
+    const host = await h.create('甲');
+    element = mountJoiningWidget({ room: host.roomId, code: host.code, name: '乙' });
+    for (let i = 0; i < 100 && !(element.client?.me && element.client['pending'].size === 0); i++) {
+      await flush(); now += 20; t.mock.timers.tick(20); await flush();
+    }
+    const e = element, client = e.client!, socket = sockets[0]!; assert.ok(client.me);
+    assert.deepEqual(socket.session.inbox.map(m => m.type), ['hello', 'rtc:config', 'room:state', 'room:state', 'speaking', 'ok']);
+    const pid = client.me.participantId;
+    assert.equal(await h.req(socket.session, { type: 'hand:raise' }), 'ok');
+    assert.equal(await h.req(host.s, { type: 'stage:approve', targetId: pid }), 'ok');
+    assert.equal(await h.req(socket.session, { type: 'rtc:offer', payload: SENDRECV_OFFER }), 'ok');
+    assert.equal(await h.req(host.s, { type: 'rtc:offer', payload: SENDRECV_OFFER }), 'ok');
+    assert.equal(h.transport.emitUplink(host.roomId, host.id, sine(960, .5)), true);
+    assert.equal(h.transport.emitUplink(host.roomId, pid, sine(960, .5)), true);
+    h.mixers.get(host.roomId)!.tick(); assert.deepEqual(view(e), visible(label('甲', '乙')));
+    const deltaViews: unknown[] = [];
+    for (const type of ['role', 'stageleft']) e.addEventListener(`stage-${type}`, () => {
+      deltaViews.push({ type, ownStillOnStage: client.me!.onStage, view: view(e) });
+    });
+    const framesBefore = socket.sent.length, incomingBefore = socket.session.inbox.length;
+    click(e['leaveStage']); await flush(); now += 100; t.mock.timers.tick(100); await flush(); await socket.chain; await flush();
+    assert.equal(client.me!.onStage, false); assert.equal(client.me!.role, 'audience');
+    assert.deepEqual(socket.sent.slice(framesBefore).map(m => m.type), ['stage:leave']);
+    assert.equal(client['pending'].size, 0); assert.deepEqual(view(e), visible(label('甲')));
+    assert.deepEqual(socket.session.inbox.slice(incomingBefore).map(m => m.type), ['role:update', 'speaking', 'stage:left', 'room:state', 'ok']);
+    assert.deepEqual(deltaViews,
+      [{ type: 'role', ownStillOnStage: true, view: visible(label('甲')) }, { type: 'stageleft', ownStillOnStage: true, view: visible(label('甲')) }]);
+  });
+
+  for (const own of [false, true]) {
+    it(`isolated actual Hub ${own ? 'own' : 'other'} removal deltas prune and suppress before the current snapshot`, async t => {
+      const h = harness(testConfig(c => { c.rooms.presenceBroadcastMs = 0; c.rooms.qualityIntervalMs = 0; }));
+      t.after(async () => { await h.hub.shutdown(); await h.transport.close(); });
+      const host = await h.create('甲'), speaker = await h.join(host.roomId, host.code, '乙');
+      assert.equal(await h.req(speaker.s, { type: 'hand:raise' }), 'ok');
+      assert.equal(await h.req(host.s, { type: 'stage:approve', targetId: speaker.id }), 'ok');
+      const observer = (own ? speaker : host).s;
+      const f = await socketJoinedWidget(t, observer.last('room:state')!);
+      f.socket.deliver(report(host.id, speaker.id)); shown(f.element);
+      observer.clear(); assert.equal(await h.req(host.s, { type: 'stage:remove', targetId: speaker.id }), 'ok');
+      const deltas = observer.inbox.filter(m => m.type === 'stage:left' || m.type === 'role:update');
+      assert.deepEqual(deltas.map(m => m.type), ['role:update', 'stage:left']);
+      let callbacks = 0;
+      for (const type of ['role', 'stageleft']) f.element.addEventListener(`stage-${type}`, () => {
+        callbacks++; shown(f.element, label('甲'));
+        assert.ok(f.client.state!.speakers.some(p => p.participantId === speaker.id), 'SDK still exposes the previous roster');
+      }, { once: true });
+      for (const delta of deltas) f.socket.deliver(delta);
+      assert.equal(callbacks, 2);
+      // Synthetic newly allocated receipt deliberately probes the stale-roster interval, not Hub mixer ordering.
+      emit(f.client, 'speaking', { participantIds: [host.id, speaker.id] }); shown(f.element, label('甲'));
+      f.socket.deliver(observer.last('room:state')!); shown(f.element, label('甲'));
+      if (own) assert.equal(f.client.me!.role, 'audience', 'own removal preserves room-wide reader admission');
+    });
+  }
+
+  for (const type of ['stageleft', 'role'] as const) {
+    it(`isolated ${type} suppresses all new receipts until an unseen exact current snapshot, without reviving history`, async t => {
+      const { element, client } = await joined(t), accepted = client.state!;
+      emit(client, 'speaking', report('host', 'speaker')); shown(element);
+      const rejected = state(); emit(client, 'state', rejected);
+      emit(client, type, { participantId: 'speaker', role: 'audience' }); shown(element, label('甲'));
+      for (const old of [accepted, rejected]) {
+        emit(client, 'speaking', report('host', 'speaker')); shown(element, label('甲'));
+        client['snapshot'] = old; emit(client, 'state', old);
+        emit(client, 'speaking', report('host', 'speaker')); shown(element, label('甲'));
+      }
+      client['setStatus']('waiting'); emit(client, 'stagejoined', { participantId: 'speaker', role: 'speaker' });
+      emit(client, 'role', { participantId: 'speaker', role: 'controller' });
+      emit(client, 'speaking', report('host', 'speaker')); shown(element, label('甲'));
+      await receiveState(client); shown(element, label('甲'));
+      emit(client, 'speaking', report('host', 'speaker')); shown(element);
+    });
+  }
+
+  it('rejects pre-state and non-admitting status-placeholder receipts permanently while forwarding exact details', async t => {
+    const f = socketJoiningWidget(t); await settle(); const socket = f.sockets[0]!, request = await f.hello(socket), client = f.element.client!;
+    const rejected = report('host'); emit(client, 'speaking', rejected); hidden(f.element);
+    socket.deliver({ type: 'room:state', ...state() }); socket.deliver({ type: 'ok', requestId: request.requestId }); await settle();
+    emit(client, 'speaking', rejected); shown(f.element, WAITING);
+    const placeholder = report('speaker'), newer = state(); newer.roomId = 'replacement'; newer.status = 'waiting';
+    f.element.addEventListener('stage-status', () => {
+      shown(f.element, WAITING); emit(client, 'speaking', placeholder); shown(f.element, WAITING);
+    }, { once: true });
+    let forwarded: CustomEvent | undefined;
+    f.element.addEventListener('stage-speaking', event => { forwarded = event as CustomEvent; });
+    socket.deliver({ type: 'room:state', ...newer }); shown(f.element, WAITING);
+    emit(client, 'speaking', placeholder); shown(f.element, WAITING);
+    assert.equal(forwarded!.detail, placeholder); assert.equal(forwarded!.bubbles, true); assert.equal(forwarded!.composed, true);
+    emit(client, 'speaking', report('speaker')); shown(f.element, label('乙'));
+  });
+
+  it('actual SDK reconnect consumes rejected and accepted reports and snapshots until new state and new receipt', async t => {
+    const f = await socketJoinedWidget(t, state()), acceptedState = f.client.state!, accepted = report('host');
+    emit(f.client, 'speaking', accepted); shown(f.element, label('甲')); f.socket.close(); hidden(f.element);
+    const rejectedState = state(), rejected = report('speaker'), statusOnly = report('host', 'speaker');
+    emit(f.client, 'state', rejectedState); emit(f.client, 'speaking', rejected); hidden(f.element);
+    await f.tick(500); const next = f.sockets[1]!, request = await f.hello(next);
+    next.deliver({ type: 'status', state: 'live' }); emit(f.client, 'speaking', statusOnly); hidden(f.element);
+    for (const old of [acceptedState, rejectedState]) {
+      f.client['snapshot'] = old; emit(f.client, 'state', old); emit(f.client, 'speaking', report('speaker')); hidden(f.element);
+    }
+    next.deliver({ type: 'room:state', ...state(), resumeToken: 'resume-me' });
+    next.deliver({ type: 'ok', requestId: request.requestId }); await settle(); shown(f.element, WAITING);
+    for (const detail of [accepted, rejected, statusOnly]) { emit(f.client, 'speaking', detail); shown(f.element, WAITING); }
+    emit(f.client, 'speaking', report('speaker')); shown(f.element, label('乙'));
+  });
+
+  for (const ids of [[], ['host'], ['unknown']] as const) {
+    it(`accepted ${ids.length ? ids[0] : 'empty'} receipt replay cannot overwrite newer activity`, async t => {
+      const { element, client } = await joined(t), old = report(...ids);
+      emit(client, 'speaking', old); emit(client, 'speaking', report('speaker')); shown(element, label('乙'));
+      emit(client, 'speaking', old); shown(element, label('乙'));
+      emit(client, 'speaking', report()); shown(element, EMPTY); emit(client, 'speaking', old); shown(element, EMPTY);
+    });
+  }
+
+  it('object/function receipts are identity-fenced while primitive and sparse malformed inputs stay unknown', async t => {
+    const { element, client } = await joined(t);
+    for (const detail of [undefined, null, false, 1, 'host', {}, { participantIds: Array(1) }, { participantIds: ['host', 1] }]) {
+      emit(client, 'speaking', report('host')); shown(element, label('甲'));
+      emit(client, 'speaking', detail); shown(element, WAITING);
+    }
+    const callable = Object.assign(() => {}, { participantIds: ['host'] });
+    emit(client, 'speaking', callable); shown(element, label('甲'));
+    emit(client, 'speaking', report('speaker')); emit(client, 'speaking', callable); shown(element, label('乙'));
+  });
+
+  it('retains live-name rendering, permanent pruning, grace membership, and ordinary host descendant repair', async t => {
+    const { element, client } = await joined(t), snapshot = client.state!, node = element['speaking'] as unknown as Node;
+    emit(client, 'speaking', report('host', 'speaker')); shown(element);
+    snapshot.speakers[0]!.name = '改名 &amp; 甲'; snapshot.speakers[0]!.connected = false;
+    element.playbackMuted = true; shown(element, label('改名 & 甲', '乙'));
+    snapshot.speakers[1]!.onStage = false; client['setStatus']('waiting'); shown(element, label('改名 & 甲'));
+    snapshot.speakers[1]!.onStage = true; element.playbackMuted = false; shown(element, label('改名 & 甲'));
+    emit(client, 'speaking', report('speaker')); shown(element, label('乙'));
+    let text = node.textContent, replacements = 0;
+    Object.defineProperty(node, 'textContent', { configurable: true, get: () => text, set: value => {
+      text = value; replacements++; node.children.length = 0;
+    } });
+    t.after(() => Object.defineProperty(node, 'textContent', { configurable: true, writable: true, value: text }));
+    node.children.push(Object.assign(new Node(), { textContent: text }));
+    emit(client, 'speaking', report('speaker')); shown(element, label('乙'));
+    assert.equal(replacements, 1); assert.deepEqual(node.children, []);
+    emit(client, 'speaking', report('unknown')); shown(element, UNMATCHED);
+  });
+
+  for (const type of ['stageleft', 'role', 'closed', 'kicked', 'status'] as const) {
+    for (const getter of ['state', 'status'] as const) {
+      it(`${type} pure loss bookkeeping precedes ${getter} reentry with a newly allocated report`, async t => {
+        const { element, client } = await joined(t); emit(client, 'speaking', report('host', 'speaker'));
+        const rejected = report('host', 'speaker'), read = Object.getOwnPropertyDescriptor(StageClient.prototype, getter)!.get!;
+        let armed = true;
+        Object.defineProperty(client, getter, { configurable: true, get() {
+          const result: unknown = read.call(client);
+          if (armed) { armed = false; emit(client, 'speaking', rejected); }
+          return result;
+        } });
+        t.after(() => Reflect.deleteProperty(client, getter));
+        emit(client, type, type === 'status' ? 'reconnecting' : type === 'closed' || type === 'kicked'
+          ? { roomId: 'one' } : { participantId: 'speaker', role: 'audience' });
+        const delta = type === 'stageleft' || type === 'role';
+        if (delta) shown(element, label('甲')); else hidden(element);
+        await receiveState(client); if (delta) shown(element, label('甲')); else shown(element, WAITING);
+        emit(client, 'speaking', rejected); if (delta) shown(element, label('甲')); else shown(element, WAITING);
+        emit(client, 'speaking', report('speaker')); shown(element, label('乙'));
+      });
+    }
+  }
+
+  for (const property of ['hidden', 'textContent'] as const) {
+    for (const loss of ['status', 'room', 'self'] as const) {
+      it(`${property} setter clears silent ${loss} loss after a nested winner and requires a distinct authoritative state`, async t => {
+        const { element, client } = await joined(t); emit(client, 'speaking', report('host'));
+        setter(t, element['speaking'], property, () => {
+          emit(client, 'speaking', report('speaker'));
+          if (loss === 'status') client['currentStatus'] = 'reconnecting';
+          else if (loss === 'room') client['snapshot']!.roomId = 'other'; else client['snapshot']!.me.participantId = 'other';
+        });
+        emit(client, 'speaking', report('host', 'speaker')); hidden(element);
+        client['currentStatus'] = 'live'; client['snapshot']!.roomId = 'one'; client['snapshot']!.me.participantId = 'me';
+        emit(client, 'speaking', report('host')); hidden(element);
+        await receiveState(client); shown(element, WAITING); emit(client, 'speaking', report('speaker')); shown(element, label('乙'));
+      });
+    }
+
+    it(`${property} setter preserves a legitimate replacement entry and its newer report`, async t => {
+      const { element, client } = await joined(t);
+      setter(t, element['speaking'], property, () => {
+        const replacement = state(); replacement.roomId = 'new'; replacement.me.participantId = 'new';
+        void receiveState(client, replacement); emit(client, 'speaking', report('speaker'));
+      });
+      emit(client, 'speaking', report('host')); shown(element, label('乙')); assert.equal(client.state!.roomId, 'new');
+    });
+
+    it(`${property} setter rejects retired terminal receipts and preserves later genuine same-client admission`, async t => {
+      const { element, client } = await joined(t), retired = report('host');
+      setter(t, element['speaking'], property, () => { void client['receive']({ type: 'room:closed', roomId: 'one' }); });
+      emit(client, 'speaking', retired); hidden(element); await settle(); assert.equal(client.state, null);
+      await receiveState(client); shown(element, WAITING); emit(client, 'speaking', retired); shown(element, WAITING);
+      emit(client, 'speaking', report('speaker')); shown(element, label('乙'));
+    });
+  }
+
+  for (const getter of ['state', 'status', 'name'] as const) {
+    for (const loss of ['status', 'room'] as const) {
+      it(`${getter} getter reconciles a nested newer report then silent ${loss} loss`, async t => {
+        const { element, client } = await joined(t); emit(client, 'speaking', report('host'));
+        const target = getter === 'name' ? client.state!.speakers[0]! : client;
+        const descriptor = Object.getOwnPropertyDescriptor(target, getter);
+        const read = getter === 'name' ? () => '甲' : Object.getOwnPropertyDescriptor(StageClient.prototype, getter)!.get!;
+        let armed = true;
+        Object.defineProperty(target, getter, { configurable: true, get() {
+          const result: unknown = read.call(client);
+          if (armed) {
+            armed = false; emit(client, 'speaking', report('speaker'));
+            if (loss === 'status') client['currentStatus'] = 'reconnecting'; else client['snapshot']!.roomId = 'other';
+          }
+          return result;
+        } });
+        t.after(() => { if (descriptor) Object.defineProperty(target, getter, descriptor); else Reflect.deleteProperty(target, getter); });
+        element['syncSpeakingOwner'](); hidden(element);
+        client['currentStatus'] = 'live'; client['snapshot']!.roomId = 'one'; emit(client, 'speaking', report('host')); hidden(element);
+        await receiveState(client); emit(client, 'speaking', report('speaker')); shown(element, label('乙'));
+      });
+    }
+
+    it(`${getter} getter cannot overwrite or prune a nested newer admitted report`, async t => {
+      const { element, client } = await joined(t); emit(client, 'speaking', report('host'));
+      const target = getter === 'name' ? client.state!.speakers[0]! : client;
+      const descriptor = Object.getOwnPropertyDescriptor(target, getter);
+      const read = getter === 'name' ? () => '甲' : Object.getOwnPropertyDescriptor(StageClient.prototype, getter)!.get!;
+      let armed = true;
+      Object.defineProperty(target, getter, { configurable: true, get() {
+        const result: unknown = read.call(client);
+        if (armed) { armed = false; emit(client, 'speaking', report('speaker')); }
+        return result;
+      } });
+      t.after(() => { if (descriptor) Object.defineProperty(target, getter, descriptor); else Reflect.deleteProperty(target, getter); });
+      element['syncSpeakingOwner'](); shown(element, label('乙')); element['render'](); shown(element, label('乙'));
+    });
+  }
+
+  it('consumes an outer receipt before a public getter delivers a newer report, including later replay', async t => {
+    const { element, client } = await joined(t), outer = report('host');
+    const read = Object.getOwnPropertyDescriptor(StageClient.prototype, 'state')!.get!; let armed = true;
+    Object.defineProperty(client, 'state', { configurable: true, get() {
+      const result: unknown = read.call(client);
+      if (armed) { armed = false; emit(client, 'speaking', report('speaker')); }
+      return result;
+    } });
+    t.after(() => Reflect.deleteProperty(client, 'state'));
+    emit(client, 'speaking', outer); shown(element, label('乙')); emit(client, 'speaking', outer); shown(element, label('乙'));
+  });
+
+  for (const getter of ['state', 'status'] as const) {
+    it(`early pure terminal retirement preserves genuinely new state and report from a ${getter} getter`, async t => {
+      const { element, client } = await joined(t); emit(client, 'speaking', report('host'));
+      const read = Object.getOwnPropertyDescriptor(StageClient.prototype, getter)!.get!; let armed = true;
+      Object.defineProperty(client, getter, { configurable: true, get() {
+        const result: unknown = read.call(client);
+        if (armed) { armed = false; void receiveState(client); emit(client, 'speaking', report('speaker')); }
+        return result;
+      } });
+      t.after(() => Reflect.deleteProperty(client, getter));
+      emit(client, 'closed', { roomId: 'one' }); shown(element, label('乙'));
+    });
+  }
+
+  for (const action of ['close', 'transfer'] as const) {
+    for (const loss of ['status', 'identity'] as const) {
+      for (const property of ['hidden', 'textContent'] as const) {
+        it(`corrective speaking ${property} cannot restore pending ${action} consent after silent ${loss} loss`, async t => {
+          const { element, client } = await joined(t), value = state(); value.me.role = 'controller'; value.controllerId = 'me';
+          value.speakers = [{ ...value.me, name: '甲', onStage: true }, { ...value.speakers[1]!, connected: true }];
+          await receiveState(client, value); emit(client, 'speaking', report('me', 'speaker'));
+          const row = element['stageManagementRows'].get('speaker')!;
+          const close = t.mock.method(client, 'closeRoom', async () => {}), transfer = t.mock.method(client, 'transferControl', async () => {});
+          let stored = Reflect.get(element['speaking'], property), armed = false, lost = false;
+          Object.defineProperty(element['speaking'], property, { configurable: true, get: () => stored, set: next => {
+            stored = next;
+            if (armed) {
+              armed = false; emit(client, 'speaking', report('speaker')); lost = true;
+              if (loss === 'status') client['currentStatus'] = 'reconnecting'; else client['snapshot']!.me.participantId = 'other';
+            } else if (lost) {
+              lost = false; client['currentStatus'] = 'live'; client['snapshot']!.me.participantId = 'me';
+            }
+          } });
+          t.after(() => Object.defineProperty(element['speaking'], property, { configurable: true, writable: true, value: stored }));
+          const confirm = t.mock.method(window, 'confirm', () => {
+            armed = true; emit(client, 'speaking', report('me')); hidden(element); return true;
+          });
+          click(action === 'close' ? element['roomClose'] : row.transfer); await settle();
+          assert.equal(confirm.mock.callCount(), 1); assert.equal(close.mock.callCount(), 0); assert.equal(transfer.mock.callCount(), 0);
+          emit(client, 'speaking', report('speaker')); hidden(element);
+          await receiveState(client, value); emit(client, 'speaking', report('speaker')); shown(element, label('乙'));
+        });
+      }
+    }
+  }
+
+  for (const type of ['role', 'stageleft'] as const) {
+    it(`${type} loss fences existing Close and Transfer before a new speaking paint can click stale controls`, async t => {
+      const { element, client } = await joined(t), value = state(); value.me.role = 'controller'; value.me.onStage = true; value.controllerId = 'me';
+      value.speakers = [{ ...value.me, name: '甲' }, value.speakers[1]!]; await receiveState(client, value);
+      emit(client, 'speaking', report('me', 'speaker')); const row = element['stageManagementRows'].get('speaker')!;
+      const close = t.mock.method(client, 'closeRoom', async () => {}), transfer = t.mock.method(client, 'transferControl', async () => {});
+      const confirm = t.mock.method(window, 'confirm', () => true);
+      setter(t, element['speaking'], 'textContent', () => { click(element['roomClose']); click(row.transfer); });
+      // Own audience-role invalidates Close; target stageleft invalidates Transfer while its pending dialog excludes Close.
+      if (type === 'role') emit(client, type, { participantId: 'me', role: 'audience' });
+      else {
+        t.mock.method(window, 'confirm', () => { emit(client, type, { participantId: 'speaker', role: 'audience' }); return true; });
+        click(row.transfer);
+      }
+      await settle(); assert.equal(close.mock.callCount(), 0); assert.equal(transfer.mock.callCount(), 0);
+      if (type === 'role') assert.equal(confirm.mock.callCount(), 0);
+    });
+  }
+
+  it('manual leave retires purely before early UI helpers and paints only after current-client and dialog teardown', async t => {
+    const { element, client } = await joined(t), value = state(); value.me.role = 'controller'; value.controllerId = 'me';
+    await receiveState(client, value); emit(client, 'speaking', report('host', 'speaker'));
+    const row = element['stageManagementRows'].get('speaker')!, rejected = report('host');
+    setter(t, element['error'], 'hidden', () => { emit(client, 'speaking', rejected); assert.equal(element['speakingOwner'], undefined); });
+    const close = t.mock.method(client, 'closeRoom', async () => {}), transfer = t.mock.method(client, 'transferControl', async () => {});
+    const confirm = t.mock.method(window, 'confirm', () => true);
+    setter(t, element['speaking'], 'textContent', () => {
+      assert.equal(element.client, null); click(element['roomClose']); click(row.transfer);
+    });
+    click(element['roomAction']); await settle(); hidden(element);
+    assert.equal(confirm.mock.callCount(), 0); assert.equal(close.mock.callCount(), 0); assert.equal(transfer.mock.callCount(), 0);
+  });
+
+  for (const property of ['hidden', 'textContent'] as const) {
+    it(`${property} setter completing its stale write after a nested painter repairs the actual final DOM`, async t => {
+      const { element, client } = await joined(t), node = element['speaking'];
+      let value = Reflect.get(node, property), armed = true;
+      Object.defineProperty(node, property, { configurable: true, get: () => value, set: next => {
+        if (armed) {
+          armed = false;
+          if (property === 'hidden') emit(client, 'closed', { roomId: 'one' });
+          else emit(client, 'speaking', report('speaker'));
+        }
+        value = next;
+      } });
+      t.after(() => Object.defineProperty(node, property, { configurable: true, writable: true, value }));
+      emit(client, 'speaking', report('host'));
+      if (property === 'hidden') hidden(element); else shown(element, label('乙'));
+    });
+  }
+
+  for (const type of ['closed', 'kicked', 'role', 'transferred'] as const) {
+    for (const action of ['close', 'transfer'] as const) {
+      it(`${type} pure dialog loss precedes a getter-nested speaking setter clicking ${action}`, async t => {
+        const { element, client } = await joined(t), value = state(); value.me.role = 'controller'; value.me.onStage = true; value.controllerId = 'me';
+        value.speakers = [{ ...value.me, name: '甲' }, value.speakers[1]!]; await receiveState(client, value);
+        emit(client, 'speaking', report('me', 'speaker')); const row = element['stageManagementRows'].get('speaker')!;
+        const close = t.mock.method(client, 'closeRoom', async () => {}), transfer = t.mock.method(client, 'transferControl', async () => {});
+        const confirm = t.mock.method(window, 'confirm', () => true);
+        setter(t, element['speaking'], 'textContent', () => { click(action === 'close' ? element['roomClose'] : row.transfer); });
+        const read = Object.getOwnPropertyDescriptor(StageClient.prototype, 'state')!.get!; let armed = true;
+        Object.defineProperty(client, 'state', { configurable: true, get() {
+          const result: unknown = read.call(client);
+          if (armed) { armed = false; emit(client, 'speaking', report('speaker')); }
+          return result;
+        } });
+        t.after(() => Reflect.deleteProperty(client, 'state'));
+        emit(client, type, type === 'role' ? { participantId: 'me', role: 'audience' }
+          : type === 'transferred' ? { fromId: 'me', toId: 'speaker' } : { roomId: 'one' });
+        await settle(); assert.equal(confirm.mock.callCount(), 0); assert.equal(close.mock.callCount(), 0); assert.equal(transfer.mock.callCount(), 0);
+      });
+    }
+  }
+
+  for (const terminal of ['closed', 'kicked'] as const) {
+    for (const action of ['close', 'transfer'] as const) {
+      it(`${terminal} outer getter continuation preserves genuine same-client new state and new ${action} consent`, async t => {
+        const { element, client } = await joined(t), value = state(); value.me.role = 'controller'; value.me.onStage = true; value.controllerId = 'me';
+        value.speakers = [{ ...value.me, name: '甲' }, value.speakers[1]!]; await receiveState(client, value);
+        emit(client, 'speaking', report('me'));
+        const close = t.mock.method(client, 'closeRoom', async () => {}), transfer = t.mock.method(client, 'transferControl', async () => {});
+        const confirm = t.mock.method(window, 'confirm', () => true);
+        const read = Object.getOwnPropertyDescriptor(StageClient.prototype, 'state')!.get!; let armed = true;
+        Object.defineProperty(client, 'state', { configurable: true, get() {
+          const result: unknown = read.call(client);
+          if (armed) {
+            armed = false; void receiveState(client, value); emit(client, 'speaking', report('speaker'));
+            const button = action === 'close' ? element['roomClose'] : element['stageManagementRows'].get('speaker')!.transfer;
+            click(button);
+          }
+          return result;
+        } });
+        t.after(() => Reflect.deleteProperty(client, 'state'));
+        emit(client, terminal, { roomId: 'one' }); await settle(); shown(element, label('乙'));
+        assert.equal(confirm.mock.callCount(), 1); assert.equal(close.mock.callCount(), action === 'close' ? 1 : 0);
+        assert.equal(transfer.mock.callCount(), action === 'transfer' ? 1 : 0);
+        assert.equal(element['canCloseRoom'](), true);
+        const row = element['stageManagementRows'].get('speaker')!;
+        assert.equal(element['canTransferStage']('speaker', row.node), true);
+      });
+
+      it(`${terminal} fences old pending ${action} consent even when a getter restores same-client state, and permits a new attempt`, async t => {
+        const { element, client } = await joined(t), value = state(); value.me.role = 'controller'; value.me.onStage = true; value.controllerId = 'me';
+        value.speakers = [{ ...value.me, name: '甲' }, value.speakers[1]!]; await receiveState(client, value);
+        emit(client, 'speaking', report('me'));
+        const close = t.mock.method(client, 'closeRoom', async () => {}), transfer = t.mock.method(client, 'transferControl', async () => {});
+        const read = Object.getOwnPropertyDescriptor(StageClient.prototype, 'state')!.get!; let armed = false, first = true;
+        Object.defineProperty(client, 'state', { configurable: true, get() {
+          const result: unknown = read.call(client);
+          if (armed) { armed = false; void receiveState(client, value); emit(client, 'speaking', report('speaker')); }
+          return result;
+        } });
+        t.after(() => Reflect.deleteProperty(client, 'state'));
+        const confirm = t.mock.method(window, 'confirm', () => {
+          if (first) { first = false; armed = true; emit(client, terminal, { roomId: 'one' }); }
+          return true;
+        });
+        const button = () => action === 'close' ? element['roomClose'] : element['stageManagementRows'].get('speaker')!.transfer;
+        click(button()); await settle(); shown(element, label('乙'));
+        assert.equal(close.mock.callCount(), 0); assert.equal(transfer.mock.callCount(), 0);
+        click(button()); await settle(); assert.equal(confirm.mock.callCount(), 2);
+        assert.equal(close.mock.callCount(), action === 'close' ? 1 : 0); assert.equal(transfer.mock.callCount(), action === 'transfer' ? 1 : 0);
+      });
+    }
+  }
+
+  for (const type of ['speaking', 'state', 'status', 'mic', 'micerror', 'micready', 'role', 'stagejoined', 'transferred', 'quality', 'error'] as const) {
+    it(`preserves ordinary ${type} speaking setter trace without gratuitous paints`, async t => {
+      const { element, client } = await joined(t); emit(client, 'speaking', report('host', 'speaker'));
+      const writes: string[] = [], node = element['speaking'];
+      for (const property of ['hidden', 'textContent'] as const) {
+        let value = Reflect.get(node, property);
+        Object.defineProperty(node, property, { configurable: true, get: () => value, set: next => { value = next; writes.push(property); } });
+        t.after(() => Object.defineProperty(node, property, { configurable: true, writable: true, value }));
+      }
+      if (type === 'speaking') emit(client, type, report('host', 'speaker'));
+      else if (type === 'state') await receiveState(client);
+      else if (type === 'status') client['setStatus']('waiting');
+      else if (type === 'mic') emit(client, type, { participantId: 'speaker', muted: true, forceMuted: true });
+      else if (type === 'role' || type === 'stagejoined') emit(client, type, { participantId: 'speaker', role: 'controller' });
+      else if (type === 'transferred') emit(client, type, { fromId: 'host', toId: 'speaker' });
+      else if (type === 'quality') emit(client, type, { participants: [] });
+      else emit(client, type, type === 'micready' ? undefined : new Error('Unrelated'));
+      const pair = ['hidden', 'textContent'];
+      assert.deepEqual(writes, type === 'state' || type === 'status' ? [...pair, ...pair] : type === 'speaking' || type === 'mic' ? pair : []);
+      shown(element);
+    });
+  }
+});

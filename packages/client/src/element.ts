@@ -94,6 +94,12 @@ export class StageElement extends HTMLElement {
   private readonly speaking: HTMLParagraphElement;
   private speakingOwner: { client: StageClient; roomId: string; participantId: string; generation: number } | undefined;
   private speakingReport: { ids: Set<string>; empty: boolean } | undefined;
+  private readonly speakingSnapshots = new WeakSet<object>();
+  private readonly speakingReceipts = new WeakSet<object>();
+  private readonly speakingSuppressed = new Set<string>();
+  private speakingEventRevision = 0;
+  private speakingRevision = 0;
+  private speakingPainted = { hidden: true, text: '' };
   private readonly handRejection: HTMLParagraphElement;
   private handRejectionOwner: { client: StageClient; roomId: string; participantId: string; generation: number } | undefined;
   /** Last failure (request rejected, mic denied…); stays until dismissed, the next action or join. */
@@ -460,17 +466,20 @@ export class StageElement extends HTMLElement {
       for (const type of EVENTS) {
         client.on(type, ({ detail }) => {
           if (generation !== this.generation || this.current !== client) return;
+          const speakingEvent = this.rememberSpeakingEvent(type, detail);
           const qualityEvent = this.rememberQualityEvent(type, detail);
+          if (type === 'closed' || type === 'kicked') this.stageManagementTerminalClient = client;
+          else if (type === 'state') this.stageManagementTerminalClient = undefined;
           // Own-role deltas precede their snapshot. Fence both dialogs before any DOM setter can reenter.
           this.noteRoomCloseEvent(type, detail);
           this.noteStageTransferEvent(type, detail);
+          this.reconcileRoomClose();
           this.noteQualityEvent(client, generation, type, detail, qualityEvent);
+          this.noteSpeakingEvent(client, generation, type, detail, speakingEvent);
           if (type === 'closed' || type === 'kicked') this.microphoneTerminalClient = client;
           else if (type === 'state') this.microphoneTerminalClient = undefined;
           if (type === 'closed' || type === 'kicked') this.outputDeviceTerminalClient = client;
           else if (type === 'state') this.outputDeviceTerminalClient = undefined;
-          if (type === 'closed' || type === 'kicked') this.stageManagementTerminalClient = client;
-          else if (type === 'state') this.stageManagementTerminalClient = undefined;
           if (type === 'closed' || type === 'kicked' || (type === 'status' && detail === 'disconnected')) this.audioRecoveryTerminalClient = client;
           else if (type === 'state') this.audioRecoveryTerminalClient = undefined;
           this.syncOccupancy(type === 'state' ? detail as StageEventMap['state'] : undefined,
@@ -499,10 +508,8 @@ export class StageElement extends HTMLElement {
           this.syncQualityOwner(type === 'quality' || type === 'state' || type === 'status' || type === 'closed'
             || type === 'kicked' || type === 'micerror'
             || (type === 'stageleft' && (detail as StageEventMap['stageleft']).participantId === ownId));
-          if (type === 'closed' || type === 'kicked'
-            || (type === 'status' && (detail === 'reconnecting' || detail === 'disconnected'))) this.retireSpeakingOwner();
-          else if (type === 'speaking') this.syncSpeakingOwner({ participantIds: (detail as StageEventMap['speaking'] | null | undefined)?.participantIds });
-          else if (type === 'state' || type === 'status') this.syncSpeakingOwner();
+          this.syncSpeakingOwner(type === 'speaking' || type === 'state' || type === 'status'
+            || type === 'closed' || type === 'kicked');
           // SDK status precedes state; a forwarded status listener may disconnect immediately.
           if (type === 'state' || client.state) { receivedState = true; this.hideRetry(); this.hideCancel(); }
           if (type === 'closed' || type === 'kicked') { terminal = true; this.micFailure = undefined; this.hideRetry(); this.hideCancel(); }
@@ -530,9 +537,11 @@ export class StageElement extends HTMLElement {
           if (micLifecycle) this.syncMicRetry();
           this.syncOccupancy();
           this.syncQualityOwner(false);
+          this.syncSpeakingOwner(false);
           this.dispatchEvent(new CustomEvent(`stage-${type}`, { detail, bubbles: true, composed: true }));
           this.syncOccupancy();
           this.syncQualityOwner(false);
+          this.syncSpeakingOwner(false);
           // Application callbacks may retire this seat or mutate its exposed snapshot.
           this.syncMicrophoneOwner();
           this.syncOutputDeviceOwner();
@@ -583,6 +592,7 @@ export class StageElement extends HTMLElement {
     this.leftRoom = true; this.roomExit = exit;
     this.retireOccupancy();
     this.retireQualityOwner();
+    this.retireSpeakingOwner();
     this.hideError();
     // Retire the event lane before disconnect can synchronously invoke application callbacks.
     void this.leave().catch(error => {
@@ -596,6 +606,7 @@ export class StageElement extends HTMLElement {
   private async leave(): Promise<void> {
     this.retireOccupancy();
     this.retireQualityOwner();
+    this.retireSpeakingOwner();
     this.retireRoomClose();
     this.roomCloseAuthority = undefined; this.roomCloseTerminalClient = undefined;
     this.joinPhase = undefined;
@@ -611,7 +622,6 @@ export class StageElement extends HTMLElement {
     this.retireStageManagement();
     this.audioRecoveryTerminalClient = undefined;
     this.retireAudioRecovery();
-    this.retireSpeakingOwner();
     this.retireHandRejection();
     this.hideCancel();
     this.hideRetry();
@@ -700,7 +710,7 @@ export class StageElement extends HTMLElement {
   }
 
   private noteRoomCloseEvent(type: keyof StageEventMap, detail: StageEventMap[keyof StageEventMap]): void {
-    const client = this.current, state = client?.state, me = client?.me;
+    const client = this.current, authority = this.roomCloseAuthority;
     if (type === 'closed' || type === 'kicked' || (type === 'status' && detail === 'disconnected')) {
       this.roomCloseTerminalClient = client ?? undefined; this.retireRoomClose(); return;
     }
@@ -710,15 +720,14 @@ export class StageElement extends HTMLElement {
     }
     const role = type === 'role' ? detail as StageEventMap['role'] : undefined;
     const transfer = type === 'transferred' ? detail as StageEventMap['transferred'] : undefined;
-    if (client && state && me && ((role && role.participantId === me.participantId && role.role !== 'controller')
-      || (transfer && transfer.fromId === me.participantId && transfer.toId !== me.participantId))) {
-      const previous = this.roomCloseAuthority;
-      this.roomCloseAuthority = { client, roomId: state.roomId, participantId: me.participantId, generation: this.generation,
-        revision: (previous?.revision ?? 0) + 1, awaitingState: true };
+    // Both dialogs consume known loss using copied IDs before either helper reads public getters.
+    if (authority && authority.client === client && authority.generation === this.generation
+      && ((role && role.participantId === authority.participantId && role.role !== 'controller')
+        || (transfer && transfer.fromId === authority.participantId && transfer.toId !== authority.participantId))) {
+      this.roomCloseAuthority = { ...authority, revision: authority.revision + 1, awaitingState: true };
       this.retireRoomClose();
     }
     if (type === 'status' && detail === 'reconnecting' && this.roomCloseAttempt) this.roomCloseAttempt.invalid = true;
-    this.reconcileRoomClose();
   }
 
   private roomCloseMounted(): boolean {
@@ -827,8 +836,9 @@ export class StageElement extends HTMLElement {
   }
 
   private retireSpeakingOwner(): void {
+    ++this.speakingRevision;
     this.speakingOwner = undefined; this.speakingReport = undefined;
-    this.speaking.textContent = ''; this.speaking.hidden = true;
+    this.speakingSuppressed.clear();
   }
 
   private retireHandRejection(): void {
@@ -854,40 +864,137 @@ export class StageElement extends HTMLElement {
     if (this.handRejection.textContent !== text) this.handRejection.textContent = text;
   }
 
-  /** A resumed SDK getter can retain the old report; only a new event establishes this owner's set. */
-  private syncSpeakingOwner(report?: { participantIds: unknown }): void {
-    const client = this.current, state = client?.state, me = state?.me;
-    if (!this.isConnected || !client || !state || !me
-      || (client.status !== 'waiting' && client.status !== 'live')) {
-      this.retireSpeakingOwner(); return;
+  private rememberSpeakingEvent(type: keyof StageEventMap, detail: StageEventMap[keyof StageEventMap]): { revision: number; unseen: boolean } {
+    const revision = ++this.speakingEventRevision;
+    const identities = type === 'state' ? this.speakingSnapshots : type === 'speaking' ? this.speakingReceipts : undefined;
+    const object = detail !== null && (typeof detail === 'object' || typeof detail === 'function');
+    const unseen = !object || !identities?.has(detail as object);
+    // Reserve even rejected envelopes before public getters can reenter. Primitive malformed reports stay unknown.
+    if (identities && object) identities.add(detail as object);
+    if (type === 'closed' || type === 'kicked'
+      || (type === 'status' && (detail === 'reconnecting' || detail === 'disconnected'))) this.retireSpeakingOwner();
+    else if (type === 'stageleft' || (type === 'role' && (detail as StageEventMap['role']).role === 'audience')) {
+      const id = (detail as StageEventMap['stageleft']).participantId;
+      if (revision === this.speakingEventRevision && typeof id === 'string') {
+        this.speakingSuppressed.add(id);
+        this.speakingReport?.ids.delete(id);
+        ++this.speakingRevision;
+      }
     }
-    const owner = this.speakingOwner;
-    if (!owner || owner.client !== client || owner.generation !== this.generation
-      || owner.roomId !== state.roomId || owner.participantId !== me.participantId) {
+    return { revision, unseen };
+  }
+
+  /** Room-wide readership survives own-stage loss; only connection and entry identity bind its tenure. */
+  private reconcileSpeakingOwner(): void {
+    for (;;) {
+      const owner = this.speakingOwner;
+      if (!owner) return;
+      const revision = this.speakingRevision, client = owner.client;
+      const state = client.state, status = client.status;
+      const roomId = state?.roomId, participantId = state?.me?.participantId;
+      const currentState = client.state, currentStatus = client.status;
+      if (owner !== this.speakingOwner || revision !== this.speakingRevision) continue;
+      if (state !== currentState || status !== currentStatus) continue;
+      if (this.isConnected && this.current === client && this.generation === owner.generation
+        && roomId === owner.roomId && participantId === owner.participantId
+        && (status === 'waiting' || status === 'live')) return;
       this.retireSpeakingOwner();
-      this.speakingOwner = { client, roomId: state.roomId, participantId: me.participantId, generation: this.generation };
+      // A corrective paint must not allow its setters to restore either pending dialog's consent.
+      this.noteRoomCloseEvent('status', currentStatus);
+      this.noteStageTransferEvent('status', currentStatus);
+      this.reconcileRoomClose();
     }
-    if (report) {
-      const ids = Array.isArray(report.participantIds) ? [...report.participantIds] : undefined;
-      // Copy before forwarding the mutable event; malformed synthetic reports are not evidence of silence.
-      this.speakingReport = ids?.every(id => typeof id === 'string') ? { ids: new Set(ids), empty: !ids.length } : undefined;
+  }
+
+  private noteSpeakingEvent(client: StageClient, generation: number, type: keyof StageEventMap,
+    detail: StageEventMap[keyof StageEventMap], event: { revision: number; unseen: boolean }): void {
+    this.reconcileSpeakingOwner();
+    if (event.revision !== this.speakingEventRevision || this.current !== client || this.generation !== generation) return;
+    if (type === 'state' && event.unseen) {
+      const state = client.state, status = client.status;
+      const roomId = state?.roomId, participantId = state?.me?.participantId;
+      const eligible = state && state === detail && this.isConnected && participantId !== undefined
+        && (status === 'waiting' || status === 'live') && state === client.state && status === client.status;
+      this.reconcileSpeakingOwner();
+      if (eligible && event.revision === this.speakingEventRevision && this.current === client && this.generation === generation) {
+        if (!this.speakingOwner) this.speakingOwner = { client, roomId: roomId!, participantId, generation };
+        // Releasing suppression never repopulates the already-pruned historical report.
+        this.speakingSuppressed.clear();
+        ++this.speakingRevision;
+      }
     }
-    const current = this.speakingReport;
-    this.speaking.hidden = false;
-    if (!current) { this.speaking.textContent = '發言偵測：等待伺服器回報。'; return; }
-    if (current.empty) { this.speaking.textContent = '最近收到的發言回報：未偵測到發言。'; return; }
-    const seen = new Set<string>(), names: string[] = [];
-    for (const person of state.speakers) {
-      if (!person.onStage || (person.role !== 'speaker' && person.role !== 'controller')
-        || !current.ids.has(person.participantId) || seen.has(person.participantId)) continue;
-      seen.add(person.participantId);
-      // Control-socket grace can retain media, so connected is deliberately not an eligibility test.
-      names.push(decodeName(person.name));
+    this.reconcileSpeakingOwner();
+    const owner = this.speakingOwner;
+    if (type !== 'speaking' || !event.unseen || !owner || event.revision !== this.speakingEventRevision) return;
+    const raw = (detail as StageEventMap['speaking'] | null | undefined)?.participantIds;
+    const ids: unknown[] | undefined = Array.isArray(raw) ? [...raw] : undefined;
+    const report = ids?.every((id): id is string => typeof id === 'string')
+      ? { ids: new Set(ids.filter(id => !this.speakingSuppressed.has(id))), empty: ids.length === 0 } : undefined;
+    this.reconcileSpeakingOwner();
+    if (owner !== this.speakingOwner || event.revision !== this.speakingEventRevision) return;
+    this.speakingReport = report; ++this.speakingRevision;
+  }
+
+  private speakingProjection(): { hidden: boolean; text: string; revision: number } {
+    for (;;) {
+      this.reconcileSpeakingOwner();
+      const owner = this.speakingOwner, report = this.speakingReport, revision = this.speakingRevision;
+      const client = this.current, generation = this.generation, state = client?.state, status = client?.status;
+      // SDK status can precede the first receipt for a new identity. This placeholder admits no report.
+      const placeholder = !owner && state?.me && !this.speakingSnapshots.has(state) && this.isConnected
+        && (status === 'waiting' || status === 'live');
+      const hidden = !owner && !placeholder;
+      let text = hidden ? '' : '發言偵測：等待伺服器回報。';
+      let seen: Set<string> | undefined;
+      if (owner && report) {
+        if (report.empty) text = '最近收到的發言回報：未偵測到發言。';
+        else {
+          seen = new Set<string>(); const names: string[] = [];
+          for (const person of state?.speakers ?? []) {
+            const id = person.participantId, onStage = person.onStage, role = person.role;
+            if (!onStage || (role !== 'speaker' && role !== 'controller') || !report.ids.has(id)
+              || this.speakingSuppressed.has(id) || seen.has(id)) continue;
+            seen.add(id);
+            // Read the live public roster on every original render, including disconnected grace seats.
+            names.push(decodeName(person.name));
+          }
+          text = names.length ? `最近收到的發言回報：${names.join('、')}（${names.length} 人）。`
+            : '最近收到的發言回報：沒有可對應的台上成員。';
+        }
+      }
+      const sameSnapshot = state === client?.state && status === client?.status;
+      // Always reconcile the live winner, even after a getter completed a newer nested report.
+      this.reconcileSpeakingOwner();
+      if (revision !== this.speakingRevision || owner !== this.speakingOwner || client !== this.current
+        || generation !== this.generation || !sameSnapshot) continue;
+      if (seen && report) report.ids = seen;
+      return { hidden, text, revision };
     }
-    // A later stage entry must not revive an ID from an earlier, unmatched or removed seat.
-    current.ids = seen;
-    this.speaking.textContent = names.length ? `最近收到的發言回報：${names.join('、')}（${names.length} 人）。`
-      : '最近收到的發言回報：沒有可對應的台上成員。';
+  }
+
+  /** New events supply activity; rendering only maps and permanently prunes that copied report. */
+  private syncSpeakingOwner(force = true): void {
+    const projection = this.speakingProjection();
+    if (!force && projection.hidden === this.speakingPainted.hidden && projection.text === this.speakingPainted.text) return;
+    const current = (): boolean => {
+      const next = this.speakingProjection();
+      if (next.revision !== projection.revision || next.hidden !== projection.hidden || next.text !== projection.text) {
+        // A host setter may finish its old write after a nested painter; its cached paint is no longer proof.
+        this.syncSpeakingOwner(); return false;
+      }
+      return true;
+    };
+    // Keep ordinary unconditional replacement and its hidden-then-text order, including host descendant repair.
+    if (projection.hidden) {
+      this.speaking.textContent = projection.text;
+      if (!current()) return;
+      this.speaking.hidden = true;
+    } else {
+      this.speaking.hidden = false;
+      if (!current()) return;
+      this.speaking.textContent = projection.text;
+    }
+    if (current()) this.speakingPainted = projection;
   }
 
   /** Retirement is pure: a corrective DOM write must never precede the dialog authority fences. */
@@ -907,6 +1014,7 @@ export class StageElement extends HTMLElement {
       this.retireQualityOwner();
       this.noteRoomCloseEvent('status', currentStatus);
       this.noteStageTransferEvent('status', currentStatus);
+      this.reconcileRoomClose();
       // Either authority getter may have admitted a newer entry; reconcile that entry too.
     }
   }
@@ -1324,17 +1432,8 @@ export class StageElement extends HTMLElement {
   private noteStageTransferEvent(type: keyof StageEventMap, detail: StageEventMap[keyof StageEventMap]): void {
     const owner = this.stageManagementOwner;
     if (!owner) return;
-    if (type === 'status' && (detail === 'reconnecting' || detail === 'disconnected') && this.stageTransferAttempt) this.stageTransferAttempt.invalid = true;
-    const client = this.current, state = client?.state, me = client?.me;
-    const sameController = owner.client === client && owner.generation === this.generation
-      && state?.roomId === owner.roomId && me?.participantId === owner.participantId
-      && me.role === 'controller' && me.connected === true;
-    // A replacement snapshot can emit status before state; observe its own-seat loss before DOM sync.
-    if (!sameController) {
-      owner.transferRevision++; owner.transferAwaitingState = true;
-      if (this.stageTransferAttempt) this.stageTransferAttempt.invalid = true;
-    }
-    if (type === 'state') { owner.transferAwaitingState = !sameController; return; }
+    if ((type === 'closed' || type === 'kicked' || (type === 'status' && (detail === 'reconnecting' || detail === 'disconnected')))
+      && this.stageTransferAttempt) this.stageTransferAttempt.invalid = true;
     const role = type === 'role' ? detail as StageEventMap['role'] : undefined;
     const left = type === 'stageleft' ? detail as StageEventMap['stageleft'] : undefined;
     const transferred = type === 'transferred' ? detail as StageEventMap['transferred'] : undefined;
@@ -1346,6 +1445,17 @@ export class StageElement extends HTMLElement {
       owner.transferRevision++; owner.transferAwaitingState = true;
       if (this.stageTransferAttempt) this.stageTransferAttempt.invalid = true;
     }
+    const client = this.current, state = client?.state, me = client?.me;
+    if (owner !== this.stageManagementOwner) return;
+    const sameController = owner.client === client && owner.generation === this.generation
+      && state?.roomId === owner.roomId && me?.participantId === owner.participantId
+      && me.role === 'controller' && me.connected === true;
+    // A replacement snapshot can emit status before state; observe its own-seat loss before DOM sync.
+    if (!sameController) {
+      owner.transferRevision++; owner.transferAwaitingState = true;
+      if (this.stageTransferAttempt) this.stageTransferAttempt.invalid = true;
+    }
+    if (type === 'state') { owner.transferAwaitingState = !sameController; return; }
   }
 
   private canTransferStage(id: string, node: HTMLLIElement): boolean {
