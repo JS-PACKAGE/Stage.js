@@ -93,7 +93,7 @@ async function actualSetup(t: TestContext) {
     const peer = Peer.instances.at(-1)!;
     h.clock.advance(2000); peer.polls.at(-1)!.resolve(report(2000)); await flushSample();
     h.clock.advance(2000); peer.polls.at(-1)!.resolve(report(4000)); await flushSample();
-    assert.match(line().textContent, /收聽掉包 20\.0%.*延遲 180 ms.*緩衝 10 ms/);
+    assert.match(line().textContent, /接收掉包 20\.0%.*接收 RTT 180 ms.*接收緩衝 10 ms/);
     assert.equal(line().classList.contains('error'), true);
     return peer;
   };
@@ -115,9 +115,9 @@ it('full sample actual retained-peer reconnect preserves rendered history, sched
   h.clock.advance(2000); const beforeDrop = peer.polls.at(-1)!;
   await h.drop(); assert.equal(peer.closes, 0); assert.equal(h.line().textContent, oldText);
   assert.equal(count.text, 0); assert.equal(count.error, 0); assert.equal(h.clock.intervals(2000)[0], timer);
-  beforeDrop.resolve(report(6000, 0.04)); await flushSample(); assert.match(h.line().textContent, /收聽掉包 20\.0%.*延遲 40 ms.*緩衝 10 ms/);
+  beforeDrop.resolve(report(6000, 0.04)); await flushSample(); assert.match(h.line().textContent, /接收掉包 20\.0%.*接收 RTT 40 ms.*接收緩衝 10 ms/);
   h.clock.advance(2000); peer.polls.at(-1)!.resolve(report(8000, 0.03)); await flushSample();
-  assert.match(h.line().textContent, /延遲 30 ms/);
+  assert.match(h.line().textContent, /接收 RTT 30 ms/);
   const { state } = await h.resume(); assert.equal(state.me.participantId, id); assert.equal(Peer.instances.at(-1), peer);
   assert.equal(h.audio.pauses, beforePauses); assert.equal(h.clock.intervals(2000)[0], timer);
   assert.equal(count.text, 2); assert.equal(count.error, 2); assert.equal(peer.polls.length, 4);
@@ -141,9 +141,9 @@ for (const settlement of ['resolve', 'reject'] as const) {
     h.clock.advance(2000); fresh.polls.at(-1)!.reject(new Error('new peer stats unavailable')); await flushSample();
     cleared(h); assert.equal(count.text, 1); assert.equal(count.error, 1);
     h.clock.advance(2000); fresh.polls.at(-1)!.resolve(report(10000, 0.02)); await flushSample();
-    assert.equal(h.line().textContent, '你的連線：延遲 20 ms'); assert.equal(h.line().classList.contains('error'), false);
+    assert.equal(h.line().textContent, '你的連線（上次完成讀取；SDK 取樣區間）：接收掉包 —% · 接收 RTT 20 ms · 接收緩衝 — ms；傳送：暫無統計。RTT 不是端到端音訊延遲；不保證資料即時或目前可聽。'); assert.equal(h.line().classList.contains('error'), false);
     h.clock.advance(2000); fresh.polls.at(-1)!.resolve(report(12000, 0.03)); await flushSample();
-    assert.match(h.line().textContent, /收聽掉包 20\.0%.*延遲 30 ms.*緩衝 10 ms/);
+    assert.match(h.line().textContent, /接收掉包 20\.0%.*接收 RTT 30 ms.*接收緩衝 10 ms/);
     assert.equal(count.text, 3); assert.equal(count.error, 3); assert.equal(fresh.polls.length, 3);
     assert.equal(h.audio.volume, 0.37); assert.equal(h.audio.muted, true);
   });
@@ -164,7 +164,7 @@ it('full sample actual public join to another room retires prior-room rendered d
   const fresh = Peer.instances.at(-1)!; assert.equal(fresh.polls.length, 0);
   h.clock.advance(2000); fresh.polls.at(-1)!.reject(new Error('no current stats')); await flushSample(); cleared(h);
   h.clock.advance(2000); fresh.polls.at(-1)!.resolve(report(8000, 0.025)); await flushSample();
-  assert.equal(h.line().textContent, '你的連線：延遲 25 ms'); assert.equal(h.line().classList.contains('error'), false);
+  assert.equal(h.line().textContent, '你的連線（上次完成讀取；SDK 取樣區間）：接收掉包 —% · 接收 RTT 25 ms · 接收緩衝 — ms；傳送：暫無統計。RTT 不是端到端音訊延遲；不保證資料即時或目前可聽。'); assert.equal(h.line().classList.contains('error'), false);
 });
 
 it('full sample actual hidden/resume and external stats retain SDK delta baselines and completion fencing', async t => {
@@ -175,11 +175,11 @@ it('full sample actual hidden/resume and external stats retain SDK delta baselin
   h.clock.advance(10000); assert.equal(peer.polls.length, 3); h.setHidden(false); assert.equal(peer.polls.length, 4);
   const timer = h.clock.intervals(2000)[0]; retired(); assert.equal(peer.polls.length, 4);
   peer.polls[3]!.resolve(report(16000, 0.05)); await flushSample();
-  assert.match(h.line().textContent, /收聽掉包 20\.0%.*延遲 50 ms.*緩衝 10 ms/);
-  hiddenPending.resolve(report(6000, 0.9)); await flushSample(); assert.match(h.line().textContent, /延遲 50 ms/);
+  assert.match(h.line().textContent, /接收掉包 20\.0%.*接收 RTT 50 ms.*接收緩衝 10 ms/);
+  hiddenPending.resolve(report(6000, 0.9)); await flushSample(); assert.match(h.line().textContent, /接收 RTT 50 ms/);
   const external = h.sdk.getStats(); peer.polls[4]!.resolve(report(17000, 0.06, 850)); await external;
   h.clock.advance(2000); peer.polls[5]!.resolve(report(18000, 0.07, 850)); await flushSample();
-  assert.match(h.line().textContent, /收聽掉包 0\.0%.*延遲 70 ms/); assert.equal(h.line().classList.contains('error'), false);
+  assert.match(h.line().textContent, /接收掉包 0\.0%.*接收 RTT 70 ms/); assert.equal(h.line().classList.contains('error'), false);
   assert.equal(h.clock.intervals(2000)[0], timer); assert.equal(peer.closes, 0);
 });
 
@@ -202,7 +202,7 @@ function writes(line: SampleNode) {
 async function setup(t: TestContext) {
   const h = sampleApp({ source }); t.after(() => h.cleanup()); await flushSample(); h.sdk.snapshot(roomState());
   h.clock.advance(2000); h.sdk.polls[0]!.resolve(result()); await flushSample();
-  assert.match(connection(h).textContent, /收聽掉包 20\.0%.*延遲 180 ms.*緩衝 10 ms/);
+  assert.match(connection(h).textContent, /接收掉包 20\.0%.*接收 RTT 180 ms.*接收緩衝 10 ms/);
   assert.equal(connection(h).classList.contains('error'), true);
   return h;
 }
@@ -220,9 +220,9 @@ for (const identity of ['room', 'participant'] as const) {
       await flushSample(); cleared(h); assert.equal(count.text, 1); assert.equal(count.error, 1);
       h.clock.advance(2000); h.sdk.polls.at(-1)!.reject(new Error('first new failure')); await flushSample(); cleared(h);
       h.clock.advance(4000); const [earlier, later] = h.sdk.polls.slice(-2);
-      later!.resolve(result(0.02, 0)); await flushSample(); assert.match(line.textContent, /延遲 20 ms/);
+      later!.resolve(result(0.02, 0)); await flushSample(); assert.match(line.textContent, /接收 RTT 20 ms/);
       assert.equal(line.classList.contains('error'), false);
-      earlier!.resolve(result(0.7, 70)); await flushSample(); assert.match(line.textContent, /延遲 20 ms/);
+      earlier!.resolve(result(0.7, 70)); await flushSample(); assert.match(line.textContent, /接收 RTT 20 ms/);
       assert.equal(count.text, 2); assert.equal(count.error, 2); assert.equal(h.sdk.polls.length, 5);
       assert.equal(h.sdk.joins.length, 0); assert.equal(h.sdk.raises.length, 0); assert.equal(h.sdk.previews.length, 0);
       assert.deepEqual(h.sdk.inputDevices, []); assert.deepEqual(h.sdk.outputDevices, []);
@@ -239,7 +239,7 @@ it('full sample ordinary snapshots and same-seat reconnect add no history writes
   assert.equal(line.textContent, text); assert.equal(line.classList.contains('error'), true);
   assert.equal(count.text, 0); assert.equal(count.error, 0); assert.deepEqual([...h.clock.jobs.keys()], jobs);
   assert.equal(h.sdk.polls.length, 1); h.clock.advance(2000); h.sdk.polls[1]!.resolve(result(0.03, 0)); await flushSample();
-  assert.equal(count.text, 1); assert.equal(count.error, 1); assert.match(line.textContent, /延遲 30 ms/);
+  assert.equal(count.text, 1); assert.equal(count.error, 1); assert.match(line.textContent, /接收 RTT 30 ms/);
   assert.equal(h.sdk.joins.length, 0); assert.equal(h.sdk.raises.length, 0); assert.equal(h.sdk.previews.length, 0);
 });
 
@@ -251,7 +251,7 @@ it('full sample identity replacement while hidden keeps retired results fenced a
   old.resolve(result(0.9, 90)); await flushSample(); cleared(h);
   h.sdk.polls[2]!.reject(new Error('resumed sample failed')); await flushSample(); cleared(h);
   h.clock.advance(2000); h.sdk.polls[3]!.resolve(result(0.02, 0)); await flushSample();
-  assert.match(connection(h).textContent, /延遲 20 ms/); assert.equal(connection(h).classList.contains('error'), false);
+  assert.match(connection(h).textContent, /接收 RTT 20 ms/); assert.equal(connection(h).classList.contains('error'), false);
 });
 
 for (const property of ['text', 'error'] as const) {
@@ -281,12 +281,12 @@ for (const property of ['text', 'error'] as const) {
     assert.equal(h.sdk.me!.participantId, 'nested-owner');
     assert.equal(h.find(node => node.dataset.roomAction === 'hand'), newAction, 'outer render cannot reinstall a superseded view');
     assert.equal(newAction!.disabled, true); assert.equal(newAction!.attributes['aria-busy'], 'true');
-    await flushSample(); assert.match(line.textContent, /延遲 25 ms/); assert.equal(line.classList.contains('error'), false);
+    await flushSample(); assert.match(line.textContent, /接收 RTT 25 ms/); assert.equal(line.classList.contains('error'), false);
     assert.equal(h.sdk.polls[callbackPoll]!.status, 'fulfilled');
     assert.equal(h.find(node => node.attributes.role === 'alert').hidden, true);
     newAction!.onclick!(); assert.equal(h.sdk.raises.length, 2, 'old completion cannot unlock the new pending action');
     h.sdk.raises[1]!.resolve(undefined); await flushSample(); assert.equal(newAction!.disabled, false);
-    h.sdk.snapshot(roomState({ participantId: 'nested-owner' })); assert.match(line.textContent, /延遲 25 ms/);
+    h.sdk.snapshot(roomState({ participantId: 'nested-owner' })); assert.match(line.textContent, /接收 RTT 25 ms/);
   });
 }
 

@@ -1065,13 +1065,20 @@ function refreshConnectionLine(): void {
     // A newer pending poll must not starve completed samples; older completions cannot replace newer results.
     if (!client.state || document.hidden || generation !== roomActionGeneration || sequence <= connectionResultWatermark) return;
     connectionResultWatermark = sequence;
-    const parts: string[] = [];
-    if (inbound?.lossPercent !== undefined) parts.push(`收聽掉包 ${inbound.lossPercent.toFixed(1)}%`);
-    if (outbound?.lossPercent !== undefined) parts.push(`發言掉包 ${outbound.lossPercent.toFixed(1)}%`);
-    const rtt = inbound?.rtt ?? outbound?.rtt;
-    if (rtt !== undefined) parts.push(`延遲 ${Math.round(rtt * 1000)} ms`);
-    if (inbound?.bufferMs !== undefined) parts.push(`緩衝 ${Math.round(inbound.bufferMs)} ms`);
-    connectionLine.textContent = parts.length ? `你的連線：${parts.join(' · ')}` : '';
+    const milliseconds = (value: number | undefined, scale = 1): string => {
+      if (value === undefined) return '—';
+      const ms = value * scale;
+      return Number.isFinite(ms) ? String(Math.round(ms)) : '—';
+    };
+    const receive = inbound
+      ? `接收掉包 ${inbound.lossPercent?.toFixed(1) ?? '—'}% · 接收 RTT ${milliseconds(inbound.rtt, 1000)} ms · 接收緩衝 ${milliseconds(inbound.bufferMs)} ms`
+      : '接收：暫無統計';
+    const send = outbound
+      ? `傳送掉包 ${outbound.lossPercent?.toFixed(1) ?? '—'}% · 傳送 RTT ${milliseconds(outbound.rtt, 1000)} ms`
+      : '傳送：暫無統計';
+    connectionLine.textContent = inbound || outbound
+      ? `你的連線（上次完成讀取；SDK 取樣區間）：${receive}；${send}。RTT 不是端到端音訊延遲；不保證資料即時或目前可聽。`
+      : '';
     connectionLine.classList.toggle('error', Math.max(inbound?.lossPercent ?? 0, outbound?.lossPercent ?? 0) >= POOR_LOSS_PERCENT);
   }, () => {});
 }

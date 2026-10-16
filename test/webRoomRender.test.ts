@@ -262,7 +262,7 @@ it('whole sample keeps microphone retry pending and independent meter and stats 
   h.sdk.micLevelValue = 0.4; h.clock.advance(2000);
   assert.equal(h.id('mic-level').value, 0.4); assert.equal(h.sdk.polls.length, 1); assert.ok(h.sdk.micLevelReads >= 40);
   h.sdk.polls[0]!.resolve({ inbound: { lossPercent: 2, rtt: 0.02 }, outbound: null }); await flushSample();
-  assert.match(h.app.textContent, /收聽掉包 2.0% · 延遲 20 ms/); assert.equal(retries, 1);
+  assert.match(h.app.textContent, /接收掉包 2.0% · 接收 RTT 20 ms/); assert.equal(retries, 1);
   h.sdk.emit('micready', undefined); assert.equal(h.app.descendants().some(node => node.id === 'mic-retry'), false);
   h.sdk.snapshot(clone(state)); assert.equal(h.counts.replacements, 0); assert.equal(retries, 1);
   const offstage = roomState(); offstage.status = 'live'; h.sdk.snapshot(offstage);
@@ -596,7 +596,7 @@ it('whole sample count-only updates preserve pending hand, cooldown, notices, er
   h.sdk.polls[0]!.resolve({ inbound: { rtt: 0.02 }, outbound: null });
   pending.reject(new Error('current count rejection')); await flushSample();
   assert.equal(hand.disabled, false); assert.equal(errorBox(h).textContent, 'current count rejection');
-  assert.equal(h.clock.timeouts().length, 0); assert.match(h.app.textContent, /延遲 20 ms/);
+  assert.equal(h.clock.timeouts().length, 0); assert.match(h.app.textContent, /接收 RTT 20 ms/);
   const raised = countOnlyState(true); h.sdk.snapshot(clone(raised));
   const position = h.find(node => node.classList.contains('own-hand-position')), raisedRows = rows(h); h.reset();
   assert.equal(position.textContent, '你的舉手位置：佇列第 8 位。');
