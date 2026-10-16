@@ -7,6 +7,7 @@ import type { TestContext } from 'node:test';
 import { StageClient } from '../src/index.ts';
 import type { ClientMessage, RoomStatePayload, ServerMessage } from '../../../shared/protocol.ts';
 import { Room } from '../../../src/model/room.ts';
+import type { Session } from '../../../src/ws/hub.ts';
 import { parseClientMessage, ValidationError } from '../../../src/ws/validate.ts';
 
 /** Minimal DOM surface for widget state tests; this does not simulate a browser layout or input system. */
@@ -11075,4 +11076,697 @@ describe('widget manual audio negotiation recovery', () => {
     assert.equal(captures, 0); assert.equal(plays, playsBefore); assert.equal(peer.transceiver.sender.track, null); assert.equal(peer.restarts, 0);
     assert.equal(client.playbackMuted, true); assert.equal(client.playbackVolume, .37); assert.equal(peer.connectionState, 'new');
   });
+});
+
+
+describe('widget confirmed room closure', () => {
+  type CloseWidget = InstanceType<typeof StageElement>;
+  const closePrompt = '確定關閉此房間並讓所有人離場？關閉後無法再加入此房間。';
+  function controllerState(onStage = false): RoomStatePayload {
+    const state = roomState(onStage); state.controllerId = state.me.participantId; state.me.role = 'controller';
+    state.speakers = ['target', 'second'].map(participantId => ({ ...roomState(true).me, participantId, name: `Speaker ${participantId}` }));
+    return state;
+  }
+  const closeRequests = (socket: { sent: ClientMessage[] }) => socket.sent.filter(message => message.type === 'room:close');
+  const closeBusy = (element: CloseWidget, busy: boolean) => assert.equal(element['roomClose'].getAttribute('aria-busy'), String(busy));
+  const transferButton = (element: CloseWidget, id = 'target') => {
+    const row = element['stageManagementRows'].get(id); assert.ok(row); return row.transfer;
+  };
+  function feedback(element: CloseWidget, message = 'Keep existing feedback'): void { element['show'](new Error(message)); }
+  function controlSetter(t: TestContext, control: Node, property: 'hidden' | 'disabled' | 'textContent', callback: () => void): void {
+    let value = control[property];
+    Object.defineProperty(control, property, { configurable: true, get: () => value, set(next: string | boolean) { value = next; callback(); } });
+    t.after(() => Object.defineProperty(control, property, { configurable: true, writable: true, value }));
+  }
+
+  for (const onStage of [false, true]) for (const muted of [false, true]) it(`offers independent destructive closure for controller onStage=${onStage} muted=${muted}`, async t => {
+    const state = controllerState(onStage); state.me.muted = muted; state.me.forceMuted = muted;
+    const { element, client } = await socketJoinedWidget(t, state), pending = deferred();
+    const close = t.mock.method(client, 'closeRoom', () => pending.promise), dialog = t.mock.method(window, 'confirm', () => true);
+    const action = element['roomClose'];
+    assert.equal(action.type, 'button'); assert.equal(action.className, 'danger'); assert.equal(action.hidden, false); assert.equal(action.disabled, false);
+    assert.equal(action.textContent, '關閉房間'); assert.equal(action.getAttribute('aria-describedby'), element['roomCloseNotice'].id);
+    assert.equal(element['roomCloseNotice'].hidden, false); assert.equal(element['roomCloseNotice'].textContent,
+      '關閉房間會讓所有人離場，且無法再加入此房間。離開房間只會讓你離場，房間可能保留並由其他人接任主控。');
+    assert.equal(element['roomAction'].textContent, '離開房間'); feedback(element);
+    click(action); closeBusy(element, true); assert.equal(action.disabled, true); click(action);
+    assert.equal(dialog.mock.callCount(), 1); assert.equal(dialog.mock.calls[0]!.arguments[0], closePrompt); assert.equal(close.mock.callCount(), 1);
+    pending.resolve(); await settle(); closeBusy(element, false); assert.equal(action.disabled, false);
+    assert.equal(element['error'].textContent, 'Keep existing feedback'); assert.equal(element['error'].hidden, false);
+    assert.equal(element['leftRoom'], false); assert.equal(element.client, client); assert.notEqual(element['status'].textContent, '房間已關閉。');
+  });
+
+  for (const condition of ['initial', 'unjoined', 'audience', 'speaker', 'disconnected', 'unsupported', 'unmounted'] as const) {
+    it(`rejects retained closure clicks for ${condition} without a dialog or SDK call`, async t => {
+      const { element, client } = await socketJoinedWidget(t, controllerState()), action = element['roomClose'];
+      const close = t.mock.method(client, 'closeRoom', async () => {}), dialog = t.mock.method(window, 'confirm', () => true);
+      feedback(element);
+      if (condition === 'initial') element['current'] = null;
+      else if (condition === 'unjoined') client['snapshot'] = null;
+      else if (condition === 'audience' || condition === 'speaker') client.me!.role = condition;
+      else if (condition === 'disconnected') client['setStatus']('disconnected');
+      else if (condition === 'unsupported') Reflect.set(client, 'closeRoom', undefined);
+      else Object.assign(element, { isConnected: false });
+      element['render'](); assert.equal(action.hidden, true); assert.equal(action.disabled, true); action.disabled = false; click(action);
+      assert.equal(dialog.mock.callCount(), 0); assert.equal(close.mock.callCount(), 0); assert.equal(element['error'].textContent, 'Keep existing feedback');
+      assert.equal(element['error'].hidden, false); closeBusy(element, false);
+    });
+  }
+
+  for (const decision of ['cancel', 'throw', 'missing'] as const) it(`handles ${decision} confirmation without dispatch or fallback and permits a fresh action`, async t => {
+    const { element, client } = await socketJoinedWidget(t, controllerState()), action = element['roomClose'];
+    const close = t.mock.method(client, 'closeRoom', async () => {}), leave = t.mock.method(client, 'disconnect', async () => {});
+    const transfer = t.mock.method(client, 'transferControl', async () => {}); feedback(element);
+    const dialog = t.mock.method(window, 'confirm', () => { if (decision === 'throw') throw new Error('Confirmation failed'); return false; });
+    if (decision === 'missing') Reflect.set(window, 'confirm', undefined);
+    element['render'](); assert.equal(action.hidden, false); assert.equal(action.disabled, decision === 'missing'); click(action); await settle();
+    assert.equal(close.mock.callCount(), 0); assert.equal(leave.mock.callCount(), 0); assert.equal(transfer.mock.callCount(), 0); closeBusy(element, false);
+    assert.equal(element['error'].textContent, decision === 'throw' ? 'Confirmation failed' : 'Keep existing feedback'); assert.equal(element['error'].hidden, false);
+    dialog.mock.restore(); t.mock.method(window, 'confirm', () => true); element['render'](); click(action); await settle(); assert.equal(close.mock.callCount(), 1);
+  });
+
+  for (const entry of ['reservation setter', 'confirmation', 'SDK invocation'] as const) it(`reserves exact close consent before ${entry} reentry`, async t => {
+    const { element, client, socket } = await socketJoinedWidget(t, controllerState()), pending = deferred();
+    let entered = false;
+    const reenter = () => { if (entered) return; entered = true; click(element['roomClose']); click(transferButton(element)); };
+    const close = t.mock.method(client, 'closeRoom', () => { if (entry === 'SDK invocation') { socket.deliver({ type: 'room:state', ...controllerState() }); reenter(); } return pending.promise; });
+    const transfer = t.mock.method(client, 'transferControl', async () => {});
+    const dialog = t.mock.method(window, 'confirm', () => { if (entry === 'confirmation') reenter(); return true; });
+    if (entry === 'reservation setter') controlSetter(t, element['roomClose'] as unknown as Node, 'disabled', reenter);
+    click(element['roomClose']); assert.equal(entered, true); assert.equal(close.mock.callCount(), 1); assert.equal(dialog.mock.callCount(), 1);
+    assert.equal(transfer.mock.callCount(), 0); closeBusy(element, true); pending.resolve(); await settle(); closeBusy(element, false);
+  });
+
+  it('reserves the original owner before the first admission render can replace its controller tenure', async t => {
+    const { element, client, socket } = await socketJoinedWidget(t, controllerState()), action = element['roomClose'], owner = element['roomCloseOwner'];
+    const close = t.mock.method(client, 'closeRoom', async () => {}), dialog = t.mock.method(window, 'confirm', () => true);
+    action.hidden = true; let replaced = false;
+    controlSetter(t, action as unknown as Node, 'hidden', () => {
+      if (replaced || action.hidden) return; replaced = true;
+      socket.deliver({ type: 'room:state', ...roomState() }); socket.deliver({ type: 'room:state', ...controllerState() });
+    });
+    click(action); await settle(); assert.equal(replaced, true); assert.notEqual(element['roomCloseOwner'], owner);
+    assert.equal(dialog.mock.callCount(), 0); assert.equal(close.mock.callCount(), 0); closeBusy(element, false);
+    click(action); await settle(); assert.equal(dialog.mock.callCount(), 1); assert.equal(close.mock.callCount(), 1);
+  });
+
+  for (const boundary of ['reconnect', 'local disconnected', 'role', 'method', 'confirmation', 'button disconnected', 'button moved', 'actions removed', 'snapshot', 'room', 'seat', 'client'] as const) {
+    it(`permanently invalidates consent after observed ${boundary} even when restored inside confirmation`, async t => {
+      const { element, client, socket } = await socketJoinedWidget(t, controllerState()), action = element['roomClose'];
+      const close = t.mock.method(client, 'closeRoom', async () => {}); let once = false;
+      const dialog = t.mock.method(window, 'confirm', () => {
+        if (once) return true; once = true;
+        if (boundary === 'reconnect') { client['setStatus']('reconnecting'); socket.deliver({ type: 'room:state', ...controllerState() }); }
+        else if (boundary === 'local disconnected') { client.me!.connected = false; element['render'](); client.me!.connected = true; }
+        else if (boundary === 'role') { socket.deliver({ type: 'room:state', ...roomState() }); socket.deliver({ type: 'room:state', ...controllerState() }); }
+        else if (boundary === 'method') { const method = client.closeRoom; Reflect.set(client, 'closeRoom', undefined); element['render'](); Reflect.set(client, 'closeRoom', method); }
+        else if (boundary === 'confirmation') { const confirm = window.confirm; Reflect.set(window, 'confirm', undefined); element['render'](); Reflect.set(window, 'confirm', confirm); }
+        else if (boundary === 'button disconnected') { Object.assign(action, { isConnected: false }); element['render'](); Object.assign(action, { isConnected: true }); }
+        else if (boundary === 'button moved') {
+          const actions = element['roomActions'] as unknown as Node, original = [...actions.children], root = element['widgetRoot'] as unknown as Node;
+          actions.replaceChildren(...original.filter(node => node !== action as unknown as Node)); root.append(action as unknown as Node);
+          assert.equal(action.isConnected, true); element['render'](); root.children.splice(root.children.indexOf(action as unknown as Node), 1); actions.replaceChildren(...original);
+        } else if (boundary === 'actions removed') {
+          const root = element['widgetRoot'] as unknown as Node, original = [...root.children]; root.replaceChildren(); element['render'](); root.replaceChildren(...original);
+        } else if (boundary === 'snapshot') { const original = client['snapshot']; client['snapshot'] = null; element['render'](); client['snapshot'] = original; }
+        else if (boundary === 'room') { client.state!.roomId = 'other'; element['render'](); client.state!.roomId = 'one'; }
+        else if (boundary === 'seat') { client.me!.participantId = 'other'; element['render'](); client.me!.participantId = 'me'; }
+        else { element['current'] = null; element['render'](); element['current'] = client; }
+        element['render'](); click(action); return true;
+      });
+      feedback(element); click(action); await settle(); assert.equal(dialog.mock.callCount(), 1); assert.equal(close.mock.callCount(), 0);
+      assert.equal(element['error'].textContent, 'Keep existing feedback'); closeBusy(element, false);
+      click(action); await settle(); assert.equal(dialog.mock.callCount(), 2); assert.equal(close.mock.callCount(), 1);
+    });
+  }
+
+  for (const attribute of ['room', 'name', 'code', 'url'] as const) it(`invalidates consent for ${attribute} identity replacement and never replays it`, async t => {
+    const { element, client, tick } = await socketJoinedWidget(t, controllerState());
+    const close = t.mock.method(client, 'closeRoom', async () => {}), dialog = t.mock.method(window, 'confirm', () => {
+      element.setAttribute(attribute, attribute === 'url' ? 'wss://synthetic.invalid/replacement' : 'replacement'); click(element['roomClose']); return true;
+    });
+    click(element['roomClose']); await tick(100); assert.equal(dialog.mock.callCount(), 1); assert.equal(close.mock.callCount(), 0);
+    assert.notEqual(element.client, client); assert.equal(element['leftRoom'], false); closeBusy(element, false);
+  });
+
+  it('invalidates an open dialog through unmount/remount while retaining its synchronous exclusion', async t => {
+    const { element, client } = await socketJoinedWidget(t, controllerState());
+    const close = t.mock.method(client, 'closeRoom', async () => {}), dialog = t.mock.method(window, 'confirm', () => {
+      Object.assign(element, { isConnected: false }); element.disconnectedCallback();
+      Object.assign(element, { isConnected: true }); element.connectedCallback(); click(element['roomClose']); return true;
+    });
+    click(element['roomClose']); await settle(); assert.equal(dialog.mock.callCount(), 1); assert.equal(close.mock.callCount(), 0); closeBusy(element, false);
+  });
+
+  for (const update of ['snapshot', 'names', 'stage and mute', 'target removal', 'other role delta', 'other stage delta', 'playback volume', 'playback mute'] as const) {
+    it(`keeps room-level consent through unrelated ${update}`, async t => {
+      const { element, client, socket } = await socketJoinedWidget(t, controllerState()), owner = element['roomCloseOwner'];
+      const close = t.mock.method(client, 'closeRoom', async () => {});
+      const dialog = t.mock.method(window, 'confirm', () => {
+        const state = controllerState();
+        if (update === 'names') { state.name = 'Renamed room'; state.me.name = 'Renamed controller'; }
+        if (update === 'stage and mute') { state.me.onStage = true; state.me.muted = true; state.me.forceMuted = true; }
+        if (update === 'target removal') state.speakers = [];
+        if (update === 'other role delta') socket.deliver({ type: 'role:update', participantId: 'target', role: 'audience' });
+        else if (update === 'other stage delta') socket.deliver({ type: 'stage:left', participantId: 'target', role: 'audience' });
+        else if (update === 'playback volume') element.playbackVolume = .41;
+        else if (update === 'playback mute') element.playbackMuted = true;
+        else socket.deliver({ type: 'room:state', ...state });
+        assert.equal(element['roomCloseOwner'], owner); return true;
+      });
+      click(element['roomClose']); await settle(); assert.equal(dialog.mock.callCount(), 1); assert.equal(close.mock.callCount(), 1);
+    });
+  }
+
+  for (const boundary of ['closed', 'shutdown', 'kicked', 'disconnect', 'role tenure', 'unmount', 'identity'] as const) for (const result of ['resolve', 'reject'] as const) {
+    it(`ignores delayed ${result} after ${boundary} and preserves newer feedback`, async t => {
+      const { element, client, socket } = await socketJoinedWidget(t, controllerState()), old = deferred(), active = deferred(); let calls = 0;
+      t.mock.method(client, 'closeRoom', () => (++calls === 1 ? old : active).promise); t.mock.method(window, 'confirm', () => true);
+      click(element['roomClose']); closeBusy(element, true);
+      if (boundary === 'closed' || boundary === 'shutdown') socket.deliver({ type: 'room:closed', roomId: 'one', ...(boundary === 'shutdown' ? { reason: 'shutdown' as const } : {}) });
+      else if (boundary === 'kicked') socket.deliver({ type: 'kicked', roomId: 'one' });
+      else if (boundary === 'disconnect') await client.disconnect();
+      else if (boundary === 'role tenure') { socket.deliver({ type: 'room:state', ...roomState() }); socket.deliver({ type: 'room:state', ...controllerState() }); click(element['roomClose']); closeBusy(element, true); }
+      else if (boundary === 'unmount') { Object.assign(element, { isConnected: false }); element.disconnectedCallback(); }
+      else element.setAttribute('name', 'Replacement');
+      await settle(); feedback(element, 'New feedback'); if (result === 'resolve') old.resolve(); else old.reject(new Error('Obsolete close failure')); await settle();
+      assert.equal(element['error'].textContent, 'New feedback'); assert.equal(element['error'].hidden, false); closeBusy(element, boundary === 'role tenure');
+      if (boundary === 'role tenure') { assert.equal(calls, 2); active.resolve(); await settle(); closeBusy(element, false); }
+      if (boundary === 'closed' || boundary === 'shutdown' || boundary === 'kicked') { assert.equal(element['roomAction'].hidden, true); assert.equal(element['roomClose'].hidden, true); assert.equal(element['leftRoom'], false); }
+    });
+  }
+
+  for (const newerFeedback of [false, true]) it(`reports current close rejection only with unchanged feedback revision: newer=${newerFeedback}`, async t => {
+    const { element, client } = await socketJoinedWidget(t, controllerState()), pending = deferred();
+    t.mock.method(client, 'closeRoom', () => pending.promise); t.mock.method(window, 'confirm', () => true);
+    feedback(element); click(element['roomClose']); if (newerFeedback) feedback(element, 'Newer feedback');
+    pending.reject(new Error('Current close failed')); await settle();
+    assert.equal(element['error'].textContent, newerFeedback ? 'Newer feedback' : 'Current close failed'); closeBusy(element, false);
+  });
+
+  it('releases an actual SDK ACK without synthesizing terminal state, clearing feedback, or replaying closure', async t => {
+    const { element, client, socket, tick } = await socketJoinedWidget(t, controllerState()); t.mock.method(window, 'confirm', () => true); feedback(element);
+    click(element['roomClose']); await tick(100); const request = closeRequests(socket)[0]!; assert.deepEqual(Object.keys(request).sort(), ['requestId', 'type']);
+    socket.deliver({ type: 'ok', requestId: request.requestId }); await settle(); closeBusy(element, false);
+    assert.equal(client.me!.role, 'controller'); assert.equal(element['leftRoom'], false); assert.equal(element['roomAction'].textContent, '離開房間');
+    assert.notEqual(element['status'].textContent, '房間已關閉。'); assert.equal(element['error'].textContent, 'Keep existing feedback'); assert.equal(element['error'].hidden, false);
+    await tick(500); assert.equal(closeRequests(socket).length, 1);
+  });
+
+  it('retains the same pending owner across reconnect, releases only its request rejection and permits a fresh resumed action', async t => {
+    const { element, client, socket, sockets, tick, hello } = await socketJoinedWidget(t, controllerState()); t.mock.method(window, 'confirm', () => true);
+    click(element['roomClose']); await tick(100); const owner = element['roomCloseOwner'], stale = socket.onmessage, old = closeRequests(socket)[0]!;
+    socket.close(); assert.equal(element['roomCloseOwner'], owner); assert.equal(element['roomClose'].disabled, true); await settle(); closeBusy(element, false);
+    feedback(element, 'Reconnect feedback'); await tick(500); const next = sockets[1]!, join = await hello(next);
+    next.deliver({ type: 'room:state', ...controllerState() }); next.deliver({ type: 'ok', requestId: join.requestId }); await settle();
+    assert.equal(element['roomCloseOwner'], owner); assert.equal(closeRequests(next).length, 0); click(element['roomClose']); await tick(100); closeBusy(element, true);
+    feedback(element, 'Fresh feedback'); stale?.({ data: JSON.stringify({ type: 'error', requestId: old.requestId, code: 'forbidden', message: 'Stale wire error' }) }); await settle();
+    assert.equal(element['error'].textContent, 'Fresh feedback'); closeBusy(element, true);
+    next.deliver({ type: 'ok', requestId: closeRequests(next)[0]!.requestId }); await settle(); closeBusy(element, false); assert.equal(client.me!.role, 'controller');
+  });
+
+  for (const property of ['hidden', 'disabled', 'aria-busy', 'notice'] as const) it(`stops old close render writes after ${property} setter retires the owner without another render`, async t => {
+    const { element, client } = await socketJoinedWidget(t, controllerState()), action = element['roomClose']; let retired = false;
+    const retire = () => { if (retired) return; retired = true; client.me!.role = 'audience'; };
+    if (property === 'hidden') { action.hidden = true; controlSetter(t, action as unknown as Node, 'hidden', retire); }
+    else if (property === 'disabled') { action.disabled = true; controlSetter(t, action as unknown as Node, 'disabled', retire); }
+    else if (property === 'notice') { element['roomCloseNotice'].hidden = true; controlSetter(t, element['roomCloseNotice'] as unknown as Node, 'hidden', retire); }
+    else { action.setAttribute('aria-busy', 'tampered'); const original = action.setAttribute; t.mock.method(action, 'setAttribute', function (this: HTMLButtonElement, key: string, value: string) { original.call(this, key, value); retire(); }); }
+    element['syncRoomClose'](); assert.equal(retired, true); assert.equal(action.hidden, true); assert.equal(action.disabled, true); closeBusy(element, false);
+    assert.equal(element['roomCloseNotice'].hidden, true); assert.equal(element['roomCloseOwner'], undefined);
+  });
+
+  for (const direction of ['close to transfer', 'transfer to close'] as const) for (const decision of ['cancel', 'throw', 'replacement', 'remount'] as const) {
+    it(`excludes ${direction} during ${decision} while allowing a fresh action after synchronous scope exit`, async t => {
+      const { element, client, socket } = await socketJoinedWidget(t, controllerState()), pending = deferred();
+      const close = t.mock.method(client, 'closeRoom', () => pending.promise), transfer = t.mock.method(client, 'transferControl', () => pending.promise);
+      const outer = direction === 'close to transfer' ? element['roomClose'] : transferButton(element);
+      let dialogs = 0;
+      t.mock.method(window, 'confirm', () => {
+        dialogs++;
+        if (decision === 'replacement') { socket.deliver({ type: 'room:state', ...roomState() }); socket.deliver({ type: 'room:state', ...controllerState() }); }
+        if (decision === 'remount') { Object.assign(element, { isConnected: false }); element.disconnectedCallback(); Object.assign(element, { isConnected: true }); element.connectedCallback(); }
+        const inner = direction === 'close to transfer' ? (element['stageManagementRows'].get('target')?.transfer ?? outer) : element['roomClose']; click(inner);
+        if (decision === 'throw') throw new Error('Dialog failed'); return false;
+      });
+      click(outer); await settle(); assert.equal(dialogs, 1); assert.equal(close.mock.callCount(), 0); assert.equal(transfer.mock.callCount(), 0);
+      assert.equal(element['roomCloseDialog'], undefined); assert.equal(element['stageTransferDialogs'].size, 0);
+      if (decision !== 'remount') { t.mock.method(window, 'confirm', () => true); click(direction === 'close to transfer' ? transferButton(element) : element['roomClose']);
+        assert.equal(direction === 'close to transfer' ? transfer.mock.callCount() : close.mock.callCount(), 1); pending.resolve(); await settle(); }
+    });
+  }
+
+  it('retains an outer transfer scope after a nested replacement transfer exits and releases it before waiting for ACK', async t => {
+    const { element, client, socket } = await socketJoinedWidget(t, controllerState()), pending = deferred(); let transfers = 0, closes = 0;
+    const transfer = t.mock.method(client, 'transferControl', () => pending.promise), close = t.mock.method(client, 'closeRoom', async () => {});
+    t.mock.method(window, 'confirm', (message: string) => {
+      if (message === closePrompt) { closes++; return true; }
+      if (++transfers === 2) return true;
+      socket.deliver({ type: 'room:state', ...roomState() }); socket.deliver({ type: 'room:state', ...controllerState() });
+      click(transferButton(element, 'second')); assert.equal(transfer.mock.callCount(), 1);
+      click(element['roomClose']); assert.equal(closes, 0); return false;
+    });
+    click(transferButton(element)); await settle(); assert.equal(transfers, 2); assert.equal(transfer.mock.callCount(), 1); assert.equal(closes, 0);
+    assert.equal(element['stageTransferDialogs'].size, 0); click(element['roomClose']); await settle(); assert.equal(closes, 1); assert.equal(close.mock.callCount(), 1);
+    pending.resolve(); await settle(); assert.equal(element['stageTransferAttempt'], undefined);
+  });
+
+  it('preserves transfer pre-admission reconciliation even when a close dialog excludes it', async t => {
+    const { element, client } = await socketJoinedWidget(t, controllerState()), action = transferButton(element);
+    const close = t.mock.method(client, 'closeRoom', async () => {}), transfer = t.mock.method(client, 'transferControl', async () => {});
+    t.mock.method(window, 'confirm', () => { client.me!.role = 'audience'; click(action); assert.equal(element['stageManagementOwner'], undefined); return true; });
+    click(element['roomClose']); await settle(); assert.equal(close.mock.callCount(), 0); assert.equal(transfer.mock.callCount(), 0);
+  });
+
+  it('marks transfer admission before pre-admission setters can attempt closure', async t => {
+    const { element, client } = await socketJoinedWidget(t, controllerState()); let entered = false;
+    const close = t.mock.method(client, 'closeRoom', async () => {}), transfer = t.mock.method(client, 'transferControl', async () => {});
+    const dialog = t.mock.method(window, 'confirm', () => true);
+    controlSetter(t, element['stageManagementSummary'] as unknown as Node, 'textContent', () => { if (entered) return; entered = true; click(element['roomClose']); });
+    click(transferButton(element)); await settle(); assert.equal(entered, true); assert.equal(dialog.mock.callCount(), 1);
+    assert.equal(close.mock.callCount(), 0); assert.equal(transfer.mock.callCount(), 1);
+  });
+
+  for (const event of ['role:update', 'control:transferred'] as const) for (const lane of ['audio', 'output', 'transfer', 'close'] as const) {
+    it(`fences both controller actions before ${lane} DOM setters on real Hub ${event} with its snapshot held`, async t => {
+      const f = await hubCloseWidget(t), transferNode = [...f.element['stageManagementRows'].values()][0]?.transfer;
+      assert.ok(transferNode); f.holdSnapshots(); f.holdDeltas();
+      await f.server.hub.handle(f.session, { type: 'control:transfer', requestId: 'real-held-deltas', targetId: f.host.id }); await f.drain();
+      const delta = f.heldDeltas.find(message => message.type === event && (message.type !== 'role:update' || message.participantId === f.pid)); assert.ok(delta);
+      assert.equal(f.client.me!.role, 'controller');
+      const close = t.mock.method(f.client, 'closeRoom', async () => {}), transfer = t.mock.method(f.client, 'transferControl', async () => {});
+      const dialog = t.mock.method(window, 'confirm', () => true); let entered = false;
+      const node = lane === 'audio' ? f.element['audioRetry'] : lane === 'output' ? f.element['outputDeviceApply'] : lane === 'transfer' ? transferNode : f.element['roomClose'];
+      controlSetter(t, node as unknown as Node, lane === 'close' ? 'hidden' : 'disabled', () => {
+        if (entered) return; entered = true; assert.equal(f.client.me!.role, 'controller');
+        click(f.element['roomClose']); click(transferNode);
+      });
+      f.socket.deliver(delta); await settle(); assert.equal(entered, true); assert.equal(dialog.mock.callCount(), 0);
+      assert.equal(close.mock.callCount(), 0); assert.equal(transfer.mock.callCount(), 0); assert.equal(f.element['roomCloseOwner'], undefined);
+      assert.equal(f.element['roomCloseAuthority']?.awaitingState, true); assert.equal(f.element['stageManagementOwner']?.transferAwaitingState, true);
+    });
+  }
+
+  for (const event of ['role:update', 'control:transferred'] as const) it(`cannot restore consent inside confirmation after a real ${event} loses control before its snapshot`, async t => {
+    const f = await hubCloseWidget(t), state = structuredClone(f.client.state!); f.holdSnapshots(); f.holdDeltas();
+    await f.server.hub.handle(f.session, { type: 'control:transfer', requestId: 'real-confirm-delta', targetId: f.host.id }); await f.drain();
+    const delta = f.heldDeltas.find(message => message.type === event && (message.type !== 'role:update' || message.participantId === f.pid)); assert.ok(delta);
+    const close = t.mock.method(f.client, 'closeRoom', async () => {}), owner = f.element['roomCloseOwner'];
+    const dialog = t.mock.method(window, 'confirm', () => {
+      f.socket.deliver(delta); assert.equal(f.client.me!.role, 'controller'); click(f.element['roomClose']);
+      f.socket.deliver({ type: 'room:state', ...state }); assert.notEqual(f.element['roomCloseOwner'], owner); click(f.element['roomClose']); return true;
+    });
+    click(f.element['roomClose']); await settle(); assert.equal(dialog.mock.callCount(), 1); assert.equal(close.mock.callCount(), 0); closeBusy(f.element, false);
+  });
+
+  it('retains the own-role fence when unsupported close capability retires the UI owner before the real delta', async t => {
+    const f = await hubCloseWidget(t); f.holdSnapshots(); f.holdDeltas();
+    const method = f.client.closeRoom; Reflect.set(f.client, 'closeRoom', undefined); f.element['render'](); assert.equal(f.element['roomCloseOwner'], undefined);
+    await f.server.hub.handle(f.session, { type: 'control:transfer', requestId: 'missing-method-fence', targetId: f.host.id }); await f.drain();
+    const delta = f.heldDeltas.find(message => message.type === 'role:update' && message.participantId === f.pid); assert.ok(delta);
+    const dialog = t.mock.method(window, 'confirm', () => true); let restored = false;
+    controlSetter(t, f.element['audioRetry'] as unknown as Node, 'disabled', () => {
+      if (restored) return; restored = true; Reflect.set(f.client, 'closeRoom', method); click(f.element['roomClose']);
+    });
+    f.socket.deliver(delta); await f.drain(); assert.equal(restored, true); assert.equal(dialog.mock.callCount(), 0);
+    assert.equal(f.validated.some(message => message.type === 'room:close'), false); assert.equal(f.element['roomCloseAuthority']?.awaitingState, true);
+    for (const state of f.heldSnapshots) f.socket.deliver(state); assert.equal(f.element['roomClose'].hidden, true);
+  });
+
+  it('never establishes a fresh close owner from a reconnecting snapshot', async t => {
+    const { element, client, socket } = await socketJoinedWidget(t, roomState()); t.mock.method(window, 'confirm', () => true);
+    client['setStatus']('reconnecting'); client.me!.role = 'controller'; element['render'](); assert.equal(element['roomCloseOwner'], undefined);
+    assert.equal(element['roomClose'].hidden, true); click(element['roomClose']); assert.equal(closeRequests(socket).length, 0);
+    client['setStatus']('live'); assert.ok(element['roomCloseOwner']); assert.equal(element['roomClose'].disabled, false);
+  });
+
+  for (const result of ['resolve', 'reject'] as const) it(`isolates old ${result} after same-client same-ID actual disconnect and rejoin`, async t => {
+    const { element, client, socket, sockets, tick, joinRequest } = await socketJoinedWidget(t, controllerState());
+    const old = deferred(), active = deferred(); let calls = 0;
+    t.mock.method(client, 'closeRoom', () => (++calls === 1 ? old : active).promise); t.mock.method(window, 'confirm', () => true);
+    click(element['roomClose']); const owner = element['roomCloseOwner']; await client.disconnect(); assert.equal(element['roomCloseOwner'], undefined);
+    const connecting = client.connect(), next = sockets[1]!; next.hello(); await connecting;
+    const joining = client.join({ roomId: 'one', name: 'Same-ID controller' }); await settle(); await tick(100); const join = joinRequest(next);
+    next.deliver({ type: 'room:state', ...controllerState() }); next.deliver({ type: 'ok', requestId: join.requestId }); await joining;
+    assert.notEqual(element['roomCloseOwner'], owner); click(element['roomClose']); closeBusy(element, true); feedback(element, 'New tenure feedback');
+    if (result === 'resolve') old.resolve(); else old.reject(new Error('Retired close failure')); await settle();
+    closeBusy(element, true); assert.equal(element['error'].textContent, 'New tenure feedback'); assert.equal(calls, 2); assert.equal(closeRequests(socket).length, 0);
+    active.resolve(); await settle(); closeBusy(element, false);
+  });
+
+  for (const result of ['resolve', 'reject'] as const) it(`keeps a pending same-tenure attempt across temporary reconnect until exact ${result}`, async t => {
+    const { element, client, socket } = await socketJoinedWidget(t, controllerState()), pending = deferred();
+    const close = t.mock.method(client, 'closeRoom', () => pending.promise), dialog = t.mock.method(window, 'confirm', () => true);
+    click(element['roomClose']); const owner = element['roomCloseOwner'], attempt = element['roomCloseAttempt'];
+    client['setStatus']('reconnecting'); assert.equal(element['roomCloseOwner'], owner); closeBusy(element, true);
+    socket.deliver({ type: 'room:state', ...controllerState() }); click(element['roomClose']);
+    assert.equal(element['roomCloseAttempt'], attempt); assert.equal(dialog.mock.callCount(), 1); assert.equal(close.mock.callCount(), 1);
+    feedback(element, 'Reconnect feedback'); if (result === 'resolve') pending.resolve(); else pending.reject(new Error('Obsolete request failure'));
+    await settle(); closeBusy(element, false); assert.equal(element['error'].textContent, 'Reconnect feedback'); assert.equal(element['roomClose'].disabled, false);
+  });
+
+  it('does not let an old render overwrite a nested replacement controller pending close', async t => {
+    const { element, client, socket } = await socketJoinedWidget(t, controllerState()), pending = deferred(); let replaced = false;
+    const close = t.mock.method(client, 'closeRoom', () => pending.promise); t.mock.method(window, 'confirm', () => true);
+    element['roomClose'].hidden = true;
+    controlSetter(t, element['roomClose'] as unknown as Node, 'hidden', () => {
+      if (replaced || element['roomClose'].hidden) return; replaced = true;
+      socket.deliver({ type: 'room:state', ...roomState() }); socket.deliver({ type: 'room:state', ...controllerState() }); click(element['roomClose']);
+    });
+    element['syncRoomClose'](); assert.equal(replaced, true); assert.equal(close.mock.callCount(), 1);
+    closeBusy(element, true); assert.equal(element['roomClose'].disabled, true); assert.equal(element['roomCloseNotice'].hidden, false);
+    pending.resolve(); await settle(); closeBusy(element, false);
+  });
+
+  for (const terminal of ['room:closed', 'kicked'] as const) it(`stops a close renderer when a setter delivers ${terminal}`, async t => {
+    const { element, socket } = await socketJoinedWidget(t, controllerState()); let terminalSent = false;
+    element['roomClose'].disabled = true;
+    controlSetter(t, element['roomClose'] as unknown as Node, 'disabled', () => {
+      if (terminalSent) return; terminalSent = true; socket.deliver({ type: terminal, roomId: 'one' });
+    });
+    element['syncRoomClose'](); assert.equal(element['roomCloseOwner'], undefined); assert.equal(element['roomClose'].hidden, true);
+    assert.equal(element['roomClose'].disabled, true); assert.equal(element['roomCloseNotice'].hidden, true); closeBusy(element, false);
+  });
+
+  it('releases only its exact attempt even when reservation and finalizer DOM setters throw', async t => {
+    const { element, client } = await socketJoinedWidget(t, controllerState()), action = element['roomClose'];
+    const close = t.mock.method(client, 'closeRoom', async () => {}), dialog = t.mock.method(window, 'confirm', () => true); let fail = true;
+    controlSetter(t, action as unknown as Node, 'disabled', () => { if (fail) throw new Error('Controlled DOM failure'); });
+    click(action); await settle(); assert.equal(element['roomCloseAttempt'], undefined); assert.equal(element['roomCloseDialog'], undefined);
+    assert.equal(dialog.mock.callCount(), 0); assert.equal(close.mock.callCount(), 0);
+    fail = false; element['render'](); click(action); await settle(); assert.equal(close.mock.callCount(), 1); closeBusy(element, false);
+  });
+
+  it('keeps synchronous dialog exclusion local to each widget instance', async t => {
+    const first = await subscribedWidget(t), second = await subscribedWidget(t);
+    await first.client['receive']({ type: 'room:state', ...controllerState() }); await second.client['receive']({ type: 'room:state', ...controllerState() });
+    const firstClose = t.mock.method(first.client, 'closeRoom', async () => {}), secondClose = t.mock.method(second.client, 'closeRoom', async () => {}); let dialogs = 0;
+    t.mock.method(window, 'confirm', () => { if (++dialogs === 1) click(second.element['roomClose']); return true; });
+    click(first.element['roomClose']); await settle(); assert.equal(dialogs, 2); assert.equal(firstClose.mock.callCount(), 1); assert.equal(secondClose.mock.callCount(), 1);
+  });
+
+  it('reconciles a retained direct handler after capability removal without transferring that click to a restored owner', async t => {
+    const { element, client } = await socketJoinedWidget(t, controllerState()), action = element['roomClose'];
+    const close = t.mock.method(client, 'closeRoom', async () => {}), method = client.closeRoom, dialog = t.mock.method(window, 'confirm', () => true);
+    Reflect.set(client, 'closeRoom', undefined); click(action); await settle();
+    assert.equal(dialog.mock.callCount(), 0); assert.equal(close.mock.callCount(), 0); assert.equal(action.hidden, true); assert.equal(action.disabled, true);
+    Reflect.set(client, 'closeRoom', method); click(action); await settle(); assert.equal(dialog.mock.callCount(), 1); assert.equal(close.mock.callCount(), 1);
+  });
+
+  for (const boundary of ['role', 'connectivity', 'room', 'seat'] as const) it(`observes ${boundary} replacement state before an early audio setter can restore it inside confirmation`, async t => {
+    const { element, client, socket } = await socketJoinedWidget(t, controllerState()), close = t.mock.method(client, 'closeRoom', async () => {});
+    let restoring = false, restored = false;
+    controlSetter(t, element['audioRetry'] as unknown as Node, 'disabled', () => {
+      if (!restoring || restored) return; restored = true;
+      client.me!.role = 'controller'; client.me!.connected = true; client.me!.participantId = 'me'; client.state!.roomId = 'one';
+      click(element['roomClose']);
+    });
+    const dialog = t.mock.method(window, 'confirm', () => {
+      restoring = true; const state = controllerState();
+      if (boundary === 'role') state.me.role = 'audience';
+      else if (boundary === 'connectivity') state.me.connected = false;
+      else if (boundary === 'room') state.roomId = 'other';
+      else state.me.participantId = 'other';
+      socket.deliver({ type: 'room:state', ...state }); return true;
+    });
+    click(element['roomClose']); await settle(); assert.equal(restored, true); assert.equal(dialog.mock.callCount(), 1); assert.equal(close.mock.callCount(), 0); closeBusy(element, false);
+  });
+
+  for (const boundary of ['role', 'connectivity', 'room', 'seat'] as const) it(`fences a transfer's observed ${boundary} replacement state before an early setter restores the old controller`, async t => {
+    const { element, client, socket } = await socketJoinedWidget(t, controllerState()), action = transferButton(element);
+    const transfer = t.mock.method(client, 'transferControl', async () => {}); let restoring = false, restored = false, dialogs = 0;
+    controlSetter(t, element['audioRetry'] as unknown as Node, 'disabled', () => {
+      if (!restoring || restored) return; restored = true;
+      client.me!.role = 'controller'; client.me!.connected = true; client.me!.participantId = 'me'; client.state!.roomId = 'one';
+      click(transferButton(element)); click(element['roomClose']);
+    });
+    t.mock.method(window, 'confirm', () => {
+      if (++dialogs > 1) return true;
+      restoring = true; const state = controllerState();
+      if (boundary === 'role') state.me.role = 'audience';
+      else if (boundary === 'connectivity') state.me.connected = false;
+      else if (boundary === 'room') state.roomId = 'other';
+      else state.me.participantId = 'other';
+      socket.deliver({ type: 'room:state', ...state }); return true;
+    });
+    click(action); await settle(); assert.equal(restored, true); assert.equal(dialogs, 1); assert.equal(transfer.mock.callCount(), 0);
+    assert.equal(element['stageManagementOwner']?.transferAwaitingState, true); click(transferButton(element)); await settle(); assert.equal(dialogs, 1);
+    socket.deliver({ type: 'room:state', ...controllerState() }); click(transferButton(element)); await settle(); assert.equal(dialogs, 2); assert.equal(transfer.mock.callCount(), 1);
+  });
+
+  it('permits waiting offstage controller closure with an empty stage and preserves independent Leave', async t => {
+    const state = controllerState(); state.status = 'waiting'; state.speakers = [];
+    const { element, client } = await socketJoinedWidget(t, state), close = t.mock.method(client, 'closeRoom', async () => {});
+    t.mock.method(window, 'confirm', () => true); assert.equal(element['roomClose'].disabled, false);
+    assert.equal(element['roomAction'].disabled, false); assert.equal(element['stageManagementRows'].size, 0);
+    click(element['roomClose']); await settle(); assert.equal(close.mock.callCount(), 1); assert.equal(element['leftRoom'], false);
+  });
+
+  for (const status of ['reconnecting', 'disconnected'] as const) it(`invalidates active transfer consent on observed ${status} before an early setter restores live status`, async t => {
+    const { element, client } = await socketJoinedWidget(t, controllerState()), action = transferButton(element);
+    const transfer = t.mock.method(client, 'transferControl', async () => {}); let restoring = false, restored = false;
+    controlSetter(t, element['audioRetry'] as unknown as Node, 'disabled', () => {
+      if (!restoring || restored) return; restored = true; client['setStatus']('live');
+    });
+    const dialog = t.mock.method(window, 'confirm', () => { restoring = true; client['setStatus'](status); return true; });
+    click(action); await settle(); assert.equal(restored, true); assert.equal(dialog.mock.callCount(), 1); assert.equal(transfer.mock.callCount(), 0);
+  });
+
+  for (const boundary of ['role', 'connectivity', 'room', 'seat'] as const) it(`fences a transfer's ${boundary} loss in a status-changing snapshot before the following state event`, async t => {
+    const { element, client, socket } = await socketJoinedWidget(t, controllerState()), transfer = t.mock.method(client, 'transferControl', async () => {});
+    let restoring = false, restored = false;
+    controlSetter(t, element['audioRetry'] as unknown as Node, 'disabled', () => {
+      if (!restoring || restored) return; restored = true;
+      client.me!.role = 'controller'; client.me!.connected = true; client.me!.participantId = 'me'; client.state!.roomId = 'one';
+    });
+    const dialog = t.mock.method(window, 'confirm', () => {
+      restoring = true; const state = controllerState(); state.status = 'waiting';
+      if (boundary === 'role') state.me.role = 'audience';
+      else if (boundary === 'connectivity') state.me.connected = false;
+      else if (boundary === 'room') state.roomId = 'other';
+      else state.me.participantId = 'other';
+      socket.deliver({ type: 'room:state', ...state }); return true;
+    });
+    click(transferButton(element)); await settle(); assert.equal(restored, true); assert.equal(dialog.mock.callCount(), 1); assert.equal(transfer.mock.callCount(), 0);
+  });
+
+  // Controlled browser-media surfaces for the complete widget/SDK/validator/Hub path.
+  // These do not establish native dialog, focus, layout, accessibility or hardware-audio behavior.
+  class StagePeer {
+    static instances: StagePeer[] = [];
+    connectionState = 'connected'; signalingState = 'stable';
+    localDescription: { type: 'offer'; sdp: string } | null = null;
+    readonly transceiver = { direction: 'recvonly', sender: { track: null as unknown,
+      replaceTrack: async (track: unknown) => { this.transceiver.sender.track = track; } } };
+    constructor() { StagePeer.instances.push(this); }
+    addTransceiver() { return this.transceiver; }
+    async createOffer() { return { type: 'offer' as const, sdp: `v=0\r\nm=audio 9 UDP/TLS/RTP/SAVPF 111\r\na=${this.transceiver.direction}\r\n` }; }
+    async setLocalDescription(description: { type: 'offer'; sdp: string }): Promise<void> { this.localDescription = description; this.signalingState = 'have-local-offer'; }
+    async setRemoteDescription(): Promise<void> { this.signalingState = 'stable'; }
+    async addIceCandidate(): Promise<void> {}
+    close(): void { this.connectionState = 'closed'; }
+  }
+  class StageContext {
+    static instances: StageContext[] = [];
+    closes = 0;
+    constructor() { StageContext.instances.push(this); }
+    createMediaStreamSource() { return { connect() {}, disconnect() {} }; }
+    createAnalyser() { return { fftSize: 2048, getFloatTimeDomainData() {}, disconnect() {} }; }
+    async resume(): Promise<void> {}
+    async close(): Promise<void> { this.closes++; }
+  }
+
+  async function hubCloseWidget(t: TestContext, onStage = false, asController = true) {
+    const tracks: { enabled: boolean; stopped: boolean; readyState: string; stop(): void }[] = [];
+    const mediaGlobals = new Map(['navigator', 'RTCPeerConnection', 'AudioContext'].map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
+    Object.defineProperty(globalThis, 'RTCPeerConnection', { configurable: true, value: StagePeer });
+    Object.defineProperty(globalThis, 'AudioContext', { configurable: true, value: StageContext });
+    Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { mediaDevices: { getUserMedia: async () => {
+      const track = Object.assign(new EventTarget(), { enabled: true, stopped: false, readyState: 'live', stop() { this.stopped = true; this.readyState = 'ended'; } });
+      tracks.push(track); return { getTracks: () => [track], getAudioTracks: () => [track] };
+    } } } });
+    t.after(() => { for (const [key, descriptor] of mediaGlobals) { if (descriptor) Object.defineProperty(globalThis, key, descriptor); else Reflect.deleteProperty(globalThis, key); } });
+    const config = testConfig(c => { c.rooms.qualityIntervalMs = 0; c.rooms.controllerGraceMs = 60_000; });
+    const server = harness(config), host = await server.create('Synthetic original controller');
+    const sockets: Socket[] = [], elements: InstanceType<typeof StageElement>[] = [];
+    const validated: ClientMessage[] = [], incoming: ServerMessage[] = [], held: ServerMessage[] = [];
+    const sessions = new Map<Socket, Session>();
+    const closes: { socket: Socket; code: number | undefined }[] = [];
+    const peersStart = StagePeer.instances.length, contextsStart = StageContext.instances.length, tracksStart = tracks.length;
+    let serverWork = Promise.resolve(), sequence = 0, holdCloseAck = false, holdSnapshots = false, holdDeltas = false;
+    const heldDeltas: ServerMessage[] = [];
+    let beforeClose: (() => Promise<void>) | undefined;
+    const heldSnapshots: ServerMessage[] = [];
+    class Socket {
+      static OPEN = 1;
+      readyState = 1;
+      onmessage: ((event: { data: string }) => void) | null = null;
+      onclose: (() => void) | null = null;
+      constructor() {
+        sockets.push(this);
+        const session: Session = { id: `widget-close-${++sequence}`,
+          send: message => {
+            incoming.push(message);
+            if (holdDeltas && (message.type === 'role:update' || message.type === 'control:transferred')) { heldDeltas.push(message); return; }
+            if (holdCloseAck && message.type === 'ok' && validated.some(request => request.type === 'room:close' && request.requestId === message.requestId)) { held.push(message); return; }
+            if (holdSnapshots && message.type === 'room:state') { heldSnapshots.push(message); return; }
+            if (this.readyState === Socket.OPEN) this.deliver(message);
+          },
+          close: code => this.close(code),
+        };
+        sessions.set(this, session);
+        queueMicrotask(() => server.hub.attach(session));
+      }
+      send(data: string) {
+        assert.equal(this.readyState, Socket.OPEN);
+        const message = parseClientMessage(data, config.limits), session = sessions.get(this)!;
+        validated.push(message);
+        serverWork = serverWork.then(async () => { if (message.type === 'room:close') await beforeClose?.(); await server.hub.handle(session, message); });
+      }
+      deliver(message: ServerMessage) { this.onmessage?.({ data: JSON.stringify(message) }); }
+      close(code?: number) {
+        if (this.readyState === 3) return;
+        closes.push({ socket: this, code }); this.readyState = 3; this.onclose?.();
+        const session = sessions.get(this)!;
+        serverWork = serverWork.then(() => server.hub.detach(session, code === 1000));
+      }
+    }
+    const oldSocket = Object.getOwnPropertyDescriptor(globalThis, 'WebSocket');
+    Object.defineProperty(globalThis, 'WebSocket', { configurable: true, value: Socket });
+    t.mock.timers.enable({ apis: ['setTimeout', 'setInterval'] });
+    let now = 1000; t.mock.method(performance, 'now', () => now);
+    const tick = async (ms = 200) => { now += ms; t.mock.timers.tick(ms); await settle(); await serverWork; await settle(); };
+    const drain = async () => { for (let n = 0; n < 8; n++) await tick(); };
+    const flushStates = async () => {
+      for (const timer of server.timers) if (!timer.cleared && (timer.ms === 0 || timer.ms === config.rooms.presenceBroadcastMs)) { timer.cleared = true; timer.fn(); }
+      await nextTurn(); await settle();
+    };
+    const mount = async (name: string) => {
+      const element = new StageElement(); elements.push(element); Object.assign(element, { isConnected: false });
+      element.setAttribute('url', 'wss://synthetic.invalid/ws'); element.setAttribute('room', host.roomId); element.setAttribute('code', host.code); element.setAttribute('name', name);
+      Object.assign(element, { isConnected: true }); element.connectedCallback(); await settle(); await drain();
+      assert.ok(element.client?.me, 'actual widget joined through actual SDK and Hub'); return element;
+    };
+    t.after(async () => {
+      for (const element of elements) { Object.assign(element, { isConnected: false }); element.disconnectedCallback(); }
+      await settle(); await serverWork; await server.hub.shutdown(); await server.transport.close(); await settle();
+      if (oldSocket) Object.defineProperty(globalThis, 'WebSocket', oldSocket); else Reflect.deleteProperty(globalThis, 'WebSocket');
+    });
+    const element = await mount('Synthetic widget controller'), client = element.client!, socket = sockets[0]!, session = sessions.get(socket)!, pid = client.me!.participantId;
+    if (asController) { assert.equal(await server.req(host.s, { type: 'control:transfer', targetId: pid }), 'ok'); await drain(); assert.equal(client.me!.role, 'controller'); }
+    if (onStage) {
+      const work = asController ? client.returnToStage() : client.raiseHand(); await drain(); await work;
+      if (!asController) { assert.equal(await server.req(host.s, { type: 'stage:approve', targetId: pid }), 'ok'); await drain(); }
+      assert.equal(client.me!.onStage, true);
+    }
+    return { config, server, host, sockets, sessions, closes, validated, incoming, held, heldSnapshots, heldDeltas, peersStart, contextsStart, tracksStart, tracks,
+      element, client, socket, session, pid, tick, drain, flushStates, mount,
+      holdAck: () => { holdCloseAck = true; }, beforeClose: (fn: () => Promise<void>) => { beforeClose = fn; },
+      holdSnapshots: () => { holdSnapshots = true; }, holdDeltas: () => { holdDeltas = true; },
+    };
+  }
+
+  for (const onStage of [false, true]) it(`widget Leave onStage=${onStage} keeps controller grace, live guests and later succession without room:close`, async t => {
+    const f = await hubCloseWidget(t, onStage), guest = await f.mount('Synthetic guest'), guestSession = f.sessions.get(f.sockets.at(-1)!)!;
+    click(f.element['roomAction']); await f.drain(); await f.flushStates();
+    assert.equal(f.closes.find(close => close.socket === f.socket)?.code, 1000);
+    assert.equal(f.element.client, null); assert.equal(f.client.status, 'disconnected');
+    assert.equal(f.element['status'].textContent, '已離開房間。'); assert.equal(f.element['roomAction'].textContent, '重新加入');
+    assert.equal(f.validated.some(message => message.type === 'room:close'), false);
+    assert.equal(f.server.hub.roomCount, 1); assert.equal(f.server.transport.rooms.has(f.host.roomId), true);
+    assert.equal(f.server.hub.isJoined(guestSession), true); assert.equal(guest.client!.state!.controllerId, f.pid);
+    assert.notEqual(guest.client!.status, 'disconnected'); assert.equal(f.incoming.some(message => message.type === 'room:closed'), false);
+    const late = await f.server.join(f.host.roomId, f.host.code, 'Synthetic late join'); assert.ok(late.id);
+    const grace = f.server.timers.find(timer => !timer.cleared && timer.ms === f.config.rooms.controllerGraceMs); assert.ok(grace);
+    grace.cleared = true; grace.fn(); await nextTurn(); await f.flushStates();
+    assert.equal(f.server.hub.roomCount, 1); assert.notEqual(guest.client!.state!.controllerId, f.pid);
+    assert.equal(f.incoming.some(message => message.type === 'room:closed'), false);
+  });
+
+  it('ordinary audience Leave immediately removes only its own seat and leaves the room joinable', async t => {
+    const f = await hubCloseWidget(t, false, false); click(f.element['roomAction']); await f.drain(); await f.flushStates();
+    assert.equal(f.server.hub.isJoined(f.session), false); assert.equal(f.server.hub.isJoined(f.host.s), true);
+    assert.equal(f.host.s.last('room:state')!.audience!.some(person => person.participantId === f.pid), false);
+    assert.equal(f.server.hub.roomCount, 1); assert.equal(f.validated.some(message => message.type === 'room:close'), false);
+  });
+
+  for (const onStage of [false, true]) it(`confirmed widget button onStage=${onStage} closes all seats/media, unlike Leave`, async t => {
+    const f = await hubCloseWidget(t, onStage), guest = await f.mount('Synthetic guest'), guestSession = f.sessions.get(f.sockets.at(-1)!)!;
+    const closed: unknown[] = []; f.element.addEventListener('stage-closed', event => closed.push((event as CustomEvent).detail));
+    t.mock.method(window, 'confirm', () => true); click(f.element['roomClose']); await f.drain();
+    assert.deepEqual(f.validated.filter(message => message.type === 'room:close').map(message => Object.keys(message).sort()), [['requestId', 'type']]);
+    assert.equal(f.server.hub.roomCount, 0); assert.equal(f.server.transport.rooms.has(f.host.roomId), false);
+    for (const session of [f.session, guestSession, f.host.s]) assert.equal(f.server.hub.isJoined(session), false);
+    assert.equal(f.client.me, null); assert.equal(guest.client!.me, null); assert.equal(f.client.status, 'disconnected');
+    assert.equal(f.element['status'].textContent, '房間已關閉。'); assert.equal(guest['status'].textContent, '房間已關閉。');
+    assert.equal(f.element['roomAction'].hidden, true); assert.deepEqual(closed, [{ roomId: f.host.roomId }]);
+    assert.ok(f.server.timers.every(timer => timer.cleared));
+    assert.ok(StagePeer.instances.length > f.peersStart);
+    if (onStage) { assert.ok(f.tracks.length > f.tracksStart); assert.ok(StageContext.instances.length > f.contextsStart); }
+    assert.ok(StagePeer.instances.slice(f.peersStart).every(peer => peer.connectionState === 'closed'));
+    assert.ok(StageContext.instances.slice(f.contextsStart).every(context => context.closes > 0));
+    assert.ok(f.tracks.slice(f.tracksStart).every(track => track.stopped));
+    const late = new FakeSession(); f.server.hub.attach(late);
+    assert.equal(await f.server.req(late, { type: 'join', roomId: f.host.roomId, code: f.host.code, name: 'Cannot rejoin closed room' }), 'unauthorized');
+  });
+
+  for (const onStage of [false, true]) it(`Hub rejects actual widget ${onStage ? 'speaker' : 'audience'} SDK closure without affecting room`, async t => {
+    const f = await hubCloseWidget(t, onStage, false), dialog = t.mock.method(window, 'confirm', () => true);
+    assert.equal(f.element['roomClose'].hidden, true); assert.equal(f.element['roomClose'].disabled, true);
+    click(f.element['roomClose']); await f.drain(); assert.equal(dialog.mock.callCount(), 0);
+    assert.equal(f.validated.some(message => message.type === 'room:close'), false);
+    const result = f.client.closeRoom().then(() => 'ok', error => error.code);
+    await f.drain(); assert.equal(await result, 'forbidden'); assert.equal(f.server.hub.roomCount, 1);
+    assert.equal(f.server.hub.isJoined(f.session), true); assert.equal(f.incoming.some(message => message.type === 'room:closed'), false);
+    assert.equal(f.element['error'].hidden, false);
+  });
+
+  it('terminal before withheld ACK rejects local close promise but complete widget shows terminal result and never retries', async t => {
+    const f = await hubCloseWidget(t); f.holdAck();
+    t.mock.method(window, 'confirm', () => true); click(f.element['roomClose']); await f.drain();
+    assert.equal(f.held.length, 1); assert.equal(f.client['pending'].size, 0);
+    assert.equal(f.element['status'].textContent, '房間已關閉。'); assert.equal(f.element['error'].hidden, true);
+    for (const ack of f.held) f.socket.deliver(ack); await f.tick(30_000); await f.drain();
+    assert.equal(f.sockets.length, 1); assert.equal(f.validated.filter(message => message.type === 'room:close').length, 1);
+    assert.equal(f.element['status'].textContent, '房間已關閉。');
+  });
+
+  it('server authority wins if control is transferred after close is queued but before Hub executes it', async t => {
+    const f = await hubCloseWidget(t);
+    // Inject the competing authoritative request before the queued close executes.
+    f.beforeClose(async () => { await f.server.hub.handle(f.session, { type: 'control:transfer', requestId: 'competing-transfer', targetId: f.host.id }); });
+    t.mock.method(window, 'confirm', () => true); click(f.element['roomClose']); await f.drain();
+    assert.ok(f.incoming.some(message => message.type === 'error' && message.code === 'forbidden')); assert.notEqual(f.client.me!.role, 'controller'); assert.equal(f.server.hub.roomCount, 1);
+    assert.equal(f.incoming.some(message => message.type === 'room:closed'), false);
+  });
+
+  it('actual transfer notifications precede authoritative snapshot and expose stale controller getter to host callbacks', async t => {
+    const f = await hubCloseWidget(t), observed: { type: string; role: string | undefined }[] = [];
+    for (const type of ['stage-role', 'stage-transferred']) f.element.addEventListener(type, () => observed.push({ type, role: f.client.me?.role }));
+    f.holdSnapshots(); await f.server.hub.handle(f.session, { type: 'control:transfer', requestId: 'notify-before-state', targetId: f.host.id }); await f.drain();
+    assert.ok(observed.some(event => event.type === 'stage-transferred' && event.role === 'controller'));
+    assert.ok(f.heldSnapshots.length); assert.equal(f.client.me!.role, 'controller');
+    const result = f.client.closeRoom().then(() => 'ok', error => error.code); await f.drain(); assert.equal(await result, 'forbidden');
+    for (const state of f.heldSnapshots) f.socket.deliver(state); await settle(); assert.notEqual(f.client.me!.role, 'controller');
+  });
+
+  it('validator cannot use extra roomId, targetId or role fields to confer closure authority', async t => {
+    const f = await hubCloseWidget(t, false, false);
+    const request = parseClientMessage(JSON.stringify({ type: 'room:close', requestId: 'spoof-close', roomId: 'another-room', targetId: f.host.id, role: 'controller' }), f.config.limits);
+    assert.deepEqual(request, { type: 'room:close', requestId: 'spoof-close' });
+    await f.server.hub.handle(f.session, request); await settle();
+    assert.ok(f.incoming.some(message => message.type === 'error' && message.requestId === 'spoof-close' && message.code === 'forbidden'));
+    assert.equal(f.server.hub.roomCount, 1);
+  });
+
+  it('Leave opt-out survives widget attribute changes and unmount/remount until explicit rejoin', async t => {
+    const f = await hubCloseWidget(t); click(f.element['roomAction']); await f.drain();
+    f.element.setAttribute('name', 'New synthetic name'); f.element.setAttribute('code', f.host.code);
+    Object.assign(f.element, { isConnected: false }); f.element.disconnectedCallback();
+    Object.assign(f.element, { isConnected: true }); f.element.connectedCallback(); await f.drain();
+    assert.equal(f.sockets.length, 1); assert.equal(f.element.client, null); assert.equal(f.element['status'].textContent, '已離開房間。');
+    click(f.element['roomAction']); await f.drain(); assert.equal(f.sockets.length, 2); assert.ok(f.element.client!.me);
+    assert.equal(f.validated.some(message => message.type === 'room:close'), false);
+  });
+
 });

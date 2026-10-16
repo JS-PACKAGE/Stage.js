@@ -45,6 +45,7 @@ input[type=range] { flex: 1; min-width: 5rem; max-width: 12rem; }
 button { font: inherit; padding: .4rem .8rem; border-radius: var(--stage-radius, .5rem); border: 1px solid var(--stage-border, #8884); background: var(--stage-button-bg, #fff1); color: inherit; cursor: pointer; }
 button[hidden] { display: none; }
 button:disabled { opacity: .5; cursor: default; }
+button.danger { color: var(--stage-error, #dc2626); border-color: currentColor; }
 button.primary { background: var(--stage-accent, #2563eb); border-color: transparent; color: var(--stage-accent-fg, #fff); }
 `;
 
@@ -146,6 +147,18 @@ export class StageElement extends HTMLElement {
   private errorRevision = 0;
   private readonly leaveStage: HTMLButtonElement;
   private readonly roomAction: HTMLButtonElement;
+  private readonly roomClose: HTMLButtonElement;
+  private readonly roomCloseNotice: HTMLParagraphElement;
+  private readonly roomActions: HTMLDivElement;
+  private readonly widgetRoot: ShadowRoot;
+  private roomCloseOwner: { client: StageClient; roomId: string; participantId: string; generation: number; revision: number } | undefined;
+  private roomCloseAuthority: { client: StageClient; roomId: string; participantId: string; generation: number; revision: number; awaitingState: boolean } | undefined;
+  private roomCloseTerminalClient: StageClient | undefined;
+  private roomCloseAttempt: { owner: NonNullable<StageElement['roomCloseOwner']>; revision: number; invalid: boolean; errorRevision: number } | undefined;
+  private roomCloseRenderRevision = 0;
+  // Dialog scopes outlive retired owners, but never the synchronous admission stack.
+  private roomCloseDialog: object | undefined;
+  private readonly stageTransferDialogs = new Set<object>();
   private leftRoom = false;
   private roomExit: object | undefined;
   private readonly listen: HTMLButtonElement;
@@ -165,7 +178,7 @@ export class StageElement extends HTMLElement {
 
   constructor() {
     super();
-    const root = this.attachShadow({ mode: 'open' });
+    const root = this.widgetRoot = this.attachShadow({ mode: 'open' });
     const style = document.createElement('style');
     style.textContent = STYLE;
     const panel = document.createElement('div');
@@ -232,7 +245,7 @@ export class StageElement extends HTMLElement {
     this.stageManagementNotice = document.createElement('p');
     this.stageManagementList = document.createElement('ul');
     this.stageManagementPanel.append(this.stageManagementSummary, this.stageManagementNotice, this.stageManagementList);
-    const actions = document.createElement('div');
+    const actions = this.roomActions = document.createElement('div');
     actions.part.add('actions');
     this.unlock = document.createElement('button');
     this.unlock.type = 'button'; this.unlock.className = 'primary'; this.unlock.textContent = '啟用音訊';
@@ -309,6 +322,15 @@ export class StageElement extends HTMLElement {
     this.roomAction = document.createElement('button');
     this.roomAction.type = 'button';
     this.roomAction.onclick = () => this.changeRoomPresence();
+    this.roomClose = document.createElement('button');
+    this.roomClose.type = 'button'; this.roomClose.className = 'danger'; this.roomClose.textContent = '關閉房間';
+    this.roomClose.hidden = this.roomClose.disabled = true;
+    this.roomClose.setAttribute('aria-busy', 'false');
+    this.roomClose.setAttribute('aria-describedby', 'room-close-notice');
+    this.roomClose.onclick = () => this.closeRoom();
+    this.roomCloseNotice = document.createElement('p');
+    this.roomCloseNotice.id = 'room-close-notice'; this.roomCloseNotice.hidden = true;
+    this.roomCloseNotice.textContent = '關閉房間會讓所有人離場，且無法再加入此房間。離開房間只會讓你離場，房間可能保留並由其他人接任主控。';
     this.listen = this.button('靜音收聽', () => { this.playbackMuted = !this.playbackMuted; });
     this.listen.setAttribute('aria-label', '靜音收聽');
     this.playback = document.createElement('div');
@@ -330,8 +352,8 @@ export class StageElement extends HTMLElement {
     this.playback.append(volumeLabel, this.volume, this.volumeValue);
     this.retry = this.button('重試加入', () => { if (this.canRetry()) this.rejoin(); });
     this.cancelJoin = this.button('取消加入', () => this.cancelInitial?.());
-    actions.append(this.unlock, this.listen, this.hand, this.mic, this.micRetry, this.audioRetry, this.leaveStage, this.roomAction, this.retry, this.cancelJoin);
-    panel.append(this.status, this.quality, this.speaking, this.handRejection, this.error, this.errorDismiss, this.namePanel, this.roomNamePanel, this.handQueuePanel, this.stageManagementPanel, actions, this.audioRecovery, this.microphonePanel, this.outputDevicePanel, this.playback);
+    actions.append(this.unlock, this.listen, this.hand, this.mic, this.micRetry, this.audioRetry, this.leaveStage, this.roomAction, this.roomClose, this.retry, this.cancelJoin);
+    panel.append(this.status, this.quality, this.speaking, this.handRejection, this.error, this.errorDismiss, this.namePanel, this.roomNamePanel, this.handQueuePanel, this.stageManagementPanel, actions, this.roomCloseNotice, this.audioRecovery, this.microphonePanel, this.outputDevicePanel, this.playback);
     root.append(style, panel);
     this.render();
   }
@@ -421,6 +443,9 @@ export class StageElement extends HTMLElement {
       for (const type of EVENTS) {
         client.on(type, ({ detail }) => {
           if (generation !== this.generation || this.current !== client) return;
+          // Own-role deltas precede their snapshot. Fence both dialogs before any DOM setter can reenter.
+          this.noteRoomCloseEvent(type, detail);
+          this.noteStageTransferEvent(type, detail);
           if (type === 'closed' || type === 'kicked') this.microphoneTerminalClient = client;
           else if (type === 'state') this.microphoneTerminalClient = undefined;
           if (type === 'closed' || type === 'kicked') this.outputDeviceTerminalClient = client;
@@ -440,8 +465,8 @@ export class StageElement extends HTMLElement {
           if (type === 'state' || type === 'status' || type === 'closed' || type === 'kicked') this.syncNameOwner();
           if (type === 'state' || type === 'status' || type === 'closed' || type === 'kicked') this.syncRoomNameOwner();
           if (type === 'state' || type === 'status' || type === 'closed' || type === 'kicked') this.syncHandQueue();
-          this.noteStageTransferEvent(type, detail);
           this.syncStageManagement();
+          this.syncRoomClose();
           const ownId = client.me?.participantId;
           if (type === 'closed' || type === 'kicked'
             || (type === 'status' && (detail === 'reconnecting' || detail === 'disconnected'))
@@ -489,6 +514,7 @@ export class StageElement extends HTMLElement {
           this.syncMicrophoneOwner();
           this.syncOutputDeviceOwner();
           this.syncStageManagement();
+          this.syncRoomClose();
           this.syncHandRejection();
           this.syncAudioRecovery();
           if (type === 'state' || type === 'status' || type === 'mic' || type === 'closed' || type === 'kicked') this.render();
@@ -543,6 +569,8 @@ export class StageElement extends HTMLElement {
   }
 
   private async leave(): Promise<void> {
+    this.retireRoomClose();
+    this.roomCloseAuthority = undefined; this.roomCloseTerminalClient = undefined;
     this.joinPhase = undefined;
     this.micFailure = undefined;
     this.microphoneTerminalClient = undefined;
@@ -570,6 +598,133 @@ export class StageElement extends HTMLElement {
     this.unlock.hidden = true;
     this.render();
     await client?.disconnect();
+  }
+
+  private retireRoomClose(): void {
+    if (this.roomCloseAttempt) this.roomCloseAttempt.invalid = true;
+    this.roomCloseOwner = undefined; this.roomCloseAttempt = undefined;
+  }
+
+  private noteRoomCloseEvent(type: keyof StageEventMap, detail: StageEventMap[keyof StageEventMap]): void {
+    const client = this.current, state = client?.state, me = client?.me;
+    if (type === 'closed' || type === 'kicked' || (type === 'status' && detail === 'disconnected')) {
+      this.roomCloseTerminalClient = client ?? undefined; this.retireRoomClose(); return;
+    }
+    if (type === 'state') {
+      this.roomCloseTerminalClient = undefined;
+      if (this.roomCloseAuthority) this.roomCloseAuthority.awaitingState = false;
+    }
+    const role = type === 'role' ? detail as StageEventMap['role'] : undefined;
+    const transfer = type === 'transferred' ? detail as StageEventMap['transferred'] : undefined;
+    if (client && state && me && ((role && role.participantId === me.participantId && role.role !== 'controller')
+      || (transfer && transfer.fromId === me.participantId && transfer.toId !== me.participantId))) {
+      const previous = this.roomCloseAuthority;
+      this.roomCloseAuthority = { client, roomId: state.roomId, participantId: me.participantId, generation: this.generation,
+        revision: (previous?.revision ?? 0) + 1, awaitingState: true };
+      this.retireRoomClose();
+    }
+    if (type === 'status' && detail === 'reconnecting' && this.roomCloseAttempt) this.roomCloseAttempt.invalid = true;
+    this.reconcileRoomClose();
+  }
+
+  private roomCloseMounted(): boolean {
+    return this.isConnected && this.roomClose.isConnected && this.widgetRoot.contains(this.roomActions)
+      && this.roomActions.contains(this.roomClose);
+  }
+
+  private canCloseRoom(): boolean {
+    const owner = this.roomCloseOwner, client = owner?.client;
+    return Boolean(owner && client && this.current === client && this.generation === owner.generation
+      && client.state?.roomId === owner.roomId && client.me?.participantId === owner.participantId
+      && client.me?.role === 'controller' && client.me.connected === true
+      && (client.status === 'waiting' || client.status === 'live') && this.roomCloseTerminalClient !== client
+      && !this.roomCloseAuthority?.awaitingState && this.roomCloseAuthority?.revision === owner.revision
+      && typeof client.closeRoom === 'function' && typeof window.confirm === 'function' && this.roomCloseMounted());
+  }
+
+  private reconcileRoomClose(): void {
+    const client = this.current, state = client?.state, me = client?.me;
+    const active = client?.status === 'waiting' || client?.status === 'live';
+    const authority = this.roomCloseAuthority;
+    if (authority && (authority.client !== client || authority.generation !== this.generation
+      || authority.roomId !== state?.roomId || authority.participantId !== me?.participantId)) this.roomCloseAuthority = undefined;
+    if (!this.isConnected || !client || !state || me?.role !== 'controller' || this.roomCloseTerminalClient === client
+      || (!active && client.status !== 'reconnecting') || typeof client.closeRoom !== 'function' || this.roomCloseAuthority?.awaitingState) {
+      this.retireRoomClose();
+    } else {
+      const owner = this.roomCloseOwner;
+      if (!owner || owner.client !== client || owner.generation !== this.generation
+        || owner.roomId !== state.roomId || owner.participantId !== me.participantId) {
+        this.retireRoomClose();
+        // Reconnect can retain a controller tenure, but cannot establish consent for a new one.
+        if (active && me.connected) {
+          this.roomCloseAuthority ??= { client, roomId: state.roomId, participantId: me.participantId,
+            generation: this.generation, revision: 0, awaitingState: false };
+          this.roomCloseOwner = { client, roomId: state.roomId, participantId: me.participantId,
+            generation: this.generation, revision: this.roomCloseAuthority.revision };
+        }
+      }
+    }
+    if (this.roomCloseAttempt && !this.canCloseRoom()) this.roomCloseAttempt.invalid = true;
+  }
+
+  private syncRoomClose(): void {
+    this.reconcileRoomClose();
+    const owner = this.roomCloseOwner, attempt = this.roomCloseAttempt, revision = ++this.roomCloseRenderRevision;
+    const allowed = this.canCloseRoom(), hidden = !owner, disabled = !allowed || Boolean(attempt), busy = String(Boolean(attempt));
+    const current = (): boolean => {
+      if (revision !== this.roomCloseRenderRevision) return false;
+      // A host setter can change the exposed snapshot or detach a control without rendering.
+      this.reconcileRoomClose();
+      if (this.roomCloseOwner !== owner || this.roomCloseAttempt !== attempt || this.canCloseRoom() !== allowed) {
+        this.syncRoomClose(); return false;
+      }
+      return true;
+    };
+    if (this.roomClose.hidden !== hidden) this.roomClose.hidden = hidden;
+    if (!current()) return;
+    if (this.roomClose.disabled !== disabled) this.roomClose.disabled = disabled;
+    if (!current()) return;
+    if (this.roomClose.getAttribute('aria-busy') !== busy) this.roomClose.setAttribute('aria-busy', busy);
+    if (!current()) return;
+    if (this.roomCloseNotice.hidden !== hidden) this.roomCloseNotice.hidden = hidden;
+    current();
+  }
+
+  private closeRoom(): void {
+    if (this.roomCloseDialog || this.stageTransferDialogs.size) return;
+    const dialog = this.roomCloseDialog = {};
+    let owner: StageElement['roomCloseOwner'], attempt: StageElement['roomCloseAttempt'];
+    const owns = (): boolean => Boolean(owner && attempt && this.roomCloseOwner === owner && this.roomCloseAttempt === attempt);
+    const eligible = (): boolean => owns() && !attempt!.invalid && attempt!.revision === owner!.revision && this.canCloseRoom();
+    const releaseDialog = (): void => { if (this.roomCloseDialog === dialog) this.roomCloseDialog = undefined; };
+    void (async () => {
+      try {
+        this.reconcileRoomClose(); owner = this.roomCloseOwner;
+        if (!owner || this.roomCloseAttempt || !this.canCloseRoom()) { this.syncRoomClose(); return; }
+        attempt = this.roomCloseAttempt = { owner, revision: owner.revision, invalid: false, errorRevision: this.errorRevision };
+        this.syncRoomClose();
+        if (!eligible()) return;
+        if (!window.confirm('確定關閉此房間並讓所有人離場？關閉後無法再加入此房間。')) return;
+        this.syncRoomClose();
+        if (!eligible()) return;
+        const result = owner.client.closeRoom();
+        releaseDialog();
+        // ACK is not terminal truth: only the SDK's closed/kicked lifecycle changes room presence.
+        await result;
+      } catch (error) {
+        if (owns()) {
+          try { this.syncRoomClose(); } catch { /* A failed DOM write can be reconciled on the next action. */ }
+          if (eligible() && this.errorRevision === attempt!.errorRevision) this.show(error);
+        }
+      } finally {
+        releaseDialog();
+        if (owns()) {
+          this.roomCloseAttempt = undefined;
+          try { this.syncRoomClose(); } catch { /* Release the exact token even if a host setter throws. */ }
+        }
+      }
+    })();
   }
 
   private retireQualityOwner(): void {
@@ -997,7 +1152,17 @@ export class StageElement extends HTMLElement {
   private noteStageTransferEvent(type: keyof StageEventMap, detail: StageEventMap[keyof StageEventMap]): void {
     const owner = this.stageManagementOwner;
     if (!owner) return;
-    if (type === 'state') { owner.transferAwaitingState = false; return; }
+    if (type === 'status' && (detail === 'reconnecting' || detail === 'disconnected') && this.stageTransferAttempt) this.stageTransferAttempt.invalid = true;
+    const client = this.current, state = client?.state, me = client?.me;
+    const sameController = owner.client === client && owner.generation === this.generation
+      && state?.roomId === owner.roomId && me?.participantId === owner.participantId
+      && me.role === 'controller' && me.connected === true;
+    // A replacement snapshot can emit status before state; observe its own-seat loss before DOM sync.
+    if (!sameController) {
+      owner.transferRevision++; owner.transferAwaitingState = true;
+      if (this.stageTransferAttempt) this.stageTransferAttempt.invalid = true;
+    }
+    if (type === 'state') { owner.transferAwaitingState = !sameController; return; }
     const role = type === 'role' ? detail as StageEventMap['role'] : undefined;
     const left = type === 'stageleft' ? detail as StageEventMap['stageleft'] : undefined;
     const transferred = type === 'transferred' ? detail as StageEventMap['transferred'] : undefined;
@@ -1022,30 +1187,39 @@ export class StageElement extends HTMLElement {
   }
 
   private transferStageControl(id: string, node: HTMLLIElement): void {
-    this.syncStageManagement();
-    const owner = this.stageManagementOwner;
-    if (!owner || this.stageTransferAttempt || !this.canTransferStage(id, node)) return;
-    const attempt = { id, node, revision: owner.transferRevision, invalid: false };
-    this.stageTransferAttempt = attempt; this.syncStageManagement();
-    const current = (): boolean => {
-      if (this.stageManagementOwner !== owner || this.stageTransferAttempt !== attempt) return false;
+    const dialog = {};
+    this.stageTransferDialogs.add(dialog);
+    const releaseDialog = (): void => { this.stageTransferDialogs.delete(dialog); };
+    try {
+      // Reconcile even when a close dialog excludes this admission.
       this.syncStageManagement();
-      return this.stageManagementOwner === owner && this.stageTransferAttempt === attempt;
-    };
-    const eligible = (): boolean => current() && !attempt.invalid && owner.transferRevision === attempt.revision && this.canTransferStage(id, node);
-    void (async () => {
-      try {
-        if (!eligible()) return;
-        const target = owner.client.state!.speakers.find(person => person.participantId === id && person.role === 'speaker' && person.onStage)!;
-        if (!window.confirm(`確定將控制權移交給 ${decodeName(target.name)}？你將失去主控權限，但保留目前台位並留在房間。`) || !eligible()) return;
-        this.hideError();
-        await owner.client.transferControl(id);
-      } catch (error) {
-        if (current() && !attempt.invalid && this.stageManagementRows.get(id)?.node === node) this.show(error);
-      } finally {
-        if (current()) { this.stageTransferAttempt = undefined; this.syncStageManagement(); }
-      }
-    })();
+      const owner = this.stageManagementOwner;
+      if (this.roomCloseDialog || !owner || this.stageTransferAttempt || !this.canTransferStage(id, node)) { releaseDialog(); return; }
+      const attempt = { id, node, revision: owner.transferRevision, invalid: false };
+      this.stageTransferAttempt = attempt; this.syncStageManagement();
+      const current = (): boolean => {
+        if (this.stageManagementOwner !== owner || this.stageTransferAttempt !== attempt) return false;
+        this.syncStageManagement();
+        return this.stageManagementOwner === owner && this.stageTransferAttempt === attempt;
+      };
+      const eligible = (): boolean => current() && !attempt.invalid && owner.transferRevision === attempt.revision && this.canTransferStage(id, node);
+      void (async () => {
+        try {
+          if (!eligible()) return;
+          const target = owner.client.state!.speakers.find(person => person.participantId === id && person.role === 'speaker' && person.onStage)!;
+          if (!window.confirm(`確定將控制權移交給 ${decodeName(target.name)}？你將失去主控權限，但保留目前台位並留在房間。`) || !eligible()) return;
+          this.hideError();
+          const result = owner.client.transferControl(id);
+          releaseDialog();
+          await result;
+        } catch (error) {
+          if (current() && !attempt.invalid && this.stageManagementRows.get(id)?.node === node) this.show(error);
+        } finally {
+          releaseDialog();
+          if (current()) { this.stageTransferAttempt = undefined; this.syncStageManagement(); }
+        }
+      })();
+    } catch (error) { releaseDialog(); throw error; }
   }
 
   private retireRoomNameOwner(): void {
@@ -1536,6 +1710,7 @@ export class StageElement extends HTMLElement {
     this.syncRoomNameOwner();
     this.syncHandQueue();
     this.syncStageManagement();
+    this.syncRoomClose();
     this.syncQualityOwner();
     this.syncSpeakingOwner();
     this.syncHandRejection();
