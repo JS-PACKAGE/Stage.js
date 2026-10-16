@@ -119,6 +119,7 @@ function createMicMeter(stream: MediaStream): MicTest {
     throw error;
   }
 }
+export interface StageClientEventOptions { once?: boolean; signal?: AbortSignal }
 export interface StageEventMap {
   state: RoomStatePayload;
   status: ClientStatus;
@@ -463,9 +464,10 @@ export class StageClient extends EventTarget {
   private audioConstraints(deviceId: string): MediaTrackConstraints {
     return { channelCount: 1, sampleRate: 48000, echoCancellation: true, noiseSuppression: true, autoGainControl: true, ...this.options.micConstraints, ...(deviceId ? { deviceId: { exact: deviceId } } : {}) };
   }
-  on<K extends keyof StageEventMap>(type: K, listener: (event: CustomEvent<StageEventMap[K]>) => void): () => void {
+  on<K extends keyof StageEventMap>(type: K, listener: (event: CustomEvent<StageEventMap[K]>) => void, options?: StageClientEventOptions): () => void {
     const handler = listener as EventListener;
-    this.addEventListener(type, handler);
+    // Keep native listener identity and false capture even with structurally wider options.
+    this.addEventListener(type, handler, { once: options?.once, signal: options?.signal });
     return () => this.removeEventListener(type, handler);
   }
   private emit<K extends keyof StageEventMap>(type: K, detail: StageEventMap[K]): void {

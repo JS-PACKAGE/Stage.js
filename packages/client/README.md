@@ -114,7 +114,19 @@ hello、內部 SDP／ICE 信令及自動回座不占用此上限，仍遵守原�
 
 ## 事件與狀態
 
-`state`、`me`、`status`、`speaking`（目前說話中的 participantId 集合）為即時 getters。`on(type, listener)` 回傳取消訂閱函式；事件也可透過 EventTarget 的 `addEventListener` 使用。事件：`state`、`status`、`created`、`closed`（`{roomId, reason?}`；`reason: 'shutdown'` 表示伺服器停止或重啟，而非主控關房）、`kicked`（被主控踢出；已斷線且不會自動重連）、`hand`、`invite`、`stagejoined`、`stageleft`、`transferred`、`mic`、`role`、`speaking`（說話中集合；伺服器於成功建立／加入／恢復連線的 state 之後、ACK 之前先同步目前集合，之後隨集合變動更新）、`quality`（主控與台上者每隔數秒收到所有上行者的 `{participantId, uplinkLossPercent?, downlinkLossPercent?, rttMs?}`）、`error`、`micerror`、`micready`、`audioblocked`。`quality` 是本輪完整集合；伺服器既有品質輪次完成時若已無發布者，會送空陣列供清除舊資料，之後停止排程。仍有發布者但統計全部失敗／缺失時不因此送空陣列。清空不增加 timer 或 timeout，未完成的統計請求仍可能延後事件；關房或停用品質回報不另發此事件。狀態為 waiting/live/reconnecting/disconnected。名稱先用 `decodeName()` 還原伺服器的五種 HTML entities，再以 `textContent` 顯示，勿使用 innerHTML。
+`state`、`me`、`status`、`speaking`（目前說話中的 participantId 集合）為即時 getters。`on(type, listener, options?)` 回傳取消訂閱函式；事件也可透過 EventTarget 的 `addEventListener` 使用。事件：`state`、`status`、`created`、`closed`（`{roomId, reason?}`；`reason: 'shutdown'` 表示伺服器停止或重啟，而非主控關房）、`kicked`（被主控踢出；已斷線且不會自動重連）、`hand`、`invite`、`stagejoined`、`stageleft`、`transferred`、`mic`、`role`、`speaking`（說話中集合；伺服器於成功建立／加入／恢復連線的 state 之後、ACK 之前先同步目前集合，之後隨集合變動更新）、`quality`（主控與台上者每隔數秒收到所有上行者的 `{participantId, uplinkLossPercent?, downlinkLossPercent?, rttMs?}`）、`error`、`micerror`、`micready`、`audioblocked`。`quality` 是本輪完整集合；伺服器既有品質輪次完成時若已無發布者，會送空陣列供清除舊資料，之後停止排程。仍有發布者但統計全部失敗／缺失時不因此送空陣列。清空不增加 timer 或 timeout，未完成的統計請求仍可能延後事件；關房或停用品質回報不另發此事件。狀態為 waiting/live/reconnecting/disconnected。名稱先用 `decodeName()` 還原伺服器的五種 HTML entities，再以 `textContent` 顯示，勿使用 innerHTML。
+
+`on` 的第三個參數可用公開型別 `StageClientEventOptions` 指定 `once?: boolean` 與 `signal?: AbortSignal`，同時保留事件 `detail` 的型別推論：
+
+```ts
+const controller = new AbortController();
+const off = client.on('state', ({ detail }) => {
+  console.log(detail.roomId);
+}, { once: true, signal: controller.signal });
+// off() 或 controller.abort() 可解除尚未觸發的訂閱。
+```
+
+`once` 沿用原生 EventTarget，在第一次回呼前移除；已 abort 的 signal 不啟用訂閱。取消訂閱與 abort 只影響監聽，不取消進房、控制請求、媒體或已開始執行的回呼。省略 options 的兩參數呼叫保持原行為。只轉交 once/signal；即使傳入結構上較寬的物件，也不轉交 capture/passive，回傳的取消函式固定對應非 capture 監聽。相同事件與相同 callback 沿用宿主原生 EventTarget 的註冊身分／去重規則，不是彼此獨立的訂閱；多次註冊搭配不同 signal 的細節依執行環境，不保證 Node 與所有瀏覽器一致。需要其他原生選項仍可用 addEventListener。受控 Node／型別驗證不等於原生瀏覽器或音訊驗收。
 
 舉手／收回的 `hand` 事件保持伺服器順序。`raiseHand()`／`withdrawHand()` 成功時，發起者已收到更新後的自身狀態；其他人的完整 `state` 可在下一輪事件迴圈合併送達，請以 `state` 事件讀取最新完整排隊名單，不假設每個 `hand` 事件各有一份緊接的完整快照。
 

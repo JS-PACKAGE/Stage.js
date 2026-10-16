@@ -313,6 +313,8 @@ Web Component 的目前主控另有獨立「關閉房間」，台上與台下皆
 
 SDK 的應用層 keepalive 會與控制請求共用送出間隔，避免合法低限速（例如 `limits.controlPerSecond: 1`）下定期 ping 和自身操作相撞而被伺服器 1008 斷線。已有保留送出時段時省略該輪 ping，空閒才先保留控制間隔再送；正常回覆維持連線存活，完全無回覆的靜默期限仍優先檢查。不更動伺服器限流、ICE 排程或請求容量／ACK 期限。預設每秒 20 次的對照未重現此碰撞；驗證限本機真實 WebSocket／SDK 與受控或原生 timer，不宣稱原生瀏覽器或實體音訊驗收。
 
+SDK 的 typed `client.on(type, listener, options?)` 可選 `{ once, signal }`，方便一次性監聽或以 AbortController 解除訂閱，同時保留事件 detail 型別與原本回傳的取消函式。它沿用原生 EventTarget 的 callback 身分，不包裝成獨立訂閱；取消只停止監聽，不取消請求、媒體或已執行的回呼。兩參數呼叫保持相容，其他原生選項仍用 addEventListener。
+
 完整 API 見 [`packages/client/README.md`](packages/client/README.md)；`web/embed.html` 是最小嵌入範例。
 
 完整範例的「複製邀請連結」在開始前也會核對目前房間、本人主控身分、有效邀請連結與當前按鈕／輸入欄位；舊畫面保留的 handler 或同步 state 回呼內的過期按鈕，不會提交舊連結或取代新複製工作的結果順位。這是受控程式化／同步重入邊界的防護，不表示一般實體點擊會插入同步狀態派發。有效同房重連仍可複製，同一有效連結的重畫與已開始複製的既有完成規則不變；不撤銷已交給瀏覽器的剪貼簿寫入。原生剪貼簿、焦點／鍵盤與 AT 尚未驗收。
