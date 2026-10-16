@@ -13902,3 +13902,175 @@ describe('widget manual own connection statistics', () => {
     });
   }
 });
+
+describe('widget stats preserves observed consent loss', () => {
+  type Widget = InstanceType<typeof StageElement>;
+  type Action = 'close' | 'transfer';
+  type Loss = 'status' | 'roomId' | 'participantId';
+  type Entry = Record<string, unknown>;
+  const report = (timestamp = 1000) => new Map<string, Entry>([
+    ['in', { id: 'in', type: 'inbound-rtp', kind: 'audio', timestamp, bytesReceived: timestamp,
+      packetsReceived: timestamp / 10, packetsLost: 2, jitterBufferDelay: 2, jitterBufferEmittedCount: 100 }],
+    ['pair', { id: 'pair', type: 'candidate-pair', state: 'succeeded', nominated: true, currentRoundTripTime: .157 }],
+  ]) as unknown as RTCStatsReport;
+  const token = (element: Widget, action: Action) => action === 'close' ? element['roomCloseAttempt'] : element['stageTransferAttempt'];
+  const button = (element: Widget, action: Action) => action === 'close' ? element['roomClose'] : element['stageManagementRows'].get('target')!.transfer;
+  const refresh = (element: Widget) => click(element['connectionStatsUpdate']);
+  function pending<T>() {
+    let resolve!: (value: T) => void, reject!: (error: unknown) => void;
+    const promise = new Promise<T>((yes, no) => { resolve = yes; reject = no; }); return { promise, resolve, reject };
+  }
+  async function joined(t: TestContext) {
+    const f = await subscribedWidget(t), room = roomState(true);
+    room.me.role = 'controller'; room.controllerId = 'me';
+    room.speakers = [{ ...room.me }, { ...room.me, participantId: 'target', name: 'Speaker', role: 'speaker' }];
+    await f.client['receive']({ type: 'room:state', ...room });
+    return { ...f, room };
+  }
+  function accessor(t: TestContext, target: object, property: string, get: () => unknown) {
+    const descriptor = Object.getOwnPropertyDescriptor(target, property);
+    Object.defineProperty(target, property, { configurable: true, get });
+    t.after(() => { if (descriptor) Object.defineProperty(target, property, descriptor); else Reflect.deleteProperty(target, property); });
+  }
+  const boundary = (client: StageClient, loss: Loss) => loss === 'status' ? client : loss === 'roomId' ? client.state! : client.me!;
+
+  for (const action of ['close', 'transfer'] as const) for (const loss of ['status', 'roomId', 'participantId'] as const)
+    for (const readAt of [1, 2]) for (const throws of [false, true]) {
+      it(`${action} consumes ${loss} ${throws ? 'throw' : 'loss'} on identity read ${readAt} before restoration or a stats request`, async t => {
+        const { element, client } = await joined(t), target = boundary(client, loss), good = Reflect.get(target, loss);
+        let armed = false, gets = 0, observations = 0, nextReadInvalid: boolean | undefined, nativeReads = 0;
+        let old: ReturnType<typeof token>;
+        client['pc'] = { close() {}, getStats: async () => { nativeReads++; return report(); } } as unknown as RTCPeerConnection;
+        accessor(t, target, loss, () => {
+          if (armed) {
+            gets++;
+            if (gets === readAt + 1) nextReadInvalid = old?.invalid;
+            if (gets === readAt) { observations++; if (throws) throw new Error('private identity getter'); return loss === 'status' ? 'reconnecting' : 'different'; }
+          }
+          return good;
+        });
+        accessor(t, client, 'getStats', () => { armed = true; return StageClient.prototype.getStats; });
+        const send = t.mock.method(client, action === 'close' ? 'closeRoom' : 'transferControl', async () => {});
+        t.mock.method(window, 'confirm', () => {
+          old = token(element, action); assert.ok(old); assert.equal(old.invalid, false);
+          refresh(element); assert.equal(old.invalid, true); return true;
+        });
+        click(button(element, action)); await settle();
+        assert.equal(observations, 1); assert.ok(gets > readAt); assert.equal(nextReadInvalid, true);
+        assert.equal(old?.invalid, true); assert.equal(send.mock.callCount(), 0); assert.equal(nativeReads, 0);
+        assert.equal(element['connectionStatsAttempt'], undefined); assert.equal(element['connectionStatsPanel'].hidden, false);
+        assert.doesNotMatch(element['connectionStatsText'].textContent!, /private|失敗/);
+      });
+    }
+
+  for (const action of ['close', 'transfer'] as const) {
+    it(`valid ${action} consent survives a complete actual SDK stats read without media or extra control work`, async t => {
+      const { element, client } = await joined(t); let nativeReads = 0, old: ReturnType<typeof token>;
+      client['pc'] = { close() {}, getStats: async () => { nativeReads++; return report(); } } as unknown as RTCPeerConnection;
+      const send = t.mock.method(client, action === 'close' ? 'closeRoom' : 'transferControl', async () => {});
+      const request = t.mock.method(client as unknown as { request(): never }, 'request', () => assert.fail('no unrelated request'));
+      const capture = t.mock.method(client as unknown as { acquireMic(): never }, 'acquireMic', () => assert.fail('no capture'));
+      const negotiate = t.mock.method(client as unknown as { negotiate(): never }, 'negotiate', () => assert.fail('no negotiation'));
+      const play = t.mock.method(client['audio'], 'play'), pause = t.mock.method(client['audio'], 'pause');
+      const timeout = t.mock.method(globalThis, 'setTimeout'), interval = t.mock.method(globalThis, 'setInterval');
+      t.mock.method(window, 'confirm', () => {
+        old = token(element, action); assert.ok(old); refresh(element);
+        assert.equal(token(element, action), old); assert.equal(old.invalid, false); return true;
+      });
+      click(button(element, action)); await settle(); await settle();
+      assert.equal(send.mock.callCount(), 1); assert.equal(nativeReads, 1); assert.equal(old?.invalid, false);
+      assert.match(element['connectionStatsText'].textContent!, /157 ms/);
+      for (const spy of [request, capture, negotiate, play, pause, timeout, interval]) assert.equal(spy.mock.callCount(), 0);
+    });
+
+    for (const loss of ['status', 'roomId', 'participantId'] as const) {
+      it(`new ${action} consent admitted within an old ${loss} getter is not invalidated by its stale return`, async t => {
+        const { element, client } = await joined(t), target = boundary(client, loss), good = Reflect.get(target, loss), actionResult = deferred();
+        let armed = true, fresh: ReturnType<typeof token>, nativeReads = 0;
+        client['pc'] = { close() {}, getStats: async () => { nativeReads++; return report(); } } as unknown as RTCPeerConnection;
+        const send = t.mock.method(client, action === 'close' ? 'closeRoom' : 'transferControl', () => actionResult.promise);
+        t.mock.method(window, 'confirm', () => { fresh = token(element, action); assert.ok(fresh); return true; });
+        accessor(t, target, loss, () => {
+          if (!armed) return good; armed = false; click(button(element, action));
+          return loss === 'status' ? 'reconnecting' : 'different';
+        });
+        refresh(element); await settle(); await settle();
+        assert.equal(send.mock.callCount(), 1); assert.equal(nativeReads, 1);
+        assert.ok(fresh); assert.equal(fresh.invalid, false); assert.equal(token(element, action), fresh);
+        actionResult.reject(new Error('New valid action failure')); await settle();
+        assert.match(element['error'].textContent!, /New valid action failure/);
+      });
+    }
+
+    for (const completion of ['resolve', 'reject'] as const) {
+      it(`old pending ${action} ${completion} cannot clear the valid token created by a genuine same-client entry during stats observation`, async t => {
+        const { element, client, room } = await joined(t), first = deferred(), second = deferred();
+        let sends = 0, armed = true, fresh: ReturnType<typeof token>;
+        t.mock.method(client, action === 'close' ? 'closeRoom' : 'transferControl', () => ++sends === 1 ? first.promise : second.promise);
+        t.mock.method(window, 'confirm', () => { fresh = token(element, action); return true; });
+        click(button(element, action)); const old = token(element, action); assert.ok(old);
+        const oldStats = element['connectionStatsOwner'];
+        const oldOwner = action === 'close' ? element['roomCloseOwner'] : element['stageManagementOwner'];
+        const status = Object.getOwnPropertyDescriptor(StageClient.prototype, 'status')!.get!;
+        accessor(t, client, 'status', () => {
+          if (!armed) return status.call(client); armed = false;
+          void client.disconnect(); assert.equal(client.state, null);
+          void client['receive']({ type: 'room:state', ...room });
+          assert.notEqual(element['connectionStatsOwner'], oldStats);
+          assert.notEqual(action === 'close' ? element['roomCloseOwner'] : element['stageManagementOwner'], oldOwner);
+          click(button(element, action)); return 'reconnecting';
+        });
+        refresh(element); await settle();
+        assert.equal(sends, 2); assert.equal(old.invalid, true); assert.ok(fresh); assert.notEqual(fresh, old);
+        assert.equal(token(element, action), fresh); assert.equal(fresh.invalid, false);
+        if (completion === 'resolve') first.resolve(); else first.reject(new Error('Private old failure'));
+        await settle(); assert.equal(token(element, action), fresh); assert.equal(fresh.invalid, false);
+        assert.doesNotMatch(element['error'].textContent!, /Private old failure/);
+        second.reject(new Error('Current entry failure')); await settle();
+        assert.match(element['error'].textContent!, /Current entry failure/);
+      });
+    }
+  }
+
+  for (const completion of ['resolve', 'reject'] as const) {
+    it(`observed stats retirement isolates the old native ${completion} and finally from a new pending read`, async t => {
+      const { element, client } = await joined(t), first = pending<RTCStatsReport>(), second = pending<RTCStatsReport>();
+      let nativeReads = 0, armed = true;
+      client['pc'] = { close() {}, getStats: () => ++nativeReads === 1 ? first.promise : second.promise } as unknown as RTCPeerConnection;
+      refresh(element); const old = element['connectionStatsAttempt']; assert.ok(old);
+      accessor(t, client, 'status', () => { if (!armed) return 'live'; armed = false; return 'reconnecting'; });
+      element['syncConnectionStats'](); assert.equal(element['connectionStatsAttempt'], undefined);
+      refresh(element); const fresh = element['connectionStatsAttempt']; assert.ok(fresh); assert.notEqual(fresh, old);
+      if (completion === 'resolve') first.resolve(report()); else first.reject(new Error('Private old stats failure'));
+      await settle(); await settle();
+      assert.equal(nativeReads, 2); assert.equal(element['connectionStatsAttempt'], fresh);
+      assert.equal(element['connectionStatsUpdate'].disabled, true); assert.equal(element['connectionStatsUpdate'].getAttribute('aria-busy'), 'true');
+      assert.equal(element['connectionStatsText'].textContent, '尚未手動讀取連線統計。');
+      second.resolve(report(2000)); await settle(); await settle();
+      assert.equal(element['connectionStatsAttempt'], undefined); assert.equal(element['connectionStatsUpdate'].disabled, false);
+      assert.match(element['connectionStatsText'].textContent!, /157 ms/);
+    });
+  }
+
+  for (const loss of ['status', 'roomId', 'participantId'] as const) {
+    it(`stale ${loss} returned after genuine reentry preserves its newer pending actual SDK read`, async t => {
+      const { element, client, room } = await joined(t), target = boundary(client, loss), good = Reflect.get(target, loss);
+      const result = pending<RTCStatsReport>(); let armed = true, nativeReads = 0;
+      let freshOwner: Widget['connectionStatsOwner'], freshAttempt: object | undefined;
+      accessor(t, target, loss, () => {
+        if (!armed) return good; armed = false;
+        void client.disconnect(); void client['receive']({ type: 'room:state', ...room });
+        client['pc'] = { close() {}, getStats: () => { nativeReads++; return result.promise; } } as unknown as RTCPeerConnection;
+        refresh(element); freshOwner = element['connectionStatsOwner']; freshAttempt = element['connectionStatsAttempt'];
+        assert.ok(freshOwner); assert.ok(freshAttempt); return loss === 'status' ? 'reconnecting' : 'different';
+      });
+      refresh(element); await settle();
+      assert.equal(nativeReads, 1); assert.equal(element['connectionStatsOwner'], freshOwner);
+      assert.equal(element['connectionStatsAttempt'], freshAttempt); assert.equal(element['connectionStatsUpdate'].getAttribute('aria-busy'), 'true');
+      result.resolve(report()); await settle(); await settle();
+      assert.match(element['connectionStatsText'].textContent!, /157 ms/);
+      assert.equal(element['connectionStatsUpdate'].getAttribute('aria-busy'), 'false');
+    });
+  }
+
+});

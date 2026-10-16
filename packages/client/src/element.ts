@@ -874,15 +874,40 @@ export class StageElement extends HTMLElement {
       && this.connectionStatsPanel.contains(this.connectionStatsUpdate) && this.connectionStatsPanel.contains(this.connectionStatsText);
   }
 
+  private connectionStatsIdentityReader() {
+    const stats = this.connectionStatsOwner;
+    const close = this.roomCloseAttempt, closeOwner = close?.owner;
+    const transfer = this.stageTransferAttempt, transferOwner = this.stageManagementOwner;
+    const observe = (field: string, value: unknown): void => {
+      const lost = (owner: NonNullable<StageElement['connectionStatsOwner']>): boolean =>
+        owner.client !== this.current || owner.generation !== this.generation || field === 'unreadable'
+        || ((field === 'state' || field === 'me') && !value)
+        || (field === 'status' && value !== 'waiting' && value !== 'live')
+        || (field === 'roomId' && value !== owner.roomId) || (field === 'participantId' && value !== owner.participantId);
+      // Consume each observation before another public getter can restore identity or admit a new dialog.
+      if (close && (!closeOwner || lost(closeOwner))) close.invalid = true;
+      if (transfer && (!transferOwner || lost(transferOwner))) transfer.invalid = true;
+      if (stats && this.connectionStatsOwner === stats && lost(stats)) this.retireConnectionStats();
+    };
+    return <T>(field: 'state' | 'me' | 'status' | 'roomId' | 'participantId', get: () => T): T => {
+      let value: T;
+      try { value = get(); }
+      catch (error) { observe('unreadable', undefined); throw error; }
+      observe(field, value); return value;
+    };
+  }
+
   /** Manual readership needs a current seat, not a publisher, microphone, or new passive report. */
   private reconcileConnectionStats(): void {
     for (;;) {
       const owner = this.connectionStatsOwner, client = this.current, generation = this.generation;
-      const state = client?.state, me = client?.me, status = client?.status;
-      const roomId = state?.roomId, participantId = me?.participantId;
+      const read = this.connectionStatsIdentityReader();
+      const state = read('state', () => client?.state), me = read('me', () => client?.me), status = read('status', () => client?.status);
+      const roomId = read('roomId', () => state?.roomId), participantId = read('participantId', () => me?.participantId);
       if (owner !== this.connectionStatsOwner || client !== this.current || generation !== this.generation
-        || state !== client?.state || status !== client?.status || roomId !== client?.state?.roomId
-        || participantId !== client?.me?.participantId) continue;
+        || state !== read('state', () => client?.state) || status !== read('status', () => client?.status)
+        || roomId !== read('roomId', () => read('state', () => client?.state)?.roomId)
+        || participantId !== read('participantId', () => read('me', () => client?.me)?.participantId)) continue;
       const eligible = Boolean(client && state && me && typeof roomId === 'string' && typeof participantId === 'string'
         && (status === 'waiting' || status === 'live') && this.connectionStatsTerminalClient !== client
         && !this.connectionStatsLeaving && !this.leftRoom && !this.roomExit && this.connectionStatsMounted());
@@ -890,21 +915,14 @@ export class StageElement extends HTMLElement {
         || owner.roomId !== roomId || owner.participantId !== participantId));
       if (lost) this.retireConnectionStats();
       const retained = this.connectionStatsOwner;
-      const authorities = [this.roomCloseOwner, this.stageManagementOwner];
-      const authorityLost = authorities.some(authority => authority && (!eligible || authority.client !== client
-        || authority.generation !== generation || authority.roomId !== roomId || authority.participantId !== participantId
-        || me?.role !== 'controller' || me.connected !== true));
-      // Preserve ordinary helper traces; only observed loss needs corrective authority notes.
-      if (lost || authorityLost) {
-        this.noteRoomCloseEvent('status', status ?? 'disconnected');
-        this.noteStageTransferEvent('status', status ?? 'disconnected');
-      }
       this.reconcileRoomClose();
       const transfer = this.stageTransferAttempt;
       if (transfer && !this.canTransferStage(transfer.id, transfer.node)) transfer.invalid = true;
       if (retained !== this.connectionStatsOwner || client !== this.current || generation !== this.generation
-        || state !== client?.state || status !== client?.status || roomId !== client?.state?.roomId
-        || participantId !== client?.me?.participantId || eligible !== Boolean(client && state && me
+        || state !== read('state', () => client?.state) || status !== read('status', () => client?.status)
+        || roomId !== read('roomId', () => read('state', () => client?.state)?.roomId)
+        || participantId !== read('participantId', () => read('me', () => client?.me)?.participantId)
+        || eligible !== Boolean(client && state && me
           && typeof roomId === 'string' && typeof participantId === 'string'
           && (status === 'waiting' || status === 'live') && this.connectionStatsTerminalClient !== client
           && !this.connectionStatsLeaving && !this.leftRoom && !this.roomExit && this.connectionStatsMounted())) continue;
