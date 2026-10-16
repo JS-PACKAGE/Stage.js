@@ -79,7 +79,7 @@ export class StageContext {
 }
 /** Complete production module and real SDK. Only external-host import, socket, DOM and browser media are replaced. */
 export async function actualApp(t: TestContext, options: { deferCapture?: boolean; search?: string; output?: boolean; confirm?: ((message: string) => boolean) | null } = {}) {
-  const { StageClient, decodeName } = await import(new URL('../../packages/client/src/index.ts', import.meta.url).href);
+  const { StageClient, decodeName, MAX_GAIN_DB } = await import(new URL('../../packages/client/src/index.ts', import.meta.url).href);
   StageSocket.instances = []; StagePeer.instances = []; StageContext.instances = [];
   const tracks: StageTrack[] = [];
   const makeStream = (): { track: StageTrack; stream: StageStream } => {
@@ -127,7 +127,7 @@ export async function actualApp(t: TestContext, options: { deferCapture?: boolea
     const retry = client.retryMicrophone.bind(client);
     t.mock.method(client, 'retryMicrophone', () => { calls++; return retry(); });
     client.on('micready', () => { ready++; }); return client;
-  }, decodeName };
+  }, decodeName, MAX_GAIN_DB };
   const source = readFileSync(new URL('../../web/src/embed.ts', import.meta.url), 'utf8'), dynamicImport = 'import(/* @vite-ignore */ moduleUrl)';
   assert.equal(source.split(dynamicImport).length, 2); assert.equal(source.split("import './styles.css';").length, 2);
   const executable = stripTypeScriptTypes(source.replace("import './styles.css';", '').replace(dynamicImport, 'loadLibrary(moduleUrl)'));
@@ -135,7 +135,7 @@ export async function actualApp(t: TestContext, options: { deferCapture?: boolea
   const confirmations: string[] = [];
   runInNewContext(executable, {
     ...(options.confirm === null ? {} : { confirm: (message: string) => { confirmations.push(message); return options.confirm?.(message) ?? false; } }),
-    document: { createElement(tag: string) { assert.ok(['option', 'li', 'span', 'div', 'button'].includes(tag), `unmodeled element: ${tag}`); return new EmbedNode(tag); }, querySelector(selector: string) { assert.match(selector, /^#[a-z-]+$/); return node(selector.slice(1)); } },
+    document: { createElement(tag: string) { assert.ok(['option', 'li', 'span', 'div', 'button', 'label', 'input'].includes(tag), `unmodeled element: ${tag}`); return new EmbedNode(tag); }, querySelector(selector: string) { assert.match(selector, /^#[a-z-]+$/); return node(selector.slice(1)); } },
     location: { search: options.search ?? '?room=same-room', origin: 'https://stage.example.test' },
     URL, URLSearchParams, Error, Promise, performance, setTimeout, clearTimeout, setInterval, clearInterval,
     loadLibrary: async (url: string) => { assert.equal(url, 'https://stage.example.test/lib/stage-client.js'); return library; },

@@ -66,6 +66,7 @@ const handQueuePending = new Map<string, object>();
 let handQueueOrder: string[] = [];
 interface StageManagementRow {
   node: HTMLLIElement; name: HTMLSpanElement; mute: HTMLButtonElement; remove: HTMLButtonElement; transfer: HTMLButtonElement;
+  gainCurrent: HTMLSpanElement; gainLabel: HTMLSpanElement; gainDraft: HTMLInputElement; gainApply: HTMLButtonElement; gainNotice: HTMLSpanElement;
 }
 let stageManagementOwner: {
   client: Client; roomId: string; participantId: string; generation: number; revision: number; transferFenced: boolean;
@@ -75,6 +76,7 @@ const stageManagementRows = new Map<string, StageManagementRow>();
 const stageManagementPending = new Map<string, object>();
 let stageManagementOrder: string[] = [];
 let decodeRoomName: typeof StageLibrary.decodeName | undefined;
+let maxGainDb: number | undefined;
 let micRetryParticipant: string | undefined;
 let pendingMicRetry: { client: Client } | undefined;
 let microphoneOwner: {
@@ -288,7 +290,7 @@ function moderateHand(id: string, row: HandQueueRow, kind: 'approve' | 'reject')
 function retireStageManagement(): void {
   stageManagementOwner = undefined; stageManagementPending.clear(); pendingTransfer = undefined;
   for (const row of stageManagementRows.values()) {
-    for (const button of [row.mute, row.remove, row.transfer]) { button.disabled = true; button.setAttribute('aria-busy', 'false'); }
+    for (const button of [row.mute, row.remove, row.transfer, row.gainDraft, row.gainApply]) { button.disabled = true; button.setAttribute('aria-busy', 'false'); }
   }
   if (stageManagementRows.size) stageManagementList.replaceChildren();
   stageManagementRows.clear(); stageManagementOrder = [];
@@ -327,16 +329,40 @@ function syncStageManagement(): void {
       const mute = document.createElement('button'), remove = document.createElement('button'), transfer = document.createElement('button');
       node.className = 'person'; name.className = 'identity'; actions.className = 'actions';
       mute.type = remove.type = transfer.type = 'button'; remove.textContent = '移下台'; transfer.textContent = '移交控制權';
-      row = { node, name, mute, remove, transfer };
+      const gain = document.createElement('div'), gainCurrent = document.createElement('span'), gainField = document.createElement('label');
+      const gainLabel = document.createElement('span'), gainDraft = document.createElement('input');
+      const gainApply = document.createElement('button'), gainNotice = document.createElement('span');
+      gainCurrent.className = 'identity'; gainField.className = 'field'; gainNotice.className = 'identity';
+      gainDraft.type = 'number'; gainDraft.step = '0.1'; gainDraft.value = String(person.gainDb);
+      gainApply.type = 'button'; gainApply.textContent = '套用混音增益';
+      row = { node, name, mute, remove, transfer, gainCurrent, gainLabel, gainDraft, gainApply, gainNotice };
       const original = row;
       mute.onclick = () => moderateStage(id, original, 'mute');
       remove.onclick = () => moderateStage(id, original, 'remove');
       transfer.onclick = () => transferStageControl(id, original);
-      actions.append(mute, remove, transfer); node.append(name, actions); stageManagementRows.set(id, row);
+      gainDraft.oninput = gainDraft.onchange = () => syncStageManagement();
+      gainApply.onclick = () => applyStageGain(id, original);
+      gainField.append(gainLabel, gainDraft); gain.append(gainCurrent, gainField, gainNotice, gainApply);
+      actions.append(mute, remove, transfer); node.append(name, actions, gain); stageManagementRows.set(id, row);
     }
     const name = decodeRoomName(person.name);
     const label = `${name} · ${person.muted ? '已靜音' : '未靜音'} · ${person.forceMuted ? '靜音已鎖定' : '靜音未鎖定'}${person.connected ? '' : ' · 暫時離線（保留席位）'}`;
     if (row.name.textContent !== label) row.name.textContent = label;
+    const gainSupported = maxGainDb !== undefined && typeof current.setGain === 'function';
+    const accepted = `目前混音增益：${person.gainDb > 0 ? '+' : ''}${person.gainDb} dB${active ? '' : '（上次收到）'}`;
+    if (row.gainCurrent.textContent !== accepted) row.gainCurrent.textContent = accepted;
+    const gainLabel = `${name} 的混音增益草稿（dB）${gainSupported ? `，範圍 -${maxGainDb} 至 +${maxGainDb}，步進 0.1` : ''}`;
+    if (row.gainLabel.textContent !== gainLabel) row.gainLabel.textContent = gainLabel;
+    if (maxGainDb !== undefined) { row.gainDraft.min = String(-maxGainDb); row.gainDraft.max = String(maxGainDb); }
+    const gainNotice = gainSupported
+      ? '調整這位發言者在房間混音中的音量；0 表示不手動增減。可能在後續音訊或返回舞台時生效，不會解除麥克風靜音。'
+      : '此 SDK 不支援混音增益調整；其他舞台操作仍可使用。';
+    if (row.gainNotice.textContent !== gainNotice) row.gainNotice.textContent = gainNotice;
+    const gainBusy = String(stageManagementPending.has(id));
+    row.gainDraft.disabled = !active || !state.me.connected || !gainSupported || stageManagementPending.has(id) || Boolean(pendingTransfer);
+    row.gainApply.disabled = row.gainDraft.disabled || stageGainDraft(row) === undefined;
+    row.gainDraft.setAttribute('aria-busy', gainBusy); row.gainApply.setAttribute('aria-busy', gainBusy);
+    row.gainApply.setAttribute('aria-label', `套用 ${name} 的混音增益`);
     const muteLabel = person.forceMuted ? '解除靜音鎖定' : '鎖定靜音';
     if (row.mute.textContent !== muteLabel) row.mute.textContent = muteLabel;
     const labels = { mute: `${muteLabel}：${name}`, remove: `將 ${name} 移下台` };
@@ -356,7 +382,7 @@ function syncStageManagement(): void {
     row.transfer.setAttribute('aria-busy', String(pendingTransfer?.id === id));
   }
   for (const [id, row] of stageManagementRows) if (!seen.has(id)) {
-    for (const button of [row.mute, row.remove, row.transfer]) { button.disabled = true; button.setAttribute('aria-busy', 'false'); }
+    for (const button of [row.mute, row.remove, row.transfer, row.gainDraft, row.gainApply]) { button.disabled = true; button.setAttribute('aria-busy', 'false'); }
     stageManagementRows.delete(id);
   }
   const order = people.map(person => person.participantId);
@@ -368,7 +394,7 @@ function syncStageManagement(): void {
   for (const [id, row] of stageManagementRows) row.transfer.disabled = Boolean(pendingTransfer)
     || stageManagementPending.size > 0 || !eligibleTransfer(stageManagementOwner, id, row);
 }
-function currentStageRow(id: string, row: StageManagementRow, kind: 'mute' | 'remove' | 'transfer'): boolean {
+function currentStageRow(id: string, row: StageManagementRow, kind: 'mute' | 'remove' | 'transfer' | 'gainApply'): boolean {
   return stageManagementRows.get(id) === row && row.node.parentElement === stageManagementList
     && row.node.contains(row[kind]) && !stageManagementPanel.hidden;
 }
@@ -399,6 +425,43 @@ function moderateStage(id: string, row: StageManagementRow, kind: 'mute' | 'remo
       // Original-row feedback is isolated; SDK global wire errors keep their existing policy.
       if (eligible()) report(error);
     } finally {
+      if (current()) { stageManagementPending.delete(id); syncStageManagement(); }
+    }
+  })();
+}
+function stageGainDraft(row: StageManagementRow): number | undefined {
+  const text = row.gainDraft.value.trim();
+  // Native number fields can be blank or mid-edit; never coerce those drafts to zero or clamp them.
+  if (maxGainDb === undefined || !/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:[eE][+-]?\d+)?$/.test(text)) return;
+  const value = Number(text);
+  return Number.isFinite(value) && Math.abs(value) <= maxGainDb ? value : undefined;
+}
+function applyStageGain(id: string, row: StageManagementRow): void {
+  syncStageManagement();
+  const owner = stageManagementOwner, value = stageGainDraft(row);
+  if (!owner || value === undefined) return;
+  const eligible = (): boolean => stageManagementOwner === owner
+    && currentStageRow(id, row, 'gainApply') && row.node.contains(row.gainDraft)
+    && owner.client.state?.me.connected === true
+    && (owner.client.status === 'waiting' || owner.client.status === 'live')
+    && typeof owner.client.setGain === 'function' && stageGainDraft(row) !== undefined;
+  if (!eligible() || pendingTransfer || stageManagementPending.has(id)) return;
+  // Share the same target token with moderation, including when its row disappears before ACK.
+  const attempt = {};
+  stageManagementPending.set(id, attempt); syncStageManagement();
+  const current = (): boolean => {
+    if (stageManagementOwner !== owner || stageManagementPending.get(id) !== attempt) return false;
+    syncStageManagement();
+    return stageManagementOwner === owner && stageManagementPending.get(id) === attempt;
+  };
+  void (async () => {
+    try {
+      if (!current() || !eligible()) return;
+      await owner.client.setGain(id, value);
+    } catch (error) {
+      if (current() && eligible()) report(error);
+    } finally {
+      // ACK never writes either accepted gain or draft; only snapshots own accepted state.
       if (current()) { stageManagementPending.delete(id); syncStageManagement(); }
     }
   })();
@@ -727,7 +790,10 @@ join.onsubmit = (event) => {
       if (generation !== entryGeneration) return;
       // This compact UI has no room-level meter; explicit preview APIs remain available.
       client = new library.StageClient({ url: ws.href, audioElement: audio, enableMicMeter: false });
-      const current = client; controlsClient = current; entryClient = current; decodeRoomName = library.decodeName; syncUnlock();
+      const current = client; controlsClient = current; entryClient = current; decodeRoomName = library.decodeName;
+      maxGainDb = typeof library.MAX_GAIN_DB === 'number' && Number.isFinite(library.MAX_GAIN_DB) && library.MAX_GAIN_DB > 0
+        ? library.MAX_GAIN_DB : undefined;
+      syncUnlock();
       client.on('state', ({ detail }: CustomEvent<StageEventMap['state']>) => {
         if (client !== current || cancelledEntry) return;
         if (generation === entryGeneration && controlsClient === current && stageManagementOwner?.client === current)

@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { stripTypeScriptTypes } from 'node:module';
 import { runInNewContext } from 'node:vm';
+import { MAX_GAIN_DB } from '../../shared/protocol.ts';
 import type { ParticipantView } from '../../shared/protocol.ts';
 
 type Status = 'waiting' | 'live' | 'reconnecting' | 'disconnected';
@@ -33,6 +34,9 @@ export class EmbedNode {
   hidden = false;
   open = false;
   type = '';
+  min = '';
+  max = '';
+  step = '';
   className = '';
   parentElement: EmbedNode | null = null;
   readonly tagName: string;
@@ -52,6 +56,7 @@ export class EmbedNode {
   readonly attributes: Record<string, string> = {};
   readonly children: EmbedNode[] = [];
   onchange: (() => void) | null = null;
+  oninput: (() => void) | null = null;
   append(...nodes: EmbedNode[]): void {
     for (const node of nodes) { node.remove(); node.parentElement = this; this.children.push(node); }
   }
@@ -114,6 +119,8 @@ export class EmbedSdk {
   private moderateStage(kind: 'forceMute' | 'forceUnmute' | 'removeFromStage', id: string): Promise<void> {
     const work = new Deferred(); this.stageModerations.push({ kind, id, work }); return work.promise;
   }
+  readonly gains: { id: string; gainDb: number; work: Deferred }[] = [];
+  setGain(id: string, gainDb: number): Promise<void> { const work = new Deferred(); this.gains.push({ id, gainDb, work }); return work.promise; }
   readonly transfers: { id: string; work: Deferred }[] = [];
   transferControl(id: string): Promise<void> { const work = new Deferred(); this.transfers.push({ id, work }); return work.promise; }
   readonly roomRenames: { name: string; work: Deferred }[] = [];
@@ -151,7 +158,7 @@ export class EmbedSdk {
 }
 export const flush = async (): Promise<void> => { for (let i = 0; i < 16; i++) await Promise.resolve(); };
 
-export function embedApp(options: { libraryLoad?: Promise<void> | ((url: string, attempt: number) => Promise<void>); source?: string; search?: string; confirm?: ((message: string) => boolean) | null } = {}) {
+export function embedApp(options: { libraryLoad?: Promise<void> | ((url: string, attempt: number) => Promise<void>); source?: string; search?: string; maxGainDb?: unknown; confirm?: ((message: string) => boolean) | null } = {}) {
   const nodes = new Map(['host', 'ws-path', 'room', 'code', 'name', 'status', 'hand-rejected', 'error-notice', 'last-error', 'error-dismiss', 'join', 'hand', 'mic', 'rename', 'room-name-panel', 'room-name-current', 'room-name-draft', 'room-name-update', 'hand-queue', 'hand-queue-summary', 'hand-queue-notice', 'hand-queue-list', 'stage-management', 'stage-management-summary', 'stage-management-notice', 'stage-management-list', 'stage', 'mic-retry', 'audio-retry', 'audio-retry-status', 'microphone-panel', 'microphone-device', 'microphone-refresh', 'microphone-apply', 'microphone-draft-notice', 'output-panel', 'output-device', 'output-refresh', 'output-apply', 'output-draft-notice', 'output-support', 'cancel-join', 'leave', 'audio', 'unlock'].map(id => [id, new EmbedNode()]));
   const node = (id: string): EmbedNode => { const found = nodes.get(id); assert.ok(found, `unmodeled node: ${id}`); return found; };
   node('error-notice').hidden = true; node('hand-rejected').hidden = true;
@@ -211,6 +218,7 @@ export function embedApp(options: { libraryLoad?: Promise<void> | ((url: string,
   const library = {
     StageClient: class extends EmbedSdk { constructor(options: ClientOptions) { super(options, () => now); clients.push(this); } },
     decodeName: (value: string) => value,
+    MAX_GAIN_DB: Object.hasOwn(options, 'maxGainDb') ? options.maxGainDb : MAX_GAIN_DB,
   };
   // Execute the complete module; replace only its external-host import and stylesheet import.
   const source = options.source ?? readFileSync(new URL('../../web/src/embed.ts', import.meta.url), 'utf8');
@@ -222,7 +230,7 @@ export function embedApp(options: { libraryLoad?: Promise<void> | ((url: string,
   const confirmations: string[] = [];
   runInNewContext(executable, {
     ...(options.confirm === null ? {} : { confirm: (message: string) => { confirmations.push(message); return options.confirm?.(message) ?? false; } }),
-    document: { createElement(tag: string) { assert.ok(['option', 'li', 'span', 'div', 'button'].includes(tag), `unmodeled element: ${tag}`); return new EmbedNode(tag); }, querySelector(selector: string) { assert.match(selector, /^#[a-z-]+$/); return node(selector.slice(1)); } },
+    document: { createElement(tag: string) { assert.ok(['option', 'li', 'span', 'div', 'button', 'label', 'input'].includes(tag), `unmodeled element: ${tag}`); return new EmbedNode(tag); }, querySelector(selector: string) { assert.match(selector, /^#[a-z-]+$/); return node(selector.slice(1)); } },
     location: { search: options.search ?? '?host=https%3A%2F%2Fstage.example.test%2Fprefix&room=%20same-room%20&code=%20TEST42%20', origin: 'https://embed.example.test' },
     URL, URLSearchParams, Error, Promise, performance: { now: () => now },
     loadLibrary: async (url: string) => {
@@ -244,10 +252,10 @@ export function embedApp(options: { libraryLoad?: Promise<void> | ((url: string,
       assert.equal(sdk.joins.length, 1); sdk.snapshot(overrides); assert.equal(submit.disabled, false); return sdk;
     },
     async cleanup(): Promise<void> {
-      for (const sdk of clients) for (const action of [...sdk.actions, ...sdk.renames, ...sdk.roomRenames, ...sdk.inputSelections, ...sdk.moderations, ...sdk.stageModerations, ...sdk.transfers]) if (!action.work.settled) action.work.resolve();
+      for (const sdk of clients) for (const action of [...sdk.actions, ...sdk.renames, ...sdk.roomRenames, ...sdk.inputSelections, ...sdk.moderations, ...sdk.stageModerations, ...sdk.transfers, ...sdk.gains]) if (!action.work.settled) action.work.resolve();
       for (const sdk of clients) for (const work of sdk.deviceLists) if (!work.settled) work.resolve();
       await flush(); timers.clear(); retired.clear();
-      assert.ok(clients.every(sdk => [...sdk.actions, ...sdk.renames, ...sdk.roomRenames, ...sdk.inputSelections, ...sdk.moderations, ...sdk.stageModerations, ...sdk.transfers].every(action => action.work.settled)), 'all command promises must settle');
+      assert.ok(clients.every(sdk => [...sdk.actions, ...sdk.renames, ...sdk.roomRenames, ...sdk.inputSelections, ...sdk.moderations, ...sdk.stageModerations, ...sdk.transfers, ...sdk.gains].every(action => action.work.settled)), 'all command promises must settle');
       assert.equal(timers.size, 0);
     },
   };
