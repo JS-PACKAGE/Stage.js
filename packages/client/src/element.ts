@@ -830,9 +830,10 @@ export class StageElement extends HTMLElement {
   private retireNameOwner(): void {
     this.nameOwner = undefined; this.nameAttempt = undefined;
     this.nameInput.value = ''; this.acceptedName.textContent = '';
-    this.namePanel.hidden = true;
-    this.nameInput.disabled = this.nameUpdate.disabled = true;
-    this.nameUpdate.removeAttribute('aria-busy');
+    if (!this.namePanel.hidden) this.namePanel.hidden = true;
+    if (!this.nameUpdate.disabled) this.nameUpdate.disabled = true;
+    if (!this.nameInput.disabled) this.nameInput.disabled = true;
+    if (this.nameUpdate.hasAttribute('aria-busy')) this.nameUpdate.removeAttribute('aria-busy');
   }
 
   private syncNameOwner(): void {
@@ -849,9 +850,12 @@ export class StageElement extends HTMLElement {
     }
     // A same-seat snapshot (including resume) must not replace an unsent or rejected draft.
     this.acceptedName.textContent = `目前名稱：${decodeName(me.name)}`;
-    this.namePanel.hidden = false; this.nameInput.disabled = false;
-    this.nameUpdate.disabled = client.status === 'reconnecting' || Boolean(this.nameAttempt);
-    this.nameUpdate.setAttribute('aria-busy', String(Boolean(this.nameAttempt)));
+    if (this.namePanel.hidden) this.namePanel.hidden = false;
+    if (this.nameInput.disabled) this.nameInput.disabled = false;
+    const disabled = client.status === 'reconnecting' || Boolean(this.nameAttempt);
+    if (this.nameUpdate.disabled !== disabled) this.nameUpdate.disabled = disabled;
+    const busy = String(Boolean(this.nameAttempt));
+    if (this.nameUpdate.getAttribute('aria-busy') !== busy) this.nameUpdate.setAttribute('aria-busy', busy);
   }
 
   private updateName(): void {
@@ -1225,9 +1229,10 @@ export class StageElement extends HTMLElement {
   private retireRoomNameOwner(): void {
     this.roomNameOwner = undefined; this.roomNameAttempt = undefined;
     this.roomNameInput.value = ''; this.acceptedRoomName.textContent = '';
-    this.roomNamePanel.hidden = true;
-    this.roomNameInput.disabled = this.roomNameUpdate.disabled = true;
-    this.roomNameUpdate.removeAttribute('aria-busy');
+    if (!this.roomNamePanel.hidden) this.roomNamePanel.hidden = true;
+    if (!this.roomNameUpdate.disabled) this.roomNameUpdate.disabled = true;
+    if (!this.roomNameInput.disabled) this.roomNameInput.disabled = true;
+    if (this.roomNameUpdate.hasAttribute('aria-busy')) this.roomNameUpdate.removeAttribute('aria-busy');
   }
 
   private syncRoomNameOwner(): void {
@@ -1244,9 +1249,12 @@ export class StageElement extends HTMLElement {
     }
     // Same-controller snapshots and reconnects update the accepted value, never the draft.
     this.acceptedRoomName.textContent = `目前房間名稱：${decodeName(state.name)}`;
-    this.roomNamePanel.hidden = false; this.roomNameInput.disabled = false;
-    this.roomNameUpdate.disabled = client.status === 'reconnecting' || Boolean(this.roomNameAttempt);
-    this.roomNameUpdate.setAttribute('aria-busy', String(Boolean(this.roomNameAttempt)));
+    if (this.roomNamePanel.hidden) this.roomNamePanel.hidden = false;
+    if (this.roomNameInput.disabled) this.roomNameInput.disabled = false;
+    const disabled = client.status === 'reconnecting' || Boolean(this.roomNameAttempt);
+    if (this.roomNameUpdate.disabled !== disabled) this.roomNameUpdate.disabled = disabled;
+    const busy = String(Boolean(this.roomNameAttempt));
+    if (this.roomNameUpdate.getAttribute('aria-busy') !== busy) this.roomNameUpdate.setAttribute('aria-busy', busy);
   }
 
   private updateRoomName(): void {

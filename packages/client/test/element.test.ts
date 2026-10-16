@@ -11769,4 +11769,265 @@ describe('widget confirmed room closure', () => {
     assert.equal(f.validated.some(message => message.type === 'room:close'), false);
   });
 
+
+  /** Counts controlled DOM calls, not browser layout, focus, IME, or accessibility behavior. */
+  function instrumentEditors(element: InstanceType<typeof StageElement>) {
+    const counts = new Map<string, { calls: number; changes: number; reads: number }>();
+    const restores: (() => void)[] = [], writes: string[] = []; let recording = true;
+    const bump = (key: string, kind: 'calls' | 'changes' | 'reads') => {
+      if (!recording) return;
+      if (kind === 'calls') writes.push(key);
+      const value = counts.get(key) ?? { calls: 0, changes: 0, reads: 0 }; value[kind]++; counts.set(key, value);
+    };
+    for (const [key, property] of [
+      ['namePanel', 'hidden'], ['nameInput', 'value'], ['nameInput', 'disabled'], ['acceptedName', 'textContent'], ['nameUpdate', 'disabled'],
+      ['roomNamePanel', 'hidden'], ['roomNameInput', 'value'], ['roomNameInput', 'disabled'], ['acceptedRoomName', 'textContent'], ['roomNameUpdate', 'disabled'],
+    ] as const) {
+      const node = element[key], original = Object.getOwnPropertyDescriptor(node, property);
+      let stored = Reflect.get(node, property);
+      Object.defineProperty(node, property, { configurable: true, get() { bump(`${key}.${property}`, 'reads'); return stored; }, set(value) {
+        bump(`${key}.${property}`, 'calls'); if (stored !== value) bump(`${key}.${property}`, 'changes'); stored = value;
+      } });
+      restores.push(() => { if (original) Object.defineProperty(node, property, { ...original, value: stored }); else { Reflect.deleteProperty(node, property); Reflect.set(node, property, stored); } });
+    }
+    for (const key of ['nameUpdate', 'roomNameUpdate'] as const) {
+      const node = element[key], set = node.setAttribute, remove = node.removeAttribute, get = node.getAttribute, has = node.hasAttribute;
+      node.setAttribute = function(name, value) {
+        if (name === 'aria-busy') { bump(`${key}.aria-busy`, 'calls'); if (get.call(this, name) !== value) bump(`${key}.aria-busy`, 'changes'); }
+        set.call(this, name, value);
+      };
+      node.removeAttribute = function(name) {
+        if (name === 'aria-busy') { bump(`${key}.aria-busy`, 'calls'); if (has.call(this, name)) bump(`${key}.aria-busy`, 'changes'); }
+        remove.call(this, name);
+      };
+      node.getAttribute = function(name) { if (name === 'aria-busy') bump(`${key}.aria-busy`, 'reads'); return get.call(this, name); };
+      node.hasAttribute = function(name) { if (name === 'aria-busy') bump(`${key}.aria-busy`, 'reads'); return has.call(this, name); };
+      restores.push(() => { node.setAttribute = set; node.removeAttribute = remove; node.getAttribute = get; node.hasAttribute = has; });
+    }
+    const snapshot = () => {
+      const properties = Object.fromEntries([...counts].sort(([a], [b]) => a.localeCompare(b)));
+      return { calls: [...counts.values()].reduce((n, v) => n + v.calls, 0), changes: [...counts.values()].reduce((n, v) => n + v.changes, 0), properties, writes: [...writes] };
+    };
+    return { snapshot, reset: () => { counts.clear(); writes.length = 0; }, hostWrite(fn: () => void) { recording = false; try { fn(); } finally { recording = true; } }, restore: () => restores.forEach(fn => fn()) };
+  }
+
+  it('editor DOM guards counts full widget legal SDK validator Hub workloads with retained drafts and callback order', async t => {
+    const f = await hubCloseWidget(t), guest = await f.mount('Synthetic audience');
+    await f.flushStates(); await f.drain();
+    const controller = f.element, viewers = [controller, guest], meters = viewers.map(instrumentEditors);
+    t.after(() => meters.forEach(meter => meter.restore()));
+    const identities = viewers.map(element => ['namePanel', 'acceptedName', 'nameInput', 'nameUpdate', 'roomNamePanel', 'acceptedRoomName', 'roomNameInput', 'roomNameUpdate'].map(key => Reflect.get(element, key)));
+    const handlers = viewers.map(element => [element['nameUpdate'].onclick, element['roomNameUpdate'].onclick]);
+    controller['nameInput'].value = '  untouched controller draft  '; controller['roomNameInput'].value = '  untouched room draft  '; guest['nameInput'].value = '  untouched audience draft  ';
+    for (const input of [controller['nameInput'], controller['roomNameInput'], guest['nameInput']]) Object.assign(input, { selectionStart: 2, selectionEnd: 7, selectionDirection: 'backward' });
+    const methods = ['syncNameOwner', 'syncRoomNameOwner', 'noteRoomCloseEvent', 'noteStageTransferEvent'] as const;
+    const syncs = viewers.map(element => methods.map(method => t.mock.method(element as unknown as Record<(typeof methods)[number], (...args: unknown[]) => void>, method)));
+    const eventTrace: string[] = [];
+    for (const [index, element] of viewers.entries()) for (const type of ['state', 'status', 'role', 'transferred', 'error']) element.addEventListener(`stage-${type}`, () => eventTrace.push(`${index}:${type}`));
+    type EditorCounts = ReturnType<ReturnType<typeof instrumentEditors>['snapshot']>;
+    type Workload = {
+      label: string; controller: EditorCounts; audience: EditorCounts;
+      callbacks: string[]; synchronizations: number[][]; commands: string[];
+    };
+    const results: Workload[] = [];
+    async function measure(label: string, work: () => Promise<void>) {
+      meters.forEach(meter => meter.reset());
+      const before = syncs.map(items => items.map(item => item.mock.callCount())), trace = eventTrace.length, request = f.validated.length;
+      await work(); await f.drain();
+      results.push({ label, controller: meters[0]!.snapshot(), audience: meters[1]!.snapshot(), callbacks: eventTrace.slice(trace),
+        synchronizations: syncs.map((items, i) => items.map((item, j) => item.mock.callCount() - before[i]![j]!)),
+        commands: f.validated.slice(request).filter(message => message.type !== 'ping').map(message => message.type) });
+    }
+    async function run(action: () => Promise<void>) { const result = action(); await f.drain(); await result; }
+    await measure('20 audience participant rename changes', async () => { for (let i = 0; i < 20; i++) await run(() => guest.client!.setName(`Audience ${i}`)); });
+    await measure('20 controller room rename changes', async () => { for (let i = 0; i < 20; i++) await run(() => f.client.setRoomName(`Room ${i}`)); });
+    await measure('20 controller no-op room submissions', async () => { for (let i = 0; i < 20; i++) await run(() => f.client.setRoomName('Room 19')); });
+    assert.equal(controller['nameInput'].value, '  untouched controller draft  '); assert.equal(controller['roomNameInput'].value, '  untouched room draft  '); assert.equal(guest['nameInput'].value, '  untouched audience draft  ');
+    for (const input of [controller['nameInput'], controller['roomNameInput'], guest['nameInput']]) assert.deepEqual([input.selectionStart, input.selectionEnd, input.selectionDirection], [2, 7, 'backward']);
+    for (const [index, element] of viewers.entries()) {
+      for (const [position, key] of ['namePanel', 'acceptedName', 'nameInput', 'nameUpdate', 'roomNamePanel', 'acceptedRoomName', 'roomNameInput', 'roomNameUpdate'].entries()) assert.equal(Reflect.get(element, key), identities[index]![position]);
+      assert.equal(element['nameUpdate'].onclick, handlers[index]![0]); assert.equal(element['roomNameUpdate'].onclick, handlers[index]![1]);
+    }
+    await measure('20 controller participant editor button submissions', async () => {
+      for (let i = 0; i < 20; i++) { meters[0]!.hostWrite(() => { controller['nameInput'].value = `UI Controller ${i}`; }); click(controller['nameUpdate']); await f.drain(); assert.equal(controller['nameAttempt'], undefined); }
+    });
+    await measure('20 controller room editor button submissions', async () => {
+      for (let i = 0; i < 20; i++) { meters[0]!.hostWrite(() => { controller['roomNameInput'].value = `UI Room ${i}`; }); click(controller['roomNameUpdate']); await f.drain(); assert.equal(controller['roomNameAttempt'], undefined); }
+    });
+    await measure('20 audience participant editor button submissions', async () => {
+      for (let i = 0; i < 20; i++) { meters[1]!.hostWrite(() => { guest['nameInput'].value = `UI Audience ${i}`; }); click(guest['nameUpdate']); await f.drain(); assert.equal(guest['nameAttempt'], undefined); }
+    });
+    // Per-property expectations retain every accepted-text and retired-draft write, including equal values.
+    const expected = [
+      { calls: [80, 120], changes: [0, 20], command: 'participant:rename', events: ['1:state', '0:state'], syncs: [[40, 40, 20, 20], [40, 40, 20, 20]], changed: [null, 'name'], pending: [null, null] },
+      { calls: [80, 120], changes: [20, 0], command: 'room:rename', events: ['0:state', '1:state'], syncs: [[40, 40, 20, 20], [40, 40, 20, 20]], changed: ['roomName', null], pending: [null, null] },
+      { calls: [80, 0], changes: [0, 0], command: 'room:rename', events: ['0:state'], syncs: [[40, 40, 20, 20], [0, 0, 0, 0]], changed: [null, null], pending: [null, null] },
+      { calls: [240, 120], changes: [100, 0], command: 'participant:rename', events: ['0:state', '1:state'], syncs: [[120, 40, 20, 20], [40, 40, 20, 20]], changed: ['name', null], pending: ['name', null] },
+      { calls: [240, 120], changes: [100, 0], command: 'room:rename', events: ['0:state', '1:state'], syncs: [[40, 120, 20, 20], [40, 40, 20, 20]], changed: ['roomName', null], pending: ['roomName', null] },
+      { calls: [80, 280], changes: [0, 100], command: 'participant:rename', events: ['1:state', '0:state'], syncs: [[40, 40, 20, 20], [120, 40, 20, 20]], changed: [null, 'name'], pending: [null, 'name'] },
+    ] as const;
+    assert.equal(results.length, expected.length);
+    for (const [index, result] of results.entries()) {
+      const want = expected[index]!;
+      assert.deepEqual(result.commands, Array(20).fill(want.command), result.label);
+      assert.deepEqual(result.callbacks, Array.from({ length: 20 }, () => [...want.events]).flat(), result.label);
+      assert.deepEqual(result.synchronizations, want.syncs, result.label);
+      for (const [viewer, measured] of [result.controller, result.audience].entries()) {
+        assert.equal(measured.calls, want.calls[viewer], `${result.label}: viewer ${viewer} writes`);
+        assert.equal(measured.changes, want.changes[viewer], `${result.label}: viewer ${viewer} changed writes`);
+        for (const [editorIndex, editor] of (['name', 'roomName'] as const).entries()) {
+          const sync = want.syncs[viewer]![editorIndex]!, pending = want.pending[viewer] === editor;
+          const text = editor === 'name' ? 'acceptedName' : 'acceptedRoomName';
+          const propertyCounts: Record<string, readonly [number, number]> = {
+            [`${text}.textContent`]: [sync, want.changed[viewer] === editor ? 20 : 0],
+            [`${editor}Input.value`]: [viewer === 1 && editor === 'roomName' ? sync : 0, 0],
+            [`${editor}Panel.hidden`]: [0, 0], [`${editor}Input.disabled`]: [0, 0],
+            [`${editor}Update.disabled`]: [pending ? 40 : 0, pending ? 40 : 0],
+            [`${editor}Update.aria-busy`]: [pending ? 40 : 0, pending ? 40 : 0],
+          };
+          for (const [key, counts] of Object.entries(propertyCounts)) {
+            const actual = measured.properties[key];
+            assert.deepEqual([actual?.calls ?? 0, actual?.changes ?? 0], counts, `${result.label}: viewer ${viewer} ${key}`);
+          }
+        }
+      }
+    }
+    assert.equal(results.reduce((sum, result) => sum + result.controller.calls + result.audience.calls, 0), 1560);
+    assert.equal(results.reduce((sum, result) => sum + result.controller.changes + result.audience.changes, 0), 340);
+    assert.equal(eventTrace.length, 220);
+
+  });
+
+  for (const editor of ['name', 'roomName'] as const) it(`editor DOM guards ${editor} full Hub pending ACK, draft edits, validation failure and retry`, async t => {
+    const f = await hubCloseWidget(t), element = f.element, input = editor === 'name' ? element['nameInput'] : element['roomNameInput'];
+    const button = editor === 'name' ? element['nameUpdate'] : element['roomNameUpdate'];
+    const accepted = editor === 'name' ? element['acceptedName'] : element['acceptedRoomName'];
+    const command = editor === 'name' ? 'participant:rename' : 'room:rename';
+    const attempt = editor === 'name' ? 'nameAttempt' : 'roomNameAttempt';
+    let hold = true; const held: ServerMessage[] = [], deliver = f.socket.deliver.bind(f.socket);
+    t.mock.method(f.socket, 'deliver', (message: ServerMessage) => {
+      if (hold && message.type === 'ok' && f.validated.some(request => request.type === command && request.requestId === message.requestId)) { held.push(message); return; }
+      deliver(message);
+    });
+    input.value = '  e\u0301 & <Editor>  '; click(button); const token = element[attempt]; assert.ok(token);
+    await f.drain(); assert.equal(held.length, 1); assert.equal(element[attempt], token); assert.equal(button.disabled, true); assert.equal(input.disabled, false); assert.match(accepted.textContent!, /é & <Editor>/);
+    input.value = 'Next raw draft'; Object.assign(input, { selectionStart: 1, selectionEnd: 5 }); click(button); await f.drain();
+    assert.equal(f.validated.filter(message => message.type === command).length, 1); assert.equal(input.value, 'Next raw draft');
+    hold = false; for (const message of held.splice(0)) deliver(message); await f.drain();
+    assert.equal(button.disabled, false); assert.equal(button.getAttribute('aria-busy'), 'false'); assert.equal(element[attempt], undefined);
+    assert.deepEqual([input.selectionStart, input.selectionEnd], [1, 5]);
+    input.value = ' '; click(button); await f.drain(); assert.equal(element['error'].hidden, false); assert.equal(input.value, ' '); assert.equal(button.disabled, false);
+    input.value = 'Successful retry'; click(button); await f.drain(); assert.equal(element['error'].hidden, true); assert.match(accepted.textContent!, /Successful retry/); assert.equal(f.validated.filter(message => message.type === command).length, 2);
+  });
+
+  for (const asController of [true, false]) it(`editor DOM guards repairs corrupted live DOM via legal Hub update controller=${asController}`, async t => {
+    const f = await hubCloseWidget(t, false, asController), element = f.element;
+    const nameDraft = element['nameInput'].value = 'Preserve personal raw', roomAccepted = element['acceptedRoomName'].textContent;
+    if (asController) element['roomNameInput'].value = 'Preserve room raw';
+    element['namePanel'].hidden = true; element['nameInput'].disabled = true; element['nameUpdate'].disabled = true; element['nameUpdate'].setAttribute('aria-busy', 'corrupt'); element['acceptedName'].textContent = 'Corrupt accepted';
+    element['roomNamePanel'].hidden = !asController; element['roomNameInput'].disabled = asController; element['roomNameUpdate'].disabled = asController; element['roomNameUpdate'].setAttribute('aria-busy', 'corrupt'); element['acceptedRoomName'].textContent = 'Corrupt room accepted';
+    if (!asController) { element['roomNamePanel'].hidden = false; element['roomNameInput'].disabled = false; element['roomNameUpdate'].disabled = false; element['roomNameInput'].value = 'Stale retired draft'; }
+    const work = f.client.setName('Repair via authoritative state'); await f.drain(); await work;
+    assert.equal(element['namePanel'].hidden, false); assert.equal(element['nameInput'].disabled, false); assert.equal(element['nameUpdate'].disabled, false); assert.equal(element['nameUpdate'].getAttribute('aria-busy'), 'false'); assert.equal(element['nameInput'].value, nameDraft); assert.match(element['acceptedName'].textContent!, /Repair via authoritative state/);
+    assert.equal(element['roomNamePanel'].hidden, !asController); assert.equal(element['roomNameInput'].disabled, !asController); assert.equal(element['roomNameUpdate'].disabled, !asController); assert.equal(element['roomNameUpdate'].getAttribute('aria-busy'), asController ? 'false' : null); assert.equal(element['roomNameInput'].value, asController ? 'Preserve room raw' : '');
+    assert.equal(element['acceptedRoomName'].textContent, roomAccepted);
+  });
+
+  for (const editor of ['name', 'roomName'] as const) for (const retired of [false, true]) for (const property of ['hidden', 'input-disabled', 'update-disabled', 'aria-busy'] as const) it(`editor DOM guards retries failed ${editor} ${property} setter retired=${retired}`, async t => {
+    const f = await hubCloseWidget(t), element = f.element;
+    if (retired) await f.client.disconnect();
+    const panel = editor === 'name' ? element['namePanel'] : element['roomNamePanel'];
+    const input = editor === 'name' ? element['nameInput'] : element['roomNameInput'];
+    const button = editor === 'name' ? element['nameUpdate'] : element['roomNameUpdate'];
+    let failed = false, writes = 0;
+    if (property === 'aria-busy') {
+      if (retired) button.setAttribute('aria-busy', 'corrupt'); else button.removeAttribute('aria-busy');
+      const method = retired ? 'removeAttribute' : 'setAttribute', original = button[method];
+      Object.defineProperty(button, method, { configurable: true, value: function(...args: unknown[]) {
+        if (args[0] === 'aria-busy') {
+          writes++;
+          if (!failed) { failed = true; throw new Error('Synthetic editor write failure'); }
+        }
+        return Reflect.apply(original, this, args);
+      } });
+      t.after(() => { Object.defineProperty(button, method, { configurable: true, value: original }); });
+    } else {
+      const node = property === 'hidden' ? panel : property === 'input-disabled' ? input : button;
+      const key = property === 'hidden' ? 'hidden' : 'disabled'; let value = !retired;
+      Object.defineProperty(node, key, { configurable: true, get: () => value, set(next: boolean) {
+        writes++;
+        if (!failed) { failed = true; throw new Error('Synthetic editor write failure'); } value = next;
+      } });
+    }
+    assert.throws(() => element['render'](), /Synthetic editor write failure/); assert.equal(failed, true); assert.equal(writes, 1);
+    element['render'](); assert.equal(writes, 2);
+    assert.equal(panel.hidden, retired); assert.equal(input.disabled, retired); assert.equal(button.disabled, retired); assert.equal(button.getAttribute('aria-busy'), retired ? null : 'false');
+    element['render'](); assert.equal(writes, 2, 'the successful retry alone makes subsequent equal writes unnecessary');
+  });
+
+  for (const action of ['close', 'transfer'] as const) it(`editor DOM guards preserves early ${action} authority notes across editor setter reentry and skipped equal writes`, async t => {
+    const f = await hubCloseWidget(t), element = f.element;
+    const originalState = structuredClone(f.client.state!), closeOwner = element['roomCloseOwner'], transferOwner = element['stageManagementOwner'];
+    const close = t.mock.method(f.client, 'closeRoom', async () => {}), transfer = t.mock.method(f.client, 'transferControl', async () => {});
+    const transferAction = transferButton(element, f.host.id), closeAction = element['roomClose'];
+    f.holdSnapshots(); f.holdDeltas();
+    await f.server.hub.handle(f.session, { type: 'control:transfer', requestId: 'editor-authority-loss', targetId: f.host.id }); await f.drain();
+    const loss = f.heldSnapshots.find(message => message.type === 'room:state' && message.me.role !== 'controller'); assert.ok(loss);
+    let armed = false, reentered = false;
+    controlSetter(t, element['acceptedName'] as unknown as Node, 'textContent', () => {
+      if (!armed || reentered) return; reentered = true;
+      assert.notEqual(element['roomCloseOwner'], closeOwner, 'old close owner retired before editor text setter'); assert.equal(transferOwner?.transferAwaitingState, true, 'old transfer owner fenced before editor text setter');
+      f.client.me!.role = 'controller'; f.client.me!.connected = true;
+      click(closeAction); click(transferAction);
+    });
+    const dialog = t.mock.method(window, 'confirm', () => {
+      armed = true; f.socket.deliver(loss); f.socket.deliver({ type: 'room:state', ...originalState }); return true;
+    });
+    click(action === 'close' ? closeAction : transferAction); await settle();
+    assert.equal(reentered, true); assert.equal(dialog.mock.callCount(), 1); assert.equal(close.mock.callCount(), 0); assert.equal(transfer.mock.callCount(), 0);
+  });
+
+  it('editor DOM guards retain retirement write order and unconditional draft/text resets', async t => {
+    const f = await hubCloseWidget(t), element = f.element;
+    await f.client.disconnect();
+    for (const editor of ['name', 'roomName'] as const) {
+      element[`${editor}Panel`].hidden = false;
+      element[`${editor}Input`].disabled = false;
+      element[`${editor}Update`].disabled = false;
+      element[`${editor}Update`].setAttribute('aria-busy', 'corrupt');
+    }
+    const meter = instrumentEditors(element); t.after(() => meter.restore());
+    element['render']();
+    assert.deepEqual(meter.snapshot().writes, ['name', 'roomName'].flatMap(editor => [
+      `${editor}Input.value`, `${editor === 'name' ? 'acceptedName' : 'acceptedRoomName'}.textContent`,
+      `${editor}Panel.hidden`, `${editor}Update.disabled`, `${editor}Input.disabled`, `${editor}Update.aria-busy`,
+    ]));
+    meter.reset(); element['render']();
+    assert.deepEqual(meter.snapshot().writes, ['nameInput.value', 'acceptedName.textContent', 'roomNameInput.value', 'acceptedRoomName.textContent']);
+  });
+
+  for (const editor of ['name', 'roomName'] as const) it(`editor DOM guards evaluate ${editor} disabled and busy at their original setter boundaries`, async t => {
+    const f = await hubCloseWidget(t), element = f.element;
+    const panel = element[`${editor}Panel`], input = element[`${editor}Input`], button = element[`${editor}Update`];
+    const attempt = editor === 'name' ? 'nameAttempt' : 'roomNameAttempt', calls: string[] = [];
+    let inspecting = true;
+    panel.hidden = true; input.disabled = true; button.disabled = false; button.setAttribute('aria-busy', 'corrupt');
+    controlSetter(t, input as unknown as Node, 'disabled', () => {
+      if (!inspecting) return;
+      assert.equal(panel.hidden, false); calls.push('input'); element[attempt] = {};
+    });
+    controlSetter(t, button as unknown as Node, 'disabled', () => {
+      if (!inspecting) return;
+      assert.equal(input.disabled, false); calls.push('update'); element[attempt] = undefined;
+    });
+    try {
+      element['render']();
+      assert.deepEqual(calls, ['input', 'update']);
+      assert.equal(button.disabled, true, 'disabled observes the attempt created by the preceding input setter');
+      assert.equal(button.getAttribute('aria-busy'), 'false', 'busy observes the attempt retired by the preceding update setter');
+      assert.equal(element[attempt], undefined);
+      element['render'](); assert.equal(button.disabled, false); assert.equal(button.getAttribute('aria-busy'), 'false');
+    } finally { inspecting = false; }
+  });
+
 });
