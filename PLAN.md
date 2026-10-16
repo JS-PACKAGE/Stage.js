@@ -787,3 +787,6 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 
 
 204. **Widget 舉手列避免不變 DOM 寫入（第182批，2026-10-16）：** 對syncHandQueue既有列的姓名textContent、兩個aria-label、disabled與aria-busy採目前DOM值相等檢查，未變時省略寫入。保留所有owner／pending／row identity與順序、事件轉送前後同步及重入檢查，不以snapshot identity跳過、不快取衍生狀態或合併事件；宿主修改列值仍會在下次同步修復。published181基線與候選經公開SDK JSON ingress→完整widget、真Room生成合法快照的受控DOM操作計數與48項差異對照；100次主控mute／unmute事件加state，在20／292／300舉手名單的不變列寫入由42000／613200／630000降為0（固定工作量，非每秒流量或實際速度宣稱）。正式回歸守不變列零寫入及實際變更／pending／重連／重入／清理語義，不以脆弱計時門檻當測試。沒有SDK／server／protocol／media／依賴變更；操作次數降低不等同原生瀏覽器CPU／layout／latency或容量改善，native browser／AT／硬體音訊未驗收。
+
+
+205. **最小 embed 舉手主持（第183批，2026-10-16）：** immutable181並重證published182的whole embed＋公開SDK→validator→Hub七例證明manual transfer與controller grace expiry可使觀眾成台下主控且取得hands，但無核准／婉拒入口；既有API支持主持並維持滿台、離線、withdraw與失權裁決。僅embed加入controller-only原生details、按snapshot順序的具名核准／婉拒列，安全textContent與keyed row保留展開，不複製完整觀眾或其他管理功能。owner綁client／entry generation／room／pid／主控任期，per-target共享token先reserve，state-before-ACK移除／同ID重現不提前解鎖；同席reconnect保留但停用，retireControls與失權／終止／新entry清理，舊catch／finally不得覆蓋新owner等待與錯誤。保留server capacity／offline policy、notification-before-state窗口及SDK全域error，不加epoch或本機權限真值；開始／成功不清新錯誤，不樂觀移除、自動主持、timer、storage或額外capture／play。SDK／server／protocol／media不改，驗證限受控DOM/socket與實際SDK／Hub，native details／鍵盤／焦點／AT／WebRTC／硬體音訊未驗收。

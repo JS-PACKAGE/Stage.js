@@ -107,7 +107,7 @@ export async function actualApp(t: TestContext, options: { deferCapture?: boolea
   const originals = new Map(Object.keys(globals).map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
   for (const [key, value] of Object.entries(globals)) Object.defineProperty(globalThis, key, { configurable: true, value });
   t.mock.timers.enable({ apis: ['setTimeout', 'setInterval'] }); let now = 1000; t.mock.method(performance, 'now', () => now);
-  const nodes = new Map(['host', 'ws-path', 'room', 'code', 'name', 'status', 'hand-rejected', 'error-notice', 'last-error', 'error-dismiss', 'join', 'hand', 'mic', 'rename', 'room-name-panel', 'room-name-current', 'room-name-draft', 'room-name-update', 'stage', 'mic-retry', 'audio-retry', 'audio-retry-status', 'microphone-panel', 'microphone-device', 'microphone-refresh', 'microphone-apply', 'microphone-draft-notice', 'output-panel', 'output-device', 'output-refresh', 'output-apply', 'output-draft-notice', 'output-support', 'cancel-join', 'leave', 'audio', 'unlock'].map(id => [id, new EmbedNode()]));
+  const nodes = new Map(['host', 'ws-path', 'room', 'code', 'name', 'status', 'hand-rejected', 'error-notice', 'last-error', 'error-dismiss', 'join', 'hand', 'mic', 'rename', 'room-name-panel', 'room-name-current', 'room-name-draft', 'room-name-update', 'hand-queue', 'hand-queue-summary', 'hand-queue-notice', 'hand-queue-list', 'stage', 'mic-retry', 'audio-retry', 'audio-retry-status', 'microphone-panel', 'microphone-device', 'microphone-refresh', 'microphone-apply', 'microphone-draft-notice', 'output-panel', 'output-device', 'output-refresh', 'output-apply', 'output-draft-notice', 'output-support', 'cancel-join', 'leave', 'audio', 'unlock'].map(id => [id, new EmbedNode()]));
   const node = (id: string): EmbedNode => { const found = nodes.get(id); assert.ok(found, id); return found; };
   node('error-notice').hidden = true; node('hand-rejected').hidden = true;
   const cancel = node('cancel-join'); cancel.hidden = cancel.disabled = true; cancel.textContent = '取消連線';
@@ -133,7 +133,7 @@ export async function actualApp(t: TestContext, options: { deferCapture?: boolea
   const executable = stripTypeScriptTypes(source.replace("import './styles.css';", '').replace(dynamicImport, 'loadLibrary(moduleUrl)'));
   assert.doesNotMatch(executable, /\bimport\s*(?:\(|['"])/, 'no real external host import');
   runInNewContext(executable, {
-    document: { createElement(tag: string) { assert.equal(tag, 'option'); return new EmbedNode(); }, querySelector(selector: string) { assert.match(selector, /^#[a-z-]+$/); return node(selector.slice(1)); } },
+    document: { createElement(tag: string) { assert.ok(['option', 'li', 'span', 'div', 'button'].includes(tag), `unmodeled element: ${tag}`); return new EmbedNode(tag); }, querySelector(selector: string) { assert.match(selector, /^#[a-z-]+$/); return node(selector.slice(1)); } },
     location: { search: options.search ?? '?room=same-room', origin: 'https://stage.example.test' },
     URL, URLSearchParams, Error, Promise, performance, setTimeout, clearTimeout, setInterval, clearInterval,
     loadLibrary: async (url: string) => { assert.equal(url, 'https://stage.example.test/lib/stage-client.js'); return library; },

@@ -31,6 +31,12 @@ export class EmbedNode {
   private textValue = '';
   value = '';
   hidden = false;
+  open = false;
+  type = '';
+  className = '';
+  parentElement: EmbedNode | null = null;
+  readonly tagName: string;
+  constructor(tag = 'div') { this.tagName = tag.toUpperCase(); }
   readonly writes = { disabled: 0, textContent: 0, attributes: 0, unchanged: 0 };
   get disabled(): boolean { return this.disabledValue; }
   set disabled(value: boolean) {
@@ -46,7 +52,16 @@ export class EmbedNode {
   readonly attributes: Record<string, string> = {};
   readonly children: EmbedNode[] = [];
   onchange: (() => void) | null = null;
-  replaceChildren(...nodes: EmbedNode[]): void { this.children.splice(0, this.children.length, ...nodes); }
+  append(...nodes: EmbedNode[]): void {
+    for (const node of nodes) { node.remove(); node.parentElement = this; this.children.push(node); }
+  }
+  remove(): void {
+    if (!this.parentElement) return;
+    const siblings = this.parentElement.children, index = siblings.indexOf(this);
+    assert.ok(index >= 0); siblings.splice(index, 1); this.parentElement = null;
+  }
+  contains(node: EmbedNode): boolean { return this === node || this.children.some(child => child.contains(node)); }
+  replaceChildren(...nodes: EmbedNode[]): void { for (const child of [...this.children]) child.remove(); this.append(...nodes); }
   change(value: string): void { if (!this.disabled) { this.value = value; this.invokeChange(); } }
   invokeChange(): void { assert.ok(this.onchange); this.onchange(); }
   onclick: (() => void) | null = null;
@@ -56,6 +71,7 @@ export class EmbedNode {
     this.writes.attributes++; if (value === this.attributes[key]) this.writes.unchanged++;
     this.attributes[key] = value;
   }
+  getAttribute(key: string): string | null { return this.attributes[key] ?? null; }
   querySelector(selector: string): EmbedNode | null {
     assert.equal(selector, 'button', 'unmodeled form selector'); return this.submitButton;
   }
@@ -88,6 +104,9 @@ export class EmbedSdk {
   readonly actions: { type: Action; work: Deferred }[] = [];
   readonly renames: { name: string; work: Deferred }[] = [];
   setName(name: string): Promise<void> { const work = new Deferred(); this.renames.push({ name, work }); return work.promise; }
+  readonly moderations: { kind: 'approve' | 'reject'; id: string; work: Deferred }[] = [];
+  approve(id: string): Promise<void> { const work = new Deferred(); this.moderations.push({ kind: 'approve', id, work }); return work.promise; }
+  reject(id: string): Promise<void> { const work = new Deferred(); this.moderations.push({ kind: 'reject', id, work }); return work.promise; }
   readonly roomRenames: { name: string; work: Deferred }[] = [];
   setRoomName(name: string): Promise<void> { const work = new Deferred(); this.roomRenames.push({ name, work }); return work.promise; }
   private readonly listeners = new Map<string, ((event: { detail: unknown }) => void)[]>();
@@ -124,7 +143,7 @@ export class EmbedSdk {
 export const flush = async (): Promise<void> => { for (let i = 0; i < 16; i++) await Promise.resolve(); };
 
 export function embedApp(options: { libraryLoad?: Promise<void> | ((url: string, attempt: number) => Promise<void>); source?: string; search?: string } = {}) {
-  const nodes = new Map(['host', 'ws-path', 'room', 'code', 'name', 'status', 'hand-rejected', 'error-notice', 'last-error', 'error-dismiss', 'join', 'hand', 'mic', 'rename', 'room-name-panel', 'room-name-current', 'room-name-draft', 'room-name-update', 'stage', 'mic-retry', 'audio-retry', 'audio-retry-status', 'microphone-panel', 'microphone-device', 'microphone-refresh', 'microphone-apply', 'microphone-draft-notice', 'output-panel', 'output-device', 'output-refresh', 'output-apply', 'output-draft-notice', 'output-support', 'cancel-join', 'leave', 'audio', 'unlock'].map(id => [id, new EmbedNode()]));
+  const nodes = new Map(['host', 'ws-path', 'room', 'code', 'name', 'status', 'hand-rejected', 'error-notice', 'last-error', 'error-dismiss', 'join', 'hand', 'mic', 'rename', 'room-name-panel', 'room-name-current', 'room-name-draft', 'room-name-update', 'hand-queue', 'hand-queue-summary', 'hand-queue-notice', 'hand-queue-list', 'stage', 'mic-retry', 'audio-retry', 'audio-retry-status', 'microphone-panel', 'microphone-device', 'microphone-refresh', 'microphone-apply', 'microphone-draft-notice', 'output-panel', 'output-device', 'output-refresh', 'output-apply', 'output-draft-notice', 'output-support', 'cancel-join', 'leave', 'audio', 'unlock'].map(id => [id, new EmbedNode()]));
   const node = (id: string): EmbedNode => { const found = nodes.get(id); assert.ok(found, `unmodeled node: ${id}`); return found; };
   node('error-notice').hidden = true; node('hand-rejected').hidden = true;
   const cancel = node('cancel-join'); cancel.hidden = cancel.disabled = true; cancel.textContent = '取消連線';
@@ -192,7 +211,7 @@ export function embedApp(options: { libraryLoad?: Promise<void> | ((url: string,
   const executable = stripTypeScriptTypes(source.replace("import './styles.css';", '').replace(dynamicImport, 'loadLibrary(moduleUrl)'));
   assert.doesNotMatch(executable, /\bimport\s*(?:\(|['"])/, 'the fixture must never import a real external library');
   runInNewContext(executable, {
-    document: { createElement(tag: string) { assert.equal(tag, 'option'); return new EmbedNode(); }, querySelector(selector: string) { assert.match(selector, /^#[a-z-]+$/); return node(selector.slice(1)); } },
+    document: { createElement(tag: string) { assert.ok(['option', 'li', 'span', 'div', 'button'].includes(tag), `unmodeled element: ${tag}`); return new EmbedNode(tag); }, querySelector(selector: string) { assert.match(selector, /^#[a-z-]+$/); return node(selector.slice(1)); } },
     location: { search: options.search ?? '?host=https%3A%2F%2Fstage.example.test%2Fprefix&room=%20same-room%20&code=%20TEST42%20', origin: 'https://embed.example.test' },
     URL, URLSearchParams, Error, Promise, performance: { now: () => now },
     loadLibrary: async (url: string) => {
@@ -214,10 +233,10 @@ export function embedApp(options: { libraryLoad?: Promise<void> | ((url: string,
       assert.equal(sdk.joins.length, 1); sdk.snapshot(overrides); assert.equal(submit.disabled, false); return sdk;
     },
     async cleanup(): Promise<void> {
-      for (const sdk of clients) for (const action of [...sdk.actions, ...sdk.renames, ...sdk.roomRenames, ...sdk.inputSelections]) if (!action.work.settled) action.work.resolve();
+      for (const sdk of clients) for (const action of [...sdk.actions, ...sdk.renames, ...sdk.roomRenames, ...sdk.inputSelections, ...sdk.moderations]) if (!action.work.settled) action.work.resolve();
       for (const sdk of clients) for (const work of sdk.deviceLists) if (!work.settled) work.resolve();
       await flush(); timers.clear(); retired.clear();
-      assert.ok(clients.every(sdk => [...sdk.actions, ...sdk.renames, ...sdk.roomRenames, ...sdk.inputSelections].every(action => action.work.settled)), 'all command promises must settle');
+      assert.ok(clients.every(sdk => [...sdk.actions, ...sdk.renames, ...sdk.roomRenames, ...sdk.inputSelections, ...sdk.moderations].every(action => action.work.settled)), 'all command promises must settle');
       assert.equal(timers.size, 0);
     },
   };

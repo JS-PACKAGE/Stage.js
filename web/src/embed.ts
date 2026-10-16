@@ -17,6 +17,10 @@ const leave = document.querySelector<HTMLButtonElement>('#leave')!;
 const cancelJoin = document.querySelector<HTMLButtonElement>('#cancel-join')!;
 const mic = document.querySelector<HTMLButtonElement>('#mic')!;
 const rename = document.querySelector<HTMLButtonElement>('#rename')!;
+const handQueuePanel = document.querySelector<HTMLDetailsElement>('#hand-queue')!;
+const handQueueSummary = document.querySelector<HTMLElement>('#hand-queue-summary')!;
+const handQueueNotice = document.querySelector<HTMLParagraphElement>('#hand-queue-notice')!;
+const handQueueList = document.querySelector<HTMLUListElement>('#hand-queue-list')!;
 const roomNamePanel = document.querySelector<HTMLDivElement>('#room-name-panel')!;
 const roomNameCurrent = document.querySelector<HTMLParagraphElement>('#room-name-current')!;
 const roomNameDraft = input('room-name-draft');
@@ -49,6 +53,13 @@ let controlsClient: Client | undefined;
 let pendingRename: { client: Client; roomId: string; participantId: string; generation: number } | undefined;
 let roomNameOwner: { client: Client; roomId: string; participantId: string; generation: number } | undefined;
 let roomNameAttempt: object | undefined;
+interface HandQueueRow {
+  node: HTMLLIElement; name: HTMLSpanElement; approve: HTMLButtonElement; reject: HTMLButtonElement;
+}
+let handQueueOwner: { client: Client; roomId: string; participantId: string; generation: number } | undefined;
+const handQueueRows = new Map<string, HandQueueRow>();
+const handQueuePending = new Map<string, object>();
+let handQueueOrder: string[] = [];
 let decodeRoomName: typeof StageLibrary.decodeName | undefined;
 let micRetryParticipant: string | undefined;
 let pendingMicRetry: { client: Client } | undefined;
@@ -95,7 +106,7 @@ function hideCancel(): void {
   cancelEntry = undefined; cancelJoin.hidden = cancelJoin.disabled = true;
 }
 function retireControls(): void {
-  controlsClient = undefined; retireHandRejection();
+  controlsClient = undefined; retireHandRejection(); retireHandQueue();
   pendingHand = undefined; pendingMic = undefined; pendingStage = undefined;
   micRetryParticipant = undefined; pendingMicRetry = undefined;
   pendingRename = undefined; syncRename(); retireRoomName(); retireMicrophone(); retireAudioRetry(); retireOutput();
@@ -158,6 +169,107 @@ function syncRoomName(): void {
   roomNamePanel.hidden = false; roomNameDraft.disabled = false;
   roomNameUpdate.disabled = current.status === 'reconnecting' || Boolean(roomNameAttempt);
   roomNameUpdate.setAttribute('aria-busy', String(Boolean(roomNameAttempt)));
+}
+function retireHandQueue(): void {
+  handQueueOwner = undefined; handQueuePending.clear();
+  for (const row of handQueueRows.values()) {
+    for (const button of [row.approve, row.reject]) { button.disabled = true; button.setAttribute('aria-busy', 'false'); }
+  }
+  if (handQueueRows.size) handQueueList.replaceChildren();
+  handQueueRows.clear(); handQueueOrder = [];
+  handQueuePanel.hidden = true; handQueuePanel.open = false;
+  handQueueSummary.textContent = ''; handQueueNotice.textContent = '';
+}
+function syncHandQueue(): void {
+  const current = client, state = current?.state;
+  const active = current?.status === 'waiting' || current?.status === 'live';
+  if (!current || current !== controlsClient || !state || state.me.role !== 'controller' || !decodeRoomName
+    || (!active && current.status !== 'reconnecting')) { retireHandQueue(); return; }
+  const owner = handQueueOwner;
+  if (!owner || owner.client !== current || owner.generation !== entryGeneration
+    || owner.roomId !== state.roomId || owner.participantId !== state.me.participantId) {
+    retireHandQueue();
+    // Reconnect may retain an owned controller seat, but cannot establish a new tenure.
+    if (!active) return;
+    handQueueOwner = { client: current, roomId: state.roomId, participantId: state.me.participantId, generation: entryGeneration };
+  }
+  const seen = new Set<string>();
+  const people = state.hands.filter(person => {
+    if (!person.participantId || person.participantId === state.me.participantId || seen.has(person.participantId)
+      || person.role !== 'audience' || !person.handRaised || person.onStage) return false;
+    seen.add(person.participantId); return true;
+  });
+  const supported = typeof current.approve === 'function' && typeof current.reject === 'function';
+  handQueuePanel.hidden = false;
+  handQueueSummary.textContent = `舉手申請（${people.length}）${active ? '' : ' · 上次收到'}`;
+  handQueueNotice.textContent = !active ? '重新連線中，暫時不能處理申請。'
+    : !supported ? '此 SDK 的部分申請處理功能無法使用。'
+    : people.length ? '請選擇要核准上台或婉拒的申請；是否可上台仍由伺服器決定。' : '目前沒有舉手申請。';
+  for (const person of people) {
+    const id = person.participantId;
+    let row = handQueueRows.get(id);
+    if (!row) {
+      const node = document.createElement('li'), name = document.createElement('span'), actions = document.createElement('div');
+      const approve = document.createElement('button'), reject = document.createElement('button');
+      node.className = 'person'; name.className = 'identity'; actions.className = 'actions';
+      approve.type = reject.type = 'button'; approve.textContent = '核准上台'; reject.textContent = '婉拒';
+      row = { node, name, approve, reject };
+      const original = row;
+      approve.onclick = () => moderateHand(id, original, 'approve');
+      reject.onclick = () => moderateHand(id, original, 'reject');
+      actions.append(approve, reject); node.append(name, actions); handQueueRows.set(id, row);
+    }
+    const name = decodeRoomName(person.name), label = `${name}${person.connected ? '' : '（暫時離線）'}`;
+    if (row.name.textContent !== label) row.name.textContent = label;
+    const labels = { approve: `核准 ${name} 上台`, reject: `婉拒 ${name} 的舉手申請` };
+    for (const kind of ['approve', 'reject'] as const) {
+      const button = row[kind], pending = handQueuePending.has(id);
+      if (button.getAttribute('aria-label') !== labels[kind]) button.setAttribute('aria-label', labels[kind]);
+      const disabled = !active || pending || typeof current[kind] !== 'function', busy = String(pending);
+      if (button.disabled !== disabled) button.disabled = disabled;
+      if (button.getAttribute('aria-busy') !== busy) button.setAttribute('aria-busy', busy);
+    }
+  }
+  for (const [id, row] of handQueueRows) if (!seen.has(id)) {
+    for (const button of [row.approve, row.reject]) { button.disabled = true; button.setAttribute('aria-busy', 'false'); }
+    handQueueRows.delete(id);
+  }
+  const order = people.map(person => person.participantId);
+  if (order.length !== handQueueOrder.length || order.some((id, index) => id !== handQueueOrder[index])) {
+    handQueueList.replaceChildren(...order.map(id => handQueueRows.get(id)!.node)); handQueueOrder = order;
+  }
+}
+function currentHandRow(id: string, row: HandQueueRow, kind: 'approve' | 'reject'): boolean {
+  return handQueueRows.get(id) === row && row.node.parentElement === handQueueList
+    && row.node.contains(row[kind]) && !handQueuePanel.hidden;
+}
+function moderateHand(id: string, row: HandQueueRow, kind: 'approve' | 'reject'): void {
+  syncHandQueue();
+  const owner = handQueueOwner;
+  if (!owner || !currentHandRow(id, row, kind) || handQueuePending.has(id)
+    || (owner.client.status !== 'waiting' && owner.client.status !== 'live')
+    || typeof owner.client[kind] !== 'function') return;
+  // A target may disappear in state before its ACK, so pending belongs to the tenure, not its row.
+  const attempt = {};
+  handQueuePending.set(id, attempt); syncHandQueue();
+  const current = (): boolean => {
+    if (handQueueOwner !== owner || handQueuePending.get(id) !== attempt) return false;
+    syncHandQueue();
+    return handQueueOwner === owner && handQueuePending.get(id) === attempt;
+  };
+  const eligible = (): boolean => current() && currentHandRow(id, row, kind)
+    && (owner.client.status === 'waiting' || owner.client.status === 'live');
+  void (async () => {
+    try {
+      if (!eligible() || typeof owner.client[kind] !== 'function') return;
+      await owner.client[kind](id);
+    } catch (error) {
+      // Promise-specific feedback requires the original row; global SDK errors retain their existing policy.
+      if (eligible()) report(error);
+    } finally {
+      if (current()) { handQueuePending.delete(id); syncHandQueue(); }
+    }
+  })();
 }
 function syncMic(): void {
   const me = client === controlsClient ? client?.me : undefined;
@@ -433,7 +545,7 @@ join.onsubmit = (event) => {
         if (generation === entryGeneration) hideCancel();
         progress = false;
         status.textContent = `${library.decodeName(detail.name)} · ${library.decodeName(detail.me.name)} · ${detail.me.onStage ? '已上台' : '收聽中'}`;
-        syncHand(); syncMic(); syncStage(); syncMicRetry(); syncRename(); syncRoomName(); syncMicrophone(); syncAudioRetry(); syncOutput();
+        syncHand(); syncMic(); syncStage(); syncMicRetry(); syncRename(); syncRoomName(); syncHandQueue(); syncMicrophone(); syncAudioRetry(); syncOutput();
         leave.disabled = false;
       });
       const retireOwnHandRejection = (participantId: string): void => {
@@ -471,7 +583,7 @@ join.onsubmit = (event) => {
         if (current.state) { receivedState = true; if (generation === entryGeneration) hideCancel(); }
         if (detail === 'reconnecting') { retireHandRejection(); progress = false; status.textContent = '重新連線中'; hand.disabled = true; }
         else if (detail === 'disconnected') { progress = false; retirePlayback(); retireControls(); status.textContent = '未連線'; hand.disabled = leave.disabled = true; }
-        syncHand(); syncMic(); syncStage(); syncMicRetry(); syncRename(); syncRoomName(); syncMicrophone(); syncAudioRetry(); syncOutput();
+        syncHand(); syncMic(); syncStage(); syncMicRetry(); syncRename(); syncRoomName(); syncHandQueue(); syncMicrophone(); syncAudioRetry(); syncOutput();
       });
       client.on('error', ({ detail }) => { if (client !== current || cancelledEntry || generation !== entryGeneration) return; progress = false; report(detail); });
       client.on('audioblocked', () => { if (cancelledEntry) return; progress = false; status.textContent = '請點擊啟用音訊。'; });
@@ -692,4 +804,4 @@ leave.onclick = () => {
   });
 };
 replaceOutputOptions([]);
-syncHand(); syncMic(); syncStage(); syncMicRetry(); syncRename(); syncRoomName(); syncMicrophone(); syncAudioRetry(); syncOutput(); syncUnlock();
+syncHand(); syncMic(); syncStage(); syncMicRetry(); syncRename(); syncRoomName(); syncHandQueue(); syncMicrophone(); syncAudioRetry(); syncOutput(); syncUnlock();
