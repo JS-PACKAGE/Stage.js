@@ -10,7 +10,7 @@ import { InvariantViolation, StageError } from './errors.ts';
 export interface Participant {
   readonly participantId: string;
   /** Already HTML-escaped (AGENTS.md §S3/§S8). */
-  readonly name: string;
+  name: string;
   readonly resumeToken: string;
   readonly joinedAt: number;
   role: Role;
@@ -60,7 +60,8 @@ export type RoomEvent = Extract<
  */
 export class Room {
   readonly roomId: string;
-  readonly name: string;
+  /** Already HTML-escaped (AGENTS.md §S3/§S8). */
+  name: string;
   code: string;
   readonly codeRequired: boolean;
   readonly createdAt: number;
@@ -168,6 +169,24 @@ export class Room {
     if (targetId === byId) throw new StageError('conflict', 'controller cannot kick itself');
     this.require(targetId);
     return this.remove(targetId);
+  }
+
+  /** Update the bound participant's own name, already sanitized by input validation. */
+  rename(participantId: string, name: string): boolean {
+    const p = this.require(participantId);
+    const changed = p.name !== name;
+    p.name = name;
+    this.assertInvariants();
+    return changed;
+  }
+
+  /** Controller updates the room title, already sanitized by input validation. */
+  renameRoom(byId: string, name: string): boolean {
+    this.requireController(byId);
+    const changed = this.name !== name;
+    this.name = name;
+    this.assertInvariants();
+    return changed;
   }
 
   /** Trim one participant's level in the mix; validation bounds the range. */

@@ -121,7 +121,7 @@ export function createStageServer(deps: StageServerDeps): StageServer {
         log.error('TLS certificate reload failed, keeping the previous one', { error: String(err) });
       }
     };
-    const names: Record<string, string[]> = {};
+    const names: Record<string, string[]> = Object.create(null);
     for (const file of [certFile, keyFile]) (names[dirname(file)] ??= []).push(basename(file));
     for (const [dir, files] of Object.entries(names)) {
       try {
@@ -160,7 +160,13 @@ export function createStageServer(deps: StageServerDeps): StageServer {
       socket.end('HTTP/1.1 503 Service Unavailable\r\nConnection: close\r\nContent-Length: 0\r\nRetry-After: 1\r\n\r\n', () => socket.destroy());
       return;
     }
-    const path = new URL(req.url ?? '/', 'http://x').pathname;
+    let path: string;
+    try { path = new URL(req.url ?? '/', 'http://x').pathname; }
+    catch {
+      socket.once('error', () => socket.destroy());
+      socket.end('HTTP/1.1 400 Bad Request\r\nConnection: close\r\nContent-Length: 0\r\n\r\n', () => socket.destroy());
+      return;
+    }
     const ip = clientAddress(req);
     const perIpCap = config.limits.maxConnectionsPerIp;
     if (path !== config.server.wsPath || sessions.size >= config.limits.maxConnections || (perIpCap > 0 && (perIp.get(ip) ?? 0) >= perIpCap)) {
@@ -181,7 +187,7 @@ export function createStageServer(deps: StageServerDeps): StageServer {
       if (stopping || ws.readyState !== ws.OPEN) { stopInput(); return Promise.resolve(); }
       return hub.handle(session, message);
     }, (error) => {
-      log.error('ws message handler failed', { session: session.id, error: String(error) });
+      log.error('ws message handler failed', { session: session.id, error });
       session.terminate();
     });
     stopInput = () => { void incoming.stop(); };
@@ -233,13 +239,13 @@ export function createStageServer(deps: StageServerDeps): StageServer {
       const drained = incoming.stop();
       const detach = async (): Promise<void> => {
         try { await hub.detach(session, code === CLOSE_NORMAL); }
-        catch (error) { log.error('ws detach failed', { session: session.id, error: String(error) }); }
+        catch (error) { log.error('ws detach failed', { session: session.id, error }); }
       };
       // Release the existing binding now so a stalled offer cannot prevent same-seat resume.
       void detach();
       // An already accepted join can bind after close; clean it up once active work settles.
       void drained.finally(detach).catch(error => {
-        log.error('ws active work cleanup failed', { session: session.id, error: String(error) });
+        log.error('ws active work cleanup failed', { session: session.id, error });
       });
     });
     ws.on('error', (err) => log.debug('ws error', { session: session.id, error: String(err) }));

@@ -97,15 +97,23 @@ for (const mode of ['missing', 'throw'] as const) {
   });
 }
 
-for (const redraw of [false, true]) {
+for (const view of ['unchanged', 'identical snapshot', 'changed room name'] as const) {
+  const redraw = view === 'changed room name';
   for (const outcome of ['success', 'failure'] as const) {
-    it(`whole sample current invitation copy ${outcome} survives ${redraw ? 'a harmless same-identity redraw' : 'an unchanged view'}`, async t => {
+    it(`whole sample current invitation copy ${outcome} survives ${view}`, async t => {
       const h = setup(); t.after(() => h.cleanup()); await join(h);
       const first = inviteLink(h), firstCalls = h.watchInput(first), firstButton = h.button('複製邀請連結');
       assert.equal(first.value, 'https://sample.test/?room=same-room&code=OLD23456');
       const request = copy(h);
-      if (redraw) h.sdk.snapshot(controllerState());
+      if (view !== 'unchanged') {
+        const next = controllerState();
+        if (redraw) next.name = 'Updated room name';
+        h.sdk.snapshot(next);
+      }
       const current = inviteLink(h), currentCalls = redraw ? h.watchInput(current) : firstCalls;
+      if (!redraw) {
+        assert.equal(current, first); assert.equal(h.button('複製邀請連結'), firstButton); assert.equal(firstButton.disabled, true);
+      }
       if (redraw) {
         assert.notEqual(current, first); assert.equal(first.isConnected, false);
         assert.equal(current.value, first.value); assert.deepEqual(h.sdk.events.slice(-1), ['state']);
@@ -193,7 +201,7 @@ for (const firstToSettle of ['older', 'newer'] as const) {
     it(`whole sample overlapping copy keeps the newer ${newerOutcome} when ${firstToSettle} settles first`, async t => {
       const h = setup(); t.after(() => h.cleanup()); await join(h);
       const retired = inviteLink(h), retiredCalls = h.watchInput(retired), retiredButton = h.button('複製邀請連結');
-      const older = copy(h); h.sdk.snapshot(controllerState());
+      const older = copy(h); h.sdk.snapshot({ ...controllerState(), name: 'Updated room name' });
       const current = inviteLink(h), currentCalls = h.watchInput(current), currentButton = h.button('複製邀請連結');
       assert.equal(retired.isConnected, false); assert.notEqual(current, retired);
       const newer = copy(h); assert.equal(newer.text, older.text);

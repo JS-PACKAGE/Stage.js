@@ -156,7 +156,8 @@ it('whole sample does not restore an old false-admission notice after synchronou
 interface Track { enabled: boolean; readyState: string; stops: number; stop(): void }
 interface Stream { getTracks(): Track[]; getAudioTracks(): Track[] }
 function stream(): { value: Stream; track: Track } {
-  const track = { enabled: true, readyState: 'live', stops: 0, stop() { this.stops++; this.readyState = 'ended'; } };
+  const track = Object.assign(new EventTarget(), { enabled: true, readyState: 'live', stops: 0,
+    stop() { this.stops++; this.readyState = 'ended'; } });
   return { track, value: { getTracks: () => [track], getAudioTracks: () => [track] } };
 }
 class Socket {

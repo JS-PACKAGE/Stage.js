@@ -31,7 +31,8 @@ class Context {
   async close() {}
 }
 function stream() {
-  const track = { enabled: true, stops: 0, stop() { this.stops++; } };
+  const track = Object.assign(new EventTarget(), { enabled: true, readyState: 'live', stops: 0,
+    stop() { this.stops++; this.readyState = 'ended'; } });
   return { track, value: { getTracks: () => [track], getAudioTracks: () => [track] } as unknown as MediaStream };
 }
 function state(onStage: boolean, id: string): RoomStatePayload {

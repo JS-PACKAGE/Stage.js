@@ -208,6 +208,10 @@ export function parseConfig(raw: unknown): AppConfig {
     throw new ConfigError('server.metrics.token: required when metrics are enabled on a non-loopback host');
   }
   if (!server.wsPath.startsWith('/')) throw new ConfigError('server.wsPath: must start with "/"');
+  // Admission compares the parsed pathname literally. Do not silently configure a different route.
+  let pathname: string | undefined;
+  try { pathname = new URL(`http://x${server.wsPath}`).pathname; } catch { /* report only the field, never its value */ }
+  if (pathname !== server.wsPath) throw new ConfigError('server.wsPath: must be a literal HTTP URL pathname without query, fragment or normalization');
   const hasTls = server.tls.certFile !== '' && server.tls.keyFile !== '';
   if (!hasTls && !server.allowInsecure) {
     throw new ConfigError('server.tls: certFile/keyFile required unless server.allowInsecure is true (local dev only)');
@@ -252,6 +256,8 @@ export function parseConfig(raw: unknown): AppConfig {
     createToken: str(r, 'createToken', 'rooms'),
   };
   if (rooms.codeLength > limits.codeMaxLength) throw new ConfigError('rooms.codeLength: exceeds limits.codeMaxLength');
+  // Match the room:create wire token limit before accepting a credential no client can submit.
+  if (rooms.createToken.length > 256) throw new ConfigError('rooms.createToken: must be at most 256 UTF-16 code units');
 
   const a = obj(root.audio, 'audio');
   const o = obj(a.opus, 'audio.opus');

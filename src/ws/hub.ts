@@ -62,6 +62,8 @@ interface RoomRuntime {
   readonly sessions: Map<string, Session>;
   /** Token changes when a participant stops and resumes publishing. */
   readonly publishers: Map<string, symbol>;
+  /** Latest full mixer set, owned by this room rather than any listener's array. */
+  speakingIds: readonly string[];
   graceTimer: unknown;
   /** Seat-hold timers of disconnected non-controllers (`rooms.participantGraceMs`). */
   readonly graceTimers: Map<string, unknown>;
@@ -228,6 +230,7 @@ export class StageHub {
       mixer,
       sessions: new Map([[controller.participantId, session]]),
       publishers: new Map(),
+      speakingIds: [],
       graceTimer: undefined,
       graceTimers: new Map(),
       stateTimer: undefined,
@@ -240,14 +243,19 @@ export class StageHub {
     };
     this.rooms.set(roomId, rt);
     transport.setMixedStream(roomId, mixer);
-    // Fired from the mixer clock, outside the room queue: read-only fan-out, so no queueing needed.
-    mixer.onSpeaking((participantIds) => { if (!rt.closed) this.broadcast(rt, { type: 'speaking', participantIds }); });
+    // Fired from the mixer clock: update the room-local baseline and fan out without queueing.
+    mixer.onSpeaking((participantIds) => {
+      if (rt.closed) return;
+      rt.speakingIds = [...participantIds];
+      this.broadcast(rt, { type: 'speaking', participantIds });
+    });
     this.bindings.set(session, { roomId, participantId: controller.participantId });
     log.info('room created', { roomId, participantId: controller.participantId, codeRequired });
 
     session.send(codeRequired ? { type: 'room:created', roomId, code } : { type: 'room:created', roomId });
     session.send({ type: 'rtc:config', iceServers: iceServersFor(config.rtc, controller.participantId, this.now()) });
     session.send({ type: 'room:state', ...room.snapshot(controller.participantId) });
+    this.sendSpeaking(rt, session);
     session.send({ type: 'ok', requestId: msg.requestId });
   }
 
@@ -291,6 +299,7 @@ export class StageHub {
     session.send({ type: 'rtc:config', iceServers: iceServersFor(this.deps.config.rtc, participantId, this.now()) });
     session.send({ type: 'room:state', ...room.snapshot(participantId) });
     this.presenceChanged(rt);
+    this.sendSpeaking(rt, session);
     session.send({ type: 'ok', requestId: msg.requestId });
   }
 
@@ -299,6 +308,7 @@ export class StageHub {
     const { room } = rt;
     const now = this.now();
     let events: RoomEvent[];
+    let unchangedMic = false;
     switch (msg.type) {
       case 'room:close':
         if (pid !== room.controllerId) throw new StageError('forbidden', 'controller only');
@@ -327,15 +337,19 @@ export class StageHub {
         events = room.transfer(pid, msg.targetId);
         break;
       case 'mic:mute':
+        unchangedMic = room.get(pid)?.selfMuted === true;
         events = room.mute(pid);
         break;
       case 'mic:unmute':
+        unchangedMic = room.get(pid)?.selfMuted === false;
         events = room.unmute(pid);
         break;
       case 'mic:force-mute':
+        unchangedMic = room.get(msg.targetId)?.forceMuted === true;
         events = room.forceMute(pid, msg.targetId);
         break;
       case 'mic:force-unmute':
+        unchangedMic = room.get(msg.targetId)?.forceMuted === false;
         events = room.forceUnmute(pid, msg.targetId);
         break;
       case 'participant:kick':
@@ -344,7 +358,25 @@ export class StageHub {
         this.evict(rt, msg.targetId);
         this.deps.log.info('participant kicked', { roomId: room.roomId, byId: pid, participantId: msg.targetId });
         break;
+      case 'room:rename':
+        if (room.renameRoom(pid, msg.name)) this.broadcastState(rt);
+        else session.send({ type: 'room:state', ...room.snapshot(pid) });
+        session.send({ type: 'ok', requestId: msg.requestId });
+        return;
+      case 'participant:rename':
+        if (room.rename(pid, msg.name)) {
+          const participant = room.get(pid)!;
+          if (participant.role === 'audience' && !participant.onStage && !participant.handRaised &&
+              rt.stateTimer === undefined && rt.lastStatus === room.status) {
+            session.send({ type: 'room:state', ...room.snapshot(pid) });
+            const controller = rt.sessions.get(room.controllerId);
+            if (controller) controller.send({ type: 'room:state', ...room.snapshot(room.controllerId) });
+          } else this.broadcastState(rt);
+        } else session.send({ type: 'room:state', ...room.snapshot(pid) });
+        session.send({ type: 'ok', requestId: msg.requestId });
+        return;
       case 'mic:gain':
+        unchangedMic = room.get(msg.targetId)?.gainDb === msg.gainDb;
         room.setGain(pid, msg.targetId, msg.gainDb);
         if (rt.publishers.has(msg.targetId)) rt.mixer.setGain(msg.targetId, msg.gainDb);
         events = [];
@@ -363,10 +395,21 @@ export class StageHub {
         throw new StageError('bad_request', `unroutable ${msg.type}`);
     }
     const handOnly = msg.type === 'hand:raise' || msg.type === 'hand:withdraw';
-    this.apply(rt, events, handOnly);
+    // Still run the Room method above: identical values do not bypass permission/invariant checks.
+    // A true no-op needs only the requester refresh and must not consume a pending room broadcast.
+    if (!unchangedMic) this.apply(rt, events, handOnly);
     // Preserve the requester's state-before-ACK contract without sending N full snapshots
     // for every hand in a crowd. Other clients receive ordered events, then one fresh snapshot.
-    if (handOnly) session.send({ type: 'room:state', ...room.snapshot(pid) });
+    if (handOnly || unchangedMic) session.send({ type: 'room:state', ...room.snapshot(pid) });
+    if (msg.type === 'stage:reject' && !rt.closed) {
+      // Preserve the public withdrawal/state sequence, then privately explain this decision.
+      // Offline seats have no notification history; never send through a retired room binding.
+      const target = rt.sessions.get(msg.targetId);
+      const binding = target && this.bindings.get(target);
+      if (target && binding?.roomId === room.roomId && binding.participantId === msg.targetId) {
+        target.send({ type: 'hand:rejected', roomId: room.roomId, participantId: msg.targetId });
+      }
+    }
     session.send({ type: 'ok', requestId: msg.requestId });
     if (msg.type === 'control:transfer') this.deps.log.info('control transferred', { roomId: room.roomId, fromId: pid, toId: msg.targetId });
   }
@@ -410,7 +453,7 @@ export class StageHub {
         await transport.addRemoteCandidate(roomId, pid, msg.payload);
       } catch (err) {
         // e.g. a candidate before any offer: that client's signaling error, not a room failure.
-        log.debug('remote candidate rejected', { roomId, participantId: pid, error: String(err) });
+        log.debug('remote candidate rejected', { roomId, participantId: pid, error: err });
         throw new StageError('bad_request', 'candidate rejected');
       }
       session.send({ type: 'ok', requestId: msg.requestId });
@@ -437,7 +480,7 @@ export class StageHub {
       answer = await transport.negotiate(roomId, pid, msg.payload, { allowUplink: negotiation.allowUplink });
     } catch (err) {
       // A bad offer is that client's problem, not a reason to tear down the room.
-      log.warn('negotiation failed', { roomId, participantId: pid, error: String(err) });
+      log.warn('negotiation failed', { roomId, participantId: pid, error: err });
       await rt.queue.run(() => {
         // A newer accepted offer owns cleanup even if its replacement socket has since detached.
         if (rt.closed || rt.room.get(pid) !== negotiation.participant ||
@@ -577,7 +620,7 @@ export class StageHub {
    * the room and outside its queue, like `speaking`; stops rescheduling once nobody publishes.
    */
   private async reportQuality(rt: RoomRuntime): Promise<void> {
-    if (rt.closed || !rt.publishers.size) return;
+    if (rt.closed) return;
     const { roomId } = rt.room;
     const publishers = [...rt.publishers];
     const stats = await Promise.allSettled(publishers.map(async ([id]) => this.deps.transport.getStats(roomId, id)));
@@ -587,7 +630,7 @@ export class StageHub {
       if (rt.publishers.get(participantId) !== generation) return;
       const result = stats[i]!;
       if (result.status === 'rejected') {
-        this.deps.log.warn('publisher quality stats failed', { roomId, participantId, error: String(result.reason) });
+        this.deps.log.warn('publisher quality stats failed', { roomId, participantId, error: result.reason });
         return;
       }
       const s = result.value;
@@ -604,7 +647,8 @@ export class StageHub {
       if (s.rttMs !== undefined) q.rttMs = Math.round(s.rttMs);
       participants.push(q);
     });
-    if (participants.length) {
+    // Clear stale reports only when nobody publishes, not when current publishers lack stats.
+    if (participants.length || !rt.publishers.size) {
       const msg: ServerMessage = { type: 'quality', participants };
       const encoded = JSON.stringify(msg);
       for (const [pid, session] of rt.sessions) {
@@ -622,6 +666,15 @@ export class StageHub {
   private broadcast(rt: RoomRuntime, msg: ServerMessage): void {
     const encoded = JSON.stringify(msg);
     for (const s of rt.sessions.values()) s.send(msg, encoded);
+  }
+
+  /** A new or resumed reader needs a baseline even if the mixer set never changes again. */
+  private sendSpeaking(rt: RoomRuntime, session: Session): void {
+    const participantIds = rt.speakingIds.filter((id) => {
+      const participant = rt.room.get(id);
+      return participant?.onStage && !participant.selfMuted && !participant.forceMuted && rt.publishers.has(id);
+    });
+    session.send({ type: 'speaking', participantIds });
   }
 
   /**
@@ -682,6 +735,7 @@ export class StageHub {
     }
     rt.sessions.clear();
     rt.publishers.clear();
+    rt.speakingIds = [];
     this.deps.transport.setMixedStream(roomId, null);
     this.deps.transport.closeRoom(roomId);
     rt.mixer.stop();

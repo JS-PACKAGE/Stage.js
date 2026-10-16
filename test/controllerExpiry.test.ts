@@ -170,8 +170,8 @@ describe('controller expiry at the speaker cap', { timeout: 5_000 }, () => {
     assert.deepEqual(audience.s.inbox, []);
     assert.equal(await h.req(host.s, { type: 'mic:gain', targetId: host.id, gainDb: 0 }), 'ok');
     assert.deepEqual(host.s.last('room:state'), before, 'rejected transfer is mutation-free');
-    assert.equal(audience.s.last('room:state')!.me.handRaised, true);
-    assert.equal(audience.s.last('room:state')!.code, undefined);
+    assert.deepEqual(audience.s.inbox, [], 'the unchanged gain refreshes only its requester');
+    assert.equal(host.s.last('room:state')!.hands.some(person => person.participantId === audience.id), true);
     assert.deepEqual([...media.publishers.keys()], [host.id, ...speakers.map(person => person.id)]);
     for (const [id, peer] of peers) assert.equal(media.peers.get(id), peer);
   });

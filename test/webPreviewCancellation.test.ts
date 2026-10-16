@@ -112,7 +112,8 @@ it('whole sample device selection without an active preview never exposes cancel
 interface Stream { getTracks(): Track[]; getAudioTracks(): Track[] }
 interface Track { enabled: boolean; stops: number; stop(): void }
 function stream(): { value: Stream; track: Track } {
-  const track = { enabled: true, stops: 0, stop() { this.stops++; } };
+  const track = Object.assign(new EventTarget(), { enabled: true, readyState: 'live', stops: 0,
+    stop() { this.stops++; this.readyState = 'ended'; } });
   return { track, value: { getTracks: () => [track], getAudioTracks: () => [track] } };
 }
 class Context {

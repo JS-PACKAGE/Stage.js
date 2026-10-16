@@ -15,10 +15,15 @@
  *   - `room:state` carries `onStage`/`forceMuted` per participant, `audienceCount`,
  *     and controller-only fields (`code`, `audience`), recipient-only `resumeToken`.
  *   - S→C `speaking`  : participants currently audible in the mix (voice activity with
- *     a release hold); sent only when the set changes.
+ *     a release hold); seeded after successful create/join state and before ACK (including
+ *     resume and empty sets), then broadcast only when the set changes.
  *   - C→S `participant:kick` (controller): removes a participant from the room; the target
  *     gets S→C `kicked` and its connection is closed (it must not auto-rejoin). Kick, then
  *     `room:rotate-code`, to keep them out.
+ *   - C→S `participant:rename {name}`: updates the bound participant's own display name;
+ *     the requester receives its authoritative `room:state` before the acknowledgement.
+ *   - C→S `room:rename {name}` (controller): updates the room display name; changed names
+ *     are broadcast in personalized `room:state` snapshots before the acknowledgement.
  *   - C→S `room:rotate-code` (controller, code-protected rooms): replaces the room code;
  *     participants already inside stay. The controller's next `room:state` carries the new code.
  *   - S→C `quality`   : connection quality of everyone publishing audio, every
@@ -145,6 +150,8 @@ export interface ServerMessageMap {
   'role:update': { participantId: string; role: Role; reason?: string };
   'hand:raise': { participantId: string };
   'hand:withdraw': { participantId: string };
+  /** Target-only successful rejection notice, after room:state; transient and never replayed. */
+  'hand:rejected': { roomId: string; participantId: string };
   'stage:invite': { participantId: string; byId: string };
   'stage:joined': { participantId: string; role: Role };
   'stage:left': { participantId: string; role: Role; reason?: StageLeftReason };
@@ -161,6 +168,7 @@ export interface ServerMessageMap {
   ok: { requestId: string };
   pong: Record<never, never>;
   kicked: { roomId: string };
+  /** Full replacement of available publisher reports; an empty set clears previous reports. */
   quality: { participants: ConnectionQuality[] };
 }
 
@@ -175,6 +183,7 @@ export type ServerMessage = {
 export interface ClientMessageMap {
   'room:create': { requestId: string; name?: string; roomName?: string; codeRequired?: boolean; token?: string };
   'room:close': { requestId: string };
+  'room:rename': { requestId: string; name: string };
   join: { requestId: string; roomId: string; code?: string; name: string; resumeToken?: string };
   'hand:raise': { requestId: string };
   'hand:withdraw': { requestId: string };
@@ -188,6 +197,7 @@ export interface ClientMessageMap {
   'mic:force-unmute': { requestId: string; targetId: string };
   'stage:remove': { requestId: string; targetId: string };
   'participant:kick': { requestId: string; targetId: string };
+  'participant:rename': { requestId: string; name: string };
   'mic:gain': { requestId: string; targetId: string; gainDb: number };
   'room:rotate-code': { requestId: string };
   'rtc:offer': { requestId: string; payload: SessionDescriptionPayload };
@@ -205,6 +215,7 @@ export type ClientMessage = {
 export const CLIENT_MESSAGE_TYPES: readonly ClientMessageType[] = [
   'room:create',
   'room:close',
+  'room:rename',
   'join',
   'hand:raise',
   'hand:withdraw',
@@ -218,6 +229,7 @@ export const CLIENT_MESSAGE_TYPES: readonly ClientMessageType[] = [
   'mic:force-unmute',
   'stage:remove',
   'participant:kick',
+  'participant:rename',
   'mic:gain',
   'room:rotate-code',
   'rtc:offer',

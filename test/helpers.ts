@@ -3,7 +3,7 @@ import { readFileSync } from 'node:fs';
 import { parse } from 'yaml';
 import type { ClientMessage, ServerMessage, ServerMessageMap, ServerMessageType } from '../shared/protocol.ts';
 import { parseConfig, type AppConfig } from '../src/config.ts';
-import { silentLogger } from '../src/log.ts';
+import { silentLogger, type Logger } from '../src/log.ts';
 import { RoomMixer } from '../src/mixer/RoomMixer.ts';
 import { MockMediaTransport } from '../src/transport/MockMediaTransport.ts';
 import { StageHub, type Session } from '../src/ws/hub.ts';
@@ -57,7 +57,7 @@ type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K>
 
 let rid = 0;
 
-export function harness(config = testConfig()): Harness {
+export function harness(config = testConfig(), log: Logger = silentLogger): Harness {
   const timers: Harness['timers'] = [];
   const clock = { now: 1_000_000 };
   const mixers = new Map<string, RoomMixer>();
@@ -68,7 +68,7 @@ export function harness(config = testConfig()): Harness {
   hub = new StageHub({
     config,
     transport,
-    log: silentLogger,
+    log,
     serverVersion: 'test',
     now: () => clock.now,
     setTimer: (fn, ms) => {

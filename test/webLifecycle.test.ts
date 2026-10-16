@@ -85,7 +85,8 @@ it('whole sample state/status subscriptions own one stats interval and preserve 
   assert.equal(oldConnection.isConnected, true);
 
   const oldButton = hand(h); oldButton.click(); assert.equal(h.sdk.raises.length, 1);
-  h.sdk.snapshot(roomState()); assert.equal(oldButton.isConnected, false);
+  h.sdk.snapshot(roomState()); assert.equal(oldButton.isConnected, true);
+  assert.equal(hand(h), oldButton, 'an unchanged snapshot retains the pending hand control');
   assert.equal(hand(h).disabled, true); assert.equal(hand(h).attributes['aria-busy'], 'true');
   h.clock.advance(500); assert.match(hand(h).textContent, /1 秒/); assert.equal(hand(h).disabled, true);
   h.clock.advance(1000); assert.equal(hand(h).textContent, '舉手發言');

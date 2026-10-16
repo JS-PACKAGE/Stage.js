@@ -13,7 +13,9 @@ export class SampleNode {
   readonly attributes: Record<string, string> = {};
   id = ''; className = ''; name = ''; type = ''; title = '';
   value: string | number = ''; min: string | number = ''; max: string | number = ''; step = '';
-  hidden = false; disabled = false; checked = false; required = false; readOnly = false; maxLength = 0;
+  hidden = false; disabled = false; checked = false; required = false; readOnly = false;
+  // Reflect the unset input property; this fixture does not model typing, IME or native validation.
+  maxLength = -1;
   readonly htmlFor = { value: '' };
   onclick: (() => void) | null = null;
   onchange: (() => void) | null = null;
@@ -47,6 +49,12 @@ export class SampleNode {
     if (name === 'class') this.className = value;
     if (name.startsWith('data-')) this.dataset[name.slice(5).replace(/-([a-z])/g, (_match, letter: string) => letter.toUpperCase())] = value;
   }
+  removeAttribute(name: string): void {
+    delete this.attributes[name];
+    if (name === 'id') this.id = '';
+    if (name === 'class') this.className = '';
+    if (name.startsWith('data-')) delete this.dataset[name.slice(5).replace(/-([a-z])/g, (_match, letter: string) => letter.toUpperCase())];
+  }
   readonly classList = {
     contains: (name: string): boolean => this.className.split(/\s+/).includes(name),
     toggle: (name: string, force?: boolean): boolean => {
@@ -64,6 +72,7 @@ export class SampleNode {
       '#app': node => node.id === 'app',
       '[data-landing-submit]': node => node.dataset.landingSubmit !== undefined,
       '[data-landing-cancel]': node => node.dataset.landingCancel !== undefined,
+      '[data-landing-progress]': node => node.dataset.landingProgress !== undefined,
       '[data-room-action]': node => node.dataset.roomAction !== undefined,
       '[data-return-stage]': node => node.dataset.returnStage !== undefined,
       '.badge.quality': node => node.classList.contains('badge') && node.classList.contains('quality'),
@@ -136,6 +145,9 @@ type Status = 'waiting' | 'live' | 'reconnecting' | 'disconnected';
 interface Events {
   state: RoomStatePayload; status: Status; micready: undefined;
   created: { roomId: string; code?: string }; closed: { roomId: string; reason?: 'shutdown' }; kicked: { roomId: string };
+  handrejected: { roomId: string; participantId: string };
+  hand: { participantId: string; raised: boolean }; stagejoined: { participantId: string; role: ParticipantView['role'] };
+  role: { participantId: string; role: ParticipantView['role'] }; transferred: { fromId: string; toId: string };
   invite: { participantId: string }; stageleft: { participantId: string; reason?: string };
   micerror: { message: string; name: string }; audioblocked: unknown; error: { message: string };
   speaking: { participantIds: string[] };
@@ -161,6 +173,7 @@ export class SampleSdk {
   readonly previewSignals: (AbortSignal | undefined)[] = [];
   readonly polls: Deferred<Stats>[] = [];
   readonly raises: Deferred<void>[] = [];
+  readonly audioRetries: Deferred<void>[] = [];
   readonly deviceLists: Deferred<SampleAudioDevices>[] = [];
   readonly inputDevices: string[] = [];
   readonly outputDevices: string[] = [];
@@ -205,6 +218,9 @@ export class SampleSdk {
   }
   async setInputDevice(id: string): Promise<void> { this.inputDevices.push(id); }
   async setOutputDevice(id: string): Promise<void> { this.outputDevices.push(id); }
+  async setName(_name: string): Promise<void> {}
+  async setRoomName(_name: string): Promise<void> {}
+  retryAudioConnection(): Promise<void> { const work = new Deferred<void>(); this.audioRetries.push(work); return work.promise; }
   setPlaybackVolume(value: number): void { assert.ok(value >= 0 && value <= 1); this.playbackVolume = value; }
   setPlaybackMuted(value: boolean): void { this.playbackMuted = value; }
   startMicTest(options: { signal?: AbortSignal } = {}): Promise<SamplePreview> {
@@ -232,6 +248,7 @@ export class SampleSdk {
     for (const work of this.previews) if (work.status === 'pending') work.reject(new Error('麥克風測試已取消。'));
     for (const preview of this.activePreviews) preview.stop();
     for (const work of this.raises) if (work.status === 'pending') work.reject(new Error('連線已中斷。'));
+    for (const work of this.audioRetries) if (work.status === 'pending') work.reject(new Error('連線已中斷。'));
     this.state = null; this.cooldownUntil = 0; this.speaking = new Set(); this.setStatus('disconnected');
   }
   async terminal(kind: 'closed' | 'kicked', reason?: 'shutdown'): Promise<void> {
@@ -242,7 +259,7 @@ export class SampleSdk {
     else this.emit('kicked', { roomId });
   }
   assertSettled(): void {
-    const work = [...this.joins.map(join => join.work), ...this.previews, ...this.polls, ...this.raises, ...this.deviceLists];
+    const work = [...this.joins.map(join => join.work), ...this.previews, ...this.polls, ...this.raises, ...this.audioRetries, ...this.deviceLists];
     assert.equal(work.filter(item => item.status === 'pending').length, 0, 'all deferred work must settle');
     assert.equal(this.activePreviews.size, 0, 'all granted previews must stop');
   }
@@ -259,9 +276,14 @@ export async function flushSample(): Promise<void> { for (let i = 0; i < 16; i++
 
 interface SampleAppOptions {
   source?: string;
+  initialHidden?: boolean;
+  location?: URL;
+  expectedSdkUrl?: string;
+  decodeName?: (value: string) => string;
   deferAudioDevices?: boolean;
   clipboard?: { writeText(text: string): Promise<void> };
   confirm?: (message: string) => boolean;
+  prompt?: (message: string, defaultValue: string) => string | null;
   localStorage?: { getItem(key: string): string | null; setItem(key: string, value: string): void };
 }
 type SampleClient = { disconnect(): Promise<void> };
@@ -275,7 +297,11 @@ function mountSampleApp<Client extends SampleClient = SampleSdk>(options: Sample
   const documentRoot = new SampleNode('#document'), documentElement = new SampleNode('html'), body = new SampleNode('body');
   const app = new SampleNode('div'); app.id = 'app';
   documentRoot.append(documentElement); documentElement.append(body); body.append(app);
-  const document = { documentElement, createElement: (tag: string) => new SampleNode(tag),
+  const visibilityListeners = new Set<() => void>();
+  const document = { hidden: options.initialHidden ?? false, documentElement,
+    addEventListener(type: string, listener: () => void) { assert.equal(type, 'visibilitychange'); visibilityListeners.add(listener); },
+    removeEventListener(type: string, listener: () => void) { assert.equal(type, 'visibilitychange'); visibilityListeners.delete(listener); },
+    createElement: (tag: string) => new SampleNode(tag),
     createTextNode(text: string) { const node = new SampleNode('#text'); node.textContent = text; return node; },
     querySelector: (selector: string) => documentRoot.querySelector(selector) };
   const source = options.source ?? readFileSync(new URL('../../web/src/main.ts', import.meta.url), 'utf8');
@@ -291,14 +317,17 @@ function mountSampleApp<Client extends SampleClient = SampleSdk>(options: Sample
   const deviceChangeListeners: (() => void)[] = [];
   let constructions = 0;
   runInNewContext(`'use strict';\n${executable}`, {
-    document, location: { protocol: 'https:', host: 'sample.test', search: '', pathname: '/', origin: 'https://sample.test' },
+    document, location: options.location ?? { protocol: 'https:', host: 'sample.test', search: '', pathname: '/', origin: 'https://sample.test' },
     localStorage: options.localStorage ?? { getItem: (key: string) => storage.get(key) ?? null, setItem: (key: string, value: string) => storage.set(key, value) },
     navigator: { clipboard: options.clipboard, mediaDevices: { addEventListener(type: string, listener: () => void) {
       assert.equal(type, 'devicechange'); deviceChangeListeners.push(listener);
     } } },
-    window: { confirm: options.confirm ?? (() => { throw new Error('Unexpected confirmation dialog in lifecycle test'); }) },
-    StageClient: function (options: { url: string }) { constructions++; assert.equal(options.url, 'wss://sample.test/ws'); return sdk; },
-    decodeName: (value: string) => value, MAX_GAIN_DB, URL, URLSearchParams, Error, AbortController,
+    window: { confirm: options.confirm ?? (() => { throw new Error('Unexpected confirmation dialog in lifecycle test'); }),
+      prompt: options.prompt ?? (() => null) },
+    StageClient: function (clientOptions: { url: string }) {
+      constructions++; assert.equal(clientOptions.url, options.expectedSdkUrl ?? 'wss://sample.test/ws'); return sdk;
+    },
+    decodeName: options.decodeName ?? ((value: string) => value), MAX_GAIN_DB, URL, URLSearchParams, Error, AbortController,
     performance: { now: () => clock.now },
     setTimeout: clock.setTimeout, clearTimeout: clock.clear, setInterval: clock.setInterval, clearInterval: clock.clear,
   }, { timeout: 1000, filename: 'web/src/main.ts', contextCodeGeneration: { strings: false, wasm: false } });
@@ -307,7 +336,11 @@ function mountSampleApp<Client extends SampleClient = SampleSdk>(options: Sample
     const matches = app.descendants().filter(predicate); assert.equal(matches.length, 1, 'expected one connected matching DOM node'); return matches[0]!;
   };
   return {
-    app, sdk, clock, find, deviceChangeListeners,
+    app, sdk, clock, find, deviceChangeListeners, visibilityListeners,
+    setHidden(hidden: boolean, dispatch = true) {
+      document.hidden = hidden;
+      if (dispatch) for (const listener of [...visibilityListeners]) listener();
+    },
     dispatchDeviceChange() { for (const listener of [...deviceChangeListeners]) listener(); },
     id: (id: string) => find(node => node.id === id),
     button: (text: string) => find(node => node.tagName === 'button' && node.textContent === text),

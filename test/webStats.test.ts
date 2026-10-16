@@ -12,9 +12,12 @@ type Report = { inbound: { rtt?: number; lossPercent?: number } | null; outbound
 function setup() {
   const polls: ReturnType<typeof Promise.withResolvers<Report>>[] = [];
   const ui = runInNewContext(stripTypeScriptTypes(`
-    let roomActionIdentity = '', roomActionGeneration = 0, connectionPollSequence = 0, roomTimers = [];
+    let roomActionIdentity = '', roomActionGeneration = 0, connectionPollSequence = 0, connectionResultWatermark = 0, roomTimers = [];
+    let handRejectionRoomActive = false;
+    function retireHandRejection() {}
     const pendingRoomActions = new Map(), POOR_LOSS_PERCENT = 5;
-    const client = { state: null, getStats: collect };
+    const client = { state: null, getStats: collect }, document = { hidden: false };
+    const audioRetryNotice = { hidden: true, textContent: '' };
     const connectionLine = { textContent: '', error: false, classList: { toggle(_name, value) { connectionLine.error = value; } } };
     const setInterval = () => 1, clearInterval = () => {};
     ${reset}

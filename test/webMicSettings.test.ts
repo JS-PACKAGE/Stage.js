@@ -20,7 +20,7 @@ function setup() {
   };
   const ui = runInNewContext(stripTypeScriptTypes(`
     let micTest = null, testingBusy = false, selectedInput = '', meterTimer, micSettingsGeneration = 0, previewCapture;
-    const cancelTestButton = { hidden: true, disabled: true };
+    const cancelTestButton = { hidden: true, disabled: true }, document = { hidden: false };
     const micSelect = { disabled: false, value: '' }, level = { value: 0 }, errors = [];
     const errorBox = { hidden: true }, setInterval = () => 1, clearInterval = () => {};
     function element() { return { disabled: false, isConnected: true, attrs: {}, setAttribute(key, value) { this.attrs[key] = value; } }; }

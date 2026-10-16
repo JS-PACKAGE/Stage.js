@@ -3,7 +3,24 @@ import type { ConnectionQuality, MicTest, ParticipantView, RoomStatePayload } fr
 import './styles.css';
 
 const app = document.querySelector<HTMLDivElement>('#app')!;
-const client = new StageClient({ url: `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws` });
+const params = new URLSearchParams(location.search);
+function signalingSettings(value: string): { url: string; path: string; error?: string } {
+  const fallback = `${location.protocol === 'https:' ? 'wss:' : 'ws:'}//${location.host}/ws`;
+  try {
+    const path = value.trim() || '/ws';
+    if (!path.startsWith('/') || path.startsWith('//') || /[\p{Cc}\\?#]/u.test(value) || /\s/u.test(path)
+      || path.split('/').some(segment => /^\.{1,2}$/.test(segment.replace(/%2e/gi, '.')))) throw new Error();
+    const url = new URL(path, location.origin);
+    if (url.origin !== location.origin || url.search || url.hash) throw new Error();
+    url.protocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+    return { url: url.href, path: url.pathname };
+  } catch {
+    // Keep the page usable, but block entry below; this safe placeholder is never a fallback connection.
+    return { url: fallback, path: '/ws', error: 'WebSocket 路徑無效，請修正網址中的 wsPath（例如 /ws）後重新載入。' };
+  }
+}
+const signaling = signalingSettings(params.get('wsPath') ?? '/ws');
+const client = new StageClient({ url: signaling.url });
 const PLAYBACK_STORAGE_KEY = 'stage-playback';
 function restorePlaybackPreferences(): void {
   try {
@@ -26,16 +43,27 @@ function savePlaybackPreferences(): void {
 restorePlaybackPreferences();
 const statusLabels = { waiting: '等待發言', live: '直播中', reconnecting: '重新連線中', disconnected: '未連線' };
 const roleLabels = { controller: '主控', speaker: '發言者', audience: '觀眾' };
-const params = new URLSearchParams(location.search);
 let busy = false;
-let landingEntry: { cancelled: boolean; entered: boolean } | undefined;
+let landingEntry: { operation: 'create' | 'join'; revision: number; cancelled: boolean; entered: boolean } | undefined;
+let landingRevision = 0;
 let audioBlocked = false;
+let pendingAudioUnlock: symbol | undefined;
 let micNotice = '';
 let micRetryAvailable = false, micRetryPending = false;
 let micRetryButton: HTMLButtonElement | undefined;
+const STAGE_PERMISSION_NOTICE = '主控已邀請你上台，請允許麥克風權限。';
 let invitation = '';
+let stagePermissionOwner: { roomId: string; participantId: string; generation: number } | undefined;
 let createdRoom: { roomId: string; code?: string } | null = null;
+let renderedRoomSignature: string | undefined;
+let renderedAudienceHeading: HTMLHeadingElement | undefined;
+let renderedSpeakingSignature: string | undefined;
+let renderedQualitySignature: string | undefined;
+const renderedGainInputs: { input: HTMLInputElement; value: string }[] = [];
 let cooldownButton: HTMLButtonElement | null = null;
+/** Only the installed room view is retained; action state is still recomputed on every sync. */
+let renderedRoomActions: (HTMLButtonElement | HTMLInputElement)[] = [];
+let renderedReturnStage: HTMLButtonElement | null = null;
 let cooldownTimer: ReturnType<typeof setTimeout> | undefined;
 let cooldownDue = 0;
 let roomActionIdentity = '';
@@ -50,7 +78,38 @@ const personRows = new Map<string, HTMLElement[]>();
 let speakingIds = new Set<string>();
 /** Own connection, refreshed from `getStats()`; kept across re-renders of the room view. */
 const connectionLine = element('p', 'muted connection');
+const audioRetryNotice = element('p', 'muted');
+audioRetryNotice.id = 'audio-retry-status'; audioRetryNotice.hidden = true;
+audioRetryNotice.setAttribute('role', 'status');
+const ownHandPosition = element('p', 'muted own-hand-position');
+ownHandPosition.hidden = true; ownHandPosition.setAttribute('role', 'status');
+const handRejectionNotice = element('p', 'banner hand-rejected');
+handRejectionNotice.hidden = true; handRejectionNotice.setAttribute('role', 'status');
+let handRejectionOwner: { roomId: string; participantId: string; generation: number } | undefined;
+let handRejectionRoomActive = false;
+function retireHandRejection(): void {
+  handRejectionOwner = undefined;
+  if (!handRejectionNotice.hidden) handRejectionNotice.hidden = true;
+  if (handRejectionNotice.textContent) handRejectionNotice.textContent = '';
+}
+function eligibleHandRejection(): boolean {
+  const me = client.state?.me;
+  return Boolean(handRejectionRoomActive && me?.role === 'audience' && !me.onStage && !me.handRaised
+    && client.status !== 'reconnecting' && client.status !== 'disconnected');
+}
+function syncHandRejection(): void {
+  const owner = handRejectionOwner, state = client.state;
+  if (!eligibleHandRejection() || (owner && (owner.generation !== roomActionGeneration
+    || state?.roomId !== owner.roomId || state.me.participantId !== owner.participantId))) {
+    retireHandRejection(); return;
+  }
+  if (!owner) return;
+  const message = '主控已婉拒這次舉手申請。';
+  if (handRejectionNotice.textContent !== message) handRejectionNotice.textContent = message;
+  if (handRejectionOwner === owner && handRejectionNotice.hidden) handRejectionNotice.hidden = false;
+}
 let connectionPollSequence = 0;
+let connectionResultWatermark = 0;
 const header = element('header', 'topbar');
 const brand = element('h1', '', 'Stage.js 音訊舞台');
 const status = element('span', 'badge', statusLabels.disconnected);
@@ -76,8 +135,90 @@ notices.setAttribute('aria-live', 'polite');
 const errorBox = element('p', 'banner error');
 errorBox.hidden = true;
 errorBox.setAttribute('role', 'alert');
+const audienceFilter = element('section', 'panel audience-filter');
+audienceFilter.hidden = true;
+const audienceSearch = element('input');
+audienceSearch.type = 'search'; audienceSearch.id = 'audience-search';
+audienceSearch.autocomplete = 'off';
+const audienceSearchLabel = element('label', '', '篩選觀眾名稱');
+audienceSearchLabel.setAttribute('for', audienceSearch.id);
+const audienceFilterCount = element('p', 'muted');
+audienceFilterCount.setAttribute('role', 'status');
+const audienceFilterClear = element('button', '', '清除篩選');
+audienceFilterClear.type = 'button';
+audienceFilter.append(audienceSearchLabel, audienceSearch, audienceFilterClear, audienceFilterCount);
+let audienceFilterIdentity = '';
+const audienceFilterRows: { row: HTMLLIElement; name: string }[] = [];
+audienceSearch.oninput = () => { if (canFilterAudience()) applyAudienceFilter(); };
+audienceFilterClear.onclick = () => {
+  if (!canFilterAudience()) return;
+  audienceSearch.value = ''; applyAudienceFilter();
+};
 const content = element('main');
-app.append(header, notices, errorBox, content);
+app.append(header, notices, errorBox, audienceFilter, content);
+const stageQuality = element('details', 'panel stage-quality');
+stageQuality.id = 'stage-quality'; stageQuality.hidden = true;
+const stageQualitySummary = element('summary', '', '舞台連線品質');
+const stageQualityStatus = element('p', 'muted stage-quality-status');
+const stageQualityList = element('ul', 'stage-quality-list');
+stageQuality.append(stageQualitySummary, stageQualityStatus, stageQualityList);
+app.append(stageQuality);
+let stageQualityIdentity = '';
+let stageQualityReconnecting = false;
+let stageQualityReports = new Map<string, ConnectionQuality>();
+const stageQualityRows = new Map<string, HTMLLIElement>();
+let stageQualityOrder: string[] = [];
+function clearQualityDetailsReports(): void {
+  stageQualityReports.clear(); stageQualityRows.clear(); stageQualityOrder = [];
+  stageQualityList.replaceChildren();
+}
+function resetQualityDetails(): void {
+  stageQualityIdentity = ''; stageQualityReconnecting = false;
+  stageQuality.hidden = true; stageQuality.removeAttribute('open');
+  stageQualityStatus.textContent = ''; clearQualityDetailsReports();
+}
+/** Reports have no timestamp or room epoch; accept them only in the current eligible view. */
+function syncQualityDetails(reports?: readonly ConnectionQuality[]): void {
+  const state = client.state, me = state?.me;
+  if (!state || !me || (me.role !== 'controller' && !me.onStage)) { resetQualityDetails(); return; }
+  const identity = JSON.stringify([state.roomId, me.participantId]);
+  if (identity !== stageQualityIdentity) { resetQualityDetails(); stageQualityIdentity = identity; }
+  stageQuality.hidden = false;
+  const reconnecting = client.status === 'reconnecting';
+  if (reconnecting && !stageQualityReconnecting) clearQualityDetailsReports();
+  stageQualityReconnecting = reconnecting;
+  const speakers = state.speakers.filter(person => person.onStage);
+  const ids = new Set(speakers.map(person => person.participantId));
+  if (reports !== undefined && !reconnecting) {
+    // Copy primitive fields rather than retaining mutable event objects; each report replaces the last.
+    stageQualityReports = new Map(reports.filter(report => ids.has(report.participantId)).map(report => [report.participantId, {
+      participantId: report.participantId, uplinkLossPercent: report.uplinkLossPercent,
+      downlinkLossPercent: report.downlinkLossPercent, rttMs: report.rttMs,
+    }]));
+  }
+  for (const id of stageQualityReports.keys()) if (!ids.has(id)) stageQualityReports.delete(id);
+  const percent = (value: number | undefined) => typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 100 ? `${value.toFixed(1)}%` : '—';
+  const rtt = (value: number | undefined) => typeof value === 'number' && Number.isFinite(value) && value >= 0 ? `${Math.round(value)} ms` : '—';
+  const order: string[] = [];
+  for (const person of speakers) {
+    const report = stageQualityReports.get(person.participantId);
+    if (!report) continue;
+    order.push(person.participantId);
+    let row = stageQualityRows.get(person.participantId);
+    if (!row) { row = element('li'); row.dataset.participantId = person.participantId; stageQualityRows.set(person.participantId, row); }
+    const text = `${decodeName(person.name)}：上行掉包 ${percent(report.uplinkLossPercent)} · 下行掉包 ${percent(report.downlinkLossPercent)} · RTT ${rtt(report.rttMs)}`;
+    if (row.textContent !== text) row.textContent = text;
+  }
+  for (const id of stageQualityRows.keys()) if (!order.includes(id)) stageQualityRows.delete(id);
+  if (order.length !== stageQualityOrder.length || order.some((id, index) => id !== stageQualityOrder[index])) {
+    stageQualityList.replaceChildren(...order.map(id => stageQualityRows.get(id)!));
+    stageQualityOrder = order;
+  }
+  stageQualityStatus.textContent = order.length
+    ? '最近收到的伺服器回報；RTT 不是端到端音訊延遲。'
+    : `${reconnecting ? '重新連線中；' : ''}尚未收到目前發言者的品質回報。`;
+}
+
 const settings = element('section', 'panel audio-settings');
 settings.append(element('h2', '', '音訊設定'));
 const micSelect = element('select');
@@ -166,6 +307,7 @@ micSelect.onchange = () => {
       await client.setInputDevice(deviceId);
       if (generation !== micSettingsGeneration) return;
       selectedInput = deviceId;
+      syncMeter();
       if (micTest) {
         micTest.stop(); micTest = null;
         testButton.textContent = '測試麥克風'; testButton.setAttribute('aria-pressed', 'false');
@@ -214,7 +356,16 @@ async function refreshDevices(): Promise<void> {
     restoreDeviceSelection(select, chosen);
   }
 }
-client.on('micready', () => { micRetryAvailable = micRetryPending = false; micNotice = ''; renderNotices(); void refreshDevices().catch(() => {}); });
+client.on('micready', () => {
+  const owner = stagePermissionOwner, state = client.state;
+  // micready confirms capture, not sender installation; only retire this seat's permission prompt.
+  if (owner && state?.me.onStage && owner.generation === roomActionGeneration
+    && owner.roomId === state.roomId && owner.participantId === state.me.participantId) {
+    if (invitation === STAGE_PERMISSION_NOTICE) invitation = '';
+    stagePermissionOwner = undefined;
+  }
+  micRetryAvailable = micRetryPending = false; micNotice = ''; renderNotices(); void refreshDevices().catch(() => {});
+});
 navigator.mediaDevices?.addEventListener('devicechange', () => { void refreshDevices().catch(() => {}); });
 void refreshDevices().catch(() => {});
 /** Muted room microphones have a known zero level; only previews or unmuted stage mics need polling. */
@@ -252,14 +403,21 @@ function resetMicSettings(): void {
 function syncMeter(): void {
   if (client.me?.onStage && previewCapture) cancelPreviewCapture();
   cancelTestButton.hidden = cancelTestButton.disabled = !previewCapture;
-  if (client.me?.onStage && micTest) {
+  if (micTest && (client.me?.onStage || micTest.stopped === true)) {
     micTest.stop(); micTest = null;
     testButton.textContent = '測試麥克風'; testButton.setAttribute('aria-pressed', 'false');
   }
   testButton.disabled = testingBusy || Boolean(client.me?.onStage);
-  const metering = Boolean(micTest) || Boolean(client.me?.onStage && !client.me.muted);
+  // Lifecycle cleanup above must still run while the page is hidden.
+  const metering = !document.hidden && (Boolean(micTest) || Boolean(client.me?.onStage && !client.me.muted));
   if (metering && meterTimer === undefined) {
-    meterTimer = setInterval(() => { level.value = client.me?.onStage ? client.micLevel : micTest?.level() ?? 0; }, 50);
+    const timer = setInterval(() => {
+      // A canceled callback may already be queued, including across hide/show.
+      if (meterTimer !== timer || document.hidden) return;
+      if (micTest?.stopped === true) { syncMeter(); return; }
+      level.value = client.me?.onStage ? client.micLevel : micTest?.level() ?? 0;
+    }, 50);
+    meterTimer = timer;
   } else if (!metering && meterTimer !== undefined) {
     clearInterval(meterTimer); meterTimer = undefined; level.value = 0;
   }
@@ -279,12 +437,12 @@ function button(label: string, action: () => Promise<unknown>, className = '', g
   node.onclick = () => { void run(action, node, generation); };
   return node;
 }
-async function run(action: () => Promise<unknown>, target?: HTMLButtonElement, generation?: number, reportError: () => boolean = () => true): Promise<void> {
+async function run(action: () => Promise<unknown>, target?: HTMLButtonElement, generation?: number, reportError: () => boolean = () => true, formatError?: (error: unknown) => string): Promise<void> {
   if (target) target.disabled = true;
   errorBox.hidden = true;
   try { await action(); }
   catch (error) {
-    if (reportError() && (generation === undefined || generation === roomActionGeneration)) showError(error instanceof Error ? error.message : '操作失敗，請稍後再試。');
+    if (reportError() && (generation === undefined || generation === roomActionGeneration)) showError(formatError ? formatError(error) : error instanceof Error ? error.message : '操作失敗，請稍後再試。');
   }
   finally { if (target?.isConnected) target.disabled = false; updateCooldown(); syncMeter(); }
 }
@@ -292,14 +450,18 @@ async function run(action: () => Promise<unknown>, target?: HTMLButtonElement, g
 function resetRoomActions(identity: string): void {
   if (roomActionIdentity === identity) return;
   roomActionIdentity = identity; roomActionGeneration++; pendingRoomActions.clear();
+  audioRetryNotice.hidden = true; audioRetryNotice.textContent = '';
+  handRejectionRoomActive = identity !== ''; retireHandRejection();
+  pendingAudioUnlock = undefined;
   micRetryAvailable = micRetryPending = false; micNotice = '';
 }
-function roomButton(key: string, label: string, action: () => Promise<unknown>, className = ''): HTMLButtonElement {
+function roomButton(key: string, label: string, action: () => Promise<unknown>, className = '', canAct?: () => boolean): HTMLButtonElement {
   const node = element('button', className, label);
   node.type = 'button'; node.dataset.roomAction = key;
   const generation = roomActionGeneration;
   node.onclick = () => {
-    if (node.disabled || generation !== roomActionGeneration || pendingRoomActions.has(key)) return;
+    if (node.disabled || client.status === 'disconnected' || client.status === 'reconnecting'
+      || generation !== roomActionGeneration || pendingRoomActions.has(key) || (canAct && !canAct())) return;
     const token = Symbol(key); pendingRoomActions.set(key, token);
     updateCooldown(); errorBox.hidden = true;
     void (async () => {
@@ -321,11 +483,12 @@ function roomButton(key: string, label: string, action: () => Promise<unknown>, 
   return node;
 }
 function syncRoomActions(): void {
-  for (const node of content.querySelectorAll<HTMLButtonElement | HTMLInputElement>('[data-room-action]')) {
+  for (const node of renderedRoomActions) {
     const key = node.dataset.roomAction!;
     const pending = pendingRoomActions.has(key);
     node.setAttribute('aria-busy', String(pending));
-    node.disabled = pending || client.status === 'reconnecting' || node.dataset.policyDisabled === 'true'
+    node.disabled = pending || client.status === 'reconnecting' || client.status === 'disconnected'
+      || node.dataset.policyDisabled === 'true'
       || (key === 'hand' && !client.me?.handRaised && client.handCooldownMs > 0);
   }
 }
@@ -339,37 +502,68 @@ function syncLandingActions(): void {
   if (cancel) {
     cancel.hidden = cancel.disabled = !canCancelLanding();
   }
+  const progress = content.querySelector<HTMLParagraphElement>('[data-landing-progress]');
+  if (progress) {
+    const pending = canCancelLanding() && landingEntry?.revision === landingRevision;
+    progress.hidden = !pending;
+    progress.textContent = pending ? landingEntry!.operation === 'create' ? '正在建立房間…' : '正在加入房間…' : '';
+  }
 }
 function canCancelLanding(): boolean {
   return busy && Boolean(landingEntry && !landingEntry.cancelled && !landingEntry.entered) && !client.state;
 }
-function runLanding(action: (isCancelled: () => boolean) => Promise<unknown>): void {
+function runLanding(operation: 'create' | 'join', action: (isCancelled: () => boolean) => Promise<unknown>): void {
   if (busy) return;
-  const entry = { cancelled: false, entered: false };
+  if (signaling.error) { showError(signaling.error); return; }
+  const revision = landingRevision;
+  const entry = { operation, revision, cancelled: false, entered: false };
   landingEntry = entry; busy = true; syncLandingActions();
-  void run(() => action(() => entry.cancelled), undefined, undefined, () => !entry.cancelled).finally(() => {
+  void run(() => action(() => entry.cancelled), undefined, undefined, () => !entry.cancelled, error => {
+    const message = error instanceof Error ? error.message : '操作失敗，請稍後再試。';
+    if (landingEntry !== entry || entry.entered || client.state || revision !== landingRevision
+      || !(error instanceof Error) || !('code' in error)) return message;
+    if (operation === 'join' && error.code === 'unauthorized') {
+      return `${message}（unauthorized）\n請確認房間 ID 與代碼，或向主控索取最新邀請連結。`;
+    }
+    if (error.code !== 'bad_request') return message;
+    const guidance = operation === 'create'
+      ? '請檢查名稱、房間名稱及建立資料是否符合伺服器規則，或試著縮短名稱後重試。'
+      : '請檢查房間 ID、名稱及代碼是否符合伺服器規則，必要時向主控確認後重試。';
+    return `${message}（bad_request）\n${guidance}`;
+  }).finally(() => {
     if (landingEntry !== entry) return;
     landingEntry = undefined; busy = false; syncLandingActions();
   });
 }
 function showError(message: string): void { errorBox.textContent = message; errorBox.hidden = false; }
-function field(form: HTMLFormElement, label: string, name: string, value = '', required = true, maxLength = 32): HTMLInputElement {
+// Name limits follow normalized code points; room-code limits are also deployment-specific.
+// Only fields with a fixed client contract receive an authored HTML maxlength.
+function field(form: HTMLFormElement, label: string, name: string, value = '', required = true, maxLength?: number): HTMLInputElement {
   const wrapper = element('label', 'field', label);
   const input = element('input');
   input.name = name;
   input.value = value;
   input.required = required;
-  input.maxLength = maxLength;
+  if (maxLength !== undefined) input.maxLength = maxLength;
   input.setAttribute('autocomplete', name === 'name' ? 'nickname' : 'off');
   wrapper.append(input);
   form.append(wrapper);
   return input;
 }
 function landing(): void {
+  handRejectionRoomActive = false; retireHandRejection();
+  stopRoomTimers();
+  resetQualityDetails();
+  stagePermissionOwner = undefined;
+  landingRevision += 1;
+  ownHandPosition.hidden = true; ownHandPosition.textContent = '';
+  resetAudienceFilter();
+  renderedRoomSignature = renderedSpeakingSignature = renderedQualitySignature = undefined; renderedGainInputs.length = 0;
+  renderedAudienceHeading = undefined;
   personRows.clear(); speakingIds.clear();
   resetMicSettings();
   resetRoomActions('');
-  cooldownButton = null; scheduleCooldown(0);
+  cooldownButton = null; renderedReturnStage = null; renderedRoomActions = []; scheduleCooldown(0);
   brand.textContent = 'Stage.js 音訊舞台';
   const intro = element('section', 'intro');
   intro.append(element('h2', '', '一起聊，所有人都能聽見。'), element('p', '', '建立音訊舞台，邀請朋友發言；觀眾可舉手，經主控核准後上台。'));
@@ -377,7 +571,7 @@ function landing(): void {
   const create = element('form', 'panel');
   create.append(element('h2', '', '建立房間'));
   const createName = field(create, '你的名稱', 'name');
-  const roomName = field(create, '房間名稱', 'roomName', '', false, 64);
+  const roomName = field(create, '房間名稱', 'roomName', '', false);
   const codeLabel = element('label', 'check');
   const codeRequired = element('input');
   codeRequired.type = 'checkbox'; codeRequired.checked = true;
@@ -389,7 +583,7 @@ function landing(): void {
   create.append(codeLabel, createSubmit);
   create.onsubmit = (event) => {
     event.preventDefault();
-    runLanding(async (isCancelled) => {
+    runLanding('create', async (isCancelled) => {
       micNotice = invitation = '';
       const result = await client.createRoom({ name: createName.value.trim(), roomName: roomName.value.trim() || undefined, codeRequired: codeRequired.checked, token: createToken.value || undefined });
       if (isCancelled()) return;
@@ -400,14 +594,14 @@ function landing(): void {
   const join = element('form', 'panel');
   join.append(element('h2', '', '加入房間'));
   const roomId = field(join, '房間 ID', 'roomId', params.get('room') ?? '', true, 128);
-  const code = field(join, '房間代碼（未設定時可留空）', 'code', params.get('code') ?? '', false, 16);
+  const code = field(join, '房間代碼（未設定時可留空）', 'code', params.get('code') ?? '', false);
   const joinName = field(join, '你的名稱', 'name');
   const joinSubmit = element('button', 'primary', '加入收聽');
   joinSubmit.type = 'submit'; joinSubmit.dataset.landingSubmit = 'true';
   join.append(joinSubmit);
   join.onsubmit = (event) => {
     event.preventDefault();
-    runLanding(async () => {
+    runLanding('join', async () => {
       createdRoom = null; micNotice = invitation = '';
       await client.join({ roomId: roomId.value.trim(), code: code.value.trim() || undefined, name: joinName.value.trim() });
     });
@@ -421,7 +615,10 @@ function landing(): void {
     syncLandingActions();
     void run(() => client.disconnect());
   };
-  content.replaceChildren(intro, grid, cancel);
+  const progress = element('p', 'muted');
+  progress.id = 'landing-progress'; progress.dataset.landingProgress = 'true';
+  progress.setAttribute('role', 'status'); progress.setAttribute('aria-live', 'polite');
+  content.replaceChildren(intro, grid, progress, cancel);
   syncLandingActions(); renderNotices();
 }
 function syncMicRetry(): void {
@@ -429,16 +626,38 @@ function syncMicRetry(): void {
   micRetryButton.disabled = micRetryPending || !client.me?.onStage || client.status !== 'live';
   micRetryButton.setAttribute('aria-busy', String(micRetryPending));
 }
-function renderNotices(): void {
+let renderedNoticeSignature: string | undefined;
+// Only room renders reuse controls; direct events and pending settlement retain their redraws.
+function renderNotices(reuseUnchanged = false): void {
+  const signature = JSON.stringify([roomActionGeneration, audioBlocked, Boolean(pendingAudioUnlock),
+    micNotice, Boolean(client.me?.onStage), client.status, micRetryAvailable, micRetryPending, invitation]);
+  if (reuseUnchanged && signature === renderedNoticeSignature) { syncMicRetry(); return; }
+  renderedNoticeSignature = undefined;
   micRetryButton = undefined;
   notices.replaceChildren();
   if (audioBlocked) {
     const generation = roomActionGeneration;
     const banner = element('div', 'banner');
-    banner.append(element('span', '', '自動播放遭阻擋。'), button('點擊啟用音訊', async () => {
-      await client.unlockAudio();
-      if (generation === roomActionGeneration) { audioBlocked = false; renderNotices(); }
-    }, 'primary', generation));
+    const unlock = element('button', 'primary', '點擊啟用音訊');
+    unlock.type = 'button'; unlock.disabled = Boolean(pendingAudioUnlock);
+    unlock.setAttribute('aria-busy', String(Boolean(pendingAudioUnlock)));
+    unlock.onclick = () => {
+      if (!unlock.isConnected || generation !== roomActionGeneration || !client.state || !audioBlocked || pendingAudioUnlock) return;
+      const token = Symbol('audio-unlock'); pendingAudioUnlock = token;
+      unlock.disabled = true; unlock.setAttribute('aria-busy', 'true');
+      void run(async () => {
+        try {
+          // Invoke synchronously in this gesture; notice redraws must not admit another play.
+          await client.unlockAudio();
+          if (generation === roomActionGeneration && pendingAudioUnlock === token) audioBlocked = false;
+        } finally {
+          if (generation === roomActionGeneration && pendingAudioUnlock === token) {
+            pendingAudioUnlock = undefined; renderNotices();
+          }
+        }
+      }, unlock, generation);
+    };
+    banner.append(element('span', '', '自動播放遭阻擋。'), unlock);
     notices.append(banner);
   }
   if (micNotice) {
@@ -468,14 +687,63 @@ function renderNotices(): void {
     notices.append(banner);
   }
   if (invitation) notices.append(element('p', 'banner', invitation));
+  renderedNoticeSignature = signature;
+}
+function resetAudienceFilter(): void {
+  audienceFilterIdentity = ''; audienceSearch.value = '';
+  audienceFilterRows.length = 0;
+  audienceFilter.hidden = true; audienceSearch.disabled = audienceFilterClear.disabled = true;
+  audienceFilterCount.textContent = '';
+}
+function canFilterAudience(): boolean {
+  const state = client.state;
+  return Boolean(state?.me.role === 'controller' && state.audience
+    && audienceFilterIdentity === JSON.stringify([state.roomId, state.me.participantId]));
+}
+function applyAudienceFilter(): void {
+  const query = audienceSearch.value.trim().normalize('NFC').toLowerCase();
+  let visible = 0;
+  for (const { row, name } of audienceFilterRows) {
+    const matches = name.includes(query);
+    if (row.hidden !== !matches) row.hidden = !matches;
+    if (matches) visible++;
+  }
+  audienceFilterClear.disabled = audienceSearch.value.length === 0;
+  const count = query && visible === 0 && audienceFilterRows.length > 0
+    ? `沒有符合名稱的觀眾（0／${audienceFilterRows.length}）`
+    : `顯示 ${visible}／${audienceFilterRows.length} 位觀眾`;
+  if (audienceFilterCount.textContent !== count) audienceFilterCount.textContent = count;
+}
+function syncAudienceFilter(state: RoomStatePayload): void {
+  if (state.me.role !== 'controller' || !state.audience) { resetAudienceFilter(); return; }
+  const identity = JSON.stringify([state.roomId, state.me.participantId]);
+  if (audienceFilterIdentity !== identity) audienceSearch.value = '';
+  audienceFilterIdentity = identity;
+  audienceFilter.hidden = false; audienceSearch.disabled = false;
+  applyAudienceFilter();
 }
 function renderRoom(state: RoomStatePayload): void {
-  personRows.clear(); speakingIds = new Set(client.speaking);
+  syncQualityDetails();
   resetRoomActions(JSON.stringify([state.roomId, state.me.participantId]));
   if (!state.me.onStage) {
     if (micRetryPending) micNotice = '';
     micRetryAvailable = micRetryPending = false;
   }
+  const roomCode = state.code ?? (createdRoom?.roomId === state.roomId ? createdRoom.code : undefined);
+  // Separate already-applied overlays from structural state; dirty sliders still reset to server state.
+  const { audienceCount, ...roomStructure } = state;
+  const audienceTitle = `觀眾 · ${audienceCount}/${state.limits.maxAudience}`;
+  const signature = JSON.stringify([roomStructure, roomCode, client.status]);
+  const speakingSignature = JSON.stringify([...client.speaking]);
+  const qualitySignature = JSON.stringify([...quality]);
+  if (signature === renderedRoomSignature && speakingSignature === renderedSpeakingSignature
+    && qualitySignature === renderedQualitySignature && !renderedGainInputs.some(({ input, value }) => input.value !== value)) {
+    status.textContent = statusLabels[client.status];
+    if (renderedAudienceHeading && renderedAudienceHeading.textContent !== audienceTitle) renderedAudienceHeading.textContent = audienceTitle;
+    syncAudienceFilter(state); updateCooldown(); renderNotices(true); return;
+  }
+  renderedGainInputs.length = 0; audienceFilterRows.length = 0;
+  personRows.clear(); speakingIds = new Set(client.speaking);
   const generation = roomActionGeneration;
   brand.textContent = decodeName(state.name);
   status.textContent = statusLabels[client.status];
@@ -483,11 +751,22 @@ function renderRoom(state: RoomStatePayload): void {
   const controller = state.me.role === 'controller';
   const summary = element('section', 'panel room-summary');
   summary.append(element('h2', '', '房間資訊'), element('p', '', `房間 ID：${state.roomId}`));
-  const roomCode = state.code ?? (createdRoom?.roomId === state.roomId ? createdRoom.code : undefined);
   if (controller) {
     summary.append(element('p', '', state.codeRequired ? `房間代碼：${roomCode ?? '未提供'}` : '不需要房間代碼'));
-    const link = new URL(location.pathname, location.origin);
+    const titleRoomId = state.roomId, titleParticipantId = state.me.participantId;
+    const canRenameRoom = () => generation === roomActionGeneration && client.status !== 'reconnecting'
+      && client.state?.roomId === titleRoomId && client.me?.participantId === titleParticipantId
+      && client.me.role === 'controller';
+    const renameRoom = roomButton('room-rename', '修改房間名稱', async () => {
+      const name = window.prompt('輸入新的房間名稱', decodeName(client.state!.name));
+      if (name === null || !canRenameRoom()) return;
+      await client.setRoomName(name);
+    }, '', () => renameRoom.isConnected && canRenameRoom());
+    summary.append(renameRoom);
+    const link = new URL(location.origin);
+    link.pathname = location.pathname;
     link.searchParams.set('room', state.roomId);
+    if (signaling.path !== '/ws') link.searchParams.set('wsPath', signaling.path);
     if (state.codeRequired && roomCode) link.searchParams.set('code', roomCode);
     const inviteLink = element('input', 'invite-link');
     inviteLink.value = link.href; inviteLink.readOnly = true;
@@ -514,10 +793,35 @@ function renderRoom(state: RoomStatePayload): void {
     }));
   }
   const controls = element('section', 'panel');
-  controls.append(element('h2', '', `你好，${decodeName(state.me.name)}`), element('p', '', `${roleLabels[state.me.role]}${state.me.forceMuted ? ' · 主控已鎖定靜音' : ''}`), connectionLine);
+  controls.append(element('h2', '', `你好，${decodeName(state.me.name)}`), element('p', '', `${roleLabels[state.me.role]}${state.me.forceMuted ? ' · 主控已鎖定靜音' : ''}`), connectionLine, ownHandPosition, handRejectionNotice);
   const actions = element('div', 'actions');
+  const ownRoomId = state.roomId, ownParticipantId = state.me.participantId;
+  const canRetryAudio = () => generation === roomActionGeneration && client.state?.roomId === ownRoomId
+    && client.me?.participantId === ownParticipantId && (client.status === 'waiting' || client.status === 'live');
+  const audioRetry = roomButton('audio-retry', '重試音訊連線', async () => {
+    audioRetryNotice.textContent = '正在重新協商音訊連線…'; audioRetryNotice.hidden = false;
+    try {
+      await client.retryAudioConnection();
+      if (canRetryAudio()) audioRetryNotice.textContent = '音訊連線協商已完成。';
+    } catch (error) {
+      if (generation === roomActionGeneration) { audioRetryNotice.hidden = true; audioRetryNotice.textContent = ''; }
+      throw error;
+    }
+  }, '', () => audioRetry.isConnected && canRetryAudio());
+  audioRetry.id = 'audio-retry';
+  controls.append(audioRetry, audioRetryNotice);
+  const canRename = () => generation === roomActionGeneration && client.status !== 'reconnecting'
+    && client.state?.roomId === ownRoomId && client.me?.participantId === ownParticipantId;
+  const rename = roomButton('rename', '修改我的名稱', async () => {
+    const name = window.prompt('輸入新的顯示名稱', decodeName(client.me!.name));
+    // A dialog may outlive a snapshot, reconnect or room exit. Same-seat redraws are harmless.
+    if (name === null || !canRename()) return;
+    await client.setName(name);
+  }, '', () => rename.isConnected && canRename());
+  actions.append(rename);
   if (state.me.onStage) {
-    const mute = roomButton('mute', state.me.muted ? '取消靜音' : '靜音', () => state.me.muted ? client.unmute() : client.mute());
+    const muted = state.me.muted;
+    const mute = roomButton('mute', muted ? '取消靜音' : '靜音', () => muted ? client.unmute() : client.mute());
     mute.dataset.policyDisabled = String(state.me.forceMuted);
     actions.append(mute, roomButton('stage', '離開舞台', () => client.leaveStage()));
   } else if (controller) {
@@ -532,6 +836,9 @@ function renderRoom(state: RoomStatePayload): void {
     actions.append(cooldownButton);
   }
   actions.append(button('離開房間', async () => {
+    handRejectionRoomActive = false; retireHandRejection();
+    // Leaving after a pre-ACK snapshot also retires that entry's local feedback.
+    if (landingEntry) landingEntry.cancelled = true;
     micTest?.stop(); micTest = null;
     testButton.textContent = '測試麥克風'; testButton.setAttribute('aria-pressed', 'false');
     await client.disconnect(); createdRoom = null; micNotice = invitation = ''; landing();
@@ -547,7 +854,8 @@ function renderRoom(state: RoomStatePayload): void {
   const hands = panelList(`舉手佇列 · ${state.hands.length}`, state.hands, controller, 'hand');
   grid.append(speakers, hands);
   const audience = element('section', 'panel');
-  audience.append(element('h2', '', `觀眾 · ${state.audienceCount}/${state.limits.maxAudience}`));
+  const audienceHeading = element('h2', '', audienceTitle);
+  audience.append(audienceHeading);
   if (controller && state.audience) {
     const list = element('ul', 'people');
     for (const person of state.audience) list.append(personRow(person, true, 'audience'));
@@ -557,7 +865,11 @@ function renderRoom(state: RoomStatePayload): void {
   grid.append(audience);
   const top = element('div', 'landing-grid'); top.append(summary, controls);
   content.replaceChildren(top, grid);
-  updateCooldown(); renderNotices();
+  renderedRoomActions = Array.from(content.querySelectorAll<HTMLButtonElement | HTMLInputElement>('[data-room-action]'));
+  renderedReturnStage = content.querySelector<HTMLButtonElement>('[data-return-stage]');
+  renderedAudienceHeading = audienceHeading;
+  renderedRoomSignature = signature; renderedSpeakingSignature = speakingSignature; renderedQualitySignature = qualitySignature;
+  syncAudienceFilter(state); updateCooldown(); renderNotices(true);
 }
 function panelList(title: string, people: ParticipantView[], controller: boolean, kind: 'speaker' | 'hand'): HTMLElement {
   const panel = element('section', 'panel');
@@ -571,6 +883,7 @@ function panelList(title: string, people: ParticipantView[], controller: boolean
 function personRow(person: ParticipantView, controller: boolean, kind: 'speaker' | 'hand' | 'audience'): HTMLLIElement {
   const row = element('li', 'person');
   row.dataset.participantId = person.participantId;
+  if (kind === 'audience') audienceFilterRows.push({ row, name: decodeName(person.name).normalize('NFC').toLowerCase() });
   const rows = personRows.get(person.participantId);
   if (rows) rows.push(row); else personRows.set(person.participantId, [row]);
   row.classList.toggle('speaking', client.speaking.has(person.participantId));
@@ -584,31 +897,36 @@ function personRow(person: ParticipantView, controller: boolean, kind: 'speaker'
   applyQuality(row);
   // The controller manages others; its own mic/stage use the personal controls above.
   if (controller && person.participantId !== client.me?.participantId) {
-    const id = person.participantId;
+    const id = person.participantId, forceMuted = person.forceMuted, name = decodeName(person.name);
+    const canManageAudience = () => kind !== 'audience' || Boolean(row.isConnected && !row.hidden
+      && client.status !== 'reconnecting' && client.me?.role === 'controller'
+      && client.state?.audience?.some((p) => p.participantId === id));
     const actions = element('div', 'actions');
     if (kind === 'hand') actions.append(roomButton(`stage:${id}`, '核准上台', () => client.approve(id), 'primary'), roomButton(`stage:${id}`, '婉拒', () => client.reject(id)));
-    if (kind === 'speaker') actions.append(gainSlider(person), roomButton(`force-mute:${id}`, person.forceMuted ? '解除強制靜音' : '強制靜音', () => person.forceMuted ? client.forceUnmute(id) : client.forceMute(id)), roomButton(`stage:${id}`, '移出舞台', () => client.removeFromStage(id)));
+    if (kind === 'speaker') actions.append(gainSlider(person), roomButton(`force-mute:${id}`, forceMuted ? '解除強制靜音' : '強制靜音', () => forceMuted ? client.forceUnmute(id) : client.forceMute(id)), roomButton(`stage:${id}`, '移出舞台', () => client.removeFromStage(id)));
     actions.append(roomButton('transfer', '移交控制權', async () => {
-      if (window.confirm(`確定將控制權移交給 ${decodeName(person.name)}？`)) await client.transferControl(id);
-    }), roomButton(`kick:${id}`, '踢出房間', async () => {
-      if (window.confirm(`確定將 ${decodeName(person.name)} 踢出房間？若要防止對方再進來，請接著更換房間代碼。`)) await client.kick(id);
-    }, 'danger'));
+      if (window.confirm(`確定將控制權移交給 ${name}？`) && canManageAudience()) await client.transferControl(id);
+    }, '', canManageAudience), roomButton(`kick:${id}`, '踢出房間', async () => {
+      if (window.confirm(`確定將 ${name} 踢出房間？若要防止對方再進來，請接著更換房間代碼。`) && canManageAudience()) await client.kick(id);
+    }, 'danger', canManageAudience));
     row.append(actions);
   }
   return row;
 }
 /** Controller's per-speaker level trim; sends on release (`change`) so dragging is one request. */
 function gainSlider(person: ParticipantView): HTMLLabelElement {
+  const id = person.participantId;
   const label = element('label', 'gain', '音量');
   const slider = element('input');
   slider.type = 'range';
-  slider.dataset.roomAction = `gain:${person.participantId}`;
+  slider.dataset.roomAction = `gain:${id}`;
   slider.min = String(-MAX_GAIN_DB); slider.max = String(MAX_GAIN_DB); slider.step = '1';
   slider.value = String(person.gainDb);
+  renderedGainInputs.push({ input: slider, value: slider.value });
   slider.title = `${person.gainDb} dB`;
   slider.onchange = () => {
-    if (slider.disabled || client.status === 'reconnecting') return;
-    void run(() => client.setGain(person.participantId, Number(slider.value)), undefined, roomActionGeneration);
+    if (slider.disabled || client.status === 'reconnecting' || client.status === 'disconnected') return;
+    void run(() => client.setGain(id, Number(slider.value)), undefined, roomActionGeneration);
   };
   label.append(slider);
   return label;
@@ -624,16 +942,31 @@ function applyQuality(row: HTMLElement): void {
   badge.title = `上行掉包 ${q.uplinkLossPercent ?? '—'}%、下行掉包 ${q.downlinkLossPercent ?? '—'}%${q.rttMs !== undefined ? `、RTT ${q.rttMs} ms` : ''}`;
 }
 function updateCooldown(): void {
+  syncHandRejection(); syncHandPosition();
   const remainingMs = client.handCooldownMs;
   const remaining = Math.ceil(remainingMs / 1000);
   if (cooldownButton?.isConnected) {
     cooldownButton.disabled = remaining > 0 || client.status === 'reconnecting';
     cooldownButton.textContent = remaining > 0 ? `舉手發言（${remaining} 秒）` : '舉手發言';
   }
-  const returnButton = content.querySelector<HTMLButtonElement>('[data-return-stage]');
+  const returnButton = renderedReturnStage;
   if (returnButton) returnButton.disabled = client.status === 'reconnecting';
   syncRoomActions();
   scheduleCooldown(cooldownButton?.isConnected ? remainingMs : 0);
+}
+function syncHandPosition(): void {
+  const state = client.state, me = state?.me;
+  const visible = Boolean(me?.handRaised && !me.onStage && me.role !== 'controller');
+  let text = '';
+  if (visible) {
+    const position = state!.hands.findIndex(person => person.participantId === me!.participantId);
+    const reconnecting = client.status === 'reconnecting';
+    text = position >= 0
+      ? `${reconnecting ? '上次' : '你的'}舉手位置：佇列第 ${position + 1} 位。`
+      : reconnecting ? '上次狀態：已舉手，等待主控邀請。' : '你已舉手，等待主控邀請。';
+  }
+  if (ownHandPosition.hidden !== !visible) ownHandPosition.hidden = !visible;
+  if (ownHandPosition.textContent !== text) ownHandPosition.textContent = text;
 }
 /** Only a visible countdown needs clock-driven updates; state/status/action changes update directly. */
 function scheduleCooldown(remaining: number): void {
@@ -653,6 +986,9 @@ function scheduleCooldown(remaining: number): void {
 }
 client.on('state', ({ detail }) => { if (landingEntry) landingEntry.entered = true; renderRoom(detail); });
 client.on('status', ({ detail }) => {
+  if (detail === 'reconnecting' || detail === 'disconnected') {
+    retireHandRejection(); audioRetryNotice.hidden = true; audioRetryNotice.textContent = '';
+  }
   if (landingEntry && client.state) landingEntry.entered = true;
   status.textContent = statusLabels[detail];
   if (detail === 'disconnected' && !client.state) {
@@ -662,16 +998,35 @@ client.on('status', ({ detail }) => {
     quality.clear();
     syncMeter(); landing();
   }
-  updateCooldown(); syncMicRetry();
+  updateCooldown(); syncMicRetry(); syncQualityDetails();
+});
+client.on('hand', ({ detail }) => { if (detail.raised && detail.participantId === client.me?.participantId) retireHandRejection(); });
+client.on('stagejoined', ({ detail }) => { if (detail.participantId === client.me?.participantId) retireHandRejection(); });
+client.on('role', ({ detail }) => { if (detail.role !== 'audience' && detail.participantId === client.me?.participantId) retireHandRejection(); });
+client.on('transferred', ({ detail }) => { if (detail.toId === client.me?.participantId) retireHandRejection(); });
+client.on('handrejected', ({ detail }) => {
+  // Events carry no raise identifier; copy the current-seat ownership before observable work.
+  const generation = roomActionGeneration;
+  if (!detail || typeof detail !== 'object') return;
+  const roomId = detail.roomId, participantId = detail.participantId;
+  const state = client.state;
+  if (generation !== roomActionGeneration || !eligibleHandRejection()
+    || state?.roomId !== roomId || state.me.participantId !== participantId) return;
+  handRejectionOwner = { roomId, participantId, generation };
+  syncHandRejection();
 });
 client.on('created', ({ detail }) => { createdRoom = detail; });
 client.on('closed', ({ detail }) => { if (landingEntry) landingEntry.entered = true; createdRoom = null; micNotice = ''; invitation = detail.reason === 'shutdown' ? '伺服器維護或重新啟動，房間已關閉；請稍後重新建立或加入。' : '房間已關閉，歡迎建立或加入其他舞台。'; audioBlocked = false; landing(); });
 client.on('kicked', () => { if (landingEntry) landingEntry.entered = true; createdRoom = null; micNotice = ''; invitation = '你已被主控移出房間。'; audioBlocked = false; landing(); });
 client.on('invite', ({ detail }) => {
-  if (detail.participantId === client.me?.participantId) { invitation = '主控已邀請你上台，請允許麥克風權限。'; renderNotices(); }
+  const state = client.state;
+  if (state && detail.participantId === state.me.participantId) {
+    stagePermissionOwner = { roomId: state.roomId, participantId: state.me.participantId, generation: roomActionGeneration };
+    invitation = STAGE_PERMISSION_NOTICE; renderNotices();
+  }
 });
 client.on('stageleft', ({ detail }) => {
-  if (detail.participantId === client.me?.participantId) { invitation = detail.reason === 'removed' ? '主控已將你移出舞台，你仍可收聽。' : ''; renderNotices(); }
+  if (detail.participantId === client.me?.participantId) { stagePermissionOwner = undefined; invitation = detail.reason === 'removed' ? '主控已將你移出舞台，你仍可收聽。' : ''; renderNotices(); }
 });
 client.on('micerror', ({ detail }) => { micRetryPending = false; micRetryAvailable = Boolean(client.me?.onStage); micNotice = `${detail.message}（${detail.name}）`; renderNotices(); });
 client.on('audioblocked', () => { audioBlocked = true; renderNotices(); });
@@ -686,21 +1041,25 @@ client.on('speaking', ({ detail }) => {
     if (!speakingIds.has(id)) for (const row of personRows.get(id) ?? []) row.classList.toggle('speaking', true);
   }
   speakingIds = ids;
+  renderedSpeakingSignature = JSON.stringify([...ids]);
 });
 client.on('quality', ({ detail }) => {
+  syncQualityDetails(detail.participants);
   const previous = quality;
   quality = new Map(detail.participants.map((q) => [q.participantId, q]));
   // Omitted IDs still need their old warnings removed, including duplicate rows.
   for (const id of new Set([...previous.keys(), ...quality.keys()])) {
     for (const row of personRows.get(id) ?? []) applyQuality(row);
   }
+  renderedQualitySignature = JSON.stringify([...quality]);
 });
 function refreshConnectionLine(): void {
-  if (!client.state) return;
+  if (!client.state || document.hidden) return;
   const generation = roomActionGeneration, sequence = ++connectionPollSequence;
   void client.getStats().then(({ inbound, outbound }) => {
-    // SDK polls can settle out of order; an obsolete empty result must not erase a newer display.
-    if (generation !== roomActionGeneration || sequence !== connectionPollSequence) return;
+    // A newer pending poll must not starve completed samples; older completions cannot replace newer results.
+    if (!client.state || document.hidden || generation !== roomActionGeneration || sequence <= connectionResultWatermark) return;
+    connectionResultWatermark = sequence;
     const parts: string[] = [];
     if (inbound?.lossPercent !== undefined) parts.push(`收聽掉包 ${inbound.lossPercent.toFixed(1)}%`);
     if (outbound?.lossPercent !== undefined) parts.push(`發言掉包 ${outbound.lossPercent.toFixed(1)}%`);
@@ -711,13 +1070,31 @@ function refreshConnectionLine(): void {
     connectionLine.classList.toggle('error', Math.max(inbound?.lossPercent ?? 0, outbound?.lossPercent ?? 0) >= POOR_LOSS_PERCENT);
   }, () => {});
 }
-/** Connection stats matter only inside a room; the separate cooldown timeout runs only while visible. */
+/** Connection stats matter only for visible room diagnostics; cooldown scheduling is independent. */
 let roomTimers: ReturnType<typeof setInterval>[] = [];
 function syncRoomTimers(): void {
-  const inRoom = client.state !== null;
-  if (inRoom && !roomTimers.length) roomTimers = [setInterval(refreshConnectionLine, 2000)];
-  else if (!inRoom && roomTimers.length) { roomTimers.forEach(clearInterval); roomTimers = []; connectionLine.textContent = ''; }
+  const polling = client.state !== null && !document.hidden;
+  if (polling && !roomTimers.length) {
+    const timer = setInterval(() => {
+      if (roomTimers[0] !== timer) return;
+      refreshConnectionLine();
+    }, 2000);
+    roomTimers = [timer];
+  } else if (!polling) stopRoomTimers();
+}
+function stopRoomTimers(): void {
+  roomTimers.forEach(clearInterval); roomTimers = [];
+  connectionResultWatermark = ++connectionPollSequence; connectionLine.textContent = '';
+  connectionLine.classList.toggle('error', false);
 }
 client.on('state', syncRoomTimers);
 client.on('status', syncRoomTimers);
+// Page-lifetime listener, like the client/device listeners; landing previews also use it.
+document.addEventListener('visibilitychange', () => {
+  connectionResultWatermark = ++connectionPollSequence; // Retire pending UI results without resetting SDK delta baselines.
+  syncMeter(); syncRoomTimers();
+  // A resumed SDK sample can span the hidden interval since the last completed stats sample.
+  if (!document.hidden) refreshConnectionLine();
+});
 landing();
+if (signaling.error) showError(signaling.error);

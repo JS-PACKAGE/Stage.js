@@ -60,8 +60,10 @@ async function fixture(t: TestContext, options: { deferLibrary?: boolean } = {})
   t.mock.timers.enable({ apis: ['setTimeout', 'setInterval'] });
   let now = 1000;
   t.mock.method(performance, 'now', () => now);
-  const nodes = new Map(['host', 'room', 'code', 'name', 'status', 'join', 'hand', 'leave', 'audio', 'unlock'].map(id => [id, new EmbedNode()]));
+  const nodes = new Map(['host', 'ws-path', 'room', 'code', 'name', 'status', 'hand-rejected', 'error-notice', 'last-error', 'error-dismiss', 'join', 'hand', 'mic', 'rename', 'room-name-panel', 'room-name-current', 'room-name-draft', 'room-name-update', 'hand-queue', 'hand-queue-summary', 'hand-queue-notice', 'hand-queue-list', 'stage-management', 'stage-management-summary', 'stage-management-notice', 'stage-management-list', 'stage', 'mic-retry', 'audio-retry', 'audio-retry-status', 'microphone-panel', 'microphone-device', 'microphone-refresh', 'microphone-apply', 'microphone-draft-notice', 'output-panel', 'output-device', 'output-refresh', 'output-apply', 'output-draft-notice', 'output-support', 'cancel-join', 'leave', 'close-room', 'audio', 'unlock'].map(id => [id, new EmbedNode()]));
   const node = (id: string): EmbedNode => { const found = nodes.get(id); assert.ok(found); return found; };
+  node('error-notice').hidden = true; node('hand-rejected').hidden = true;
+  const cancel = node('cancel-join'); cancel.hidden = cancel.disabled = true; cancel.textContent = '取消連線';
   const form = node('join'), submit = new EmbedNode(), status = node('status'), leave = node('leave'), hand = node('hand');
   form.submitButton = submit; node('name').value = ' 測試聽眾 ';
   status.textContent = '尚未加入'; hand.disabled = leave.disabled = true;
@@ -77,7 +79,7 @@ async function fixture(t: TestContext, options: { deferLibrary?: boolean } = {})
   const executable = stripTypeScriptTypes(source.replace("import './styles.css';", '').replace(dynamicImport, 'loadLibrary(moduleUrl)'));
   assert.doesNotMatch(executable, /\bimport\s*(?:\(|['"])/);
   runInNewContext(executable, {
-    document: { querySelector(selector: string) { assert.match(selector, /^#[a-z]+$/); return node(selector.slice(1)); } },
+    document: { createElement(tag: string) { assert.equal(tag, 'option'); return new EmbedNode(); }, querySelector(selector: string) { assert.match(selector, /^#[a-z-]+$/); return node(selector.slice(1)); } },
     location: { search: '?room=same-room&code=TEST42', origin: 'https://stage.example.test' },
     URL, URLSearchParams, Error, Promise, performance, setTimeout, clearTimeout, setInterval, clearInterval,
     loadLibrary: async (url: string) => {
@@ -238,7 +240,7 @@ for (const terminal of ['closed', 'shutdown', 'kicked'] as const) {
       socket.deliver(terminal === 'kicked' ? { type: 'kicked', roomId: 'same-room' }
         : { type: 'room:closed', roomId: 'same-room', ...(terminal === 'shutdown' ? { reason: 'shutdown' as const } : {}) });
       await flush();
-      assert.equal(h.status.textContent, terminal === 'kicked' ? '你已被主控移出房間。' : '房間已關閉。');
+      assert.equal(h.status.textContent, terminal === 'kicked' ? '你已被主控移出房間。' : terminal === 'shutdown' ? '伺服器維護或重新啟動，房間已關閉。' : '房間已關閉。');
       assertSubmission(h.submit, false); assert.equal(h.hand.disabled, true); assert.equal(h.leave.disabled, true);
     });
   }

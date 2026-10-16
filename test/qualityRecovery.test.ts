@@ -41,13 +41,15 @@ for (const synchronous of [false, true]) it(`recovers after every stats call fai
   assert.equal(host.s.last('quality')!.participants[0]!.participantId, host.id); assert.equal(timers().length, 1);
 });
 
-for (const action of ['close', 'leave'] as const) it(`does not reschedule or report after ${action} while collection is pending`, async () => {
+for (const action of ['close', 'leave'] as const) it(`does not reschedule after ${action} while collection is pending${action === 'leave' ? ', but reports the empty publisher set' : ' or report for the closed room'}`, async () => {
   const { h, host, timers, fire } = await room(); const pending = Promise.withResolvers<TransportStats | null>();
   h.transport.getStats = () => pending.promise;
   fire(); await nextTurn();
   await h.req(host.s, { type: action === 'close' ? 'room:close' : 'stage:leave' });
   pending.resolve({ inbound: { packetsReceived: 10, packetsLost: 1 } }); await nextTurn();
-  assert.equal(host.s.last('quality'), undefined); assert.equal(timers().length, 0);
+  if (action === 'leave') assert.deepEqual(host.s.all('quality'), [{ type: 'quality', participants: [] }]);
+  else assert.equal(host.s.last('quality'), undefined);
+  assert.equal(timers().length, 0);
 });
 
 it('keeps one in-flight collection when another publisher arrives', async () => {

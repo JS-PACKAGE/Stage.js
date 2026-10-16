@@ -117,11 +117,54 @@ for (const action of ['create', 'join'] as const) {
     ]) {
       landing[action].form.submit(); assertCancel(h, true);
       h.pending(action).reject(Object.assign(new Error(message), { code })); await flushSample();
-      assert.equal(errorBox(h).hidden, false); assert.equal(errorBox(h).textContent, message);
+      assert.equal(errorBox(h).hidden, false);
+      assert.equal(errorBox(h).textContent, action === 'join' && code === 'unauthorized'
+        ? `${message}（unauthorized）\n請確認房間 ID 與代碼，或向主控索取最新邀請連結。` : message);
       assertLocked(landing, false); assertCancel(h, false);
     }
     assert.equal(h.disconnectCalls(), 0);
   });
+
+  for (const outcome of ['reject', 'fulfill'] as const) {
+    it(`whole sample explicit room Leave retires ${action} feedback through late ${outcome} without releasing the shared lock early`, async t => {
+      const h = setup(t), retired = forms(h); fill(retired);
+      retired[action].form.submit();
+      const oldCancel = assertCancel(h, true); assert.ok(oldCancel.onclick); const oldCallback = oldCancel.onclick;
+      h.sdk.snapshot(roomState()); assert.equal(oldCancel.isConnected, false);
+      h.button('離開房間').click();
+      assert.equal(h.disconnectCalls(), 1); assertLocked(forms(h), true); assertCancel(h, false);
+      await flushSample();
+      const landing = forms(h); fill(landing); assertLocked(landing, true); assertCancel(h, false);
+      assert.equal(h.pending(action).status, 'pending');
+      // This fixture deliberately holds settlement after disconnect to check the UI owner.
+      // Real SDK disconnect already rejects the request; it does not defer completion this way.
+      h.sdk.emit('error', { message: '目前的另一項通知。' });
+      oldCallback(); retired.create.form.submit(); retired.join.form.submit();
+      landing.create.form.submit(); landing.join.form.submit();
+      assert.equal(h.requestCount(), 1); assertLocked(landing, true);
+      if (outcome === 'reject') h.pending(action).reject(new Error('連線已中斷。'));
+      else h.acknowledge(action, 'RETIRED');
+      await flushSample();
+      assertLocked(landing, false); assertCancel(h, false); assertLocked(retired, true);
+      assert.equal(errorBox(h).hidden, false); assert.equal(errorBox(h).textContent, '目前的另一項通知。');
+      assert.equal(h.sdk.state, null); assert.equal(h.clock.jobs.size, 0);
+
+      landing[action].form.submit(); assert.equal(h.requestCount(), 2); assertLocked(landing, true); assertCancel(h, true);
+      oldCallback(); await flushSample();
+      assert.equal(h.disconnectCalls(), 1); assertLocked(landing, true); assertCancel(h, true);
+      assert.equal(errorBox(h).hidden, true);
+      if (action === 'create') {
+        const state = roomState({ role: 'controller', onStage: false });
+        state.controllerId = state.me.participantId; state.codeRequired = true;
+        h.sdk.snapshot(state);
+        assert.match(h.app.textContent, /房間代碼：未提供/); assert.doesNotMatch(h.app.textContent, /RETIRED/);
+      }
+      h.pending(action).reject(new Error('目前的加入失敗。')); await flushSample();
+      assert.equal(errorBox(h).hidden, false); assert.equal(errorBox(h).textContent, '目前的加入失敗。');
+      if (action === 'join') { assertLocked(landing, false); assertCancel(h, false); }
+      else await h.sdk.disconnect();
+    });
+  }
 
   it(`whole sample ${action} keeps a disconnect failure visible when the canceled entry later rejects`, async t => {
     const h = setup(t), landing = forms(h); fill(landing);
@@ -256,11 +299,82 @@ class Socket {
   }
   close(): void { this.closeCalls++; this.readyState = 2; }
 }
+class LandingPeer {
+  connectionState = 'new'; signalingState = 'stable'; localDescription = null;
+  private rejectOffer: ((error: Error) => void) | undefined;
+  addTransceiver() {
+    return { direction: 'recvonly', sender: { track: null as unknown,
+      async replaceTrack(track: unknown): Promise<void> { this.track = track; } } };
+  }
+  // Keep unrelated negotiation pending; ordinary SDK cleanup rejects it when the peer closes.
+  createOffer(): Promise<never> { return new Promise((_resolve, reject) => { this.rejectOffer = reject; }); }
+  async getStats(): Promise<Map<string, unknown>> { return new Map(); }
+  close(): void { this.connectionState = 'closed'; this.rejectOffer?.(new Error('fixture peer closed')); }
+}
 interface IntegratedClient {
   readonly state: unknown;
   readonly status: string;
   disconnect(): Promise<void>;
   on(type: string, listener: (event: { detail: unknown }) => void): () => void;
+}
+
+for (const action of ['create', 'join'] as const) {
+  it(`whole sample actual SDK explicit room Leave suppresses pending ${action} rejection and retains a fresh entry failure`, async t => {
+    const { StageClient } = await import(new URL('../packages/client/src/index.ts', import.meta.url).href);
+    const target = new EventTarget();
+    const originals = new Map(['window', 'WebSocket', 'navigator', 'RTCPeerConnection']
+      .map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));
+    Object.defineProperty(globalThis, 'window', { configurable: true, value: target });
+    Object.defineProperty(globalThis, 'WebSocket', { configurable: true, value: Socket });
+    Object.defineProperty(globalThis, 'RTCPeerConnection', { configurable: true, value: LandingPeer });
+    Object.defineProperty(globalThis, 'navigator', { configurable: true, value: { mediaDevices: {
+      enumerateDevices: async () => [],
+      getUserMedia: async () => { throw new Error('fixture microphone unavailable'); },
+    } } });
+    Socket.instances = [];
+    t.mock.timers.enable({ apis: ['setTimeout', 'setInterval'] });
+    const sdk: IntegratedClient = new StageClient({ url: 'ws://localhost/ws', requestTimeoutMs: 1000,
+      audioElement: { volume: 1, muted: false, pause() {} } });
+    const h = sampleApp({ sdk });
+    t.after(async () => {
+      try { await h.cleanup(); assert.equal(getEventListeners(target, 'pagehide').length, 0); }
+      finally {
+        for (const [key, descriptor] of originals) {
+          if (descriptor) Object.defineProperty(globalThis, key, descriptor); else Reflect.deleteProperty(globalThis, key);
+        }
+      }
+    });
+    const errors: unknown[] = []; sdk.on('error', event => errors.push(event.detail));
+    const landing = forms(h); fill(landing); landing[action].form.submit();
+    const old = Socket.instances[0]!; old.hello(); await flushSample(); t.mock.timers.tick(0);
+    assert.equal(old.sent.length, 1); assert.equal(old.sent[0]!.type, action === 'create' ? 'room:create' : 'join');
+    if (action === 'create') old.deliver({ type: 'room:created', roomId: 'same-room', code: 'TEST42' });
+    const state = roomState(action === 'create' ? { role: 'controller', onStage: true } : {});
+    if (action === 'create') { state.controllerId = state.me.participantId; state.codeRequired = true; }
+    // The authoritative snapshot opens room controls before the entry request's ACK.
+    old.deliver({ type: 'room:state', ...state }); await flushSample();
+    assert.ok(sdk.state); assert.equal(h.app.descendants().filter(node => node.tagName === 'form').length, 0);
+    h.button('離開房間').click();
+    assert.equal(old.closeCalls, 1); assert.equal(sdk.state, null); assert.equal(sdk.status, 'disconnected');
+    assertLocked(forms(h), true); assertCancel(h, false);
+    await flushSample();
+    const replacement = forms(h); fill(replacement);
+    assertLocked(replacement, false); assertCancel(h, false);
+    assert.equal(errorBox(h).hidden, true); assert.equal(notices(h).textContent, '');
+    assert.deepEqual(errors, [], 'disconnect rejects the request without emitting an SDK error event');
+    assert.equal(h.clock.jobs.size, 0);
+
+    replacement[action].form.submit(); assertLocked(replacement, true); assertCancel(h, true);
+    const current = Socket.instances[1]!; current.hello(); await flushSample(); t.mock.timers.tick(0);
+    assert.equal(current.sent.length, 1);
+    current.deliver({ type: 'error', requestId: current.sent[0]!.requestId, code: 'unauthorized', message: '目前的加入失敗。' });
+    await flushSample();
+    assertLocked(replacement, false); assertCancel(h, false);
+    assert.equal(errorBox(h).hidden, false);
+    assert.equal(errorBox(h).textContent, action === 'join'
+      ? '目前的加入失敗。（unauthorized）\n請確認房間 ID 與代碼，或向主控索取最新邀請連結。' : '目前的加入失敗。');
+    assert.equal(errors.length, 1);
+  });
 }
 
 for (const action of ['create', 'join'] as const) {

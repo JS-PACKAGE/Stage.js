@@ -65,7 +65,7 @@ const stageHub = new StageHub({
 });
 hub = stageHub;
 
-const processMetrics = processSamples();
+const processMetrics = config.server.metrics.enabled ? processSamples() : () => [];
 const server = createStageServer({
   config,
   hub: stageHub,
@@ -109,9 +109,9 @@ process.on('SIGTERM', () => void stop('SIGTERM'));
 // Node's default would take every room down. An uncaught exception may have left state inconsistent,
 // so the rooms are told the server is going away and the process exits non-zero for the supervisor.
 process.on('unhandledRejection', (reason) => {
-  log.error('unhandled rejection', { error: reason instanceof Error ? reason.stack ?? reason.message : String(reason) });
+  log.error('unhandled rejection', { error: reason });
 });
 process.on('uncaughtException', (err) => {
-  log.error('uncaught exception, shutting down', { error: err.stack ?? String(err) });
+  log.error('uncaught exception, shutting down', { error: err });
   void stop('uncaughtException', 1);
 });

@@ -8,7 +8,8 @@ const source = readFileSync(new URL('../web/src/main.ts', import.meta.url), 'utf
 // Exercise the production handlers with DOM/SDK doubles, not a duplicate pending-state model.
 const actions = source.slice(source.indexOf('function resetRoomActions('), source.indexOf('function showError('));
 const people = source.slice(source.indexOf('function panelList('), source.indexOf('/** Controller\'s per-speaker')) ;
-const landing = source.slice(source.indexOf('function landing()'), source.indexOf('function renderNotices()'));
+const landing = source.slice(source.indexOf('function landing()'), source.indexOf('function renderNotices('));
+const audienceFilter = source.slice(source.indexOf('function resetAudienceFilter()'), source.indexOf('function renderRoom('));
 const render = source.slice(source.indexOf('function renderRoom('), source.indexOf('function panelList('));
 const cooldown = source.slice(source.indexOf('function updateCooldown('), source.indexOf("client.on('state', ({ detail })"));
 interface Button {
@@ -35,15 +36,24 @@ interface Harness {
 function setup(): Harness {
   return runInNewContext(stripTypeScriptTypes(`
     let busy = false;
+    let pendingAudioUnlock, handRejectionRoomActive = false;
+    const handRejectionNotice = { hidden: true, textContent: '', dataset: {}, children: [] };
+    function retireHandRejection() {}
+    function syncHandRejection() {}
+    let landingRevision = 0;
     let roomActionIdentity = '', roomActionGeneration = 0, cooldownButton = null, cooldownTimer, cooldownDue = 0, invitation = '';
     const pendingRoomActions = new Map(), nodes = [], errors = [];
-    const personRows = new Map(); let speakingIds = new Set();
+    let renderedRoomActions = nodes, renderedReturnStage = null;
+    const personRows = new Map(), quality = new Map(); let speakingIds = new Set();
+    let renderedRoomSignature, renderedAudienceHeading, renderedSpeakingSignature, renderedQualitySignature; const renderedGainInputs = [];
+    let audienceFilterIdentity = ''; const audienceFilterRows = [];
+    const audienceFilter = {}, audienceSearch = { value: '' }, audienceFilterClear = {}, audienceFilterCount = {};
     let nextTimer = 0, clock = 0, callbacks = 0;
     const performance = { now: () => clock };
     const timers = new Map();
     const setTimeout = (fn, delay) => { const id = ++nextTimer; timers.set(id, { fn, at: clock + delay }); return id; };
     const clearTimeout = id => timers.delete(id);
-    const client = { status: 'waiting', handCooldownMs: 0, me: { handRaised: false }, speaking: new Set() };
+    const client = { state: null, status: 'waiting', handCooldownMs: 0, me: { handRaised: false }, speaking: new Set() };
     const content = { querySelectorAll: selector => selector === '[data-room-action]' ? nodes : [], querySelector: () => nodes.find(node => node.dataset.returnStage),
       replaceChildren(...children) {
         nodes.length = 0;
@@ -51,21 +61,28 @@ function setup(): Harness {
         children.forEach(visit);
       } };
     const brand = {}, status = {}, connectionLine = { dataset: {}, children: [] };
+    const audioRetryNotice = { hidden: true, textContent: '', dataset: {}, children: [] };
+    const ownHandPosition = { hidden: true, textContent: '', dataset: {}, children: [] };
     const statusLabels = {}, roleLabels = {}, createdRoom = null;
     const location = { pathname: '/', origin: 'https://example.test' };
+    const signaling = { path: '/ws' };
     const decodeName = value => value;
     const button = () => element(), field = () => element(), gainSlider = () => element();
     const window = { confirm: () => true };
     function applyQuality() {}
+    function resetQualityDetails() {}
+    function syncQualityDetails() {}
     const params = { get: () => null }, document = { createTextNode: () => element() };
     function renderNotices() {}
     function resetMicSettings() {}
+    function stopRoomTimers() {}
     const errorBox = { hidden: true };
     function element(tag, className, text) { return { textContent: text ?? '', classList: { toggle() {} }, isConnected: true, disabled: false, dataset: {}, attrs: {}, children: [], append(...children) { this.children.push(...children); }, setAttribute(k, v) { this.attrs[k] = v; } }; }
     function showError(error) { errors.push(error); }
     function syncMeter() {}
     ${actions}
     ${cooldown}
+    ${audienceFilter}
     ${render}
     ${people}
     ${landing}
@@ -76,7 +93,7 @@ function setup(): Harness {
         for (const [id, timer] of [...timers]) if (timer.at <= clock && timers.has(id)) {
           timers.delete(id); callbacks++; timer.fn();
         }
-      }, reset: resetRoomActions, tick: updateCooldown, render(state) { client.me = state.me; renderRoom(state); },
+      }, reset: resetRoomActions, tick: updateCooldown, render(state) { client.state = state; client.me = state.me; renderRoom(state); },
       button(key, action) { const node = roomButton(key, key, action); nodes.push(node); updateCooldown(); return node; } });
   `), { Symbol, Map, Error, Math, Promise, URL }) as Harness;
 }
@@ -180,13 +197,13 @@ it('schedules only displayed countdown boundaries without postponing an existing
   h.advance(100); h.render(audienceState()); h.tick(); assert.deepEqual([...h.delays()], [401]);
   h.advance(401); assert.deepEqual([...h.delays()], [1000]);
   h.advance(1000); assert.deepEqual([...h.delays()], []); assert.equal(h.callbacks(), 2);
-  assert.equal(h.nodes[0]!.disabled, false);
+  assert.equal(h.nodes.find(node => node.dataset.roomAction === 'hand')!.disabled, false);
 });
 
 it('a late countdown callback recomputes current state without replaying missed ticks', () => {
   const h = setup(); h.client.handCooldownMs = 5500; h.render(audienceState());
   h.advance(6000); assert.equal(h.callbacks(), 1); assert.deepEqual([...h.delays()], []);
-  assert.equal(h.nodes[0]!.disabled, false);
+  assert.equal(h.nodes.find(node => node.dataset.roomAction === 'hand')!.disabled, false);
 });
 
 it('cancels countdowns on raised hand or stage changes and keeps pending expiry disabled', async () => {
@@ -196,17 +213,17 @@ it('cancels countdowns on raised hand or stage changes and keeps pending expiry 
   h.render(audienceState(false, true)); assert.deepEqual([...h.delays()], []);
   h.client.handCooldownMs = 0; const work = Promise.withResolvers<void>();
   Object.assign(h.client, { raiseHand: () => { h.client.handCooldownMs = 1500; return work.promise; } });
-  h.render(audienceState()); h.nodes[0]!.onclick();
+  h.render(audienceState()); h.nodes.find(node => node.dataset.roomAction === 'hand')!.onclick();
   assert.deepEqual([...h.delays()], [500], 'local cooldown schedules before the ACK'); h.advance(1500);
-  assert.equal(h.nodes[0]!.disabled, true); assert.equal(h.delays().length, 0);
-  work.resolve(); await flush(); assert.equal(h.nodes[0]!.disabled, false);
+  assert.equal(h.nodes.find(node => node.dataset.roomAction === 'hand')!.disabled, true); assert.equal(h.delays().length, 0);
+  work.resolve(); await flush(); assert.equal(h.nodes.find(node => node.dataset.roomAction === 'hand')!.disabled, false);
 });
 
 it('production room scheduler keeps stats cadence with zero idle cooldown polling', () => {
   const scheduling = source.slice(source.indexOf('function syncRoomTimers()'), source.indexOf("client.on('state', syncRoomTimers)"));
   const jobs: { fn: () => void; ms: number }[] = []; let stats = 0, cooldownCalls = 0;
   runInNewContext(stripTypeScriptTypes(`let roomTimers = []; ${scheduling}; syncRoomTimers();`), {
-    client: { state: {} }, connectionLine: {}, clearInterval() {},
+    client: { state: {} }, document: { hidden: false }, connectionLine: {}, clearInterval() {},
     setInterval(fn: () => void, ms: number) { jobs.push({ fn, ms }); return jobs.length; },
     refreshConnectionLine() { stats++; }, updateCooldown() { cooldownCalls++; },
   });

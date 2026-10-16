@@ -13,7 +13,8 @@ class Context {
   async close() { this.closed++; }
 }
 function stream() {
-  const track = { enabled: true, stops: 0, stop() { this.stops++; } };
+  const track = Object.assign(new EventTarget(), { enabled: true, readyState: 'live', stops: 0,
+    stop() { this.stops++; this.readyState = 'ended'; } });
   return { track, value: { getTracks: () => [track], getAudioTracks: () => [track] } as unknown as MediaStream };
 }
 const flush = async () => { for (let i = 0; i < 6; i++) await Promise.resolve(); };
