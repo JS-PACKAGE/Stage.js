@@ -560,13 +560,18 @@ export class StageClient extends EventTarget {
     this.lastHeardAt = performance.now();
     this.keepaliveTimer = setInterval(() => {
       if (this.socket !== ws || ws.readyState !== WebSocket.OPEN) { this.stopKeepalive(); return; }
-      if (performance.now() - this.lastHeardAt > KEEPALIVE_TIMEOUT_MS) {
+      const now = performance.now();
+      if (now - this.lastHeardAt > KEEPALIVE_TIMEOUT_MS) {
         this.report(new StageError('timeout', '伺服器沒有回應，正在重新連線。'));
         ws.onclose = null;
         this.socketLost(ws);
         try { ws.close(); } catch { /* already dead */ }
         return;
       }
+      // Ping shares the control bucket; leave already-reserved control/ICE sends in place.
+      if (now < this.nextControlAt || now < this.lastSendAt) return;
+      this.lastSendAt = now;
+      this.nextControlAt = now + Math.ceil(2000 / this.limits.controlPerSecond);
       ws.send(JSON.stringify({ type: 'ping' }));
     }, KEEPALIVE_INTERVAL_MS);
   }

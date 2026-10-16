@@ -78,6 +78,12 @@ SDK 不樂觀改寫 `me.name`，也不在較晚的 ACK continuation 寫回提案
 
 這是 client 等待期限，不會取消已送達伺服器的操作，也不會延長伺服器 `rtc.mediaWorkerTimeoutMs`。keepalive 的靜默判定、ICE restart 與重連退避不受此選項影響；較短期限可能使慢速但仍正常的操作被判為逾時。
 
+### Keepalive 與控制排程
+
+應用層 JSON `ping` 與普通控制共用伺服器的控制限流額度。SDK 只在既有控制／全域送出保留時段已到期時送 keepalive，並在送出前保留目前 `hello.limits.controlPerSecond` 對應的控制間隔。這修復合法低限速（例如每秒 1 次）下，定期 ping 與 SDK 自己已排程的控制相撞而被 1008 斷線的情況；預設每秒 20 次在基線對照未重現這兩種碰撞，不宣稱所有預設連線皆受影響。
+
+忙碌時省略當輪 ping，不新增 queue、request ID、ACK timer 或控制容量占用，不移動已接納請求／ICE 的送出時間，也不修改 ICE 的獨立間隔。之後的控制若等候 ping 所占的間隔，仍透過原請求排程保留完整 ACK 期限；靜默檢查永遠先執行，不因排程忙碌而延長。伺服器的限流、安全政策與 WebSocket 協定層 ping／pong 不變；這不保證背景 timer 被瀏覽器節流後的任意 burst 或宿主直接 socket 傳送都不超限。驗證包含原始 SDK／validator／Hub 與本機真實 WebSocket、受控時間及原生 15 秒 timer；不代表原生瀏覽器、ICE 或硬體音訊驗收。
+
 ### 可選的控制請求上限
 
 `new StageClient({ url, maxPendingControlRequests: 128 })` 可限制呼叫端同時等待送出或 ACK 的控制請求數；省略時維持不設上限。值須為正安全整數，無效值在建構時拋 `RangeError`，尚未修改／建立 audio。
@@ -101,7 +107,7 @@ hello、內部 SDP／ICE 信令及自動回座不占用此上限，仍遵守原�
 
 - `reconnect.initialDelayMs`／`maxDelayMs` 必須各為 0–2147483647 的有限毫秒數，允許小數與 0；無效值在建構時、建立或修改 audio 前同步拋 `RangeError`。預設仍為 500／15000；最大值小於初始值時照常以最大值封頂，0 表示立即排程重試而非停用重連。重連數值在建構時複製，後續修改原 options／reconnect 物件不會改變既有 client 的重試政策。
 
-- 斷線韌性：ws 中斷時**不拆** PeerConnection——伺服器在寬限期內保留席位與媒體，音訊持續，重連回座後沿用同一條連線；協商中的 answer 遺失時立即解除等待，回座後直接替換尚未完成的 offer，保留其 MID，不以 rollback 產生額外 transceiver。只有身分改變（寬限逾時、被踢、關房、主動 `disconnect()`）才重建。`disconnect()` 會清理本機連線並嘗試以 close code 1000 告知伺服器「主動離開」。伺服器收到正常關閉後，非主控不保留 participant grace，會移除席位；主控仍遵循 `rooms.controllerGraceMs` 的斷線寬限，之後依原規則交接或關房，並非立即讓出主控或關閉房間。`disconnect()` 完成不代表伺服器已收到關閉；`pagehide` 以 4002 關閉，依各角色的寬限設定保留席位供返回頁面時回座。client 每 15 秒送 `ping`，35 秒沒收到任何訊息即視為斷線並重連（半開 TCP 不會卡住）。WebRTC 進入 `disconnected` 3 秒即 ICE restart，`failed` 則兩端重建。節流與舉手冷卻依伺服器 `hello.limits`（`rateLimits` getter）；請求排程、舉手冷卻與 keepalive 使用單調經過時間，不受系統時鐘向前／向後校正影響。
+- 斷線韌性：ws 中斷時**不拆** PeerConnection——伺服器在寬限期內保留席位與媒體，音訊持續，重連回座後沿用同一條連線；協商中的 answer 遺失時立即解除等待，回座後直接替換尚未完成的 offer，保留其 MID，不以 rollback 產生額外 transceiver。只有身分改變（寬限逾時、被踢、關房、主動 `disconnect()`）才重建。`disconnect()` 會清理本機連線並嘗試以 close code 1000 告知伺服器「主動離開」。伺服器收到正常關閉後，非主控不保留 participant grace，會移除席位；主控仍遵循 `rooms.controllerGraceMs` 的斷線寬限，之後依原規則交接或關房，並非立即讓出主控或關閉房間。`disconnect()` 完成不代表伺服器已收到關閉；`pagehide` 以 4002 關閉，依各角色的寬限設定保留席位供返回頁面時回座。client 每 15 秒檢查應用層 keepalive：先判斷距最後收到訊息是否已超過 35 秒，逾時依既有流程斷線／重連；這是週期檢查，並非精確在第 35 秒觸發。控制或全域送出排程尚有保留時段時，省略這一輪 `ping`，不插隊或另建待送請求；空閒時先保留與控制請求相同的間隔再送 `ping`，讓後續控制也遵守限速。正常控制回覆本來就會更新最後收訊時間，持續排隊但完全無回覆仍會觸發靜默期限。WebRTC 進入 `disconnected` 3 秒即 ICE restart，`failed` 則兩端重建。節流與舉手冷卻依伺服器 `hello.limits`（`rateLimits` getter）；請求排程、舉手冷卻與 keepalive 使用單調經過時間，不受系統時鐘向前／向後校正影響。
 
 取消仍在連線中的 `connect()`／`createRoom()`／`join()` 時，`disconnect()` 會立即拒絕尚未完成的 hello 等待並清除其期限，舊操作以 `disconnected` 失敗，不等待底層 close handshake，也不會稍後偷偷進房；同一個 client 可重新連線。這只結束本機等待，不保證底層 socket 立即關閉。斷線會同時清除待回覆逾時與尚未到送出時刻的排程，立即釋放排隊 payload；成功、錯誤、逾時也走相同清理路徑。同步送出失敗會拒絕該請求，不會從 timer callback 拋出未捕捉例外。`closed`／`kicked` 事件發出前已清除待回覆請求、麥克風與測試、PeerConnection、自建 audio 及 `pagehide` 監聽，不自動重連。
 
