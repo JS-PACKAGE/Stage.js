@@ -476,7 +476,16 @@ export class StageClient extends EventTarget {
   }
   connect(): Promise<void> {
     if (this.connecting) return this.connecting;
-    if (this.socket?.readyState === WebSocket.OPEN) return Promise.resolve();
+    const socket = this.socket;
+    if (socket?.readyState === WebSocket.OPEN) return Promise.resolve();
+    if (socket) {
+      const revision = this.sessionRevision;
+      this.socketLost(socket);
+      // Loss listeners can cancel this call or start a same-session replacement synchronously.
+      if (this.sessionRevision !== revision) return Promise.reject(new StageError('disconnected', '連線已中斷。'));
+      if (this.connecting) return this.connecting;
+      if (this.socket?.readyState === WebSocket.OPEN) return Promise.resolve();
+    }
     this.intentional = false;
     if (this.ownsAudio && !this.audio.isConnected) document.body.append(this.audio);
     window.addEventListener('pagehide', this.onPageHide);

@@ -226,6 +226,8 @@ JSON frame，型別定義在 [`shared/protocol.ts`](shared/protocol.ts)。每個
 </script>
 ```
 
+`connect()` 只等待控制連線的 hello，不代表已進房，仍依範例再呼叫 `join()`。若已建立的舊連線正在關閉而再次呼叫 connect，SDK 會先沿既有斷線流程清理舊待送／待回覆請求並釋放容量；有已確認的 session 時保留原自動回座，hello 後不冒稱已恢復 live。主動 disconnect 或回呼建立的新連線仍有優先權，舊關閉事件不清理新操作。同席恢復須伺服器已觀測舊連線離線且仍在寬限／容量規則內；若舊連線一直卡在伺服器端，仍可能得到新席位或 room_full，不提供強制接管。
+
 整合注意事項：
 
 - CSP：`script-src` 允許函式庫來源；`connect-src wss://stage.example.com`；`media-src blob: mediastream:`。

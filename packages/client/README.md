@@ -119,6 +119,12 @@ hello、內部 SDP／ICE 信令及自動回座不占用此上限，仍遵守原�
 
 - 斷線韌性：ws 中斷時**不拆** PeerConnection——伺服器在寬限期內保留席位與媒體，音訊持續，重連回座後沿用同一條連線；協商中的 answer 遺失時立即解除等待，回座後直接替換尚未完成的 offer，保留其 MID，不以 rollback 產生額外 transceiver。只有身分改變（寬限逾時、被踢、關房、主動 `disconnect()`）才重建。`disconnect()` 會清理本機連線並嘗試以 close code 1000 告知伺服器「主動離開」。伺服器收到正常關閉後，非主控不保留 participant grace，會移除席位；主控仍遵循 `rooms.controllerGraceMs` 的斷線寬限，之後依原規則交接或關房，並非立即讓出主控或關閉房間。`disconnect()` 完成不代表伺服器已收到關閉；`pagehide` 以 4002 關閉，依各角色的寬限設定保留席位供返回頁面時回座。client 每 15 秒檢查應用層 keepalive：先判斷距最後收到訊息是否已超過 35 秒，逾時依既有流程斷線／重連；這是週期檢查，並非精確在第 35 秒觸發。控制或全域送出排程尚有保留時段時，省略這一輪 `ping`，不插隊或另建待送請求；空閒時先保留與控制請求相同的間隔再送 `ping`，讓後續控制也遵守限速。正常控制回覆本來就會更新最後收訊時間，持續排隊但完全無回覆仍會觸發靜默期限。WebRTC 進入 `disconnected` 3 秒即 ICE restart，`failed` 則兩端重建。節流與舉手冷卻依伺服器 `hello.limits`（`rateLimits` getter）；請求排程、舉手冷卻與 keepalive 使用單調經過時間，不受系統時鐘向前／向後校正影響。
 
+已建立的控制 socket 處於 CLOSING／CLOSED、但 SDK 尚未收到舊 close 回呼時，公開 `connect()` 要建立替代連線會先執行原本的斷線清理：舊待送與待 ACK 請求立即以 `disconnected` 結束，釋放容量、期限及送出排程，舊協商等待依原流程退役。已有已確認 session 時進入 `reconnecting` 並沿用既有單一自動回座流程；無 session 的初次 state-before-ACK 不會被猜成可回座。`connect()` 仍只在新 hello 完成，不額外直接送 join 或提早變 live，呼叫端進新房仍明確使用 `join()`／`createRoom()`。
+
+若同步 status 回呼呼叫 `disconnect()`，正在處理舊關閉連線的 connect 以 `disconnected` 結束，不復活已取消操作；回呼建立的同 session 新連線會被沿用，回呼在 disconnect 後啟動的新加入也不被舊呼叫覆蓋。成功明確加入／開房仍依原 session 更新取消先前回座 timer。晚到舊 close／訊息不清除替代連線的等待、狀態或資源；清理本機請求不回滾已被伺服器接受的命令。
+
+同席／同 peer 回座仍取決於伺服器已看到舊連線斷開及其寬限、token、容量規則。若舊連線在伺服器端保持在線直到回座請求處理，既有政策可能建立新 participant 或回 `room_full`；此修正不強制踢除舊連線、不更動 takeover 或驗碼協定。驗證使用原始 SDK、真實本機 WebSocket／server／Hub 與受控網路讀取，媒體物件為 fake/mock；不代表原生瀏覽器 BFCache 時序、ICE、硬體音訊或任意卡住握手下的身分保留保證。
+
 取消仍在連線中的 `connect()`／`createRoom()`／`join()` 時，`disconnect()` 會立即拒絕尚未完成的 hello 等待並清除其期限，舊操作以 `disconnected` 失敗，不等待底層 close handshake，也不會稍後偷偷進房；同一個 client 可重新連線。這只結束本機等待，不保證底層 socket 立即關閉。斷線會同時清除待回覆逾時與尚未到送出時刻的排程，立即釋放排隊 payload；成功、錯誤、逾時也走相同清理路徑。同步送出失敗會拒絕該請求，不會從 timer callback 拋出未捕捉例外。`closed`／`kicked` 事件發出前已清除待回覆請求、麥克風與測試、PeerConnection、自建 audio 及 `pagehide` 監聽，不自動重連。
 
 自動重連的排程與錯誤處理綁定原本 session：若 `status: reconnecting` 或 `error` 監聽器同步斷線並切換房間，舊 timer／遲到的 hello 失敗／resume 拒絕不會再次加入或關閉新房間，也不向新 session 回報過期錯誤。直接 join／createRoom 成功安裝新 session 時也會取消舊重連 timer，新 session 之後斷線仍可正常重連。仍屬於目前 session 的暫時失敗照常退避重試；unauthorized／not_found／room_full 仍停止該 session。 hello 逾時或自動回座暫時失敗時，SDK 會先放棄該次 socket 的控制權再嘗試關閉，不等待可能延遲的 WebSocket close handshake 才開始退避；舊 socket 的晚到訊息／close 不會影響替代連線。這不取消已送達伺服器的操作，也不保證底層 socket 立即釋放；席位恢復仍受伺服器寬限時間限制。
