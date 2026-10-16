@@ -626,7 +626,13 @@ function syncMicRetry(): void {
   micRetryButton.disabled = micRetryPending || !client.me?.onStage || client.status !== 'live';
   micRetryButton.setAttribute('aria-busy', String(micRetryPending));
 }
-function renderNotices(): void {
+let renderedNoticeSignature: string | undefined;
+// Only room renders reuse controls; direct events and pending settlement retain their redraws.
+function renderNotices(reuseUnchanged = false): void {
+  const signature = JSON.stringify([roomActionGeneration, audioBlocked, Boolean(pendingAudioUnlock),
+    micNotice, Boolean(client.me?.onStage), client.status, micRetryAvailable, micRetryPending, invitation]);
+  if (reuseUnchanged && signature === renderedNoticeSignature) { syncMicRetry(); return; }
+  renderedNoticeSignature = undefined;
   micRetryButton = undefined;
   notices.replaceChildren();
   if (audioBlocked) {
@@ -681,6 +687,7 @@ function renderNotices(): void {
     notices.append(banner);
   }
   if (invitation) notices.append(element('p', 'banner', invitation));
+  renderedNoticeSignature = signature;
 }
 function resetAudienceFilter(): void {
   audienceFilterIdentity = ''; audienceSearch.value = '';
@@ -733,7 +740,7 @@ function renderRoom(state: RoomStatePayload): void {
     && qualitySignature === renderedQualitySignature && !renderedGainInputs.some(({ input, value }) => input.value !== value)) {
     status.textContent = statusLabels[client.status];
     if (renderedAudienceHeading && renderedAudienceHeading.textContent !== audienceTitle) renderedAudienceHeading.textContent = audienceTitle;
-    syncAudienceFilter(state); updateCooldown(); renderNotices(); return;
+    syncAudienceFilter(state); updateCooldown(); renderNotices(true); return;
   }
   renderedGainInputs.length = 0; audienceFilterRows.length = 0;
   personRows.clear(); speakingIds = new Set(client.speaking);
@@ -862,7 +869,7 @@ function renderRoom(state: RoomStatePayload): void {
   renderedReturnStage = content.querySelector<HTMLButtonElement>('[data-return-stage]');
   renderedAudienceHeading = audienceHeading;
   renderedRoomSignature = signature; renderedSpeakingSignature = speakingSignature; renderedQualitySignature = qualitySignature;
-  syncAudienceFilter(state); updateCooldown(); renderNotices();
+  syncAudienceFilter(state); updateCooldown(); renderNotices(true);
 }
 function panelList(title: string, people: ParticipantView[], controller: boolean, kind: 'speaker' | 'hand'): HTMLElement {
   const panel = element('section', 'panel');

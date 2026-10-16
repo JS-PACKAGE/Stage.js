@@ -8,7 +8,7 @@ const source = readFileSync(new URL('../web/src/main.ts', import.meta.url), 'utf
 // Exercise the production handlers with DOM/SDK doubles, not a duplicate pending-state model.
 const actions = source.slice(source.indexOf('function resetRoomActions('), source.indexOf('function showError('));
 const people = source.slice(source.indexOf('function panelList('), source.indexOf('/** Controller\'s per-speaker')) ;
-const landing = source.slice(source.indexOf('function landing()'), source.indexOf('function renderNotices()'));
+const landing = source.slice(source.indexOf('function landing()'), source.indexOf('function renderNotices('));
 const audienceFilter = source.slice(source.indexOf('function resetAudienceFilter()'), source.indexOf('function renderRoom('));
 const render = source.slice(source.indexOf('function renderRoom('), source.indexOf('function panelList('));
 const cooldown = source.slice(source.indexOf('function updateCooldown('), source.indexOf("client.on('state', ({ detail })"));
