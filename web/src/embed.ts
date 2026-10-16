@@ -65,9 +65,12 @@ const handQueueRows = new Map<string, HandQueueRow>();
 const handQueuePending = new Map<string, object>();
 let handQueueOrder: string[] = [];
 interface StageManagementRow {
-  node: HTMLLIElement; name: HTMLSpanElement; mute: HTMLButtonElement; remove: HTMLButtonElement;
+  node: HTMLLIElement; name: HTMLSpanElement; mute: HTMLButtonElement; remove: HTMLButtonElement; transfer: HTMLButtonElement;
 }
-let stageManagementOwner: { client: Client; roomId: string; participantId: string; generation: number } | undefined;
+let stageManagementOwner: {
+  client: Client; roomId: string; participantId: string; generation: number; revision: number; transferFenced: boolean;
+} | undefined;
+let pendingTransfer: { id: string; row: StageManagementRow; revision: number; invalidated: boolean } | undefined;
 const stageManagementRows = new Map<string, StageManagementRow>();
 const stageManagementPending = new Map<string, object>();
 let stageManagementOrder: string[] = [];
@@ -283,9 +286,9 @@ function moderateHand(id: string, row: HandQueueRow, kind: 'approve' | 'reject')
   })();
 }
 function retireStageManagement(): void {
-  stageManagementOwner = undefined; stageManagementPending.clear();
+  stageManagementOwner = undefined; stageManagementPending.clear(); pendingTransfer = undefined;
   for (const row of stageManagementRows.values()) {
-    for (const button of [row.mute, row.remove]) { button.disabled = true; button.setAttribute('aria-busy', 'false'); }
+    for (const button of [row.mute, row.remove, row.transfer]) { button.disabled = true; button.setAttribute('aria-busy', 'false'); }
   }
   if (stageManagementRows.size) stageManagementList.replaceChildren();
   stageManagementRows.clear(); stageManagementOrder = [];
@@ -303,7 +306,8 @@ function syncStageManagement(): void {
     retireStageManagement();
     // Reconnect can preserve an observed controller tenure, but cannot establish a new one.
     if (!active) return;
-    stageManagementOwner = { client: current, roomId: state.roomId, participantId: state.me.participantId, generation: entryGeneration };
+    stageManagementOwner = { client: current, roomId: state.roomId, participantId: state.me.participantId,
+      generation: entryGeneration, revision: 0, transferFenced: false };
   }
   const seen = new Set<string>();
   const people = state.speakers.filter(person => {
@@ -311,22 +315,24 @@ function syncStageManagement(): void {
       || person.role !== 'speaker' || !person.onStage) return false;
     seen.add(person.participantId); return true;
   });
+  invalidateTransfer();
   stageManagementPanel.hidden = false;
   stageManagementSummary.textContent = `舞台管理（${people.length}）${active ? '' : ' · 上次收到'}`;
-  stageManagementNotice.textContent = `${active ? (people.length ? '' : '目前沒有其他台上發言者。') : '重新連線中，暫時不能管理舞台。'}解除靜音鎖定會保留對方自行靜音設定；移下台後仍留在房間。`;
+  stageManagementNotice.textContent = `${active ? (people.length ? '' : '目前沒有其他台上發言者。') : '重新連線中，暫時不能管理舞台。'}解除靜音鎖定會保留對方自行靜音設定；移下台後仍留在房間。移交控制權須確認，完成後你會失去主控權限，但保留目前台位並留在房間。`;
   for (const person of people) {
     const id = person.participantId;
     let row = stageManagementRows.get(id);
     if (!row) {
       const node = document.createElement('li'), name = document.createElement('span'), actions = document.createElement('div');
-      const mute = document.createElement('button'), remove = document.createElement('button');
+      const mute = document.createElement('button'), remove = document.createElement('button'), transfer = document.createElement('button');
       node.className = 'person'; name.className = 'identity'; actions.className = 'actions';
-      mute.type = remove.type = 'button'; remove.textContent = '移下台';
-      row = { node, name, mute, remove };
+      mute.type = remove.type = transfer.type = 'button'; remove.textContent = '移下台'; transfer.textContent = '移交控制權';
+      row = { node, name, mute, remove, transfer };
       const original = row;
       mute.onclick = () => moderateStage(id, original, 'mute');
       remove.onclick = () => moderateStage(id, original, 'remove');
-      actions.append(mute, remove); node.append(name, actions); stageManagementRows.set(id, row);
+      transfer.onclick = () => transferStageControl(id, original);
+      actions.append(mute, remove, transfer); node.append(name, actions); stageManagementRows.set(id, row);
     }
     const name = decodeRoomName(person.name);
     const label = `${name} · ${person.muted ? '已靜音' : '未靜音'} · ${person.forceMuted ? '靜音已鎖定' : '靜音未鎖定'}${person.connected ? '' : ' · 暫時離線（保留席位）'}`;
@@ -338,28 +344,38 @@ function syncStageManagement(): void {
       const button = row[kind], pending = stageManagementPending.has(id);
       const method = kind === 'remove' ? 'removeFromStage' : person.forceMuted ? 'forceUnmute' : 'forceMute';
       if (button.getAttribute('aria-label') !== labels[kind]) button.setAttribute('aria-label', labels[kind]);
-      const disabled = !active || pending || typeof current[method] !== 'function', busy = String(pending);
+      const disabled = !active || pending || Boolean(pendingTransfer) || typeof current[method] !== 'function', busy = String(pending);
       if (button.disabled !== disabled) button.disabled = disabled;
       if (button.getAttribute('aria-busy') !== busy) button.setAttribute('aria-busy', busy);
     }
+    const transferLabel = `將控制權移交給 ${name}`;
+    if (row.transfer.getAttribute('aria-label') !== transferLabel) row.transfer.setAttribute('aria-label', transferLabel);
+    row.transfer.hidden = typeof current.transferControl !== 'function';
+    row.transfer.disabled = Boolean(pendingTransfer) || stageManagementPending.size > 0
+      || !eligibleTransfer(stageManagementOwner, id, row);
+    row.transfer.setAttribute('aria-busy', String(pendingTransfer?.id === id));
   }
   for (const [id, row] of stageManagementRows) if (!seen.has(id)) {
-    for (const button of [row.mute, row.remove]) { button.disabled = true; button.setAttribute('aria-busy', 'false'); }
+    for (const button of [row.mute, row.remove, row.transfer]) { button.disabled = true; button.setAttribute('aria-busy', 'false'); }
     stageManagementRows.delete(id);
   }
   const order = people.map(person => person.participantId);
   if (order.length !== stageManagementOrder.length || order.some((id, index) => id !== stageManagementOrder[index])) {
     stageManagementList.replaceChildren(...order.map(id => stageManagementRows.get(id)!.node)); stageManagementOrder = order;
   }
+  invalidateTransfer();
+  // New keyed rows only become eligible after insertion into the list.
+  for (const [id, row] of stageManagementRows) row.transfer.disabled = Boolean(pendingTransfer)
+    || stageManagementPending.size > 0 || !eligibleTransfer(stageManagementOwner, id, row);
 }
-function currentStageRow(id: string, row: StageManagementRow, kind: 'mute' | 'remove'): boolean {
+function currentStageRow(id: string, row: StageManagementRow, kind: 'mute' | 'remove' | 'transfer'): boolean {
   return stageManagementRows.get(id) === row && row.node.parentElement === stageManagementList
     && row.node.contains(row[kind]) && !stageManagementPanel.hidden;
 }
 function moderateStage(id: string, row: StageManagementRow, kind: 'mute' | 'remove'): void {
   syncStageManagement();
   const owner = stageManagementOwner;
-  if (!owner || !currentStageRow(id, row, kind) || stageManagementPending.has(id)
+  if (!owner || !currentStageRow(id, row, kind) || stageManagementPending.has(id) || pendingTransfer
     || (owner.client.status !== 'waiting' && owner.client.status !== 'live')) return;
   const person = owner.client.state?.speakers.find(person => person.participantId === id && person.role === 'speaker' && person.onStage);
   if (!person || id === owner.participantId) return;
@@ -384,6 +400,63 @@ function moderateStage(id: string, row: StageManagementRow, kind: 'mute' | 'remo
       if (eligible()) report(error);
     } finally {
       if (current()) { stageManagementPending.delete(id); syncStageManagement(); }
+    }
+  })();
+}
+function transferPerson(current: Client, id: string) {
+  // Match the first valid speaker used by the keyed roster, including its connectivity and name.
+  return current.state?.speakers.find(person => person.participantId === id && person.role === 'speaker' && person.onStage);
+}
+function eligibleTransfer(owner: typeof stageManagementOwner, id: string, row: StageManagementRow): boolean {
+  if (!owner) return false;
+  const current = owner.client, state = current.state;
+  return stageManagementOwner === owner && client === current && controlsClient === current
+    && owner.generation === entryGeneration && state?.roomId === owner.roomId
+    && state.me.participantId === owner.participantId && state.me.role === 'controller' && state.me.connected === true
+    && (current.status === 'waiting' || current.status === 'live') && !owner.transferFenced
+    && typeof current.transferControl === 'function' && typeof globalThis.confirm === 'function'
+    && id !== owner.participantId && currentStageRow(id, row, 'transfer')
+    && transferPerson(current, id)?.connected === true;
+}
+function invalidateTransfer(): void {
+  const attempt = pendingTransfer, owner = stageManagementOwner;
+  // An observed invalid state cannot be undone by a later snapshot while confirmation is open.
+  if (attempt && (!owner || attempt.revision !== owner.revision || !eligibleTransfer(owner, attempt.id, attempt.row)))
+    attempt.invalidated = true;
+}
+function fenceTransfer(): void {
+  const owner = stageManagementOwner;
+  if (!owner) return;
+  owner.revision++; owner.transferFenced = true;
+  if (pendingTransfer) pendingTransfer.invalidated = true;
+  // Notification deltas are not authoritative state for existing moderation controls.
+  syncStageManagement();
+}
+function transferStageControl(id: string, row: StageManagementRow): void {
+  syncStageManagement();
+  const owner = stageManagementOwner;
+  if (!owner || pendingTransfer || stageManagementPending.size || !eligibleTransfer(owner, id, row)) return;
+  const attempt = pendingTransfer = { id, row, revision: owner.revision, invalidated: false };
+  const current = (): boolean => {
+    if (stageManagementOwner !== owner || pendingTransfer !== attempt) return false;
+    syncStageManagement();
+    return stageManagementOwner === owner && pendingTransfer === attempt;
+  };
+  const eligible = (): boolean => current() && !attempt.invalidated && attempt.revision === owner.revision
+    && eligibleTransfer(owner, id, row);
+  void (async () => {
+    try {
+      // Reserve the entire stage list before the synchronous dialog or SDK can reenter.
+      if (!eligible()) return;
+      const person = transferPerson(owner.client, id)!;
+      if (!globalThis.confirm(`確定將控制權移交給 ${decodeRoomName!(person.name)}？你將失去主控權限，但保留目前台位並留在房間。`)
+        || !eligible()) return;
+      await owner.client.transferControl(id);
+    } catch (error) {
+      if (eligible()) report(error);
+    } finally {
+      // Settlement releases only this tenure and exact token, even if its row disappeared.
+      if (current()) { pendingTransfer = undefined; syncStageManagement(); }
     }
   })();
 }
@@ -657,6 +730,8 @@ join.onsubmit = (event) => {
       const current = client; controlsClient = current; entryClient = current; decodeRoomName = library.decodeName; syncUnlock();
       client.on('state', ({ detail }: CustomEvent<StageEventMap['state']>) => {
         if (client !== current || cancelledEntry) return;
+        if (generation === entryGeneration && controlsClient === current && stageManagementOwner?.client === current)
+          stageManagementOwner.transferFenced = false;
         receivedState = true;
         if (generation === entryGeneration) hideCancel();
         progress = false;
@@ -672,6 +747,19 @@ join.onsubmit = (event) => {
       client.on('stagejoined', ({ detail }) => retireOwnHandRejection(detail.participantId));
       client.on('role', ({ detail }) => { if (detail.role !== 'audience') retireOwnHandRejection(detail.participantId); });
       client.on('transferred', ({ detail }) => retireOwnHandRejection(detail.toId));
+      const ownsTransferEvents = (): boolean => client === current && controlsClient === current
+        && !cancelledEntry && generation === entryGeneration && stageManagementOwner?.client === current;
+      client.on('role', ({ detail }) => {
+        if (!ownsTransferEvents()) return;
+        if ((detail.participantId === stageManagementOwner!.participantId && detail.role !== 'controller')
+          || (stageManagementRows.has(detail.participantId) && detail.role !== 'speaker')) fenceTransfer();
+      });
+      client.on('transferred', ({ detail }) => {
+        if (ownsTransferEvents() && detail.fromId === stageManagementOwner!.participantId) fenceTransfer();
+      });
+      client.on('stageleft', ({ detail }) => {
+        if (ownsTransferEvents() && stageManagementRows.has(detail.participantId)) fenceTransfer();
+      });
       client.on('handrejected', ({ detail }) => {
         // No per-raise identity is provided; feedback belongs only to the current eligible seat.
         if (!detail || typeof detail !== 'object') return;

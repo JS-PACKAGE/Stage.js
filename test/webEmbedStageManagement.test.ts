@@ -15,7 +15,7 @@ type View = { node(id: string): EmbedNode };
 const panel = (h: View) => h.node('stage-management');
 const list = (h: View) => h.node('stage-management-list');
 const summary = (h: View) => h.node('stage-management-summary').textContent;
-const caveat = '解除靜音鎖定會保留對方自行靜音設定；移下台後仍留在房間。';
+const caveat = '解除靜音鎖定會保留對方自行靜音設定；移下台後仍留在房間。移交控制權須確認，完成後你會失去主控權限，但保留目前台位並留在房間。';
 function row(h: View, index = 0) {
   const node = list(h).children[index]; assert.ok(node, `stage row ${index}`);
   const name = node.children[0], actions = node.children[1]; assert.ok(name); assert.ok(actions);

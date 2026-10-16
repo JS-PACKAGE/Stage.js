@@ -78,7 +78,7 @@ export class StageContext {
   async close(): Promise<void> { this.closes++; }
 }
 /** Complete production module and real SDK. Only external-host import, socket, DOM and browser media are replaced. */
-export async function actualApp(t: TestContext, options: { deferCapture?: boolean; search?: string; output?: boolean } = {}) {
+export async function actualApp(t: TestContext, options: { deferCapture?: boolean; search?: string; output?: boolean; confirm?: ((message: string) => boolean) | null } = {}) {
   const { StageClient, decodeName } = await import(new URL('../../packages/client/src/index.ts', import.meta.url).href);
   StageSocket.instances = []; StagePeer.instances = []; StageContext.instances = [];
   const tracks: StageTrack[] = [];
@@ -132,7 +132,9 @@ export async function actualApp(t: TestContext, options: { deferCapture?: boolea
   assert.equal(source.split(dynamicImport).length, 2); assert.equal(source.split("import './styles.css';").length, 2);
   const executable = stripTypeScriptTypes(source.replace("import './styles.css';", '').replace(dynamicImport, 'loadLibrary(moduleUrl)'));
   assert.doesNotMatch(executable, /\bimport\s*(?:\(|['"])/, 'no real external host import');
+  const confirmations: string[] = [];
   runInNewContext(executable, {
+    ...(options.confirm === null ? {} : { confirm: (message: string) => { confirmations.push(message); return options.confirm?.(message) ?? false; } }),
     document: { createElement(tag: string) { assert.ok(['option', 'li', 'span', 'div', 'button'].includes(tag), `unmodeled element: ${tag}`); return new EmbedNode(tag); }, querySelector(selector: string) { assert.match(selector, /^#[a-z-]+$/); return node(selector.slice(1)); } },
     location: { search: options.search ?? '?room=same-room', origin: 'https://stage.example.test' },
     URL, URLSearchParams, Error, Promise, performance, setTimeout, clearTimeout, setInterval, clearInterval,
@@ -155,7 +157,7 @@ export async function actualApp(t: TestContext, options: { deferCapture?: boolea
       assert.ok(StagePeer.instances.every(peer => peer.connectionState === 'closed')); assert.ok(StageContext.instances.every(context => context.closes === 1));
     } finally { for (const [key, descriptor] of originals) { if (descriptor) Object.defineProperty(globalThis, key, descriptor); else Reflect.deleteProperty(globalThis, key); } }
   });
-  return { stage, status, mic, micRetry, leave, form, node, audio, clients, tracks, captures, enumerations, sinks, tick, until,
+  return { stage, status, mic, micRetry, leave, form, node, audio, clients, tracks, captures, enumerations, sinks, tick, until, confirmations,
     calls: () => calls, ready: () => ready,
     async join(overrides: Partial<ParticipantView> = {}) {
       form.submit(); await flush(); const socket = StageSocket.instances.at(-1)!;
