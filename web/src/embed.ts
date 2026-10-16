@@ -14,6 +14,7 @@ const submit = join.querySelector<HTMLButtonElement>('button')!;
 submit.setAttribute('aria-busy', 'false');
 const hand = document.querySelector<HTMLButtonElement>('#hand')!;
 const leave = document.querySelector<HTMLButtonElement>('#leave')!;
+const closeRoom = document.querySelector<HTMLButtonElement>('#close-room')!;
 const cancelJoin = document.querySelector<HTMLButtonElement>('#cancel-join')!;
 const mic = document.querySelector<HTMLButtonElement>('#mic')!;
 const rename = document.querySelector<HTMLButtonElement>('#rename')!;
@@ -71,6 +72,13 @@ interface StageManagementRow {
 let stageManagementOwner: {
   client: Client; roomId: string; participantId: string; generation: number; revision: number; transferFenced: boolean;
 } | undefined;
+let roomConfirmation: object | undefined;
+let roomCloseOwner: {
+  client: Client; roomId: string; participantId: string; generation: number; revision: number; fenced: boolean;
+} | undefined;
+let roomCloseFence: { client: Client; roomId: string; participantId: string; generation: number } | undefined;
+let pendingRoomClose: { revision: number; invalidated: boolean } | undefined;
+let roomCloseRenderRevision = 0;
 let pendingTransfer: { id: string; row: StageManagementRow; revision: number; invalidated: boolean } | undefined;
 const stageManagementRows = new Map<string, StageManagementRow>();
 const stageManagementPending = new Map<string, object>();
@@ -122,7 +130,7 @@ function hideCancel(): void {
   cancelEntry = undefined; cancelJoin.hidden = cancelJoin.disabled = true;
 }
 function retireControls(): void {
-  controlsClient = undefined; retireHandRejection(); retireHandQueue(); retireStageManagement();
+  controlsClient = undefined; roomCloseFence = undefined; retireRoomClose(); retireHandRejection(); retireHandQueue(); retireStageManagement();
   pendingHand = undefined; pendingMic = undefined; pendingStage = undefined;
   micRetryParticipant = undefined; pendingMicRetry = undefined;
   pendingRename = undefined; syncRename(); retireRoomName(); retireMicrophone(); retireAudioRetry(); retireOutput();
@@ -500,42 +508,137 @@ function invalidateTransfer(): void {
   if (attempt && (!owner || attempt.revision !== owner.revision || !eligibleTransfer(owner, attempt.id, attempt.row)))
     attempt.invalidated = true;
 }
-function fenceTransfer(): void {
+function fenceTransfer(render = true): void {
   const owner = stageManagementOwner;
   if (!owner) return;
   owner.revision++; owner.transferFenced = true;
   if (pendingTransfer) pendingTransfer.invalidated = true;
   // Notification deltas are not authoritative state for existing moderation controls.
-  syncStageManagement();
+  if (render) syncStageManagement();
 }
 function transferStageControl(id: string, row: StageManagementRow): void {
-  syncStageManagement();
-  const owner = stageManagementOwner;
-  if (!owner || pendingTransfer || stageManagementPending.size || !eligibleTransfer(owner, id, row)) return;
-  const attempt = pendingTransfer = { id, row, revision: owner.revision, invalidated: false };
-  const current = (): boolean => {
-    if (stageManagementOwner !== owner || pendingTransfer !== attempt) return false;
+  if (roomConfirmation) { syncStageManagement(); return; }
+  const admission = {};
+  roomConfirmation = admission;
+  try {
+    // Keep the existing pre-admission reconciliation without allowing nested dialogs from render.
     syncStageManagement();
-    return stageManagementOwner === owner && pendingTransfer === attempt;
-  };
+    const owner = stageManagementOwner;
+    if (!owner || pendingTransfer || stageManagementPending.size || !eligibleTransfer(owner, id, row)) return;
+    const attempt = pendingTransfer = { id, row, revision: owner.revision, invalidated: false };
+    roomConfirmation = attempt;
+    const current = (): boolean => {
+      if (stageManagementOwner !== owner || pendingTransfer !== attempt) return false;
+      syncStageManagement();
+      return stageManagementOwner === owner && pendingTransfer === attempt;
+    };
+    const eligible = (): boolean => current() && !attempt.invalidated && attempt.revision === owner.revision
+      && eligibleTransfer(owner, id, row);
+    void (async () => {
+      try {
+        // Reserve the entire stage list before the synchronous dialog or SDK can reenter.
+        if (!eligible()) return;
+        const person = transferPerson(owner.client, id)!;
+        if (!globalThis.confirm(`確定將控制權移交給 ${decodeRoomName!(person.name)}？你將失去主控權限，但保留目前台位並留在房間。`)
+          || !eligible()) return;
+        roomConfirmation = undefined;
+        await owner.client.transferControl(id);
+      } catch (error) {
+        if (eligible()) report(error);
+      } finally {
+        if (roomConfirmation === attempt) roomConfirmation = undefined;
+        // Settlement releases only this tenure and exact token, even if its row disappeared.
+        if (current()) { pendingTransfer = undefined; syncStageManagement(); }
+      }
+    })();
+  } finally { if (roomConfirmation === admission) roomConfirmation = undefined; }
+}
+function eligibleRoomClose(owner: typeof roomCloseOwner): boolean {
+  if (!owner || roomCloseOwner !== owner) return false;
+  const current = owner.client, state = current.state;
+  return client === current && controlsClient === current && owner.generation === entryGeneration
+    && state?.roomId === owner.roomId && state.me.participantId === owner.participantId
+    && state.me.role === 'controller' && state.me.connected === true && !owner.fenced
+    && (current.status === 'waiting' || current.status === 'live')
+    && typeof current.closeRoom === 'function' && typeof globalThis.confirm === 'function';
+}
+function renderRoomClose(): void {
+  const revision = ++roomCloseRenderRevision;
+  const hidden = !roomCloseOwner;
+  if (closeRoom.hidden !== hidden) closeRoom.hidden = hidden;
+  if (revision !== roomCloseRenderRevision) return;
+  const disabled = !eligibleRoomClose(roomCloseOwner) || Boolean(pendingRoomClose);
+  if (closeRoom.disabled !== disabled) closeRoom.disabled = disabled;
+  if (revision !== roomCloseRenderRevision) return;
+  const busy = String(Boolean(pendingRoomClose));
+  if (closeRoom.getAttribute('aria-busy') !== busy) closeRoom.setAttribute('aria-busy', busy);
+}
+function retireRoomClose(): void {
+  roomCloseOwner = undefined; pendingRoomClose = undefined; renderRoomClose();
+}
+function syncRoomClose(): void {
+  const current = client, state = current?.state;
+  const active = current?.status === 'waiting' || current?.status === 'live';
+  if (!current || current !== controlsClient || !state || state.me.role !== 'controller' || !state.me.connected
+    || typeof current.closeRoom !== 'function' || (!active && current.status !== 'reconnecting')) {
+    retireRoomClose(); return;
+  }
+  let owner = roomCloseOwner;
+  if (!owner || owner.client !== current || owner.generation !== entryGeneration
+    || owner.roomId !== state.roomId || owner.participantId !== state.me.participantId) {
+    roomCloseOwner = undefined; pendingRoomClose = undefined;
+    if (!active) { renderRoomClose(); return; }
+    const fenced = roomCloseFence?.client === current && roomCloseFence.generation === entryGeneration
+      && roomCloseFence.roomId === state.roomId && roomCloseFence.participantId === state.me.participantId;
+    owner = roomCloseOwner = { client: current, roomId: state.roomId, participantId: state.me.participantId,
+      generation: entryGeneration, revision: 0, fenced };
+  }
+  // Restoring eligibility cannot revive consent that was invalid at an observed boundary.
+  if (pendingRoomClose && (pendingRoomClose.revision !== owner.revision || !eligibleRoomClose(owner)))
+    pendingRoomClose.invalidated = true;
+  renderRoomClose();
+}
+function fenceRoomClose(current: Client, generation: number, participantId: string): boolean {
+  const state = current.state;
+  if (client !== current || controlsClient !== current || generation !== entryGeneration
+    || !state || state.me.participantId !== participantId) return false;
+  // Keep notification authority even while a missing SDK capability has retired the UI owner.
+  roomCloseFence = { client: current, roomId: state.roomId, participantId, generation };
+  if (roomCloseOwner?.client === current) {
+    roomCloseOwner.revision++; roomCloseOwner.fenced = true;
+    if (pendingRoomClose) pendingRoomClose.invalidated = true;
+  }
+  return true;
+}
+closeRoom.onclick = () => {
+  if (roomConfirmation || pendingRoomClose) { if (pendingRoomClose) syncRoomClose(); return; }
+  const owner = roomCloseOwner;
+  if (!owner || !eligibleRoomClose(owner)) { syncRoomClose(); return; }
+  const feedback = feedbackRevision;
+  const attempt = pendingRoomClose = { revision: owner.revision, invalidated: false };
+  roomConfirmation = attempt;
+  const current = (): boolean => roomCloseOwner === owner && pendingRoomClose === attempt;
   const eligible = (): boolean => current() && !attempt.invalidated && attempt.revision === owner.revision
-    && eligibleTransfer(owner, id, row);
+    && eligibleRoomClose(owner);
   void (async () => {
     try {
-      // Reserve the entire stage list before the synchronous dialog or SDK can reenter.
+      // Reserve before any render, synchronous dialog or public SDK callback can reenter.
+      syncRoomClose();
       if (!eligible()) return;
-      const person = transferPerson(owner.client, id)!;
-      if (!globalThis.confirm(`確定將控制權移交給 ${decodeRoomName!(person.name)}？你將失去主控權限，但保留目前台位並留在房間。`)
-        || !eligible()) return;
-      await owner.client.transferControl(id);
+      const accepted = globalThis.confirm('確定關閉此房間並讓所有人離場？關閉後無法再加入此房間。');
+      syncRoomClose();
+      if (!accepted || !eligible()) return;
+      roomConfirmation = undefined;
+      await owner.client.closeRoom();
     } catch (error) {
-      if (eligible()) report(error);
+      // Terminal events and newer feedback own their message, even when a close ACK rejects late.
+      if (eligible() && feedback === feedbackRevision) report(error);
     } finally {
-      // Settlement releases only this tenure and exact token, even if its row disappeared.
-      if (current()) { pendingTransfer = undefined; syncStageManagement(); }
+      if (roomConfirmation === attempt) roomConfirmation = undefined;
+      if (current()) { pendingRoomClose = undefined; syncRoomClose(); }
     }
   })();
-}
+};
 function syncMic(): void {
   const me = client === controlsClient ? client?.me : undefined;
   const pending = Boolean(pendingMic && pendingMic.client === client);
@@ -811,12 +914,19 @@ join.onsubmit = (event) => {
         if (client !== current || cancelledEntry) return;
         if (generation === entryGeneration && controlsClient === current && stageManagementOwner?.client === current)
           stageManagementOwner.transferFenced = false;
+        if (generation === entryGeneration && controlsClient === current) {
+          roomCloseFence = undefined;
+          if (roomCloseOwner?.client === current) roomCloseOwner.fenced = false;
+        }
+        const renderingEntry = entryGeneration;
+        syncRoomClose();
+        if (renderingEntry !== entryGeneration || client !== current || controlsClient !== current) return;
         receivedState = true;
         if (generation === entryGeneration) hideCancel();
         progress = false;
         status.textContent = `${library.decodeName(detail.name)} · ${library.decodeName(detail.me.name)} · ${detail.me.onStage ? '已上台' : '收聽中'}`;
-        syncHand(); syncMic(); syncStage(); syncMicRetry(); syncRename(); syncRoomName(); syncHandQueue(); syncStageManagement(); syncMicrophone(); syncAudioRetry(); syncOutput();
-        leave.disabled = false;
+        syncHand(); syncMic(); syncStage(); syncMicRetry(); syncRename(); syncRoomName(); syncHandQueue(); syncStageManagement(); syncRoomClose(); syncMicrophone(); syncAudioRetry(); syncOutput();
+        if (renderingEntry === entryGeneration && client === current && controlsClient === current) leave.disabled = false;
       });
       const retireOwnHandRejection = (participantId: string): void => {
         if (client === current && controlsClient === current && !cancelledEntry && generation === entryGeneration
@@ -829,12 +939,20 @@ join.onsubmit = (event) => {
       const ownsTransferEvents = (): boolean => client === current && controlsClient === current
         && !cancelledEntry && generation === entryGeneration && stageManagementOwner?.client === current;
       client.on('role', ({ detail }) => {
-        if (!ownsTransferEvents()) return;
-        if ((detail.participantId === stageManagementOwner!.participantId && detail.role !== 'controller')
-          || (stageManagementRows.has(detail.participantId) && detail.role !== 'speaker')) fenceTransfer();
+        const closeFenced = detail.role !== 'controller' && fenceRoomClose(current, generation, detail.participantId);
+        const transferFenced = ownsTransferEvents() && ((detail.participantId === stageManagementOwner!.participantId && detail.role !== 'controller')
+          || (stageManagementRows.has(detail.participantId) && detail.role !== 'speaker'));
+        // Both confirmations lose authority before either control can synchronously reenter from render.
+        if (transferFenced) fenceTransfer(false);
+        if (closeFenced) syncRoomClose();
+        if (transferFenced) syncStageManagement();
       });
       client.on('transferred', ({ detail }) => {
-        if (ownsTransferEvents() && detail.fromId === stageManagementOwner!.participantId) fenceTransfer();
+        const closeFenced = fenceRoomClose(current, generation, detail.fromId);
+        const transferFenced = ownsTransferEvents() && detail.fromId === stageManagementOwner!.participantId;
+        if (transferFenced) fenceTransfer(false);
+        if (closeFenced) syncRoomClose();
+        if (transferFenced) syncStageManagement();
       });
       client.on('stageleft', ({ detail }) => {
         if (ownsTransferEvents() && stageManagementRows.has(detail.participantId)) fenceTransfer();
@@ -863,10 +981,13 @@ join.onsubmit = (event) => {
       });
       client.on('status', ({ detail }) => {
         if (client !== current || cancelledEntry) return;
+        const renderingEntry = entryGeneration;
+        syncRoomClose();
+        if (renderingEntry !== entryGeneration || client !== current) return;
         if (current.state) { receivedState = true; if (generation === entryGeneration) hideCancel(); }
         if (detail === 'reconnecting') { retireHandRejection(); progress = false; status.textContent = '重新連線中'; hand.disabled = true; }
         else if (detail === 'disconnected') { progress = false; retirePlayback(); retireControls(); status.textContent = '未連線'; hand.disabled = leave.disabled = true; }
-        syncHand(); syncMic(); syncStage(); syncMicRetry(); syncRename(); syncRoomName(); syncHandQueue(); syncStageManagement(); syncMicrophone(); syncAudioRetry(); syncOutput();
+        syncHand(); syncMic(); syncStage(); syncMicRetry(); syncRename(); syncRoomName(); syncHandQueue(); syncStageManagement(); syncRoomClose(); syncMicrophone(); syncAudioRetry(); syncOutput();
       });
       client.on('error', ({ detail }) => { if (client !== current || cancelledEntry || generation !== entryGeneration) return; progress = false; report(detail); });
       client.on('audioblocked', () => { if (cancelledEntry) return; progress = false; status.textContent = '請點擊啟用音訊。'; });
@@ -1087,4 +1208,4 @@ leave.onclick = () => {
   });
 };
 replaceOutputOptions([]);
-syncHand(); syncMic(); syncStage(); syncMicRetry(); syncRename(); syncRoomName(); syncHandQueue(); syncStageManagement(); syncMicrophone(); syncAudioRetry(); syncOutput(); syncUnlock();
+syncHand(); syncMic(); syncStage(); syncMicRetry(); syncRename(); syncRoomName(); syncHandQueue(); syncStageManagement(); syncRoomClose(); syncMicrophone(); syncAudioRetry(); syncOutput(); syncUnlock();
