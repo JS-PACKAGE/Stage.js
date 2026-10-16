@@ -6,6 +6,7 @@ function input(id: string): HTMLInputElement {
 }
 const status = document.querySelector<HTMLParagraphElement>('#status')!;
 const roomOccupancy = document.querySelector<HTMLParagraphElement>('#room-occupancy')!;
+const ownConnectionQuality = document.querySelector<HTMLParagraphElement>('#own-connection-quality')!;
 const errorNotice = document.querySelector<HTMLDivElement>('#error-notice')!;
 const lastError = document.querySelector<HTMLParagraphElement>('#last-error')!;
 const handRejectionNotice = document.querySelector<HTMLParagraphElement>('#hand-rejected')!;
@@ -173,6 +174,83 @@ function renderOccupancy(): void {
   if (roomOccupancy.textContent !== text) { roomOccupancy.textContent = text; if (!valid()) return; }
   if (roomOccupancy.hidden) { roomOccupancy.hidden = false; if (!valid()) return; }
 }
+interface QualitySeat {
+  client: Client; generation: number; roomId: string; participantId: string;
+}
+interface QualityReport {
+  uplink: number | undefined; downlink: number | undefined; rtt: number | undefined;
+}
+let qualitySeat: QualitySeat | undefined;
+let qualityReport: QualityReport | undefined;
+let qualityRevision = 0;
+// A receipt window is local presentation ownership, not a measurement timestamp or SDK stage epoch.
+function retireQuality(): void { qualitySeat = undefined; qualityReport = undefined; qualityRevision++; }
+function eligibleQualitySeat(current: Client): boolean {
+  const state = current.state, me = state?.me;
+  return current === client && current === controlsClient && occupancyRetiredGeneration !== entryGeneration
+    && (current.status === 'waiting' || current.status === 'live')
+    && typeof state?.roomId === 'string' && Boolean(state.roomId.trim())
+    && typeof me?.participantId === 'string' && Boolean(me.participantId.trim())
+    && me.onStage === true && (me.role === 'controller' || me.role === 'speaker');
+}
+function reconcileQuality(): void {
+  const seat = qualitySeat;
+  if (client === controlsClient && client?.status === 'disconnected') occupancyRetiredGeneration = entryGeneration;
+  if (seat && (seat.generation !== entryGeneration || !eligibleQualitySeat(seat.client)
+    || seat.client.state?.roomId !== seat.roomId || seat.client.state.me.participantId !== seat.participantId)) retireQuality();
+}
+function projectQuality(detail: unknown, participantId: string): QualityReport | undefined {
+  if (!detail || typeof detail !== 'object' || Array.isArray(detail)) return;
+  const participants: unknown = Reflect.get(detail, 'participants');
+  if (!Array.isArray(participants)) return;
+  let own: object | undefined;
+  for (const item of participants) {
+    if (!item || typeof item !== 'object' || Array.isArray(item) || item.participantId !== participantId) continue;
+    if (own) return; // Multiple own entries are an ambiguous full replacement.
+    own = item;
+  }
+  if (!own) return;
+  const loss = (value: unknown): number | undefined => typeof value === 'number' && Number.isFinite(value)
+    && value >= 0 && value <= 100 ? value : undefined;
+  const rtt: unknown = Reflect.get(own, 'rttMs');
+  return { uplink: loss(Reflect.get(own, 'uplinkLossPercent')), downlink: loss(Reflect.get(own, 'downlinkLossPercent')),
+    rtt: typeof rtt === 'number' && Number.isFinite(rtt) && rtt >= 0 ? rtt : undefined };
+}
+function renderQuality(): void {
+  reconcileQuality();
+  const revision = qualityRevision, seat = qualitySeat, report = qualityReport;
+  const current = client, controls = controlsClient, generation = entryGeneration;
+  const owns = (): boolean => revision === qualityRevision && seat === qualitySeat && report === qualityReport
+    && current === client && controls === controlsClient && generation === entryGeneration;
+  const valid = (): boolean => {
+    // A nested receipt may win before the same setter silently changes its SDK eligibility.
+    if (!owns()) { renderQuality(); return false; }
+    reconcileQuality();
+    // Both consents are invalidated before any corrective DOM can restore public SDK eligibility.
+    const closeInvalid = Boolean(pendingRoomClose && !pendingRoomClose.invalidated
+      && (!roomCloseOwner || pendingRoomClose.revision !== roomCloseOwner.revision || !eligibleRoomClose(roomCloseOwner)));
+    const transferInvalid = Boolean(pendingTransfer && !pendingTransfer.invalidated
+      && (!stageManagementOwner || pendingTransfer.revision !== stageManagementOwner.revision
+        || !eligibleTransfer(stageManagementOwner, pendingTransfer.id, pendingTransfer.row)));
+    if (closeInvalid) pendingRoomClose!.invalidated = true;
+    if (transferInvalid) pendingTransfer!.invalidated = true;
+    if (!owns() || closeInvalid || transferInvalid) {
+      syncRoomClose(); syncStageManagement();
+      renderQuality(); return false;
+    }
+    return true;
+  };
+  if (!valid()) return;
+  if (!seat || !report) {
+    if (!ownConnectionQuality.hidden) { ownConnectionQuality.hidden = true; if (!valid()) return; }
+    if (ownConnectionQuality.textContent !== '') { ownConnectionQuality.textContent = ''; if (!valid()) return; }
+    return;
+  }
+  const percent = (value: number | undefined): string => value === undefined ? '—' : `${value.toFixed(1)}%`;
+  const text = `你的連線品質（最近收到）：上行掉包 ${percent(report.uplink)} · 下行掉包 ${percent(report.downlink)} · RTT ${report.rtt === undefined ? '—' : `${Math.round(report.rtt)} ms`}（非端到端音訊延遲）`;
+  if (ownConnectionQuality.textContent !== text) { ownConnectionQuality.textContent = text; if (!valid()) return; }
+  if (ownConnectionQuality.hidden) { ownConnectionQuality.hidden = false; if (!valid()) return; }
+}
 let feedbackRevision = 0;
 let handRejectionOwner: { client: Client; roomId: string; participantId: string; generation: number } | undefined;
 function retireHandRejection(): void {
@@ -208,7 +286,7 @@ function retireControls(): void {
 }
 /** Retire initial-join feedback before user or terminal callbacks can start another entry. */
 function retireEntry(): number {
-  const generation = ++entryGeneration; retireOccupancy();
+  const generation = ++entryGeneration; retireOccupancy(); retireQuality();
   hideCancel();
   submit.disabled = false; submit.setAttribute('aria-busy', 'false');
   return generation;
@@ -934,7 +1012,7 @@ function signalingUrl(host: URL, value: string): URL {
 join.onsubmit = (event) => {
   event.preventDefault();
   const previous = client, generation = ++entryGeneration;
-  retireOccupancy();
+  retireOccupancy(); retireQuality();
   clearError();
   const hostValue = input('host').value, pathValue = input('ws-path').value;
   const joinOptions = { roomId: input('room').value.trim(), code: input('code').value.trim() || undefined, name: input('name').value.trim() };
@@ -942,6 +1020,7 @@ join.onsubmit = (event) => {
   const feedback = feedbackRevision;
   let progress = true, receivedState = false, cancelledEntry = false;
   const occupancyReceipts = new WeakSet<object>();
+  const qualityReceipts = new WeakSet<object>();
   let entryClient: Client | undefined;
   const showProgress = (message: string): void => {
     if (generation === entryGeneration && feedback === feedbackRevision && progress) status.textContent = message;
@@ -956,6 +1035,7 @@ join.onsubmit = (event) => {
     hand.disabled = leave.disabled = true; hand.setAttribute('aria-busy', 'false');
     syncMic(); syncStage(); syncMicRetry();
     renderOccupancy();
+    if (cancelled === entryGeneration) renderQuality();
     if (cancelled !== entryGeneration) return;
     try {
       const stopping = entryClient?.disconnect();
@@ -972,6 +1052,7 @@ join.onsubmit = (event) => {
       hand.setAttribute('aria-busy', 'false');
       hand.disabled = leave.disabled = true;
       renderOccupancy();
+      if (generation === entryGeneration) renderQuality();
       if (generation !== entryGeneration) return;
       await previous?.disconnect();
       if (generation !== entryGeneration) return;
@@ -990,10 +1071,16 @@ join.onsubmit = (event) => {
         ? library.MAX_GAIN_DB : undefined;
       syncUnlock();
       client.on('state', ({ detail }: CustomEvent<StageEventMap['state']>) => {
-        if (client !== current || cancelledEntry || generation !== entryGeneration || occupancyRetiredGeneration === generation || controlsClient !== current) return;
-        // SDK installs state before status; only its actual, previously unseen state receipt is fresh.
+        // Record rejected receipts too: their mutable objects cannot later become a new admission.
         const unseen = detail && typeof detail === 'object' && !occupancyReceipts.has(detail);
         if (detail && typeof detail === 'object') occupancyReceipts.add(detail);
+        if (client !== current || cancelledEntry || generation !== entryGeneration || occupancyRetiredGeneration === generation || controlsClient !== current) return;
+        // SDK installs state before status; only its actual, previously unseen state receipt is fresh.
+        reconcileQuality();
+        if (detail === current.state && unseen && eligibleQualitySeat(current) && !qualitySeat) {
+          qualitySeat = { client: current, generation, roomId: detail.roomId, participantId: detail.me.participantId };
+          qualityRevision++;
+        }
         reconcileOccupancy();
         if (detail === current.state && unseen
           && (current.status === 'waiting' || current.status === 'live')) {
@@ -1015,7 +1102,23 @@ join.onsubmit = (event) => {
         syncHand(); syncMic(); syncStage(); syncMicRetry(); syncRename(); syncRoomName(); syncHandQueue(); syncStageManagement(); syncRoomClose(); syncMicrophone(); syncAudioRetry(); syncOutput();
         if (renderingEntry === entryGeneration && client === current && controlsClient === current) {
           leave.disabled = false; renderOccupancy();
+          if (renderingEntry === entryGeneration && client === current && controlsClient === current) renderQuality();
         }
+      });
+      client.on('quality', ({ detail }) => {
+        const unseen = !detail || typeof detail !== 'object' || !qualityReceipts.has(detail);
+        if (detail && typeof detail === 'object') qualityReceipts.add(detail);
+        if (client !== current || cancelledEntry || generation !== entryGeneration || controlsClient !== current) return;
+        reconcileQuality();
+        const seat = qualitySeat, revision = qualityRevision;
+        if (unseen && seat) {
+          let projection: QualityReport | undefined;
+          try { projection = projectQuality(detail, seat.participantId); } catch { /* Malformed public events fail closed. */ }
+          if (revision !== qualityRevision || seat !== qualitySeat || client !== current || generation !== entryGeneration) { renderQuality(); return; }
+          reconcileQuality();
+          if (seat === qualitySeat) { qualityReport = projection; qualityRevision++; }
+        }
+        renderQuality();
       });
       const retireOwnHandRejection = (participantId: string): void => {
         if (client === current && controlsClient === current && !cancelledEntry && generation === entryGeneration
@@ -1033,8 +1136,12 @@ join.onsubmit = (event) => {
           || (stageManagementRows.has(detail.participantId) && detail.role !== 'speaker'));
         // Both confirmations lose authority before either control can synchronously reenter from render.
         if (transferFenced) fenceTransfer(false);
+        const ownDeparture = client === current && controlsClient === current && !cancelledEntry && generation === entryGeneration
+          && detail.participantId === current.me?.participantId && detail.role === 'audience';
+        if (ownDeparture) retireQuality();
         if (closeFenced) syncRoomClose();
         if (transferFenced) syncStageManagement();
+        if (ownDeparture && client === current && generation === entryGeneration) renderQuality();
       });
       client.on('transferred', ({ detail }) => {
         const closeFenced = fenceRoomClose(current, generation, detail.fromId);
@@ -1044,7 +1151,13 @@ join.onsubmit = (event) => {
         if (transferFenced) syncStageManagement();
       });
       client.on('stageleft', ({ detail }) => {
-        if (ownsTransferEvents() && stageManagementRows.has(detail.participantId)) fenceTransfer();
+        const ownDeparture = client === current && controlsClient === current && !cancelledEntry && generation === entryGeneration
+          && detail.participantId === current.me?.participantId;
+        if (ownDeparture) retireQuality();
+        const transferFenced = ownsTransferEvents() && stageManagementRows.has(detail.participantId);
+        if (transferFenced) fenceTransfer(false);
+        if (transferFenced) syncStageManagement();
+        if (ownDeparture && client === current && generation === entryGeneration) renderQuality();
       });
       client.on('handrejected', ({ detail }) => {
         // No per-raise identity is provided; feedback belongs only to the current eligible seat.
@@ -1070,8 +1183,8 @@ join.onsubmit = (event) => {
       });
       client.on('status', ({ detail }) => {
         if (client !== current || cancelledEntry || generation !== entryGeneration) return;
-        if (detail === 'disconnected') { occupancyRetiredGeneration = generation; retireOccupancy(); }
-        else reconcileOccupancy();
+        if (detail === 'disconnected') { occupancyRetiredGeneration = generation; retireOccupancy(); retireQuality(); }
+        else { reconcileOccupancy(); if (detail === 'reconnecting') retireQuality(); else reconcileQuality(); }
         const renderingEntry = entryGeneration;
         syncRoomClose();
         if (renderingEntry !== entryGeneration || client !== current) return;
@@ -1080,6 +1193,7 @@ join.onsubmit = (event) => {
         else if (detail === 'disconnected') { progress = false; retirePlayback(); retireControls(); status.textContent = '未連線'; hand.disabled = leave.disabled = true; }
         syncHand(); syncMic(); syncStage(); syncMicRetry(); syncRename(); syncRoomName(); syncHandQueue(); syncStageManagement(); syncRoomClose(); syncMicrophone(); syncAudioRetry(); syncOutput();
         if (renderingEntry === entryGeneration && client === current) renderOccupancy();
+        if (renderingEntry === entryGeneration && client === current) renderQuality();
       });
       client.on('error', ({ detail }) => { if (client !== current || cancelledEntry || generation !== entryGeneration) return; progress = false; report(detail); });
       client.on('audioblocked', () => { if (cancelledEntry) return; progress = false; status.textContent = '請點擊啟用音訊。'; });
@@ -1088,6 +1202,7 @@ join.onsubmit = (event) => {
         const retired = retireEntry();
         clearError(); retirePlayback(); retireControls(); syncHand(); syncMic(); syncStage(); syncMicRetry(); syncRename(); syncRoomName();
         renderOccupancy();
+        if (retired === entryGeneration && client === current) renderQuality();
         if (retired !== entryGeneration || client !== current) return;
         status.textContent = detail.reason === 'shutdown' ? '伺服器維護或重新啟動，房間已關閉。' : '房間已關閉。'; hand.disabled = leave.disabled = true;
       });
@@ -1096,6 +1211,7 @@ join.onsubmit = (event) => {
         const retired = retireEntry();
         clearError(); retirePlayback(); retireControls(); syncHand(); syncMic(); syncStage(); syncMicRetry(); syncRename(); syncRoomName();
         renderOccupancy();
+        if (retired === entryGeneration && client === current) renderQuality();
         if (retired !== entryGeneration || client !== current) return;
         status.textContent = '你已被主控移出房間。'; hand.disabled = leave.disabled = true;
       });
@@ -1309,6 +1425,7 @@ leave.onclick = () => {
   retirePlayback(); scheduleHandCooldown(0);
   retireControls(); hand.setAttribute('aria-busy', 'false'); syncHand(); syncMic(); syncStage(); syncMicRetry();
   renderOccupancy();
+  if (generation === entryGeneration && client === current) renderQuality();
   if (generation !== entryGeneration || client !== current) return;
   void current?.disconnect().then(() => {
     if (generation !== entryGeneration || client !== current) return;
