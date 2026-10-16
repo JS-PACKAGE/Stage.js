@@ -584,6 +584,8 @@ function field(form: HTMLFormElement, label: string, name: string, value = '', r
   return input;
 }
 function landing(): void {
+  // Drop ownership before any reset can synchronously deliver another speaking callback.
+  resetSpeaking();
   handRejectionRoomActive = false; retireHandRejection();
   stopRoomTimers();
   stageQualitySuppressedState = undefined; resetQualityDetails();
@@ -593,7 +595,6 @@ function landing(): void {
   resetAudienceFilter();
   renderedRoomSignature = renderedSpeakingSignature = renderedQualitySignature = undefined; renderedGainInputs.length = 0;
   renderedAudienceHeading = undefined;
-  personRows.clear(); speakingIds.clear();
   resetMicSettings();
   resetRoomActions('');
   cooldownButton = null; renderedReturnStage = null; renderedRoomActions = []; scheduleCooldown(0);
@@ -755,6 +756,61 @@ function syncAudienceFilter(state: RoomStatePayload): void {
   audienceFilter.hidden = false; audienceSearch.disabled = false;
   applyAudienceFilter();
 }
+let speakingDirtyIds = new Set<string>();
+let speakingRowsRevision = 0;
+let speakingPaintRevision: number | undefined;
+let speakingRevision = 0;
+let speakingIdentity = '';
+let speakingState: RoomStatePayload | undefined;
+let speakingRetired = false;
+let speakingReconnectState: RoomStatePayload | null = null;
+function resetSpeaking(): void {
+  speakingRevision++; speakingIdentity = ''; speakingState = undefined;
+  speakingRetired = false; speakingReconnectState = null;
+  speakingRowsRevision++; personRows.clear(); speakingIds = new Set(); speakingDirtyIds = new Set();
+}
+/** The SDK retains its last report across socket loss; that is not a current activity indication. */
+function retireSpeaking(): void {
+  speakingRevision++;
+  speakingRetired = true; speakingReconnectState = client.state; speakingState = undefined;
+  updateSpeaking(new Set());
+}
+function acceptSpeakingState(state: RoomStatePayload): void {
+  if (state !== client.state) return;
+  const identity = JSON.stringify([state.roomId, state.me.participantId]);
+  if (client.status === 'reconnecting' || client.status === 'disconnected') {
+    speakingIdentity = identity; speakingRetired = true; speakingState = undefined; return;
+  }
+  if (identity !== speakingIdentity) {
+    speakingIdentity = identity; speakingRetired = false; speakingReconnectState = null;
+  }
+  // Status is emitted before state on resume. Neither status alone nor a pre-loss replay admits reports.
+  speakingState = state !== speakingReconnectState ? state : undefined;
+}
+function updateSpeaking(ids: Set<string>): void {
+  const previous = speakingIds, revision = speakingRowsRevision, dirty = speakingDirtyIds;
+  speakingIds = ids; renderedSpeakingSignature = JSON.stringify([...ids]);
+  for (const id of previous) if (!ids.has(id)) dirty.add(id);
+  for (const id of ids) if (!previous.has(id)) dirty.add(id);
+  if (speakingPaintRevision === revision) return;
+  speakingPaintRevision = revision;
+  try {
+    // Nested receipts reserve their desired set first. Drain only dirty IDs until finite callbacks settle.
+    while (dirty.size && speakingRowsRevision === revision) {
+      const id = dirty.values().next().value!; dirty.delete(id);
+      for (const row of personRows.get(id) ?? []) {
+        if (speakingRowsRevision !== revision) return;
+        const active = speakingIds.has(id);
+        if (row.classList.contains('speaking') !== active) row.classList.toggle('speaking', active);
+        if (speakingRowsRevision !== revision) return;
+        // A before-write callback can return into an older toggle after reserving a newer report.
+        if (row.classList.contains('speaking') !== speakingIds.has(id)) dirty.add(id);
+      }
+    }
+  } finally {
+    if (speakingPaintRevision === revision) speakingPaintRevision = undefined;
+  }
+}
 function renderRoom(state: RoomStatePayload): void {
   const generation = resetRoomActions(JSON.stringify([state.roomId, state.me.participantId]));
   if (generation !== roomActionGeneration) return;
@@ -770,7 +826,8 @@ function renderRoom(state: RoomStatePayload): void {
   const { audienceCount, ...roomStructure } = state;
   const audienceTitle = `觀眾 · ${audienceCount}/${state.limits.maxAudience}`;
   const signature = JSON.stringify([roomStructure, roomCode, client.status]);
-  const speakingSignature = JSON.stringify([...client.speaking]);
+  const currentSpeaking = new Set(speakingRetired ? speakingIds : client.speaking);
+  const speakingSignature = JSON.stringify([...currentSpeaking]);
   const qualitySignature = JSON.stringify([...quality]);
   if (signature === renderedRoomSignature && speakingSignature === renderedSpeakingSignature
     && qualitySignature === renderedQualitySignature && !renderedGainInputs.some(({ input, value }) => input.value !== value)) {
@@ -779,7 +836,7 @@ function renderRoom(state: RoomStatePayload): void {
     syncAudienceFilter(state); updateCooldown(); renderNotices(true); return;
   }
   renderedGainInputs.length = 0; audienceFilterRows.length = 0;
-  personRows.clear(); speakingIds = new Set(client.speaking);
+  speakingRevision++; speakingRowsRevision++; personRows.clear(); speakingDirtyIds = new Set(); speakingIds = currentSpeaking;
   brand.textContent = decodeName(state.name);
   status.textContent = statusLabels[client.status];
   cooldownButton = null;
@@ -921,7 +978,7 @@ function personRow(person: ParticipantView, controller: boolean, kind: 'speaker'
   if (kind === 'audience') audienceFilterRows.push({ row, name: decodeName(person.name).normalize('NFC').toLowerCase() });
   const rows = personRows.get(person.participantId);
   if (rows) rows.push(row); else personRows.set(person.participantId, [row]);
-  row.classList.toggle('speaking', client.speaking.has(person.participantId));
+  row.classList.toggle('speaking', speakingIds.has(person.participantId));
   const identity = element('div', 'identity');
   identity.append(element('strong', '', decodeName(person.name)), element('span', 'badge', roleLabels[person.role]));
   if (!person.connected) identity.append(element('span', 'badge', '連線中斷'));
@@ -1020,12 +1077,15 @@ function scheduleCooldown(remaining: number): void {
   }
 }
 client.on('state', ({ detail }) => {
+  acceptSpeakingState(detail);
   // Only a new current snapshot resolves early loss; status/report sync still sees the old seat.
   if (detail === client.state && detail !== stageQualitySuppressedState) stageQualitySuppressedState = undefined;
   if (landingEntry) landingEntry.entered = true;
   renderRoom(detail);
 });
 client.on('status', ({ detail }) => {
+  if (detail === 'disconnected' && !client.state) resetSpeaking();
+  else if (detail === 'reconnecting' || detail === 'disconnected') retireSpeaking();
   if (detail === 'reconnecting' || detail === 'disconnected') {
     retireHandRejection(); audioRetryNotice.hidden = true; audioRetryNotice.textContent = '';
   }
@@ -1082,15 +1142,12 @@ client.on('audioblocked', () => { audioBlocked = true; renderNotices(); });
 client.on('error', ({ detail }) => showError(detail.message));
 // Toggle in place: a full re-render every few hundred ms would reset focus and scroll.
 client.on('speaking', ({ detail }) => {
+  const revision = ++speakingRevision;
   const ids = new Set(detail.participantIds);
-  for (const id of speakingIds) {
-    if (!ids.has(id)) for (const row of personRows.get(id) ?? []) row.classList.toggle('speaking', false);
-  }
-  for (const id of ids) {
-    if (!speakingIds.has(id)) for (const row of personRows.get(id) ?? []) row.classList.toggle('speaking', true);
-  }
-  speakingIds = ids;
-  renderedSpeakingSignature = JSON.stringify([...ids]);
+  if (revision !== speakingRevision || !speakingIdentity || speakingState !== client.state
+    || client.status === 'reconnecting' || client.status === 'disconnected') return;
+  speakingRetired = false; speakingReconnectState = null;
+  updateSpeaking(ids);
 });
 client.on('quality', ({ detail }) => {
   syncQualityDetails(detail.participants);

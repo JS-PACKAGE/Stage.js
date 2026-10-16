@@ -195,6 +195,8 @@ JSON frame，型別定義在 [`shared/protocol.ts`](shared/protocol.ts)。每個
 | `rtc:answer`、`rtc:ice` | 伺服器端信令 |
 | `status` | `waiting`／`live` |
 
+完整範例在控制連線重連時清除參與者列的「說話中」標記，避免把上次收到的集合持續當成目前活動；處理恢復後的房間快照，再收到新的 `speaking` 回呼後才恢復標記。普通進房與一般快照的既有顯示不變，不停止仍保留的音訊。回報沒有時間戳或 epoch，這個顯示邊界不保證資料即時或目前可聽。
+
 連線品質收集每房間同時最多一輪；完成後再等待 `qualityIntervalMs` 啟動下一輪。個別 publisher 統計失敗只略過該人的本輪資料，其他人的回報照常；仍有 publisher 而全部統計失敗或缺失時不送空報告，但下一輪仍會重試。失敗不會被當作 0% 掉包，恢復後上行差量從上次成功樣本計算。最後一位停止發布後，既有已排程或執行中的輪次在完成時若仍無 publisher，會向當時的主控與台上者送一次 `quality: {participants: []}`，清除先前報告，之後不再排程；不新增清理輪詢。若已有新 publisher，不會以舊輪次的空結果清除它；離台再發布的舊統計結果仍會被忽略。關房不送此清空事件。清空依賴既有輪次執行及統計請求完成，未增加 timeout，也不保證一個 interval 內完成；停用品質回報時不另發事件。 個別統計請求的 rejection value 直接交給安全結構化 logger，不先字串化，避免不可轉字串的診斷值阻斷其他 publisher 的本輪資料與差量回報；任意自訂 logger／sink 自身拋錯仍不在此保證範圍。
 
 `limits.joinTimeoutMs`、`rooms.controllerGraceMs`、`rooms.participantGraceMs` 的範圍為 0～2147483647 ms；`rooms.heartbeatIntervalMs` 為 1000～2147483647 ms。上限包含 2147483647（約 24.9 天）；更大的值以前會被 Node timer 正規化成約 1 ms，現在啟動與離線 `config:check` 會拒絕該設定。0 的既有語意不變：join deadline 停用、participant 立即移除、controller 立即排程到期。這不限制只做經過時間比較的 `handRaiseIntervalMs`。
