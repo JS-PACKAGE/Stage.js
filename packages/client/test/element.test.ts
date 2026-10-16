@@ -33,6 +33,7 @@ class Node extends EventTarget {
   onclick?: () => void;
   oninput?: (event: Event) => void;
   onchange?: (event: Event) => void;
+  contains(node: Node): boolean { return this === node || this.children.some(child => child.contains(node)); }
   append(...nodes: Node[]): void { this.children.push(...nodes); }
   replaceChildren(...nodes: Node[]): void { this.children.splice(0, this.children.length, ...nodes); }
   remove(): void { this.isConnected = false; }
@@ -8544,7 +8545,8 @@ describe('widget controller stage management panel', () => {
   function buttons(row: Node) {
     assert.equal(row.tagName, 'LI');
     const found = nodes(row).filter(node => node.tagName === 'BUTTON');
-    assert.equal(found.length, 3, 'exactly force-lock, remove-from-stage and confirmed control transfer');
+    assert.equal(found.length, 4, 'force-lock, remove-from-stage, confirmed control transfer and explicit gain Apply');
+    assert.equal(found.filter(button => button.textContent === '套用混音增益').length, 1);
     found.forEach(button => assert.equal(button.type, 'button'));
     const mute = found.find(button => /靜音/.test(button.textContent)), remove = found.find(button => button.textContent === '移下台');
     const transfer = found.find(button => button.textContent === '移交控制權');
@@ -8552,12 +8554,12 @@ describe('widget controller stage management panel', () => {
   }
   function press(button: Node): void { button.onclick?.(); }
   function force(button: Node): void { const disabled = button.disabled; button.disabled = false; try { press(button); } finally { button.disabled = disabled; } }
-  function flags(row: Node) { return nodes(row).filter(node => node.tagName === 'BUTTON').map(button => ({ disabled: button.disabled, busy: button.getAttribute('aria-busy') === 'true' })); }
+  function flags(row: Node) { return Object.values(buttons(row)).map(button => ({ disabled: button.disabled, busy: button.getAttribute('aria-busy') === 'true' })); }
   function peek(element: Widget) {
     return { disclosure: element['stageManagementPanel'] as unknown as Node, rows: (element['stageManagementList'] as unknown as Node).children };
   }
   function reenter(row: Node | undefined): void {
-    if (row) for (const button of nodes(row).filter(node => node.tagName === 'BUTTON')) force(button);
+    if (row) for (const button of Object.values(buttons(row))) force(button);
   }
   function busy(row: Node, expected: boolean, disabled = expected, transferDisabled = disabled): void {
     assert.deepEqual(flags(row), [{ disabled, busy: expected }, { disabled, busy: expected }, { disabled: transferDisabled, busy: false }]);
@@ -8614,8 +8616,9 @@ describe('widget controller stage management panel', () => {
     assert.match(text(rows[2]!), /離線|未連線|斷線/); assert.equal(buttons(rows[1]!).mute.textContent, '鎖定靜音');
     assert.equal(buttons(rows[2]!).mute.textContent, '解除靜音鎖定'); busy(rows[2]!, false, false, true);
     assert.doesNotMatch(visibleText(element as unknown as Node), /Private audience|PRIVATE-CODE/);
-    for (const node of nodes(current.disclosure)) { assert.equal(Reflect.get(node, 'innerHTML'), undefined); assert.ok(!['IMG', 'SCRIPT', 'INPUT'].includes(node.tagName)); }
-    assert.doesNotMatch(text(current.disclosure), /踢出|移出房間|音量|增益/);
+    for (const node of nodes(current.disclosure)) { assert.equal(Reflect.get(node, 'innerHTML'), undefined); assert.ok(!['IMG', 'SCRIPT'].includes(node.tagName)); }
+    assert.doesNotMatch(text(current.disclosure), /踢出|移出房間/);
+    assert.equal(nodes(current.disclosure).filter(node => node.tagName === 'INPUT' && node.type === 'number').length, 3);
     current.disclosure.open = true; const replace = t.mock.method(current.list, 'replaceChildren'), renamed = structuredClone(initial);
     renamed.speakers[1]!.name = 'Renamed &amp; safe'; renamed.speakers[1]!.forceMuted = true;
     socket.deliver({ type: 'room:state', ...renamed });
@@ -8911,7 +8914,7 @@ describe('widget controller stage management panel', () => {
     const fixture = await socketJoinedWidget(t, successor.s.last('room:state')!);
     const flush = () => { for (const timer of h.timers.filter(timer => !timer.cleared && timer.ms === 0)) { timer.cleared = true; timer.fn(); } };
     const deliver = () => { flush(); fixture.socket.deliver(successor.s.last('room:state')!); };
-    const relay = async (message: StageRequest | Extract<ClientMessage, { type: 'mic:gain' | 'room:rename' }>) => {
+    const relay = async (message: StageRequest | Extract<ClientMessage, { type: 'mic:gain' | 'room:rename' | 'stage:approve' }>) => {
       const start = successor.s.inbox.length; await h.hub.handle(successor.s, parseClientMessage(JSON.stringify(message), config.limits)); flush();
       const replies = successor.s.inbox.slice(start);
       for (const reply of replies) if (reply.type !== 'ok' && reply.type !== 'error') fixture.socket.deliver(reply);
@@ -9603,6 +9606,468 @@ describe('widget controller stage management panel', () => {
     assert.equal(transfer.mock.callCount(), 1); assert.match(dialog.mock.calls[0]!.arguments[0] ?? '', /Managed speaker first/);
     assert.doesNotMatch(dialog.mock.calls[0]!.arguments[0] ?? '', /Offstage duplicate/);
   });
+  // Complete widget and public SDK with controlled DOM/socket/timers; native number editing, layout,
+  // keyboard/IME, accessibility announcements and hardware audio require browser/device validation.
+  function gainControls(row: Node) {
+    const label = row.children.find(node => node.tagName === 'LABEL'); assert.ok(label);
+    const input = label.children.find(node => node.tagName === 'INPUT'), labelText = label.children.find(node => node.tagName === 'SPAN');
+    const accepted = row.children.find(node => node.tagName === 'SPAN' && node !== row.children[0]);
+    const apply = nodes(row).find(node => node.tagName === 'BUTTON' && node.textContent === '套用混音增益');
+    assert.ok(input && labelText && accepted && apply);
+    assert.equal(input.type, 'number'); assert.equal(input.min, '-20'); assert.equal(input.max, '20'); assert.equal(input.step, '0.1');
+    assert.equal(apply.type, 'button'); assert.equal(accepted.getAttribute('aria-live'), null); assert.equal(accepted.getAttribute('role'), null);
+    return { input, label: labelText, accepted, apply };
+  }
+  function gainDraft(row: Node, value: string): void {
+    const controls = gainControls(row); controls.input.value = value; controls.input.oninput?.(new Event('input'));
+  }
+  function gainRequests(socket: { sent: ClientMessage[] }) {
+    return socket.sent.filter((message): message is Extract<ClientMessage, { type: 'mic:gain' }> => message.type === 'mic:gain');
+  }
+  function gainRequest(socket: { sent: ClientMessage[] }) { const sent = gainRequests(socket).at(-1); assert.ok(sent); return sent; }
+  function gainBusy(row: Node, expected: boolean, disabled = expected): void {
+    const { input, apply } = gainControls(row);
+    for (const node of [input, apply]) { assert.equal(node.disabled, disabled); assert.equal(node.getAttribute('aria-busy'), String(expected)); }
+  }
+  function gainWrites(t: TestContext, rows: Node[]) {
+    const writes = { text: 0, attribute: 0, disabled: 0, value: 0, static: 0 }, changes = { ...writes };
+    for (const row of rows) {
+      const controls = gainControls(row);
+      const fields: [Node, 'textContent' | 'disabled' | 'value' | 'type' | 'min' | 'max' | 'step', keyof typeof writes][] = [
+        [controls.accepted, 'textContent', 'text'], [controls.label, 'textContent', 'text'], [controls.apply, 'textContent', 'static'],
+        [controls.input, 'disabled', 'disabled'], [controls.apply, 'disabled', 'disabled'], [controls.input, 'value', 'value'],
+        [controls.input, 'type', 'static'], [controls.input, 'min', 'static'], [controls.input, 'max', 'static'], [controls.input, 'step', 'static'], [controls.apply, 'type', 'static'],
+      ];
+      for (const [node, key, counter] of fields) {
+        let value = node[key];
+        Object.defineProperty(node, key, { configurable: true, get: () => value, set: (next: string | boolean) => {
+          writes[counter]++; if (value !== next) changes[counter]++; value = next;
+        } });
+        t.after(() => { Object.defineProperty(node, key, { configurable: true, writable: true, value }); });
+      }
+      for (const node of [controls.accepted, controls.label, controls.input, controls.apply]) {
+        const original = node.setAttribute;
+        t.mock.method(node, 'setAttribute', function (this: Node, key: string, value: string): void {
+          writes.attribute++; if (this.getAttribute(key) !== value) changes.attribute++; original.call(this, key, value);
+        });
+      }
+    }
+    const reset = () => { for (const key of Object.keys(writes) as (keyof typeof writes)[]) writes[key] = changes[key] = 0; };
+    const expect = (text = 0, attribute = 0, disabled = 0) => {
+      assert.deepEqual(writes, { text, attribute, disabled, value: 0, static: 0 });
+      assert.deepEqual(changes, writes, 'every new guarded field write changes its current DOM value'); reset();
+    };
+    return { reset, expect };
+  }
+
+  for (const onStage of [false, true]) it(`gain UI: actual ${onStage ? 'onstage' : 'offstage'} controller Apply reaches SDK validator Hub, bounds, rounding and reset`, async t => {
+    const f = await hubWidget(t, false, onStage), row = f.target(), controls = gainControls(row);
+    const media = f.h.transport.rooms.get(f.host.roomId)!, peer = media.peers.get(f.first.id), publisher = media.publishers.get(f.first.id);
+    assert.equal(controls.input.value, '0'); assert.equal(controls.accepted.textContent, '目前混音增益：0 dB');
+    assert.match(controls.label.textContent, /Managed & <speaker>.*草稿.*dB.*-20.*\+20.*0.1/);
+    assert.match(controls.apply.getAttribute('aria-label')!, /Managed & <speaker>/);
+    assert.match(view(f.element).notice.textContent, /房間混音.*0.*本機播放音量.*硬體增益.*不會解除靜音.*下次上台/);
+    for (const [raw, wire, accepted] of [['3.26', 3.26, 3.3], ['-6.04', -6.04, -6], ['20', 20, 20], ['-20', -20, -20], ['0', 0, 0]] as const) {
+      gainDraft(row, raw); const before = gainRequests(f.socket).length; controls.input.onchange?.(new Event('change')); await f.tick(100);
+      assert.equal(gainRequests(f.socket).length, before, 'edits never submit');
+      press(controls.apply); force(controls.apply); gainBusy(row, true); await f.tick(100);
+      const sent = gainRequest(f.socket); assert.equal(sent.targetId, f.first.id); assert.equal(sent.gainDb, wire); assert.equal(gainRequests(f.socket).length, before + 1);
+      const { reply } = await f.relay(sent); assert.equal(reply.type, 'ok'); gainBusy(row, true);
+      assert.equal(controls.accepted.textContent, `目前混音增益：${accepted > 0 ? '+' : ''}${accepted} dB`);
+      assert.equal(controls.input.value, raw); f.socket.deliver(reply); await settle(); gainBusy(row, false); assert.equal(controls.input.value, raw);
+    }
+    assert.equal(f.client.playbackVolume, 1); assert.equal(f.client.playbackMuted, false);
+    assert.equal(media.peers.get(f.first.id), peer); assert.equal(media.publishers.get(f.first.id), publisher);
+    assert.equal(f.socket.sent.some(message => message.type === 'rtc:offer'), false); assert.equal(f.target(), row);
+  });
+
+  it('gain UI: retained offline self-muted and force-muted speaker accepts gain without unmuting or changing local playback', async t => {
+    const f = await hubWidget(t, true); await f.h.hub.detach(f.first.s);
+    assert.equal(await f.h.req(f.successor.s, { type: 'mic:force-mute', targetId: f.first.id }), 'ok'); f.deliver();
+    const row = f.target(); assert.match(text(row), /暫時離線.*目前混音增益/); gainBusy(row, false);
+    for (const value of ['20', '-20', '0']) {
+      gainDraft(row, value); press(gainControls(row).apply); await f.tick(100); const { reply } = await f.relay(gainRequest(f.socket));
+      assert.equal(reply.type, 'ok'); f.socket.deliver(reply); await settle();
+      const person = f.client.state!.speakers.find(person => person.participantId === f.first.id)!;
+      assert.equal(person.gainDb, Number(value)); assert.equal(person.connected, false); assert.equal(person.muted, true); assert.equal(person.forceMuted, true);
+      assert.equal(f.client.playbackVolume, 1); assert.equal(f.target(), row);
+    }
+  });
+
+  it('gain UI: actual hand approval creates a gain editor whose explicit Apply changes the newly approved speaker', async t => {
+    const f = await hubWidget(t), applicant = await f.h.join(f.host.roomId, f.host.code, 'New & <speaker>');
+    assert.equal(await f.h.req(applicant.s, { type: 'hand:raise' }), 'ok'); f.deliver();
+    const hand = f.element['handQueueRows'].get(applicant.id); assert.ok(hand); click(hand.approve); await f.tick(100);
+    const sent = f.socket.sent.at(-1)!; assert.equal(sent.type, 'stage:approve');
+    const approval = await f.relay(sent); assert.equal(approval.reply.type, 'ok'); f.socket.deliver(approval.reply); await settle();
+    assert.equal(f.element['handQueueRows'].has(applicant.id), false);
+    const row = f.target(applicant.id); gainDraft(row, '-4.56'); press(gainControls(row).apply); await f.tick(100);
+    const changed = await f.relay(gainRequest(f.socket)); assert.equal(changed.reply.type, 'ok'); f.socket.deliver(changed.reply); await settle();
+    assert.equal(gainControls(row).accepted.textContent, '目前混音增益：-4.6 dB'); assert.equal(gainControls(row).input.value, '-4.56');
+  });
+
+  for (const race of ['departed target', 'transferred controller'] as const) it(`gain UI: real server owns the ${race} race after widget admission`, async t => {
+    const f = await hubWidget(t), row = f.target(); gainDraft(row, '-6.04'); press(gainControls(row).apply); await f.tick(100); const sent = gainRequest(f.socket);
+    if (race === 'departed target') assert.equal(await f.h.req(f.first.s, { type: 'stage:leave' }), 'ok');
+    else assert.equal(await f.h.req(f.successor.s, { type: 'control:transfer', targetId: f.host.id }), 'ok');
+    f.deliver(); assert.equal(view(f.element).rows.includes(row), false); const result = await f.relay(sent);
+    if (race === 'departed target') {
+      assert.equal(result.reply.type, 'ok'); assert.equal(f.client.state!.audience!.find(person => person.participantId === f.first.id)!.gainDb, -6);
+      assert.equal(await f.h.req(f.first.s, { type: 'hand:raise' }), 'ok');
+      assert.equal(await f.h.req(f.successor.s, { type: 'stage:approve', targetId: f.first.id }), 'ok'); f.deliver();
+      const fresh = f.target(); assert.notEqual(fresh, row); assert.equal(gainControls(fresh).input.value, '-6'); gainBusy(fresh, true);
+      force(gainControls(row).apply); force(gainControls(fresh).apply); await f.tick(100); assert.equal(gainRequests(f.socket).length, 1);
+      f.socket.deliver(result.reply); await settle(); gainBusy(fresh, false);
+    } else {
+      assert.equal(result.reply.type, 'error'); if (result.reply.type === 'error') assert.equal(result.reply.code, 'forbidden');
+      f.socket.deliver(result.reply); await settle(); retired(f.element);
+    }
+  });
+
+  it('gain UI: rejects invalid forced drafts without requests or error clearing and accepts finite decimal precision', async t => {
+    const { element, socket, tick } = await socketJoinedWidget(t, state()), row = view(element).rows[0]!, controls = gainControls(row);
+    error(socket, 'Keep invalid draft feedback');
+    for (const raw of ['', ' ', '\t\n', '-', '+', '.', '1..2', '1e', '0x10', '0b10', 'NaN', 'Infinity', '-Infinity', '1e999', '20.001', '-20.001', '2 dB', '1,5']) {
+      gainDraft(row, raw); controls.input.onchange?.(new Event('change')); assert.equal(controls.apply.disabled, true); force(controls.apply);
+      assert.equal(controls.input.value, raw); assert.equal(element['error'].textContent, 'Keep invalid draft feedback');
+    }
+    await tick(100); assert.equal(gainRequests(socket).length, 0);
+    for (const [raw, value] of [['.25', .25], ['+1.234', 1.234], ['-0', -0], ['1e-1', .1], [' 2.5 ', 2.5]] as const) {
+      gainDraft(row, raw); assert.equal(controls.apply.disabled, false); press(controls.apply); await tick(100); const sent = gainRequest(socket);
+      assert.equal(sent.gainDb, value === 0 ? 0 : value); socket.deliver({ type: 'ok', requestId: sent.requestId }); await settle();
+      assert.equal(controls.input.value, raw); assert.equal(controls.accepted.textContent, '目前混音增益：0 dB', 'ACK alone never changes accepted gain');
+    }
+  });
+
+  it('gain UI: 24 fresh and 24 reused snapshots preserve all dirty drafts and write zero equal fields', async t => {
+    const f = await hubWidget(t), rows = [...view(f.element).rows], row = f.target(), controls = gainControls(row);
+    gainDraft(row, ''); f.element['nameInput'].value = 'Dirty name'; f.element['roomNameInput'].value = 'Dirty room'; view(f.element).disclosure.open = true;
+    const observed = gainWrites(t, rows), original = rowWrites(t, rows), replace = t.mock.method(view(f.element).list, 'replaceChildren');
+    for (let i = 0; i < 24; i++) f.deliver();
+    for (let i = 0; i < 24; i++) f.client.dispatchEvent(new CustomEvent('state', { detail: f.client.state! }));
+    observed.expect(); original.expect(); assert.equal(controls.input.value, ''); assert.equal(f.element['nameInput'].value, 'Dirty name'); assert.equal(f.element['roomNameInput'].value, 'Dirty room');
+    assert.equal(replace.mock.callCount(), 0); assert.equal(view(f.element).disclosure.open, true);
+    const update = f.client.setGain(f.first.id, 5.12); await f.tick(100); const result = await f.relay(gainRequest(f.socket)); f.socket.deliver(result.reply); await update;
+    observed.expect(1); original.expect(); assert.equal(controls.accepted.textContent, '目前混音增益：+5.1 dB'); assert.equal(controls.input.value, '');
+    const current = f.client.state!; current.speakers.find(person => person.participantId === f.first.id)!.name = '&lt;img&gt; &amp; &quot;safe&quot;';
+    current.speakers.reverse(); f.client.dispatchEvent(new CustomEvent('state', { detail: current }));
+    observed.expect(1, 1); original.expect(1, 3); assert.equal(controls.input.value, ''); assert.match(controls.label.textContent, /<img> & "safe"/);
+    assert.equal(nodes(row).some(node => node.tagName === 'IMG'), false); assert.equal(Reflect.get(controls.label, 'innerHTML'), undefined);
+    f.element['syncStageManagement'](); observed.expect(); original.expect();
+  });
+
+  it('gain UI: host-corrupted dynamic fields are repaired from live DOM while draft text remains user-owned', async t => {
+    const f = await hubWidget(t), row = f.target(), controls = gainControls(row); gainDraft(row, '4.444');
+    controls.accepted.textContent = 'Corrupt'; controls.label.textContent = 'Corrupt'; controls.apply.setAttribute('aria-label', 'Corrupt');
+    for (const node of [controls.input, controls.apply]) { node.disabled = true; node.setAttribute('aria-busy', 'Corrupt'); }
+    const observed = gainWrites(t, [row]); f.deliver(); observed.expect(2, 3, 2); assert.equal(controls.input.value, '4.444');
+    f.deliver(); observed.expect();
+  });
+
+  for (const field of ['accepted', 'label', 'apply label', 'input disabled', 'apply disabled', 'input busy', 'apply busy'] as const) {
+    it(`gain UI: retries a failed ${field} write without cached snapshot or draft repair`, async t => {
+      const f = await hubWidget(t), row = f.target(), controls = gainControls(row); gainDraft(row, '1.234');
+      const node = field === 'accepted' ? controls.accepted : field === 'label' ? controls.label : field.startsWith('input') ? controls.input : controls.apply;
+      const key = field === 'accepted' || field === 'label' ? 'textContent' : field.endsWith('disabled') ? 'disabled' : field.endsWith('busy') ? 'aria-busy' : 'aria-label';
+      let fail = true, attempts = 0;
+      if (key === 'textContent' || key === 'disabled') {
+        let value: string | boolean = key === 'disabled' ? true : 'Corrupt';
+        Object.defineProperty(node, key, { configurable: true, get: () => value, set: (next: string | boolean) => { attempts++; if (fail) throw new Error('Gain DOM failure'); value = next; } });
+        t.after(() => Object.defineProperty(node, key, { configurable: true, writable: true, value }));
+      } else {
+        node.setAttribute(key, 'Corrupt'); const original = node.setAttribute;
+        t.mock.method(node, 'setAttribute', function (this: Node, attribute: string, value: string): void {
+          if (attribute === key) { attempts++; if (fail) throw new Error('Gain DOM failure'); } original.call(this, attribute, value);
+        });
+      }
+      assert.throws(() => f.element['syncStageManagement'](), /Gain DOM failure/); assert.equal(attempts, 1);
+      fail = false; f.element['syncStageManagement'](); assert.equal(attempts, 2); f.element['syncStageManagement'](); assert.equal(attempts, 2);
+      assert.equal(controls.input.value, '1.234'); gainBusy(row, false);
+    });
+  }
+
+  for (const action of ['mute', 'unmute', 'remove'] as const) for (const gainFirst of [false, true]) {
+    it(`gain UI: shares target reservation with ${action}, gainFirst=${gainFirst}, but leaves other targets independent`, async t => {
+      const initial = state(); initial.speakers[0]!.forceMuted = action === 'unmute';
+      const { element, client, socket } = await socketJoinedWidget(t, initial), first = view(element).rows[0]!, second = view(element).rows[1]!;
+      const pending = deferred(), independent = deferred();
+      const gain = t.mock.method(client, 'setGain', (id: string) => id === 'first' ? pending.promise : independent.promise);
+      const moderate = t.mock.method(client, action === 'remove' ? 'removeFromStage' : action === 'unmute' ? 'forceUnmute' : 'forceMute', () => pending.promise);
+      const button = action === 'remove' ? buttons(first).remove : buttons(first).mute;
+      if (gainFirst) press(gainControls(first).apply); else press(button);
+      force(gainControls(first).apply); force(buttons(first).mute); force(buttons(first).remove); gainBusy(first, true);
+      assert.equal(gain.mock.callCount(), gainFirst ? 1 : 0); assert.equal(moderate.mock.callCount(), gainFirst ? 0 : 1);
+      const dialog = confirm(t); for (const row of view(element).rows) force(buttons(row).transfer); assert.equal(dialog.mock.callCount(), 0);
+      press(gainControls(second).apply); gainBusy(second, true); assert.equal(gain.mock.callCount(), gainFirst ? 2 : 1);
+      pending.resolve(); await settle(); gainBusy(first, false); gainBusy(second, true); independent.resolve(); await settle(); gainBusy(second, false);
+      assert.equal(requests(socket).length, 0);
+    });
+  }
+
+  for (const decision of ['cancel', 'accept', 'throw'] as const) it(`gain UI: global transfer ${decision} disables draft and Apply throughout reentrant confirmation and settlement`, async t => {
+    const { element, client } = await socketJoinedWidget(t, state()), pending = deferred();
+    const gain = t.mock.method(client, 'setGain', async () => {}), transfer = t.mock.method(client, 'transferControl', () => pending.promise);
+    const check = () => { for (const row of view(element).rows) { gainBusy(row, false, true); force(gainControls(row).apply); } assert.equal(gain.mock.callCount(), 0); };
+    confirm(t, () => { check(); if (decision === 'throw') throw new Error('Confirmation failed'); return decision === 'accept'; });
+    press(buttons(view(element).rows[0]!).transfer); await settle();
+    if (decision === 'accept') { check(); assert.equal(transfer.mock.callCount(), 1); pending.resolve(); await settle(); }
+    else assert.equal(transfer.mock.callCount(), 0);
+    for (const row of view(element).rows) gainBusy(row, false);
+  });
+
+  it('gain UI: synchronously reserves before SDK and event reentry, capturing the submitted decimal before a newer draft', async t => {
+    const { element, client, socket } = await socketJoinedWidget(t, state()), row = view(element).rows[0]!, pending = deferred(); gainDraft(row, '3.267');
+    element.addEventListener('stage-state', () => { force(gainControls(row).apply); force(buttons(row).mute); force(buttons(row).remove); gainDraft(row, '-2.001'); }, { once: true });
+    const gain = t.mock.method(client, 'setGain', (_id: string, _value: number) => { socket.deliver({ type: 'room:state', ...state() }); return pending.promise; });
+    const mute = t.mock.method(client, 'forceMute', async () => {}), remove = t.mock.method(client, 'removeFromStage', async () => {});
+    press(gainControls(row).apply); assert.equal(gain.mock.callCount(), 1); assert.deepEqual(gain.mock.calls[0]!.arguments, ['first', 3.267]);
+    assert.equal(mute.mock.callCount(), 0); assert.equal(remove.mock.callCount(), 0); gainBusy(row, true); assert.equal(gainControls(row).input.value, '-2.001');
+    pending.resolve(); await settle(); gainBusy(row, false); assert.equal(gainControls(row).input.value, '-2.001');
+  });
+
+  for (const outcome of ['resolve', 'reject'] as const) it(`gain UI: removed/reappeared same-ID row keeps reservation and isolates obsolete row ${outcome}`, async t => {
+    const { element, client, socket } = await socketJoinedWidget(t, state()), original = view(element).rows[0]!, old = deferred(), active = deferred(); let calls = 0;
+    const gain = t.mock.method(client, 'setGain', () => (++calls === 1 ? old : active).promise); gainDraft(original, '5.555'); press(gainControls(original).apply);
+    socket.deliver({ type: 'room:state', ...state(['second']) }); assert.equal(gainControls(original).input.disabled, true);
+    for (const row of view(element).rows) { assert.equal(buttons(row).transfer.disabled, true); force(buttons(row).transfer); }
+    const freshState = state(); freshState.speakers[0]!.gainDb = 7; socket.deliver({ type: 'room:state', ...freshState });
+    const fresh = view(element).rows[0]!; assert.notEqual(fresh, original); assert.equal(gainControls(fresh).input.value, '7'); gainBusy(fresh, true);
+    force(gainControls(original).apply); force(gainControls(fresh).apply); assert.equal(gain.mock.callCount(), 1); error(socket, 'Keep replacement error');
+    if (outcome === 'resolve') old.resolve(); else old.reject(new Error('Retired row gain failure')); await settle(); gainBusy(fresh, false);
+    assert.equal(element['error'].textContent, 'Keep replacement error'); assert.equal(gainControls(fresh).input.value, '7');
+    press(gainControls(fresh).apply); force(gainControls(original).apply); gainBusy(fresh, true); assert.equal(calls, 2); active.resolve(); await settle(); gainBusy(fresh, false);
+  });
+
+  for (const failure of ['synchronous', 'rejection', 'queue_full', 'timeout'] as const) it(`gain UI: current ${failure} preserves draft and unlocks for explicit retry only`, async t => {
+    const { element, client, socket, tick } = await socketJoinedWidget(t, state()), row = view(element).rows[0]!; gainDraft(row, '2.345');
+    if (failure === 'synchronous' || failure === 'rejection') {
+      const mock = t.mock.method(client, 'setGain', () => { if (failure === 'synchronous') throw new Error('Current gain failure'); return Promise.reject(new Error('Current gain failure')); });
+      press(gainControls(row).apply); await settle(); mock.mock.restore(); assert.equal(element['error'].textContent, 'Current gain failure');
+    } else if (failure === 'queue_full') {
+      Object.defineProperty(client, 'maxPendingControlRequests', { value: 1 }); const unrelated = client.forceMute('unlisted').catch(() => {});
+      press(gainControls(row).apply); await settle(); assert.match(element['error'].textContent ?? '', /佇列|請求/); await tick(100);
+      socket.deliver({ type: 'ok', requestId: request(socket).requestId }); await unrelated; assert.equal(gainRequests(socket).length, 0);
+    } else {
+      press(gainControls(row).apply); await tick(100); const expired = gainRequest(socket); await tick(15000); assert.match(element['error'].textContent ?? '', /逾時/);
+      socket.deliver({ type: 'ok', requestId: expired.requestId }); await settle(); assert.equal(gainRequests(socket).length, 1);
+    }
+    gainBusy(row, false); assert.equal(gainControls(row).input.value, '2.345'); assert.equal(gainControls(row).accepted.textContent, '目前混音增益：0 dB');
+    press(gainControls(row).apply); await tick(100); const retry = gainRequest(socket); gainBusy(row, true); assert.equal(retry.gainDb, 2.345);
+    socket.deliver({ type: 'ok', requestId: retry.requestId }); await settle(); gainBusy(row, false); assert.equal(gainControls(row).input.value, '2.345');
+  });
+
+  it('gain UI: start and ACK preserve independent feedback and never treat ACK as accepted gain', async t => {
+    const { element, socket, tick } = await socketJoinedWidget(t, state()), row = view(element).rows[0]!;
+    gainDraft(row, '3.26'); error(socket, 'Keep independent feedback'); press(gainControls(row).apply);
+    assert.equal(element['error'].textContent, 'Keep independent feedback'); assert.equal(element['error'].hidden, false); await tick(100); const sent = gainRequest(socket);
+    socket.deliver({ type: 'ok', requestId: sent.requestId }); await settle(); assert.equal(element['error'].textContent, 'Keep independent feedback'); assert.equal(element['error'].hidden, false);
+    assert.equal(gainControls(row).accepted.textContent, '目前混音增益：0 dB'); assert.equal(gainControls(row).input.value, '3.26');
+  });
+
+  for (const removed of ['row', 'input', 'apply'] as const) it(`gain UI: physically removed ${removed} cannot authorize a retained forced callback`, async t => {
+    const { element, client } = await socketJoinedWidget(t, state()), row = view(element).rows[0]!, controls = gainControls(row);
+    const gain = t.mock.method(client, 'setGain', async () => {});
+    if (removed === 'row') view(element).list.children.splice(0, 1);
+    else if (removed === 'input') row.children.find(node => node.tagName === 'LABEL')!.children.pop();
+    else row.children.splice(row.children.indexOf(controls.apply), 1);
+    force(controls.apply); await settle(); assert.equal(gain.mock.callCount(), 0); assert.equal(element['stageManagementPending'].size, 0);
+  });
+
+  for (const ancestor of ['list', 'panel'] as const) it(`gain UI: disconnected ${ancestor} subtree cannot authorize retained Apply`, async t => {
+    const { element, client } = await socketJoinedWidget(t, state()), row = view(element).rows[0]!, controls = gainControls(row);
+    const gain = t.mock.method(client, 'setGain', async () => {});
+    // The controlled DOM supplies the native disconnected-subtree flags, not browser tree propagation.
+    for (const node of nodes(ancestor === 'list' ? view(element).list : view(element).disclosure)) node.isConnected = false;
+    force(controls.apply); await settle(); assert.equal(gain.mock.callCount(), 0); assert.equal(element['stageManagementPending'].size, 0);
+  });
+
+  for (const mutation of ['role', 'target', 'status', 'method', 'owner offline', 'row replacement', 'input detached'] as const) it(`gain UI: reservation render ${mutation} reentry cannot submit a retired or ineligible action`, async t => {
+    const { element, client } = await socketJoinedWidget(t, state()), row = view(element).rows[0]!, controls = gainControls(row);
+    const gain = t.mock.method(client, 'setGain', async () => {}); let disabled = false, changed = false;
+    Object.defineProperty(controls.input, 'disabled', { configurable: true, get: () => disabled, set: (value: boolean) => {
+      disabled = value; if (!value || changed) return; changed = true;
+      if (mutation === 'role') client.state!.me.role = 'audience';
+      else if (mutation === 'target') client.state!.speakers[0]!.onStage = false;
+      else if (mutation === 'status') client['currentStatus'] = 'reconnecting';
+      else if (mutation === 'method') Object.defineProperty(client, 'setGain', { configurable: true, value: undefined });
+      else if (mutation === 'owner offline') client.state!.me.connected = false;
+      else if (mutation === 'input detached') row.children.find(node => node.tagName === 'LABEL')!.children.pop();
+      else {
+        const person = client.state!.speakers.shift()!; element['syncStageManagement'](); client.state!.speakers.unshift(person);
+      }
+      element['syncStageManagement']();
+    } });
+    t.after(() => Object.defineProperty(controls.input, 'disabled', { configurable: true, writable: true, value: disabled }));
+    press(controls.apply); await settle(); assert.equal(changed, true); assert.equal(gain.mock.callCount(), 0); assert.equal(element['stageManagementPending'].size, 0);
+  });
+
+  it('gain UI: reconnect retains dirty raw drafts, accepted stale marker, disclosure and deferred token without replay', async t => {
+    const { element, client, socket, sockets, tick, hello } = await socketJoinedWidget(t, state()), row = view(element).rows[0]!, other = view(element).rows[1]!, pending = deferred();
+    gainDraft(row, '3.260'); gainDraft(other, ''); view(element).disclosure.open = true;
+    const gain = t.mock.method(client, 'setGain', () => pending.promise); press(gainControls(row).apply);
+    error(socket, 'Keep reconnect feedback');
+    element.addEventListener('stage-status', () => { for (const current of view(element).rows) force(gainControls(current).apply); }, { once: true });
+    socket.close(); await settle(); assert.equal(view(element).rows[0], row); gainBusy(row, true); assert.equal(gainControls(other).input.disabled, true);
+    assert.match(gainControls(row).accepted.textContent, /上次收到/); assert.equal(gainControls(row).input.value, '3.260'); assert.equal(gainControls(other).input.value, '');
+    await tick(500); const next = sockets[1]!, resume = await hello(next), changed = state(['second', 'first'], true);
+    changed.speakers[1]!.name = 'Resumed &amp; renamed'; changed.speakers[1]!.gainDb = -4.5;
+    next.deliver({ type: 'room:state', ...changed }); next.deliver({ type: 'ok', requestId: resume.requestId }); await settle();
+    assert.equal(view(element).rows[1], row); assert.equal(view(element).disclosure.open, true); gainBusy(row, true);
+    assert.equal(gainControls(row).accepted.textContent, '目前混音增益：-4.5 dB'); assert.equal(gainControls(row).input.value, '3.260');
+    assert.equal(gainControls(other).input.value, ''); assert.equal(gainControls(other).input.disabled, false); assert.equal(gainControls(other).apply.disabled, true);
+    assert.equal(gain.mock.callCount(), 1); assert.equal(gainRequests(next).length, 0); pending.resolve(); await settle(); gainBusy(row, false);
+    assert.equal(element['error'].hidden, false); assert.equal(element['error'].textContent, 'Keep reconnect feedback');
+  });
+
+  it('gain UI: actual socket loss releases failed request while stale old wire cannot settle a resumed gain', async t => {
+    const { element, socket, sockets, tick, hello } = await socketJoinedWidget(t, state()), row = view(element).rows[0]!;
+    gainDraft(row, '5.550'); press(gainControls(row).apply); await tick(100); const old = gainRequest(socket), stale = socket.onmessage;
+    socket.close(); await settle(); assert.equal(gainControls(row).input.value, '5.550'); assert.equal(gainControls(row).input.disabled, true);
+    assert.equal(gainControls(row).apply.getAttribute('aria-busy'), 'false'); assert.equal(element['error'].textContent, '連線已中斷。');
+    await tick(500); const next = sockets[1]!, resume = await hello(next); next.deliver({ type: 'room:state', ...state() }); next.deliver({ type: 'ok', requestId: resume.requestId }); await settle();
+    assert.equal(view(element).rows[0], row); press(gainControls(row).apply); await tick(100); const active = gainRequest(next);
+    for (const message of [{ type: 'ok', requestId: old.requestId }, { type: 'error', code: 'conflict', message: 'Obsolete wire', requestId: old.requestId }, { type: 'room:state', ...state([]) }] satisfies ServerMessage[]) stale?.({ data: JSON.stringify(message) });
+    await settle(); gainBusy(row, true); assert.equal(element['error'].textContent, '連線已中斷。'); assert.equal(gainControls(row).input.value, '5.550');
+    next.deliver({ type: 'ok', requestId: active.requestId }); await settle(); gainBusy(row, false);
+  });
+
+  for (const invalid of ['missing target', 'self', 'offstage target', 'unknown target role', 'owner offline', 'owner role', 'detached element', 'missing current', 'missing snapshot', 'unknown status', 'disconnected', 'reconnecting'] as const) {
+    it(`gain UI: silent ${invalid} blocks forced callback without clearing current feedback`, async t => {
+      const { element, client, socket } = await socketJoinedWidget(t, state()), row = view(element).rows[0]!, controls = gainControls(row);
+      const gain = t.mock.method(client, 'setGain', async () => {}); error(socket, 'Keep gate feedback');
+      if (invalid === 'missing target') client.state!.speakers.splice(0, 1);
+      else if (invalid === 'self') client.state!.me.participantId = 'first';
+      else if (invalid === 'offstage target') client.state!.speakers[0]!.onStage = false;
+      else if (invalid === 'unknown target role') client.state!.speakers[0]!.role = 'unknown' as 'speaker';
+      else if (invalid === 'owner offline') client.state!.me.connected = false;
+      else if (invalid === 'owner role') client.state!.me.role = 'audience';
+      else if (invalid === 'detached element') Object.assign(element, { isConnected: false });
+      else if (invalid === 'missing current') element['current'] = null;
+      else if (invalid === 'missing snapshot') client['snapshot'] = null;
+      else client['currentStatus'] = (invalid === 'unknown status' ? 'unknown' : invalid) as typeof client.status;
+      force(controls.apply); await settle(); assert.equal(gain.mock.callCount(), 0); assert.equal(element['stageManagementPending'].size, 0);
+      assert.equal(element['error'].hidden, false); assert.equal(element['error'].textContent, 'Keep gate feedback');
+      element['current'] = client; Object.assign(element, { isConnected: true });
+    });
+  }
+
+  for (const status of ['waiting', 'live'] as const) it(`gain UI: connected controller can apply in ${status} regardless of own stage seat`, async t => {
+    const { element, client } = await socketJoinedWidget(t, state()), row = view(element).rows[0]!, gain = t.mock.method(client, 'setGain', async () => {});
+    for (const onStage of [false, true]) {
+      client['currentStatus'] = status; client.state!.me.onStage = onStage; element['render'](); assert.equal(view(element).rows[0], row);
+      press(gainControls(row).apply); await settle();
+    }
+    assert.equal(gain.mock.callCount(), 2);
+  });
+
+  it('gain UI: absent SDK capability disables only new controls; restored capability never auto-submits', async t => {
+    const { element, client, socket, tick } = await socketJoinedWidget(t, state()), row = view(element).rows[0]!, method = client.setGain;
+    gainDraft(row, '7.77'); Reflect.set(client, 'setGain', undefined); element['render'](); gainBusy(row, false, true); busy(row, false);
+    force(gainControls(row).apply); await tick(100); assert.equal(gainRequests(socket).length, 0);
+    Reflect.set(client, 'setGain', method); element['render'](); gainBusy(row, false); assert.equal(gainControls(row).input.value, '7.77'); await tick(100);
+    assert.equal(gainRequests(socket).length, 0); press(gainControls(row).apply); await tick(100); const sent = gainRequest(socket);
+    socket.deliver({ type: 'ok', requestId: sent.requestId }); await settle();
+  });
+
+  for (const outcome of ['resolve', 'reject'] as const) for (const change of ['role', 'room', 'participant', 'generation'] as const) {
+    it(`gain UI: retired ${change} ${outcome} cannot change new tenure draft, accepted gain, feedback or pending`, async t => {
+      const { element, client, socket } = await socketJoinedWidget(t, state()), original = view(element).rows[0]!, old = deferred(), active = deferred(); let calls = 0;
+      t.mock.method(client, 'setGain', () => (++calls === 1 ? old : active).promise); gainDraft(original, '3.33'); press(gainControls(original).apply);
+      const changed = state();
+      if (change === 'role') { changed.me.role = 'audience'; changed.controllerId = 'other'; }
+      else if (change === 'room') changed.roomId = 'two';
+      else if (change === 'participant') { changed.me.participantId = 'new'; changed.controllerId = 'new'; }
+      else ++element['generation'];
+      if (change === 'generation') element['render'](); else socket.deliver({ type: 'room:state', ...changed });
+      const freshState = state(); freshState.speakers[0]!.gainDb = -2.5;
+      if (change === 'generation') { client['snapshot'] = freshState; element['render'](); } else socket.deliver({ type: 'room:state', ...freshState });
+      const fresh = view(element).rows[0]!; assert.notEqual(fresh, original); gainDraft(fresh, '-4.567'); press(gainControls(fresh).apply); element['show'](new Error('Fresh gain feedback'));
+      if (outcome === 'resolve') old.resolve(); else old.reject(new Error('Obsolete gain failure')); await settle(); force(gainControls(original).apply);
+      assert.equal(calls, 2); gainBusy(fresh, true); assert.equal(gainControls(fresh).input.value, '-4.567'); assert.equal(gainControls(fresh).accepted.textContent, '目前混音增益：-2.5 dB');
+      assert.equal(element['error'].textContent, 'Fresh gain feedback'); assert.equal(element['error'].hidden, false); active.resolve(); await settle(); gainBusy(fresh, false);
+    });
+  }
+
+  for (const transition of ['leave', 'detach', 'direct disconnect', 'ordinary close', 'kick', 'shutdown'] as const) {
+    it(`gain UI: ${transition} retires drafts and pending before forwarded callbacks and ignores old rejection`, async t => {
+      const { element, client, socket } = await socketJoinedWidget(t, state()), old = view(element).rows[0]!, controls = gainControls(old), pending = deferred();
+      const gain = t.mock.method(client, 'setGain', () => pending.promise); gainDraft(old, '9.99'); press(controls.apply); view(element).disclosure.open = true;
+      const terminal = terminalCases.find(item => item.title === transition); let callbacks = 0;
+      if (terminal) element.addEventListener(`stage-${terminal.event}`, () => { callbacks++; retired(element); assert.equal(controls.input.disabled, true); force(controls.apply); }, { once: true });
+      if (transition === 'leave') click(element['roomAction']);
+      else if (transition === 'detach') { Object.assign(element, { isConnected: false }); element.disconnectedCallback(); }
+      else if (transition === 'direct disconnect') await client.disconnect();
+      else socket.deliver(terminal!.message);
+      await settle(); retired(element); if (terminal) assert.equal(callbacks, 1); assert.equal(element['stageManagementPending'].size, 0);
+      element['show'](new Error('Current terminal feedback')); pending.reject(new Error('Obsolete terminal gain')); await settle(); force(controls.apply);
+      assert.equal(gain.mock.callCount(), 1); assert.equal(element['error'].textContent, 'Current terminal feedback'); assert.equal(element['error'].hidden, false);
+    });
+  }
+
+  for (const terminal of [null, ...terminalCases]) it(`gain UI: same-client same-ID rejoin after ${terminal?.title ?? 'disconnect'} starts a fresh draft and isolates old settlement`, async t => {
+    const { element, client, socket, sockets, tick, joinRequest } = await socketJoinedWidget(t, state()), old = deferred(), active = deferred(), original = view(element).rows[0]!; let calls = 0;
+    t.mock.method(client, 'setGain', () => (++calls === 1 ? old : active).promise); gainDraft(original, '9.999'); press(gainControls(original).apply);
+    if (terminal) socket.deliver(terminal.message); else await client.disconnect(); await settle(); retired(element);
+    const connecting = client.connect(), next = sockets[1]!; next.hello(); await connecting;
+    const joining = client.join({ roomId: 'one', name: 'Fresh same-ID controller' }); await settle(); await tick(100); const join = joinRequest(next), freshState = state(); freshState.speakers[0]!.gainDb = 4.5;
+    next.deliver({ type: 'room:state', ...freshState }); next.deliver({ type: 'ok', requestId: join.requestId }); await joining;
+    const fresh = view(element).rows[0]!; assert.notEqual(fresh, original); assert.equal(gainControls(fresh).input.value, '4.5'); gainDraft(fresh, '-1.234'); press(gainControls(fresh).apply);
+    error(next, 'Fresh rejoin feedback'); old.reject(new Error('Retired same-ID gain')); await settle(); force(gainControls(original).apply);
+    assert.equal(calls, 2); gainBusy(fresh, true); assert.equal(gainControls(fresh).input.value, '-1.234'); assert.equal(element['error'].textContent, 'Fresh rejoin feedback');
+    active.resolve(); await settle(); gainBusy(fresh, false);
+  });
+
+  for (const attribute of ['room', 'name', 'code', 'url'] as const) it(`gain UI: ${attribute} client replacement cannot inherit old draft, callbacks or token`, async t => {
+    const { element, client, socket, sockets, hello } = await socketJoinedWidget(t, state()), old = deferred(), original = view(element).rows[0]!;
+    t.mock.method(client, 'setGain', () => old.promise); gainDraft(original, '3.456'); press(gainControls(original).apply); const oldMessage = socket.onmessage, oldClose = socket.onclose;
+    element.setAttribute(attribute, attribute === 'url' ? 'ws://localhost/new-stage' : attribute === 'room' ? 'two' : 'Changed'); await settle(); await settle(); retired(element);
+    const replacement = element.client!; assert.notEqual(replacement, client); const next = sockets[1]!, join = await hello(next);
+    const freshState = state(['first'], false, attribute === 'room' ? 'two' : 'one'); freshState.speakers[0]!.gainDb = -3;
+    next.deliver({ type: 'room:state', ...freshState }); next.deliver({ type: 'ok', requestId: join.requestId }); await settle();
+    const active = deferred(), gain = t.mock.method(replacement, 'setGain', () => active.promise), fresh = view(element).rows[0]!;
+    assert.equal(gainControls(fresh).input.value, '-3'); gainDraft(fresh, '1.234'); press(gainControls(fresh).apply); error(next, 'New client feedback');
+    old.reject(new Error('Old client gain')); oldMessage?.({ data: JSON.stringify({ type: 'room:state', ...state([]) }) }); oldClose?.(); await settle(); force(gainControls(original).apply);
+    gainBusy(fresh, true); assert.equal(gain.mock.callCount(), 1); assert.equal(gainControls(fresh).input.value, '1.234'); assert.equal(element['error'].textContent, 'New client feedback'); active.resolve(); await settle(); gainBusy(fresh, false);
+  });
+
+  it('gain UI: forwarded callback snapshot retirement and reconnect-only fresh snapshot cannot restore old ownership', async t => {
+    const { element, client, socket } = await socketJoinedWidget(t, state()), old = view(element).rows[0]!, pending = deferred();
+    const gain = t.mock.method(client, 'setGain', () => pending.promise); press(gainControls(old).apply);
+    element.addEventListener('stage-micready', () => { client['snapshot'] = null; }, { once: true });
+    client.dispatchEvent(new CustomEvent('micready', { detail: undefined })); retired(element); error(socket, 'Keep retired feedback');
+    pending.reject(new Error('Retired callback gain')); await settle(); assert.equal(element['error'].textContent, 'Keep retired feedback');
+    const next = state(); next.me.participantId = 'new-controller'; next.controllerId = next.me.participantId;
+    client['snapshot'] = next; client['currentStatus'] = 'reconnecting'; client.dispatchEvent(new CustomEvent('status', { detail: 'reconnecting' })); retired(element);
+    force(gainControls(old).apply); assert.equal(gain.mock.callCount(), 1); socket.deliver({ type: 'room:state', ...next }); assert.equal(view(element).rows.length, 2);
+  });
+
+  it('gain UI: silent role loss retires on settlement while SDK-global old wire errors retain their documented behavior', async t => {
+    const { element, client, socket, tick } = await socketJoinedWidget(t, state()), pending = deferred(), mock = t.mock.method(client, 'setGain', () => pending.promise);
+    press(gainControls(view(element).rows[0]!).apply); error(socket, 'Independent feedback'); client.state!.me.role = 'audience';
+    pending.reject(new Error('Silent obsolete gain')); await settle(); retired(element); assert.equal(element['error'].textContent, 'Independent feedback'); mock.mock.restore();
+    socket.deliver({ type: 'room:state', ...state() }); press(gainControls(view(element).rows[0]!).apply); await tick(100); const old = gainRequest(socket);
+    socket.deliver({ type: 'room:state', ...roomState() }); socket.deliver({ type: 'room:state', ...state() });
+    const fresh = view(element).rows[0]!; gainDraft(fresh, '6.66'); press(gainControls(fresh).apply); await tick(100); const active = gainRequest(socket);
+    socket.deliver({ type: 'error', code: 'forbidden', message: 'Global old wire error', requestId: old.requestId }); await settle();
+    assert.equal(element['error'].textContent, 'Global old wire error'); gainBusy(fresh, true); assert.equal(gainControls(fresh).input.value, '6.66');
+    socket.deliver({ type: 'ok', requestId: active.requestId }); await settle(); gainBusy(fresh, false);
+  });
+
+  for (const race of ['controller transferred', 'target left'] as const) it(`gain UI: notification-before-state ${race} retains moderation policy and server authority`, async t => {
+    const f = await hubWidget(t), row = f.target(), start = f.successor.s.inbox.length;
+    if (race === 'controller transferred') assert.equal(await f.h.req(f.successor.s, { type: 'control:transfer', targetId: f.host.id }), 'ok');
+    else assert.equal(await f.h.req(f.first.s, { type: 'stage:leave' }), 'ok');
+    const events = f.successor.s.inbox.slice(start).filter(message => !['room:state', 'ok', 'error'].includes(message.type)); let calls = 0;
+    f.element.addEventListener(race === 'controller transferred' ? 'stage-transferred' : 'stage-stageleft', () => {
+      calls++; assert.equal(f.client.me!.role, 'controller'); gainDraft(row, '4.56'); press(gainControls(row).apply); assert.equal(buttons(row).transfer.disabled, true);
+    }, { once: true });
+    for (const event of events) f.socket.deliver(event); assert.equal(calls, 1); await f.tick(100); const sent = gainRequest(f.socket), result = await f.relay(sent);
+    assert.equal(result.reply.type, race === 'controller transferred' ? 'error' : 'ok');
+    if (result.reply.type === 'error') assert.equal(result.reply.code, 'forbidden'); f.socket.deliver(result.reply); await settle(); f.deliver();
+    if (race === 'controller transferred') retired(f.element); else assert.equal(f.client.state!.audience!.find(person => person.participantId === f.first.id)!.gainDb, 4.6);
+    force(gainControls(row).apply); await f.tick(100); assert.equal(gainRequests(f.socket).length, 1);
+  });
+
 });
 
 /**

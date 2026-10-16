@@ -1,4 +1,4 @@
-import { StageClient, decodeName, type ConnectionQuality, type StageEventMap } from './index.ts';
+import { StageClient, decodeName, MAX_GAIN_DB, type ConnectionQuality, type StageEventMap } from './index.ts';
 
 /** Every StageClient event, re-dispatched from the element as `stage-<type>`. */
 const EVENTS: (keyof StageEventMap)[] = [
@@ -29,6 +29,8 @@ const STYLE = `
 [part=stage-management] ul { display: grid; gap: .5rem; padding-left: 1.25rem; }
 [part=stage-management] li { overflow-wrap: anywhere; }
 [part=stage-management] button { margin-left: .5rem; }
+[part=stage-management] label { display: inline-flex; flex-wrap: wrap; align-items: center; gap: .5rem; margin-left: .5rem; }
+[part=stage-management] input { font: inherit; width: 6rem; max-width: 100%; }
 [part=playback] { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; }
 [part=playback][hidden] { display: none; }
 [part=microphone] { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; }
@@ -61,7 +63,7 @@ button.primary { background: var(--stage-accent, #2563eb); border-color: transpa
  * later snapshots update its accepted-name display, not the draft or the `name` attribute.
  * The controller's room-name draft follows the same rule while control is retained.
  * A controller can explicitly approve or reject the snapshot's hand requests; the server owns admission.
- * Controllers can lock/unlock other speakers' mute, remove them from the stage, or confirm a connected speaker's control handoff.
+ * Controllers can lock/unlock other speakers' mute, explicitly apply a room-mix gain draft, remove them from the stage, or confirm a connected speaker's control handoff.
  * The microphone picker is an explicit draft, never an indicator of the actual capture device.
  * The output picker is also a draft; explicit refresh and submission never imply audible playback.
  * Style through `::part(panel|status|quality|speaking|hand-rejection|audio-recovery|audio-retry|actions|name|room-name|hands|stage-management|playback|microphone|output-device)` and the
@@ -110,7 +112,7 @@ export class StageElement extends HTMLElement {
   private stageManagementTerminalClient: StageClient | undefined;
   private readonly stageManagementPending = new Map<string, object>();
   private stageTransferAttempt: { id: string; node: HTMLLIElement; revision: number; invalid: boolean } | undefined;
-  private readonly stageManagementRows = new Map<string, { node: HTMLLIElement; name: HTMLSpanElement; mute: HTMLButtonElement; remove: HTMLButtonElement; transfer: HTMLButtonElement }>();
+  private readonly stageManagementRows = new Map<string, { node: HTMLLIElement; name: HTMLSpanElement; mute: HTMLButtonElement; remove: HTMLButtonElement; transfer: HTMLButtonElement; gainAccepted: HTMLSpanElement; gainLabel: HTMLSpanElement; gainInput: HTMLInputElement; gainApply: HTMLButtonElement }>();
   private stageManagementOrder: string[] = [];
   private readonly unlock: HTMLButtonElement;
   private playbackOwner: { client: StageClient; roomId: string; participantId: string; notice: number } | undefined;
@@ -814,7 +816,7 @@ export class StageElement extends HTMLElement {
   private retireStageManagement(): void {
     this.stageManagementOwner = undefined; this.stageManagementPending.clear(); this.stageTransferAttempt = undefined;
     for (const row of this.stageManagementRows.values()) {
-      for (const control of [row.mute, row.remove, row.transfer]) { control.disabled = true; control.setAttribute('aria-busy', 'false'); }
+      for (const control of [row.mute, row.remove, row.transfer, row.gainInput, row.gainApply]) { control.disabled = true; control.setAttribute('aria-busy', 'false'); }
     }
     if (this.stageManagementRows.size) this.stageManagementList.replaceChildren();
     this.stageManagementRows.clear(); this.stageManagementOrder = [];
@@ -847,7 +849,7 @@ export class StageElement extends HTMLElement {
     this.stageManagementPanel.hidden = false;
     this.stageManagementSummary.textContent = `舞台管理（${people.length}）${reconnecting ? ' · 上次收到' : ''}`;
     this.stageManagementNotice.textContent = `${reconnecting ? '重新連線中，暫時不能管理舞台。'
-      : people.length ? '僅管理其他台上發言者。' : '目前沒有其他台上發言者。'}解除靜音鎖定會保留對方自行靜音設定；移下台後仍留在房間。移交控制權後會失去主控權限，但保留目前台位並留在房間。`;
+      : people.length ? '僅管理其他台上發言者。' : '目前沒有其他台上發言者。'}解除靜音鎖定會保留對方自行靜音設定；移下台後仍留在房間。移交控制權後會失去主控權限，但保留目前台位並留在房間。混音增益調整該講者在房間混音中的音量，0 會重設手動增益；不改變本機播放音量或麥克風硬體增益，也不會解除靜音，可能影響稍後音訊或下次上台。伺服器仍可能接受在尚未得知對方下台時送出的增益。`;
     for (const person of people) {
       const id = person.participantId;
       let row = this.stageManagementRows.get(id);
@@ -855,12 +857,20 @@ export class StageElement extends HTMLElement {
         const node = document.createElement('li'), name = document.createElement('span');
         const mute = document.createElement('button'), remove = document.createElement('button'), transfer = document.createElement('button');
         mute.type = remove.type = transfer.type = 'button'; remove.textContent = '移下台'; transfer.textContent = '移交控制權';
-        row = { node, name, mute, remove, transfer };
+        const gainAccepted = document.createElement('span'), gainLabel = document.createElement('span');
+        const label = document.createElement('label'), gainInput = document.createElement('input'), gainApply = document.createElement('button');
+        gainInput.type = 'number'; gainInput.min = String(-MAX_GAIN_DB); gainInput.max = String(MAX_GAIN_DB); gainInput.step = '0.1';
+        gainInput.value = String(person.gainDb);
+        gainApply.type = 'button'; gainApply.textContent = '套用混音增益';
+        label.append(gainLabel, gainInput);
+        row = { node, name, mute, remove, transfer, gainAccepted, gainLabel, gainInput, gainApply };
         const currentRow = row;
         mute.onclick = () => this.moderateStage(id, currentRow.node, false);
         remove.onclick = () => this.moderateStage(id, currentRow.node, true);
         transfer.onclick = () => this.transferStageControl(id, currentRow.node);
-        node.append(name, mute, remove, transfer); this.stageManagementRows.set(id, row);
+        gainInput.oninput = gainInput.onchange = () => this.syncStageManagement();
+        gainApply.onclick = () => this.applyStageGain(id, currentRow.node);
+        node.append(name, mute, remove, transfer, gainAccepted, label, gainApply); this.stageManagementRows.set(id, row);
       }
       const name = decodeName(person.name);
       const label = `${name} · ${person.muted ? '已靜音' : '未靜音'}${person.forceMuted ? ' · 已鎖定靜音' : ''}${person.connected ? '' : ' · 暫時離線（席位保留中）'}`;
@@ -872,7 +882,19 @@ export class StageElement extends HTMLElement {
       if (row.mute.getAttribute('aria-label') !== muteLabel) row.mute.setAttribute('aria-label', muteLabel);
       if (row.remove.getAttribute('aria-label') !== removeLabel) row.remove.setAttribute('aria-label', removeLabel);
       if (row.transfer.getAttribute('aria-label') !== transferLabel) row.transfer.setAttribute('aria-label', transferLabel);
+      const accepted = `目前混音增益：${person.gainDb > 0 ? '+' : ''}${person.gainDb} dB${reconnecting ? '（上次收到）' : ''}`;
+      const gainLabel = `${name} 的混音增益草稿（dB），範圍 -${MAX_GAIN_DB} 至 +${MAX_GAIN_DB}，步進 0.1`;
+      const gainApplyLabel = `套用 ${name} 的混音增益`;
+      if (row.gainAccepted.textContent !== accepted) row.gainAccepted.textContent = accepted;
+      if (row.gainLabel.textContent !== gainLabel) row.gainLabel.textContent = gainLabel;
+      if (row.gainApply.getAttribute('aria-label') !== gainApplyLabel) row.gainApply.setAttribute('aria-label', gainApplyLabel);
       const pending = this.stageManagementPending.has(id);
+      const gainDisabled = reconnecting || !me.connected || pending || Boolean(this.stageTransferAttempt) || typeof client.setGain !== 'function';
+      for (const control of [row.gainInput, row.gainApply]) {
+        const disabled = gainDisabled || (control === row.gainApply && this.stageGainDraft(row.gainInput) === undefined), busy = String(pending);
+        if (control.disabled !== disabled) control.disabled = disabled;
+        if (control.getAttribute('aria-busy') !== busy) control.setAttribute('aria-busy', busy);
+      }
       // A retained offline seat can still be moderated; the server decides whether it remains valid.
       for (const control of [row.mute, row.remove]) {
         const disabled = reconnecting || pending || Boolean(this.stageTransferAttempt), busy = String(pending);
@@ -887,7 +909,7 @@ export class StageElement extends HTMLElement {
       if (row.transfer.getAttribute('aria-busy') !== busy) row.transfer.setAttribute('aria-busy', busy);
     }
     for (const [id, row] of this.stageManagementRows) if (!seen.has(id)) {
-      for (const control of [row.mute, row.remove, row.transfer]) { control.disabled = true; control.setAttribute('aria-busy', 'false'); }
+      for (const control of [row.mute, row.remove, row.transfer, row.gainInput, row.gainApply]) { control.disabled = true; control.setAttribute('aria-busy', 'false'); }
       this.stageManagementRows.delete(id);
       // Keep an admitted operation reserved until settlement, even if this ID returns on stage.
     }
@@ -921,6 +943,54 @@ export class StageElement extends HTMLElement {
       try { await (remove ? owner.client.removeFromStage(id) : forceMuted ? owner.client.forceUnmute(id) : owner.client.forceMute(id)); }
       catch (error) { if (current() && this.stageManagementRows.get(id)?.node === node) this.show(error); }
       finally { if (current()) { this.stageManagementPending.delete(id); this.syncStageManagement(); } }
+    })();
+  }
+
+  private stageGainDraft(input: HTMLInputElement): number | undefined {
+    const draft = input.value.trim();
+    // Number('') is zero and Number('0x10') is hexadecimal, neither is a decimal draft.
+    if (!/^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/i.test(draft)) return undefined;
+    const gain = Number(draft);
+    return Number.isFinite(gain) && Math.abs(gain) <= MAX_GAIN_DB ? gain : undefined;
+  }
+
+  private applyStageGain(id: string, node: HTMLLIElement): void {
+    this.syncStageManagement();
+    const owner = this.stageManagementOwner, row = this.stageManagementRows.get(id);
+    if (!owner || !row || row.node !== node) return;
+    const mounted = (): boolean => node.isConnected && this.stageManagementRows.get(id) === row && this.stageManagementList.contains(node)
+      && node.contains(row.gainInput) && node.contains(row.gainApply);
+    const current = (): boolean => this.stageManagementOwner === owner && this.current === owner.client
+      && this.generation === owner.generation && this.isConnected && !this.stageManagementPanel.hidden
+      && owner.client.state?.roomId === owner.roomId && owner.client.me?.participantId === owner.participantId
+      && owner.client.me?.role === 'controller' && this.stageManagementTerminalClient !== owner.client;
+    const eligible = (): boolean => current() && mounted() && (owner.client.status === 'waiting' || owner.client.status === 'live')
+      && owner.client.me?.connected === true && !this.stageTransferAttempt && typeof owner.client.setGain === 'function'
+      && Boolean(owner.client.state?.speakers.find(person => person.participantId === id && person.role === 'speaker' && person.onStage));
+    const gain = this.stageGainDraft(row.gainInput);
+    if (!eligible() || this.stageManagementPending.has(id) || gain === undefined) return;
+    const attempt = {};
+    this.stageManagementPending.set(id, attempt);
+    const owns = (): boolean => this.stageManagementOwner === owner && this.stageManagementPending.get(id) === attempt;
+    void (async () => {
+      try {
+        this.syncStageManagement();
+        // Rendering disabled controls can synchronously reenter host code and retire this row or owner.
+        if (!owns() || !eligible()) return;
+        await owner.client.setGain(id, gain);
+      } catch (error) {
+        if (owns()) {
+          try { this.syncStageManagement(); } catch { /* A failed DOM write remains retryable on the next reconciliation. */ }
+          if (owns() && current() && mounted()) this.show(error);
+        }
+      } finally {
+        // Release by token identity before rendering, even if a host DOM setter throws again.
+        if (owns()) {
+          this.stageManagementPending.delete(id);
+          try { this.syncStageManagement(); }
+          catch (error) { if (current() && mounted()) this.show(error); }
+        }
+      }
     })();
   }
 

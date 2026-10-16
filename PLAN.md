@@ -811,3 +811,6 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 
 
 212. **Widget 舞台列避免等值寫入（第191批，2026-10-16）：** published189完整StageElement經公開SDK→validator→Hub的24次合法gain／roomName更新，1／3／8講者等值列寫入864／2592／6912，受控候選降0。只在element.ts原舞台列12個text／attribute／disabled／hidden寫入比較目前DOM值；每次仍重算desired label與原資格／pending，保留canTransferStage原時點及短路，不加signaturecache、事件合併或提前跳過sync。panel／summary／notice、列創建／移除／排序／退役、callback與權限路徑不改；宿主改值可修正，失敗寫入下次重試，不新增歷史狀態。兩版原本皆保留列／按鈕／handler身分，無新增identity效益；變更／重入／重連／同ID與舊promise隔離須回歸。無SDK／server／protocol／media／依賴變更，不宣稱原生browser時間／記憶體／layout／焦點／AT或硬體音訊改善。
+
+
+213. **Widget 講者混音增益（第192批，2026-10-16）：** immutable191完整元件＋SDK→validator→Hub十一例證明HTML-only主控核准後舞台列看不到gainDb也不能調整，改本機播放音量不能取代房間mix trim。僅既有其他台上speaker列新增權威接受值、具名number草稿與明確apply；使用MAX_GAIN_DB界限／finite decimal驗證，拒絕空白／hex／非有限／超界，不clamp或本機round。保留raw draft跨同列快照／改名／排序／重連／ACK，接受值只依state；列移除／owner退役丟棄草稿。共用原target pending與transfer全舞台互鎖，先reserve防重入，同ID回台等舊settle；舊owner／row／token隔離，不改通知窗口或SDK全域error。191即時DOM比較完整保留，新增動態欄位也只寫不同值，不變快照zero新欄位寫入／zero草稿value寫入；無signaturecache或skip sync。離線／muted目標合法但不unmute；已送後下台仍可能接受並保留，無取消或原子台位保證。不改SDK／server／protocol／media／依賴，不新增公有屬性、timer、capture／play／協商；受控證據不等同native數字輸入／IME／版面／焦點／AT或聲音驗收。
