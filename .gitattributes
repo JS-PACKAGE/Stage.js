@@ -1,3 +1,4 @@
 stage.ps1 text eol=lf
 test/fixtures/windows-stage/stage-before-run-directory.ps1 -text
 test/fixtures/windows-stage/stage-before-pid-cleanup.ps1 -text
+test/fixtures/windows-stage/stage-before-restart-preflight.ps1 -text

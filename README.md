@@ -111,7 +111,9 @@ Linux 上完成 `npm run build` 後，可執行 `npm run test:server-package`。
 
 `stage.ps1 start` 若背景程序已啟動卻無法寫入 `.run/stage.pid`，會嘗試終止這次 `Start-Process` 回傳的程序並有限等待退出，再回報原始寫入失敗。若清理本身失敗或逾時，也會另外顯示清理錯誤；不宣稱此時已回收程序。無效的 PID 路徑保留供檢查，不透過它尋找其他程序，也不改一般 `stop` 的行為或解決並行啟動／PID 重用。
 
-`stage.sh restart` 在送出 SIGTERM 前先檢查 Node 版本、已建置的 server／設定檢查器與設定語法／schema；檢查失敗時不停止目前程序。請先執行 `build`，舊版建置若沒有 `dist/src/check-config.js` 也會拒絕 restart。檢查器與 server 使用同一份已建置 schema，不改用可能較新的 source schema。原有 timeout／PID 驗證仍優先；設定準備沿用 `start`，因此缺少預設設定時仍可能先由範例建立 `config.yaml`，而 checker 本身不寫入設定。`STAGE_CONFIG` 原值會保留給 checker，relative path 從腳本所在專案目錄解析，空值仍依 server 語意驗證並失敗。通過後仍依序 stop／start，不保證零停機或啟動成功，也不預測 port、TLS／media 資源、相依套件的所有 runtime 路徑或檢查後的檔案變更。其他控制指令與 Windows 腳本維持原本行為。
+`stage.sh restart` 在送出 SIGTERM 前先檢查 Node 版本、已建置的 server／設定檢查器與設定語法／schema；檢查失敗時不停止目前程序。請先執行 `build`，舊版建置若沒有 `dist/src/check-config.js` 也會拒絕 restart。檢查器與 server 使用同一份已建置 schema，不改用可能較新的 source schema。原有 timeout／PID 驗證仍優先；設定準備沿用 `start`，因此缺少預設設定時仍可能先由範例建立 `config.yaml`，而 checker 本身不寫入設定。`STAGE_CONFIG` 原值會保留給 checker，relative path 從腳本所在專案目錄解析，空值仍依 server 語意驗證並失敗。通過後仍依序 stop／start，不保證零停機或啟動成功，也不預測 port、TLS／media 資源、相依套件的所有 runtime 路徑或檢查後的檔案變更。其他控制指令維持原本行為。
+
+`stage.ps1 restart` 同樣在停止目前程序之前檢查 Node、已建置的 server／設定檢查器與設定。請先執行 `build`；缺少 `dist/src/check-config.js` 或檢查器回傳非零時不停止目前程序。它不向檢查器傳入另外推測的設定路徑，保留 `STAGE_CONFIG` 與專案根目錄的既有解析方式；缺少預設設定時仍可能從範例建立。通過後才執行原本的 stop／start，不保證零停機、埠號可用或後續啟動成功。Windows 原生 CI 以受控檢查器驗證這個順序、路徑與失敗結果；真實設定 schema 另由既有 Linux 測試驗證。
 
 Windows 用 `.\stage.ps1 <command>`，指令相同；Windows 無法對背景 node 送 SIGTERM，`stop` 為直接終止。
 

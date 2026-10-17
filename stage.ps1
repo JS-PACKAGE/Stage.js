@@ -13,6 +13,7 @@ $PidFile = Join-Path $RunDir 'stage.pid'
 $LogFile = Join-Path $RunDir 'stage.log'
 $ErrFile = Join-Path $RunDir 'stage.err.log'
 $Entry = Join-Path $Root 'dist/src/index.js'
+$Checker = Join-Path $Root 'dist/src/check-config.js'
 $StopTimeout = if ($env:STAGE_STOP_TIMEOUT) { [int]$env:STAGE_STOP_TIMEOUT } else { 15 }
 
 Set-Location $Root
@@ -28,9 +29,10 @@ function Invoke-Checked([string]$File, [string[]]$Arguments) {
   if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 }
 
-function Test-Node {
+function Test-Node([switch]$RequireSuccessfulExit) {
   if (-not (Get-Command node -ErrorAction SilentlyContinue)) { Fail '找不到 node（需要 Node.js 24 以上）' }
   $major = [int](& node -p 'parseInt(process.versions.node)')
+  if ($RequireSuccessfulExit -and $LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
   if ($major -lt 24) { Fail "Node.js 版本為 $(& node --version)，需要 24 以上" }
 }
 
@@ -110,6 +112,17 @@ function Stop-Stage {
   Write-Host "已停止（pid $($proc.Id)）"
 }
 
+function Restart-Stage {
+  Test-Node -RequireSuccessfulExit
+  if (-not (Test-Path -LiteralPath $Entry -PathType Leaf)) { Fail "找不到 $Entry，請先執行 build" }
+  if (-not (Test-Path -LiteralPath $Checker -PathType Leaf)) { Fail '找不到已建置的設定檢查器，請先執行 build' }
+  Initialize-Config
+  # Use the deployed schema and unchanged environment before stopping the current process.
+  Invoke-Checked 'node' @($Checker)
+  Stop-Stage
+  Start-Stage
+}
+
 function Show-Status {
   $proc = Get-RunningProcess
   if ($proc) { Write-Host "執行中（pid $($proc.Id)）" } else { Write-Host '未在執行'; exit 3 }
@@ -138,7 +151,7 @@ function Show-Help {
   build        建置伺服器、client 函式庫與範例前端
   start        於背景啟動已建置的伺服器（pid／log 位於 .run\）
   stop         停止伺服器（逾時後強制終止）
-  restart      stop 後再 start
+  restart      預檢已建置版本與設定，通過後 stop 再 start
   status       顯示執行狀態（未執行時 exit code 3）
   logs [N|-f]  顯示最後 N 行 log（預設 100），-f 持續追蹤
   run          前景執行（給 NSSM／排程等外部監管使用）
@@ -156,7 +169,7 @@ switch ($Command) {
   'build' { Test-Node; Invoke-Checked 'npm' @('run', 'build') }
   'start' { Start-Stage }
   'stop' { Stop-Stage }
-  'restart' { Stop-Stage; Start-Stage }
+  'restart' { Restart-Stage }
   'status' { Show-Status }
   'logs' { Show-Logs $Rest }
   'run' { Test-Node; Initialize-Config; Invoke-Checked 'node' @($Entry) }
