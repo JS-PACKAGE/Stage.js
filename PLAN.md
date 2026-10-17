@@ -899,3 +899,6 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 
 
 243. **Node 24 GitHub 自動驗證（第223批，2026-10-17）：** immutable222 沒有任何受版控CI workflow，Gate1／Gate5要求的型別／測試與乾淨安裝建置缺少每次提交可重現的遠端檢查；不是缺少核心功能，也不宣稱企劃明訂GitHub Actions。使用者明確同意新增push／PR CI後，加入標準Ubuntu24.04／Node24單job，locked npm ci後依序四份types、全tests與build，20分鐘上限、同event／ref取消舊run。分支push排除tags、PR用預設事件與合併測試ref；exact-head交付結果另核push run。官方checkout／setup-node完整SHA釘選，contents只讀、不保留git認證、不用custom secrets／cache／artifacts／schedule／deploy，不改settings或branch protection。新增YAML結構與授權邊界回歸及README說明，無runtime／依賴／lockfile改動。npm test仍含既有codec／worker受控檢查，不稱純控制面；此CI不含audit／start／native WebRTC loopback／load／browser／AT／hardware／跨NAT，原Gate與HOLD仍獨立。發布後追蹤首次exact-head push CI至terminal，不能把本機PASS當遠端PASS。
+
+
+244. **範例建置資產支援既有靜態掛載前綴（第224批，2026-10-17）：** immutable223 的真正 Vite 產物透過 createStaticHandler／本機 HTTP 掛在 `/demo/` 或 `/nested/demo/` 時，main／embed HTML 與 canonical 308 正常，但 HTML 的根絕對 `/assets/` JS／CSS 全回404；預設根掛載控制皆通過。以 web Vite `base: './'` 讓同一產物依文件位置解析靜態資產，保留根掛載、共用 chunk 與原 dev 行為；不另加伺服器 root fallback。新增隔離建置與真 HTTP 的根／單層／巢狀掛載回歸，涵蓋 index／embed、尾斜線與 query、產物 JS／CSS／模組依賴與 MIME／內容。完整範例邀請連結原已保留 location.pathname；WebSocket 預設 `/ws`／既有 wsPath 與 embed 指定主機 `/lib/stage-client.js` 語意保持，不由 static prefix 推測。範圍僅 Vite config、新建置交付測試與 README／PLAN；無 SDK／server／media／protocol／依賴／CI workflow／部署設定變更。驗證僅資產建置與 HTTP 解析，不代替原生瀏覽器執行、版面、鍵盤／AT／ICE／硬體聲音或原企劃整體 Gate。

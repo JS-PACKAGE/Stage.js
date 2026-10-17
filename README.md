@@ -74,6 +74,8 @@ node dist/src/check-config.js /path/to/config.yaml # 建置後也可直接執行
 
 自訂 prefix 掛載（例如 `/demo/`）若 `index.html` 存在且解析後是掛載內的一般檔案，請求 `/demo` 會以 308 導向 `/demo/`，保留 query；這讓 HTML 的相對資產網址從正確目錄解析。GET／HEAD 共用此規則，redirect 使用同來源相對 Location 與 `Cache-Control: no-cache`，不依賴傳入 Host 建立絕對網址。預設 `/`、一般檔案與已帶斜線網址不變；缺少或越界的 index 不會產生 redirect。壓縮與 conditional request 在後續的 canonical URL 照常處理。
 
+完整範例的建置資產採相對路徑，同一份 `web/dist` 可掛在 `/`、`/demo/` 或 `/nested/demo/`；例如將 `server.static` 中 `dir: web/dist` 的 `mount` 改為 `/demo/`，即可開啟 `/demo/` 與 `/demo/embed.html`，不必為每個前綴重新建置。請保留目錄網址尾端的 `/`（上述伺服器導向會補上），並將整個建置目錄連同共用 chunks／CSS／壓縮副本一起提供。這只改變範例頁面的靜態資產位置：完整範例的 WebSocket 仍預設同來源 `/ws`，自訂路徑沿用 `wsPath`；embed 仍從所選 Stage.js 主機的 `/lib/stage-client.js` 載入 SDK。靜態 prefix 不會自動改寫這些服務端點。回歸測試會實際建置並透過本機 HTTP 檢查根目錄與多層前綴的頁面／資產，不代表原生瀏覽器、麥克風或跨網路驗收。
+
 ### 控制腳本
 
 根目錄的 `stage.sh`（macOS／Linux）與 `stage.ps1`（Windows）包裝常用操作，背景執行時 pid／log 存放在 `.run/`：
