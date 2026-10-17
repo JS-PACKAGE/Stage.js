@@ -181,9 +181,7 @@ async function runFixture(shell: string, scenario: Scenario) {
     if (existsSync(reportPath)) report = JSON.parse(readFileSync(reportPath, 'utf8')) as Report;
     assert.ifError(result.error);
     assert.equal(result.signal, null, 'PowerShell driver must finish within 20 seconds');
-    assert.equal(result.status, 0, `driver failed: ${result.stdout}\n${result.stderr}`);
     assert.ok(report, `driver omitted its report: ${result.stdout}\n${result.stderr}`);
-    assert.equal(report.error, null);
     const starts = records(join(root, 'fixture-starts.jsonl'));
     const exits = records(join(root, 'fixture-exits.jsonl'));
     for (const child of starts) {
@@ -196,12 +194,20 @@ async function runFixture(shell: string, scenario: Scenario) {
     assert.equal(report.cleanup.length, report.ownedLaunches, 'each returned process must have a joined observer, even if observer acquisition fails');
     assert.equal(report.cleanup.length, starts.length, 'each launched child must have an owned process handle and readiness receipt');
     assert.ok(report.cleanup.every(child => child.exited), 'every owned child must be joined before the driver finishes');
-    cleanupVerified = true;
     assert.equal(report.foreignObjectRejections, starts.length, 'a separate process object with an owned ID must be rejected');
     assert.ok(report.lookups.every(pid => starts.some(child => child.pid === pid)), 'only owned child IDs may be queried');
     assert.ok(report.stops.every(pid => starts.some(child => child.pid === pid)), 'only owned child handles may be terminated');
     assert.deepEqual(exits, scenario === 'pid-already-exited' ? starts.map(child => ({ ...child, reason: 'before-pid-write' })) : [],
       'test completion must not depend on the cleanup-file fallback or watchdog');
+    // A failed action can still have complete retained-handle cleanup. Prove
+    // every ownership/readiness/join invariant before deciding whether the
+    // watchdog fallback is needed, then expose the captured action failure.
+    // A failed launch without a retained object remains uncertain.
+    cleanupVerified = (result.status === 0 && report.error === null)
+      || report.launchAttempts === report.ownedLaunches;
+    const diagnostic = `driver failed: ${result.stdout}\n${result.stderr}\nreport: ${JSON.stringify(report)}`;
+    assert.equal(result.status, 0, diagnostic);
+    assert.equal(report.error, null, diagnostic);
     return {
       report, starts, token, root, stderr: result.stderr,
       log: existsSync(join(runDir, 'stage.log')) ? readFileSync(join(runDir, 'stage.log'), 'utf8') : null,
