@@ -2,6 +2,8 @@
 
 建置：`npm run build -w packages/client`。無框架與執行期依賴。
 
+已有產物時可從倉庫根目錄執行 `npm run test:client-package`，以只含 `package.json`／`dist` 的暫存外部 consumer 驗證兩個 package 入口、共用匯出身分、受控自動註冊及 NodeNext／Bundler 嚴格型別宣告。根目錄 `npm run build` 最後會自動執行；workspace build 本身仍只建置。此檢查不自動建置／安裝／發布，不讀取原始碼作為套件替代，缺少或無效產物會失敗；受控 Node 與型別通過不代表原生瀏覽器／麥克風／音訊驗收。
+
 導覽：[快速開始](#快速開始) · [房間操作](#房間操作) · [請求期限](#請求期限) · [事件與狀態](#事件與狀態) · [連線生命週期](#連線生命週期) · [本機收聽音量](#本機收聽音量) · [麥克風](#音訊裝置與麥克風測試) · [取消預覽](#取消麥克風預覽) · [音訊統計](#音訊統計) · [Web Component](#web-componentstage-client) · [測試](#信令整合測試)
 
 ## 快速開始

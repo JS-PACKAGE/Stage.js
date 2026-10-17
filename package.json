@@ -13,10 +13,11 @@
     "web"
   ],
   "scripts": {
-    "build": "npm run build:server && npm run build -w packages/client && npm run build -w web && npm run build:compress",
+    "build": "npm run build:server && npm run build -w packages/client && npm run build -w web && npm run build:compress && npm run test:client-package",
     "build:server": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit -p tsconfig.json && npm run typecheck -w packages/client && npm run typecheck -w web",
     "test": "node --test --test-timeout=20000 \"test/**/*.test.ts\" && npm run test -w packages/client",
+    "test:client-package": "node scripts/check-client-package.ts",
     "start": "node dist/src/index.js",
     "config:check": "node src/check-config.ts",
     "dev": "node --watch src/index.ts",

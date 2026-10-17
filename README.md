@@ -64,9 +64,15 @@ node dist/src/check-config.js /path/to/config.yaml # 建置後也可直接執行
 
 只驗證 YAML 與既有欄位／跨欄位規則，不啟動伺服器、worker 或網路連線，也不建立／改寫設定檔；不代表 TLS／靜態檔可讀、連接埠可綁定或 TURN 可達。成功 exit 0、讀取／驗證失敗 exit 1、用法錯誤 exit 2；`-h`／`--help` 顯示用法，`--` 後可指定以 `-` 開頭的檔名。明確路徑優先於 `STAGE_CONFIG`，相對路徑以目前工作目錄解析；未提供兩者時從專案根目錄找 `config.yaml`，不受目前目錄影響。沿用直接啟動的語意：空的 `STAGE_CONFIG` 不等同未設定，會指向目前目錄並讀取失敗。輸出不列出設定內容或 stack trace；共用 loader 的 YAML 診斷只保留錯誤種類與安全的行／列位置，原本僅有 warning 的 YAML 仍可通過既有 schema，但不再印出可能包含憑證的 warning／原文片段。
 
+### 已建置 client 的外部整合檢查
+
+根目錄 `npm run build` 在完成建置與預壓縮後，會執行 `npm run test:client-package`。也可在已有產物時單獨執行此指令：它只將 client 的 `package.json` 與 `dist` 複製到暫存 consumer，以真正的 `@stage-js/client`／`@stage-js/client/element` 匯入驗證公開匯出、兩入口共用身分與受控元件註冊，再以 NodeNext／Bundler 兩種模式嚴格檢查交付的型別宣告及事件推論。檢查不引用套件原始碼，不安裝或發布套件，也不自動補建置；產物缺少或檢查失敗會回非零狀態，暫存 consumer 在結束後清理。
+
+`npm test` 與 `npm run typecheck` 仍可在尚未建置時執行；僅執行 workspace 的 client build 不會額外跑這項檢查。現有 GitHub CI 的完整 build 會包含它，不增加 workflow 權限。這是交付產物／受控 Node 載入與型別驗證，並不表示實際瀏覽器的元件互動、權限、音訊或跨網路已驗收。
+
 ### 靜態資源預壓縮
 
-`npm run build` 最後以 Node 內建 zlib 為 client／web 的 HTML、JS、CSS、JSON、SVG 與 webmanifest 產生較小的 `.br`／`.gz` 副本；不壓縮圖片、已編碼檔或 symlink，壓縮後較大的副本不保留。也可在兩個 workspace 都完成建置後單獨執行 `npm run build:compress`，或 `node scripts/precompress.ts <建置目錄>`；指令會列出原始／Brotli／gzip 位元組數。
+`npm run build` 完成編譯後，以 Node 內建 zlib 為 client／web 的 HTML、JS、CSS、JSON、SVG 與 webmanifest 產生較小的 `.br`／`.gz` 副本；不壓縮圖片、已編碼檔或 symlink，壓縮後較大的副本不保留。也可在兩個 workspace 都完成建置後單獨執行 `npm run build:compress`，或 `node scripts/precompress.ts <建置目錄>`；指令會列出原始／Brotli／gzip 位元組數。
 
 伺服器依 `Accept-Encoding` 的權重與排除規則選擇可用版本（同權重優先 Brotli），附 `Vary: Accept-Encoding`、各版本獨立 ETag 與正確 Content-Length。HEAD 與 304 保持相同的編碼資訊，未預壓縮或副本比來源舊時退回原檔；用戶端明確排除所有可用版本才回 406。不會在請求期間壓縮，也不會重複壓縮 `.br`／`.gz` URL。ETag 使用所選版本的檔案身分、大小及奈秒修改／變更時間，避免保留大小與 mtime 的 release 檔案替換沿用舊驗證值；它仍是弱 metadata validator，不是內容雜湊。只使用 If-Modified-Since 的用戶端仍受 Last-Modified 秒級精度及保留 mtime 的限制。部署時請將原檔與副本一起更新；Vite 開發模式仍維持原工作流程。
 
