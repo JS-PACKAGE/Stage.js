@@ -48,6 +48,9 @@ function setup(): Harness {
     let renderedRoomSignature, renderedAudienceHeading, renderedSpeakingSignature, renderedQualitySignature; const renderedGainInputs = [];
     let audienceFilterIdentity = ''; const audienceFilterRows = [];
     const audienceFilter = {}, audienceSearch = { value: '' }, audienceFilterClear = {}, audienceFilterCount = {};
+    let handFilterIdentity = '', handFilterDraft = '', handFilterGeneration = 0, handFilterRevision = 0;
+    let handFilterPainting = false, handFilterDirty = false, handFilterRows = [];
+    const handFilter = {}, handSearch = { value: '' }, handFilterClear = {}, handFilterCount = {};
     let nextTimer = 0, clock = 0, callbacks = 0;
     const performance = { now: () => clock };
     const timers = new Map();
@@ -77,7 +80,7 @@ function setup(): Harness {
     function resetMicSettings() {}
     function stopRoomTimers() {}
     const errorBox = { hidden: true };
-    function element(tag, className, text) { return { textContent: text ?? '', classList: { toggle() {} }, isConnected: true, disabled: false, dataset: {}, attrs: {}, children: [], append(...children) { this.children.push(...children); }, setAttribute(k, v) { this.attrs[k] = v; } }; }
+    function element(tag, className, text) { return { textContent: text ?? '', classList: { toggle() {} }, isConnected: true, parentNode: null, disabled: false, dataset: {}, attrs: {}, children: [], append(...children) { for (const child of children) { child.parentNode = this; this.children.push(child); } }, setAttribute(k, v) { this.attrs[k] = v; } }; }
     function showError(error) { errors.push(error); }
     function syncMeter() {}
     ${actions}

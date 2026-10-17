@@ -154,8 +154,34 @@ audienceFilterClear.onclick = () => {
   if (!canFilterAudience()) return;
   audienceSearch.value = ''; applyAudienceFilter();
 };
+const handFilter = element('section', 'panel hand-filter');
+handFilter.hidden = true;
+const handSearch = element('input');
+handSearch.type = 'search'; handSearch.id = 'hand-queue-search'; handSearch.autocomplete = 'off';
+handSearch.disabled = true; handSearch.setAttribute('aria-describedby', 'hand-queue-results');
+const handSearchLabel = element('label', '', '搜尋舉手者名稱');
+handSearchLabel.setAttribute('for', handSearch.id);
+const handFilterCount = element('p', 'muted');
+handFilterCount.id = 'hand-queue-results'; handFilterCount.setAttribute('role', 'status');
+const handFilterClear = element('button', '', '清除舉手搜尋');
+handFilterClear.id = 'hand-queue-clear'; handFilterClear.type = 'button'; handFilterClear.disabled = true;
+handFilter.append(handSearchLabel, handSearch, handFilterClear, handFilterCount);
+interface HandFilterRow { row: HTMLLIElement; id: string; sourceName: string; name: string }
+let handFilterIdentity = '', handFilterDraft = '';
+let handFilterGeneration = 0, handFilterRevision = 0;
+let handFilterPainting = false, handFilterDirty = false;
+let handFilterRows: HandFilterRow[] = [];
+handSearch.oninput = () => {
+  const revision = ++handFilterRevision, value = handSearch.value;
+  if (revision !== handFilterRevision || !canFilterHands()) return;
+  handFilterDraft = value; applyHandFilter();
+};
+handFilterClear.onclick = () => {
+  if (!canFilterHands()) return;
+  handFilterDraft = ''; applyHandFilter();
+};
 const content = element('main');
-app.append(header, notices, errorBox, audienceFilter, content);
+app.append(header, notices, errorBox, audienceFilter, handFilter, content);
 const stageQuality = element('details', 'panel stage-quality');
 stageQuality.id = 'stage-quality'; stageQuality.hidden = true;
 const stageQualitySummary = element('summary', '', '舞台連線品質');
@@ -604,6 +630,7 @@ function landing(): void {
   renderedAudienceHeading = undefined;
   resetMicSettings();
   resetRoomActions('');
+  resetHandFilter();
   cooldownButton = null; renderedReturnStage = null; renderedRoomActions = []; scheduleCooldown(0);
   brand.textContent = 'Stage.js 音訊舞台';
   const intro = element('section', 'intro');
@@ -763,6 +790,81 @@ function syncAudienceFilter(state: RoomStatePayload): void {
   audienceFilterIdentity = identity;
   audienceFilter.hidden = false; audienceSearch.disabled = false;
   applyAudienceFilter();
+}
+function resetHandFilter(): void {
+  handFilterIdentity = ''; handFilterDraft = ''; handFilterRows = [];
+  handFilterGeneration = roomActionGeneration;
+  applyHandFilter();
+}
+function canFilterHands(): boolean {
+  const revision = handFilterRevision, state = client.state;
+  const eligible = Boolean(state?.me.role === 'controller' && handFilterIdentity
+    && handFilterIdentity === JSON.stringify([state.roomId, state.me.participantId]));
+  return eligible && revision === handFilterRevision && handFilterGeneration === roomActionGeneration;
+}
+function applyHandFilter(): void {
+  ++handFilterRevision; handFilterDirty = true;
+  if (handFilterPainting) return;
+  handFilterPainting = true;
+  try {
+    // A finite nested input/state callback may overwrite a DOM setter after its newer paint.
+    while (handFilterDirty) {
+      handFilterDirty = false;
+      const revision = handFilterRevision, rows = handFilterRows, draft = handFilterDraft;
+      const active = canFilterHands(), query = draft.trim().normalize('NFC').toLowerCase();
+      const current = () => revision === handFilterRevision && rows === handFilterRows;
+      const write = (action: () => void): boolean => {
+        if (!current()) { handFilterDirty = true; return false; }
+        action();
+        if (!current()) { handFilterDirty = true; return false; }
+        return true;
+      };
+      if (!write(() => { if (handSearch.value !== draft) handSearch.value = draft; })) continue;
+      if (!write(() => { handFilter.hidden = !active; handSearch.disabled = !active; })) continue;
+      let visible = 0;
+      for (const { row, name } of rows) {
+        const matches = name.includes(query);
+        if (!write(() => { if (row.hidden !== !matches) row.hidden = !matches; })) break;
+        if (matches) visible++;
+      }
+      if (!current()) { handFilterDirty = true; continue; }
+      if (!write(() => { handFilterClear.disabled = !active || !draft; })) continue;
+      const text = !active ? '' : `符合 ${visible} / ${rows.length} 筆舉手申請。${query && !visible && rows.length ? '沒有符合搜尋的舉手者。' : ''}`;
+      write(() => { if (handFilterCount.textContent !== text) handFilterCount.textContent = text; });
+    }
+  } finally { handFilterPainting = false; }
+}
+function syncHandFilter(state: RoomStatePayload): void {
+  if (state !== client.state) return;
+  if (state.me.role !== 'controller') { resetHandFilter(); return; }
+  const identity = JSON.stringify([state.roomId, state.me.participantId]);
+  if (handFilterIdentity !== identity || handFilterGeneration !== roomActionGeneration) handFilterDraft = '';
+  handFilterIdentity = identity; handFilterGeneration = roomActionGeneration;
+  applyHandFilter();
+}
+function handActionButton(entry: HandFilterRow, key: string, label: string,
+  method: 'approve' | 'reject' | 'transferControl' | 'kick', className = '', confirmation?: string): HTMLButtonElement {
+  const generation = roomActionGeneration, identity = roomActionIdentity;
+  const canAct = (): boolean => {
+    const revision = handFilterRevision, state = client.state, query = handSearch.value;
+    const eligible = Boolean(state?.me.role === 'controller' && generation === roomActionGeneration
+      && identity === roomActionIdentity && identity === handFilterIdentity
+      && identity === JSON.stringify([state.roomId, state.me.participantId])
+      && client.status !== 'reconnecting' && client.status !== 'disconnected'
+      && entry.row.isConnected && node.isConnected && node.parentNode?.parentNode === entry.row
+      && handFilterRows.includes(entry) && !entry.row.hidden && query === handFilterDraft
+      && entry.name.includes(query.trim().normalize('NFC').toLowerCase())
+      && state.hands.some(person => person.participantId === entry.id && person.name === entry.sourceName));
+    const currentState = client.state;
+    return eligible && state === currentState && revision === handFilterRevision && generation === roomActionGeneration;
+  };
+  const node = roomButton(key, label, async () => {
+    // Room action admission paints pending/error state; that work can retire this filtered row.
+    if (!canAct() || (confirmation && (!window.confirm(confirmation) || !canAct()))) return;
+    const command = client[method];
+    if (canAct()) await command.call(client, entry.id);
+  }, className, canAct);
+  return node;
 }
 const roomOccupancy = element('p', 'muted room-occupancy');
 roomOccupancy.id = 'room-occupancy'; roomOccupancy.hidden = true;
@@ -941,9 +1043,9 @@ function renderRoom(state: RoomStatePayload): void {
     && qualitySignature === renderedQualitySignature && !renderedGainInputs.some(({ input, value }) => input.value !== value)) {
     status.textContent = statusLabels[client.status];
     if (renderedAudienceHeading && renderedAudienceHeading.textContent !== audienceTitle) renderedAudienceHeading.textContent = audienceTitle;
-    syncAudienceFilter(state); updateCooldown(); renderNotices(true); return;
+    syncAudienceFilter(state); syncHandFilter(state); updateCooldown(); renderNotices(true); return;
   }
-  renderedGainInputs.length = 0; audienceFilterRows.length = 0;
+  renderedGainInputs.length = 0; audienceFilterRows.length = 0; handFilterRows = []; handFilterRevision++;
   speakingRevision++; speakingRowsRevision++; personRows.clear(); speakingDirtyIds = new Set(); speakingIds = currentSpeaking;
   brand.textContent = decodeName(state.name);
   status.textContent = statusLabels[client.status];
@@ -1087,7 +1189,7 @@ function renderRoom(state: RoomStatePayload): void {
   renderedReturnStage = content.querySelector<HTMLButtonElement>('[data-return-stage]');
   renderedAudienceHeading = audienceHeading;
   renderedRoomSignature = signature; renderedSpeakingSignature = speakingSignature; renderedQualitySignature = qualitySignature;
-  syncAudienceFilter(state); updateCooldown(); renderNotices(true);
+  syncAudienceFilter(state); syncHandFilter(state); updateCooldown(); renderNotices(true);
 }
 function panelList(title: string, people: ParticipantView[], controller: boolean, kind: 'speaker' | 'hand'): HTMLElement {
   const panel = element('section', 'panel');
@@ -1120,7 +1222,15 @@ function personRow(person: ParticipantView, controller: boolean, kind: 'speaker'
       && client.status !== 'reconnecting' && client.me?.role === 'controller'
       && client.state?.audience?.some((p) => p.participantId === id));
     const actions = element('div', 'actions');
-    if (kind === 'hand') actions.append(roomButton(`stage:${id}`, '核准上台', () => client.approve(id), 'primary'), roomButton(`stage:${id}`, '婉拒', () => client.reject(id)));
+    if (kind === 'hand') {
+      const entry = { row, id, sourceName: person.name, name: name.normalize('NFC').toLowerCase() };
+      handFilterRows.push(entry);
+      actions.append(handActionButton(entry, `stage:${id}`, '核准上台', 'approve', 'primary'),
+        handActionButton(entry, `stage:${id}`, '婉拒', 'reject'),
+        handActionButton(entry, 'transfer', '移交控制權', 'transferControl', '', `確定將控制權移交給 ${name}？`),
+        handActionButton(entry, `kick:${id}`, '踢出房間', 'kick', 'danger', `確定將 ${name} 踢出房間？若要防止對方再進來，請接著更換房間代碼。`));
+      row.append(actions); return row;
+    }
     if (kind === 'speaker') actions.append(gainSlider(person), roomButton(`force-mute:${id}`, forceMuted ? '解除強制靜音' : '強制靜音', () => forceMuted ? client.forceUnmute(id) : client.forceMute(id)), roomButton(`stage:${id}`, '移出舞台', () => client.removeFromStage(id)));
     actions.append(roomButton('transfer', '移交控制權', async () => {
       if (window.confirm(`確定將控制權移交給 ${name}？`) && canManageAudience()) await client.transferControl(id);

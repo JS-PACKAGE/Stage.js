@@ -21,7 +21,7 @@ function audienceRows(h: View): SampleNode[] {
   return heading.parentNode!.descendants().filter(node => node.classList.contains('person'));
 }
 function filter(h: View, query: string): SampleNode {
-  const input = h.find(node => node.tagName === 'input' && node.type === 'search');
+  const input = h.find(node => node.tagName === 'input' && node.type === 'search' && node.id === 'audience-search');
   input.value = query; assert.ok(input.oninput); input.oninput(); return input;
 }
 

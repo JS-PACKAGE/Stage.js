@@ -80,7 +80,7 @@ function watchAccess(nodes: SampleNode[]) {
   return counts;
 }
 function setFilter(h: App, value: string): void {
-  const input = h.find(node => node.tagName === 'input' && node.type === 'search');
+  const input = h.find(node => node.tagName === 'input' && node.type === 'search' && node.id === 'audience-search');
   input.value = value; assert.ok(input.oninput); input.oninput();
 }
 function audienceRows(h: App): SampleNode[] {

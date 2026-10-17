@@ -74,7 +74,7 @@ document.createElement = ((tag: string) => {
   const reset = () => { counts.created = counts.replacements = 0; };
   reset(); return { ...h, main, counts, storage, calls, effects, reset };
 }
-function search(h: App): SampleNode { return h.find(node => node.tagName === 'input' && node.type === 'search'); }
+function search(h: App): SampleNode { return h.find(node => node.tagName === 'input' && node.type === 'search' && node.id === 'audience-search'); }
 function toolbar(h: App): SampleNode {
   let node = search(h);
   while (node.parentNode && node.parentNode !== h.app) node = node.parentNode;
