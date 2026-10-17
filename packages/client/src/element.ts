@@ -27,6 +27,9 @@ const STYLE = `
 [part=hands][hidden] { display: none; }
 [part=hands] ul { display: grid; gap: .5rem; padding-left: 1.25rem; }
 [part=hands] li { overflow-wrap: anywhere; }
+[part=hands] li[hidden] { display: none; }
+[part=hands] label { display: inline-flex; flex-wrap: wrap; align-items: center; gap: .5rem; }
+[part=hands] input { font: inherit; max-width: 100%; }
 [part=hands] button { margin-left: .5rem; }
 [part=stage-management][hidden] { display: none; }
 [part=stage-management] ul { display: grid; gap: .5rem; padding-left: 1.25rem; }
@@ -151,6 +154,13 @@ export class StageElement extends HTMLElement {
   private readonly handQueueSummary: HTMLElement;
   private readonly handQueueNotice: HTMLParagraphElement;
   private readonly handQueueList: HTMLUListElement;
+  private readonly handQueueSearch: HTMLInputElement;
+  private readonly handQueueClear: HTMLButtonElement;
+  private readonly handQueueResults: HTMLParagraphElement;
+  private handQueueQuery = '';
+  private handQueueRevision = 0;
+  private handQueueTerminalClient: StageClient | undefined;
+  private handQueueAwaitingStateClient: StageClient | undefined;
   private handQueueOwner: { client: StageClient; roomId: string; participantId: string; generation: number } | undefined;
   private readonly handQueuePending = new Map<string, object>();
   private readonly handQueueRows = new Map<string, { node: HTMLLIElement; name: HTMLSpanElement; approve: HTMLButtonElement; reject: HTMLButtonElement }>();
@@ -336,7 +346,19 @@ export class StageElement extends HTMLElement {
     this.handQueueSummary = document.createElement('summary');
     this.handQueueNotice = document.createElement('p');
     this.handQueueList = document.createElement('ul');
-    this.handQueuePanel.append(this.handQueueSummary, this.handQueueNotice, this.handQueueList);
+    const handQueueLabel = document.createElement('label');
+    handQueueLabel.textContent = '搜尋舉手者名稱';
+    this.handQueueSearch = document.createElement('input');
+    this.handQueueSearch.type = 'search';
+    this.handQueueSearch.oninput = () => this.filterHandQueue(false);
+    handQueueLabel.append(this.handQueueSearch);
+    this.handQueueClear = document.createElement('button');
+    this.handQueueClear.type = 'button'; this.handQueueClear.textContent = '清除搜尋';
+    this.handQueueClear.onclick = () => this.filterHandQueue(true);
+    this.handQueueResults = document.createElement('p');
+    this.handQueueResults.setAttribute('role', 'status');
+    this.handQueuePanel.append(this.handQueueSummary, this.handQueueNotice, handQueueLabel,
+      this.handQueueClear, this.handQueueResults, this.handQueueList);
     this.stageManagementPanel = document.createElement('details');
     this.stageManagementPanel.part.add('stage-management');
     this.stageManagementSummary = document.createElement('summary');
@@ -609,7 +631,8 @@ export class StageElement extends HTMLElement {
             if (type === 'state' || type === 'status' || type === 'closed' || type === 'kicked' || type === 'audioblocked') this.syncPlaybackOwner();
             if (type === 'state' || type === 'status' || type === 'closed' || type === 'kicked') this.syncNameOwner();
             if (type === 'state' || type === 'status' || type === 'closed' || type === 'kicked') this.syncRoomNameOwner();
-            if (type === 'state' || type === 'status' || type === 'closed' || type === 'kicked') this.syncHandQueue();
+            if (type === 'state' || type === 'status' || type === 'closed' || type === 'kicked'
+              || type === 'role' || type === 'transferred') this.syncHandQueue();
             this.syncStageManagement();
             this.syncRoomClose();
             const ownId = client.me?.participantId;
@@ -752,6 +775,7 @@ export class StageElement extends HTMLElement {
     this.retireOutputDeviceOwner();
     this.retireNameOwner();
     this.retireRoomNameOwner();
+    this.handQueueTerminalClient = this.current ?? undefined;
     this.retireHandQueue();
     this.stageManagementTerminalClient = undefined;
     this.retireStageManagement();
@@ -1651,38 +1675,130 @@ export class StageElement extends HTMLElement {
     })();
   }
 
-  private retireHandQueue(): void {
-    this.handQueueOwner = undefined; this.handQueuePending.clear();
-    for (const row of this.handQueueRows.values()) {
-      for (const control of [row.approve, row.reject]) { control.disabled = true; control.setAttribute('aria-busy', 'false'); }
+  private invalidateHandQueue(): void {
+    this.handQueueOwner = undefined; this.handQueuePending.clear(); this.handQueueQuery = '';
+    this.handQueueRevision++;
+  }
+
+  private noteHandQueueEvent(type: keyof StageEventMap, detail: StageEventMap[keyof StageEventMap]): void {
+    const client = this.current, owner = this.handQueueOwner;
+    if (type === 'closed' || type === 'kicked' || (type === 'status' && detail === 'disconnected')) {
+      this.handQueueTerminalClient = client ?? undefined; this.invalidateHandQueue(); return;
     }
-    if (this.handQueueRows.size) this.handQueueList.replaceChildren();
+    if (type === 'state') {
+      this.handQueueTerminalClient = undefined; this.handQueueAwaitingStateClient = undefined;
+    }
+    const role = type === 'role' ? detail as StageEventMap['role'] : undefined;
+    const transfer = type === 'transferred' ? detail as StageEventMap['transferred'] : undefined;
+    // A control-loss delta precedes its snapshot; copied owner IDs avoid reopening old private data.
+    const lost = owner && ((role && role.participantId === owner.participantId && role.role !== 'controller')
+      || (transfer && transfer.fromId === owner.participantId && transfer.toId !== owner.participantId));
+    if (lost && this.handQueueOwner === owner && this.current === client && owner.client === client && owner.generation === this.generation) {
+      this.handQueueAwaitingStateClient = client ?? undefined; this.invalidateHandQueue();
+    }
+  }
+
+  private retireHandQueue(): void {
+    this.invalidateHandQueue();
+    const revision = this.handQueueRevision, rows = [...this.handQueueRows.values()];
     this.handQueueRows.clear(); this.handQueueOrder = [];
-    this.handQueuePanel.hidden = true; this.handQueuePanel.open = false;
-    this.handQueueSummary.textContent = ''; this.handQueueNotice.textContent = '';
+    const current = () => {
+      if (revision === this.handQueueRevision && !this.handQueueOwner) return true;
+      this.syncHandQueue(); return false;
+    };
+    for (const row of rows) {
+      for (const control of [row.approve, row.reject]) {
+        control.disabled = true; if (!current()) return;
+        control.setAttribute('aria-busy', 'false'); if (!current()) return;
+      }
+    }
+    if (rows.length) { this.handQueueList.replaceChildren(); if (!current()) return; }
+    this.handQueuePanel.hidden = true; if (!current()) return;
+    this.handQueuePanel.open = false; if (!current()) return;
+    this.handQueueSummary.textContent = ''; if (!current()) return;
+    this.handQueueNotice.textContent = ''; if (!current()) return;
+    this.handQueueSearch.disabled = true; if (!current()) return;
+    if (this.handQueueSearch.value !== '') {
+      if (!current()) return;
+      this.handQueueSearch.value = ''; if (!current()) return;
+    }
+    if (!current()) return;
+    this.handQueueClear.disabled = true; if (!current()) return;
+    this.handQueueResults.textContent = ''; current();
+  }
+
+  private handQueueInputCurrent(owner: NonNullable<StageElement['handQueueOwner']>, revision: number): boolean {
+    if (this.handQueueOwner !== owner || this.handQueueRevision !== revision || this.current !== owner.client
+      || this.generation !== owner.generation || !this.isConnected) return false;
+    const state = owner.client.state, me = owner.client.me, status = owner.client.status;
+    const roomId = state?.roomId, participantId = me?.participantId, role = me?.role, connected = this.isConnected;
+    return this.handQueueOwner === owner && this.handQueueRevision === revision && this.current === owner.client
+      && this.generation === owner.generation && connected && roomId === owner.roomId
+      && participantId === owner.participantId && role === 'controller' && status !== 'disconnected'
+      && this.handQueueTerminalClient !== owner.client && this.handQueueAwaitingStateClient !== owner.client;
+  }
+
+  private filterHandQueue(clear: boolean): void {
+    const owner = this.handQueueOwner, revision = this.handQueueRevision;
+    if (!owner || !this.handQueueInputCurrent(owner, revision)) { this.syncHandQueue(); return; }
+    const unavailable = this.handQueuePanel.hidden || this.handQueueSearch.disabled;
+    if (!this.handQueueInputCurrent(owner, revision)) { this.syncHandQueue(); return; }
+    if (unavailable) return;
+    const query = clear ? '' : this.handQueueSearch.value;
+    // A host getter can replace this owner or run a newer input handler synchronously.
+    if (!this.handQueueInputCurrent(owner, revision)) { this.syncHandQueue(); return; }
+    this.handQueueQuery = query; this.handQueueRevision++;
+    this.syncHandQueue();
   }
 
   private syncHandQueue(): void {
-    const client = this.current, state = client?.state, me = client?.me;
-    if (!this.isConnected || !client || !state || me?.role !== 'controller' || client.status === 'disconnected') {
+    let revision = ++this.handQueueRevision;
+    const client = this.current, generation = this.generation;
+    const state = client?.state, me = client?.me, status = client?.status;
+    const roomId = state?.roomId, participantId = me?.participantId, role = me?.role, connected = this.isConnected;
+    const unchanged = () => revision === this.handQueueRevision && this.current === client && this.generation === generation;
+    if (!unchanged()) { this.syncHandQueue(); return; }
+    if (!connected || !client || !state || role !== 'controller' || status === 'disconnected'
+      || this.handQueueTerminalClient === client || this.handQueueAwaitingStateClient === client) {
       this.retireHandQueue(); return;
     }
-    const owner = this.handQueueOwner;
-    if (!owner || owner.client !== client || owner.generation !== this.generation
-      || owner.roomId !== state.roomId || owner.participantId !== me.participantId) {
+    let owner = this.handQueueOwner;
+    if (!owner || owner.client !== client || owner.generation !== generation
+      || owner.roomId !== roomId || owner.participantId !== participantId) {
       this.retireHandQueue();
-      this.handQueueOwner = { client, roomId: state.roomId, participantId: me.participantId, generation: this.generation };
+      const retiredRevision = this.handQueueRevision;
+      const latestState = client.state, latestMe = client.me, latestStatus = client.status;
+      const latestRoomId = latestState?.roomId, latestId = latestMe?.participantId, latestRole = latestMe?.role, connected = this.isConnected;
+      if (retiredRevision !== this.handQueueRevision || this.handQueueOwner || this.current !== client || this.generation !== generation
+        || latestState !== state || latestRoomId !== roomId || latestId !== participantId || latestRole !== 'controller'
+        || latestStatus !== status || !connected || this.handQueueTerminalClient === client
+        || this.handQueueAwaitingStateClient === client) { this.syncHandQueue(); return; }
+      this.handQueueOwner = owner = { client, roomId: roomId!, participantId: participantId!, generation };
+      revision = ++this.handQueueRevision;
     }
+    const current = () => {
+      const latestState = client.state, latestMe = client.me, latestStatus = client.status;
+      const latestRoomId = latestState?.roomId, latestId = latestMe?.participantId, latestRole = latestMe?.role, connected = this.isConnected;
+      if (unchanged() && this.handQueueOwner === owner && connected && latestState === state
+        && latestRoomId === owner.roomId && latestId === participantId && latestRole === 'controller' && latestStatus === status
+        && this.handQueueTerminalClient !== client && this.handQueueAwaitingStateClient !== client) return true;
+      this.syncHandQueue(); return false;
+    };
+    if (!current()) return;
     const seen = new Set<string>();
     const people = state.hands.filter(person => {
       if (seen.has(person.participantId) || person.role !== 'audience' || !person.handRaised || person.onStage) return false;
       seen.add(person.participantId); return true;
     });
-    const reconnecting = client.status === 'reconnecting';
-    this.handQueuePanel.hidden = false;
+    const query = this.handQueueQuery.trim().toLowerCase(), reconnecting = status === 'reconnecting';
+    if (!current()) return;
+    this.handQueuePanel.hidden = false; if (!current()) return;
     this.handQueueSummary.textContent = `舉手申請（${people.length}）${reconnecting ? ' · 上次收到' : ''}`;
+    if (!current()) return;
     this.handQueueNotice.textContent = reconnecting ? '重新連線中，暫時不能處理申請。'
       : people.length ? '請選擇要核准上台或婉拒的申請；是否可上台仍由伺服器決定。' : '目前沒有舉手申請。';
+    if (!current()) return;
+    let matching = 0;
     for (const person of people) {
       const id = person.participantId;
       let row = this.handQueueRows.get(id);
@@ -1694,39 +1810,88 @@ export class StageElement extends HTMLElement {
         const currentRow = row;
         approve.onclick = () => this.moderateHand(id, currentRow.node, true);
         reject.onclick = () => this.moderateHand(id, currentRow.node, false);
-        node.append(name, approve, reject); this.handQueueRows.set(id, row);
+        node.append(name, approve, reject);
+        if (!current()) return;
+        this.handQueueRows.set(id, row);
       }
-      const name = decodeName(person.name);
+      const name = decodeName(person.name), hidden = !name.toLowerCase().includes(query);
+      if (!hidden) matching++;
+      if (!current()) return;
       const label = `${name}${person.connected ? '' : '（暫時離線）'}`;
-      if (row.name.textContent !== label) row.name.textContent = label;
+      if (row.name.textContent !== label) { if (!current()) return; row.name.textContent = label; }
+      if (!current()) return;
       const approveLabel = `核准 ${name} 上台`, rejectLabel = `婉拒 ${name} 的舉手申請`;
-      if (row.approve.getAttribute('aria-label') !== approveLabel) row.approve.setAttribute('aria-label', approveLabel);
-      if (row.reject.getAttribute('aria-label') !== rejectLabel) row.reject.setAttribute('aria-label', rejectLabel);
+      if (row.approve.getAttribute('aria-label') !== approveLabel) {
+        if (!current()) return; row.approve.setAttribute('aria-label', approveLabel);
+      }
+      if (!current()) return;
+      if (row.reject.getAttribute('aria-label') !== rejectLabel) {
+        if (!current()) return; row.reject.setAttribute('aria-label', rejectLabel);
+      }
+      if (!current()) return;
+      if (row.node.hidden !== hidden) { if (!current()) return; row.node.hidden = hidden; }
+      if (!current()) return;
       const pending = this.handQueuePending.has(id);
       for (const control of [row.approve, row.reject]) {
-        const disabled = reconnecting || pending, busy = String(pending);
-        if (control.disabled !== disabled) control.disabled = disabled;
-        if (control.getAttribute('aria-busy') !== busy) control.setAttribute('aria-busy', busy);
+        const disabled = reconnecting || pending || hidden, busy = String(pending);
+        if (control.disabled !== disabled) { if (!current()) return; control.disabled = disabled; }
+        if (!current()) return;
+        if (control.getAttribute('aria-busy') !== busy) { if (!current()) return; control.setAttribute('aria-busy', busy); }
+        if (!current()) return;
       }
     }
     for (const [id, row] of this.handQueueRows) if (!seen.has(id)) {
-      for (const control of [row.approve, row.reject]) { control.disabled = true; control.setAttribute('aria-busy', 'false'); }
       this.handQueueRows.delete(id);
+      for (const control of [row.approve, row.reject]) {
+        control.disabled = true; if (!current()) return;
+        control.setAttribute('aria-busy', 'false'); if (!current()) return;
+      }
     }
     const order = people.map(person => person.participantId);
     if (order.length !== this.handQueueOrder.length || order.some((id, index) => id !== this.handQueueOrder[index])) {
       this.handQueueList.replaceChildren(...order.map(id => this.handQueueRows.get(id)!.node));
+      if (!current()) return;
       this.handQueueOrder = order;
     }
+    if (this.handQueueSearch.disabled) { if (!current()) return; this.handQueueSearch.disabled = false; }
+    if (!current()) return;
+    if (this.handQueueSearch.value !== this.handQueueQuery) {
+      if (!current()) return; this.handQueueSearch.value = this.handQueueQuery;
+    }
+    if (!current()) return;
+    const clearDisabled = !this.handQueueQuery;
+    if (this.handQueueClear.disabled !== clearDisabled) { if (!current()) return; this.handQueueClear.disabled = clearDisabled; }
+    if (!current()) return;
+    const results = `符合 ${matching} / ${people.length} 筆舉手申請。${people.length && !matching ? '沒有符合搜尋的舉手者。' : ''}`;
+    if (this.handQueueResults.textContent !== results) { if (!current()) return; this.handQueueResults.textContent = results; }
+    current();
   }
 
   private moderateHand(id: string, node: HTMLLIElement, approve: boolean): void {
     this.syncHandQueue();
-    const owner = this.handQueueOwner, row = this.handQueueRows.get(id);
-    if (!owner || !row || row.node !== node || this.handQueuePanel.hidden
-      || owner.client.status === 'reconnecting' || this.handQueuePending.has(id)) return;
+    const owner = this.handQueueOwner, row = this.handQueueRows.get(id), revision = this.handQueueRevision;
+    if (!owner || !row || row.node !== node || this.handQueuePending.has(id)) return;
+    const hidden = row.node.hidden || this.handQueuePanel.hidden || owner.client.status === 'reconnecting';
+    if (!this.handQueueInputCurrent(owner, revision) || hidden || this.handQueueRows.get(id) !== row) {
+      this.syncHandQueue(); return;
+    }
     const attempt = {};
-    this.handQueuePending.set(id, attempt); this.syncHandQueue(); this.hideError();
+    this.handQueuePending.set(id, attempt); this.syncHandQueue();
+    const admitted = (): boolean => {
+      const revision = this.handQueueRevision;
+      if (this.handQueueOwner !== owner || this.handQueuePending.get(id) !== attempt || this.handQueueRows.get(id) !== row) return false;
+      const hidden = row.node.hidden || this.handQueuePanel.hidden || owner.client.status === 'reconnecting';
+      return this.handQueueInputCurrent(owner, revision) && !hidden && this.handQueuePending.get(id) === attempt
+        && this.handQueueRows.get(id) === row;
+    };
+    const cancel = () => {
+      if (this.handQueuePending.get(id) === attempt) this.handQueuePending.delete(id);
+      this.syncHandQueue();
+    };
+    // The new filter's getters/setters may revoke this row while its pending state is painted.
+    if (!admitted()) { cancel(); return; }
+    this.hideError();
+    if (!admitted()) { cancel(); return; }
     const current = (): boolean => {
       if (this.handQueueOwner !== owner || this.handQueuePending.get(id) !== attempt) return false;
       this.syncHandQueue();
@@ -1922,7 +2087,7 @@ export class StageElement extends HTMLElement {
 
   private noteStageTransferEvent(type: keyof StageEventMap, detail: StageEventMap[keyof StageEventMap]): void {
     const owner = this.stageManagementOwner;
-    if (!owner) return;
+    if (!owner) { this.noteHandQueueEvent(type, detail); return; }
     if ((type === 'closed' || type === 'kicked' || (type === 'status' && (detail === 'reconnecting' || detail === 'disconnected')))
       && this.stageTransferAttempt) this.stageTransferAttempt.invalid = true;
     const role = type === 'role' ? detail as StageEventMap['role'] : undefined;
@@ -1936,6 +2101,8 @@ export class StageElement extends HTMLElement {
       owner.transferRevision++; owner.transferAwaitingState = true;
       if (this.stageTransferAttempt) this.stageTransferAttempt.invalid = true;
     }
+    // Keep both dialog fences ahead of new filter reads, including getters on event details.
+    this.noteHandQueueEvent(type, detail);
     const client = this.current, state = client?.state, me = client?.me;
     if (owner !== this.stageManagementOwner) return;
     const sameController = owner.client === client && owner.generation === this.generation
