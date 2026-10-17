@@ -375,6 +375,13 @@ Web Component 的台上成員快照：公開台上名單也會記住同一次 st
 
 ## 測試與驗證
 
+### GitHub 自動驗證
+
+[Node.js CI](.github/workflows/ci.yml) 在分支 push 與 pull request 開啟、更新或重新開啟時，自動使用標準 Ubuntu 24.04 runner／Node.js 24，依序執行 `npm ci --no-audit --no-fund`、`npm run typecheck`（四份型別設定）、`npm test` 與 `npm run build`。只跑分支 push，不跑 tag、排程或部署；失敗即停止，單次 job 最多 20 分鐘。同一事件種類／ref 的新執行取代舊執行，push 與 PR 不互相取消。PR 預設檢查 GitHub 的合併測試 ref，push 檢查該提交，兩者結果要分別查看。
+
+官方 actions 固定完整 commit SHA；token 僅 `contents: read`，checkout 不保留認證，不使用自訂 secrets、快取或上傳建置產物，也不更動分支保護。這是可重現的安裝、型別、既有自動測試與建置檢查；沒有執行 `npm audit`、啟動驗收、werift loopback、負載測試、原生瀏覽器／AT／硬體音訊或跨 NAT 驗收，不能當作全部 Gate 通過。需要的媒體驗證仍依 AGENTS.md 手動完成。首次或外部貢獻者的 PR 是否需批准執行，仍由 GitHub 的既有設定決定。
+
+
 ```bash
 npm run typecheck                # 伺服器＋client＋web
 npm test                         # 控制面流程 1–4、不變量、斷線寬限與回座、信令與政策競態、ws 邊界（驗證、限流、尺寸、轉義、靜態檔、准入）、混音器與時鐘、下行分級／共用編碼／靜音 DTX、worker 重生
