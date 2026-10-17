@@ -51,7 +51,7 @@ type Action = {
   pidText: string | null; pidBytes: string | null; launched: number; attempts: number; stops: number;
 };
 type Report = {
-  version: string; actions: Action[]; parseErrors: string[]; lookups: number[];
+  version: string; nodePath: string; actions: Action[]; parseErrors: string[]; lookups: number[];
   stops: number[]; launchAttempts: number; ownedLaunches: number; error: string | null;
   objectStops: number[]; foreignObjectRejections: number;
   pidWriteFailure: { message: string; id: string } | null;
@@ -77,11 +77,12 @@ function fixtureEnvironment(root: string, token: string): NodeJS.ProcessEnv {
   const env = { ...process.env };
   // Do not inherit a real configuration, preload, or another Node on PATH.
   for (const key of Object.keys(env)) {
-    if (/^(?:PATH|NODE_OPTIONS|STAGE_CONFIG|STAGE_STOP_TIMEOUT|STAGE_FIXTURE_TOKEN)$/i.test(key)) delete env[key];
+    if (/^(?:PATH|NODE_OPTIONS|STAGE_CONFIG|STAGE_STOP_TIMEOUT|STAGE_FIXTURE_TOKEN|STAGE_FIXTURE_NODE)$/i.test(key)) delete env[key];
   }
   const oldPath = Object.entries(process.env).find(([key]) => key.toLowerCase() === 'path')?.[1] ?? '';
   env.Path = `${dirname(process.execPath)};${oldPath}`;
   env.STAGE_FIXTURE_TOKEN = token;
+  env.STAGE_FIXTURE_NODE = process.execPath;
   env.STAGE_STOP_TIMEOUT = '2';
   env.STAGE_CONFIG = join(root, 'config.yaml');
   return env;
@@ -182,6 +183,9 @@ async function runFixture(shell: string, scenario: Scenario) {
     assert.ifError(result.error);
     assert.equal(result.signal, null, 'PowerShell driver must finish within 20 seconds');
     assert.ok(report, `driver omitted its report: ${result.stdout}\n${result.stderr}`);
+    assert.equal(typeof report.nodePath, 'string', 'native invocations require one scalar executable path');
+    assert.equal(realpathSync.native(report.nodePath).toLowerCase(), realpathSync.native(process.execPath).toLowerCase(),
+      'the PATH-first fixture executable must be the exact Node running this test');
     const starts = records(join(root, 'fixture-starts.jsonl'));
     const exits = records(join(root, 'fixture-exits.jsonl'));
     for (const child of starts) {

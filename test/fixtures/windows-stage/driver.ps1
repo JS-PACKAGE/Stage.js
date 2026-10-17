@@ -6,7 +6,21 @@ $ErrorActionPreference = 'Stop'
 $Root = $PSScriptRoot
 $Entry = Join-Path $Root 'dist/src/index.js'
 $Checker = Join-Path $Root 'dist/src/check-config.js'
-$NodePath = (Get-Command node -CommandType Application -ErrorAction Stop).Source
+$ExpectedNodePath = $env:STAGE_FIXTURE_NODE
+if ([String]::IsNullOrWhiteSpace($ExpectedNodePath) -or -not [System.IO.Path]::IsPathRooted($ExpectedNodePath)) {
+  throw 'Missing absolute fixture Node executable'
+}
+# Application discovery can return multiple installed Nodes even without -All.
+# Select the PATH-first command object before reading its scalar Source.
+$NodePath = (Get-Command node -CommandType Application -ErrorAction Stop | Select-Object -First 1).Source
+if ($NodePath -isnot [string] -or [String]::IsNullOrWhiteSpace($NodePath) -or
+    -not [System.IO.Path]::IsPathRooted($NodePath) -or
+    [System.IO.Path]::GetFileName($NodePath) -ine 'node.exe' -or
+    -not (Test-Path -LiteralPath $NodePath -PathType Leaf) -or
+    -not [String]::Equals([System.IO.Path]::GetFullPath($NodePath),
+      [System.IO.Path]::GetFullPath($ExpectedNodePath), [StringComparison]::OrdinalIgnoreCase)) {
+  throw 'PATH-first Node must be the exact executable supplied by the fixture runner'
+}
 $StageScript = Join-Path $Root 'stage.ps1'
 $Caller = Join-Path $Root 'caller elsewhere'
 $Settings = Get-Content (Join-Path $Root 'fixture-settings.json') -Raw | ConvertFrom-Json
@@ -289,7 +303,8 @@ try {
     $state.Cleanup.Add(@{ pid = $process.Id; exited = $exited; neededCleanup = $neededCleanup })
   }
   $report = @{
-    version = $PSVersionTable.PSVersion.ToString(); actions = @($state.Actions.ToArray())
+    version = $PSVersionTable.PSVersion.ToString(); nodePath = $state.NodePath
+    actions = @($state.Actions.ToArray())
     parseErrors = @($parseErrors | ForEach-Object { $_.ToString() })
     lookups = @($state.Lookups.ToArray()); stops = @($state.Stops.ToArray())
     objectStops = @($state.ObjectStops.ToArray()); pidWriteFailure = $state.PidWriteFailure
