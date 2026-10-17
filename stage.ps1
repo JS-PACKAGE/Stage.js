@@ -62,7 +62,7 @@ function Start-Stage {
   if ($running) { Fail "已在執行中（pid $($running.Id)）" }
   if (-not (Test-Path $Entry)) { Fail "找不到 $Entry，請先執行 build" }
   Initialize-Config
-  New-Item -ItemType Directory -Path $RunDir -Force | Out-Null
+  [System.IO.Directory]::CreateDirectory($RunDir) | Out-Null
   $startArgs = @{
     FilePath = 'node'; ArgumentList = "`"$Entry`""; WorkingDirectory = $Root
     RedirectStandardOutput = $LogFile; RedirectStandardError = $ErrFile; PassThru = $true

@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { spawnSync } from 'node:child_process';
 import { createHash, randomBytes } from 'node:crypto';
-import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from 'node:fs';
+import { copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { dirname, join } from 'node:path';
 import { before, describe, it } from 'node:test';
@@ -71,7 +71,7 @@ function fixtureEnvironment(root: string, token: string): NodeJS.ProcessEnv {
 function rawFailureProbe(shell: string, scenario: 'baseline' | 'collision') {
   const script = scenario === 'baseline' ? BASELINE : SCRIPT;
   assertReviewedProcessOperations(script);
-  const root = mkdtempSync(join(tmpdir(), 'stage Windows raw failure '));
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'stage Windows raw failure ')));
   try {
     mkdirSync(join(root, 'dist/src'), { recursive: true });
     mkdirSync(join(root, 'caller elsewhere'));
@@ -107,7 +107,7 @@ function rawFailureProbe(shell: string, scenario: 'baseline' | 'collision') {
 async function runFixture(shell: string, scenario: Scenario) {
   const script = scenario === 'baseline' ? BASELINE : SCRIPT;
   assertReviewedProcessOperations(script);
-  const root = mkdtempSync(join(tmpdir(), 'stage Windows first start '));
+  const root = realpathSync.native(mkdtempSync(join(tmpdir(), 'stage Windows first start ')));
   const token = randomBytes(16).toString('hex');
   const runDir = join(root, '.run');
   let report: Report | undefined;
@@ -146,7 +146,7 @@ async function runFixture(shell: string, scenario: Scenario) {
     const exits = records(join(root, 'fixture-exits.jsonl'));
     for (const child of starts) {
       assert.equal(child.token, token);
-      assert.equal(child.cwd, root, 'script must use its own spaced root, despite the caller CWD');
+      assert.equal(realpathSync.native(child.cwd), root, 'script must use its own physical spaced root, despite the caller CWD or Windows short-path aliases');
       assert.ok(Number.isSafeInteger(child.pid) && child.pid > 0);
       assert.notEqual(child.pid, process.pid);
       assert.deepEqual(JSON.parse(readFileSync(join(root, `fixture-ready-${child.pid}.json`), 'utf8')), child);
@@ -188,7 +188,7 @@ it('pins the immutable Windows baseline and guards reviewed process operations',
     assert.throws(() => assertReviewedProcessOperations(Buffer.concat([SCRIPT, Buffer.from(`\n${operation}\n`)])), /Unreviewed process operation/);
   }
   const text = SCRIPT.toString('utf8').replaceAll('\r\n', '\n');
-  const mkdir = text.indexOf('New-Item -ItemType Directory -Path $RunDir -Force | Out-Null');
+  const mkdir = text.indexOf('[System.IO.Directory]::CreateDirectory($RunDir) | Out-Null');
   assert.ok(mkdir > text.indexOf('  Initialize-Config\n'));
   assert.ok(mkdir < text.indexOf('  $proc = Start-Process @startArgs'));
 });
