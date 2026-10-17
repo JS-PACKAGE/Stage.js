@@ -15,6 +15,8 @@ writeFileSync(join(root, `fixture-ready-${process.pid}.json`), JSON.stringify(re
 process.stdout.write(`fixture stdout ${token}\n`);
 process.stderr.write(`fixture stderr ${token}\n`);
 setInterval(() => {
+  const beforeWrite = join(root, 'fixture-exit-before-pid-write');
+  if (existsSync(beforeWrite) && readFileSync(beforeWrite, 'utf8') === token) finish('before-pid-write');
   const cleanup = join(root, 'fixture-cleanup');
   if (existsSync(cleanup) && readFileSync(cleanup, 'utf8') === token) finish('cleanup');
 }, 50);

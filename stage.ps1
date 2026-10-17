@@ -70,7 +70,23 @@ function Start-Stage {
   # -WindowStyle 只在 Windows 上有效（pwsh 在 macOS／Linux 會拒絕此參數）
   if ($env:OS -eq 'Windows_NT') { $startArgs.WindowStyle = 'Hidden' }
   $proc = Start-Process @startArgs
-  Set-Content -Path $PidFile -Value $proc.Id
+  try {
+    Set-Content -Path $PidFile -Value $proc.Id
+  } catch {
+    $pidWriteError = $_
+    try {
+      # PID 尚未寫入，只能清理這次啟動取得的物件，不能重新查詢 PID 檔案。
+      if (-not $proc.HasExited) {
+        Stop-Process -InputObject $proc -Force -ErrorAction Stop
+      }
+      if (-not $proc.WaitForExit(5000)) {
+        [Console]::Error.WriteLine('stage: PID 檔案寫入失敗後，新啟動的程序在 5 秒內未結束；請檢查程序狀態。')
+      }
+    } catch {
+      [Console]::Error.WriteLine("stage: PID 檔案寫入失敗後，清理新啟動的程序失敗：$($_.Exception.Message)")
+    }
+    throw $pidWriteError
+  }
   # 設定錯誤或 port 被占用時程序會立刻退出，稍等一下再確認
   Start-Sleep -Seconds 1
   if ($proc.HasExited) {
