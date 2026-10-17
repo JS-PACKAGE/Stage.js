@@ -58,12 +58,12 @@ it('pins official actions and does not persist checkout credentials or enable ca
 
 it('installs from the lockfile then runs all existing validation commands without masked failures', () => {
   const steps = workflow.jobs.validate.steps;
-  assert.equal(steps.length, 6);
+  assert.equal(steps.length, 7);
   for (const [index, step] of steps.entries()) {
     assert.deepEqual(Object.keys(step).sort(), index < 2 ? ['name', 'uses', 'with'] : ['name', 'run']);
   }
   assert.deepEqual(steps.slice(2).map((step: Record<string, unknown>) => step.run), [
-    'npm ci --no-audit --no-fund', 'npm run typecheck', 'npm test', 'npm run build',
+    'npm ci --no-audit --no-fund', 'npm run typecheck', 'npm test', 'npm run build', 'npm run test:server-package',
   ]);
   for (const step of steps) {
     assert.equal(step.if, undefined);

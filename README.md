@@ -64,6 +64,12 @@ node dist/src/check-config.js /path/to/config.yaml # 建置後也可直接執行
 
 只驗證 YAML 與既有欄位／跨欄位規則，不啟動伺服器、worker 或網路連線，也不建立／改寫設定檔；不代表 TLS／靜態檔可讀、連接埠可綁定或 TURN 可達。成功 exit 0、讀取／驗證失敗 exit 1、用法錯誤 exit 2；`-h`／`--help` 顯示用法，`--` 後可指定以 `-` 開頭的檔名。明確路徑優先於 `STAGE_CONFIG`，相對路徑以目前工作目錄解析；未提供兩者時從專案根目錄找 `config.yaml`，不受目前目錄影響。沿用直接啟動的語意：空的 `STAGE_CONFIG` 不等同未設定，會指向目前目錄並讀取失敗。輸出不列出設定內容或 stack trace；共用 loader 的 YAML 診斷只保留錯誤種類與安全的行／列位置，原本僅有 warning 的 YAML 仍可通過既有 schema，但不再印出可能包含憑證的 warning／原文片段。
 
+### 已建置伺服器的本機交付檢查
+
+Linux 上完成 `npm run build` 後，可執行 `npm run test:server-package`。此指令將 server、web、client 的建置產物與套件資訊複製到暫存交付目錄，沿用已安裝的相依套件（並非完全獨立的相依套件封裝），從另一個工作目錄真正啟動編譯後入口；不載入或修改你的 `config.yaml`。檢查使用獨立合成設定、本機 `127.0.0.1` 動態埠、自訂 WebSocket 路徑及靜態前綴，核對 health／ready、靜態內容、未進房的 WebSocket hello，以及 SIGTERM 後的連線關閉與程序退出。缺少產物會失敗，不自動建置或安裝。
+
+指令為 Linux 驗證用途，既有 Ubuntu CI 在 build 後執行；一般 `npm run build` 不會啟動此服務，`npm test` 不依賴事先存在的 dist。程序、請求與輸出設有界線，失敗時回收自己啟動的程序及暫存目錄。它沒有建立房間或 WebRTC peer，也不連 STUN／TURN，不是 Windows／macOS 啟停、TLS、原生瀏覽器、實體音訊或跨網路驗收。
+
 ### 已建置 client 的外部整合檢查
 
 根目錄 `npm run build` 在完成建置與預壓縮後，會執行 `npm run test:client-package`。也可在已有產物時單獨執行此指令：它只將 client 的 `package.json` 與 `dist` 複製到暫存 consumer，以真正的 `@stage-js/client`／`@stage-js/client/element` 匯入驗證公開匯出、兩入口共用身分與受控元件註冊，再以 NodeNext／Bundler 兩種模式嚴格檢查交付的型別宣告及事件推論。檢查不引用套件原始碼，不安裝或發布套件，也不自動補建置；產物缺少或檢查失敗會回非零狀態，暫存 consumer 在結束後清理。
@@ -385,9 +391,9 @@ Web Component 的台上成員快照：公開台上名單也會記住同一次 st
 
 ### GitHub 自動驗證
 
-[Node.js CI](.github/workflows/ci.yml) 在分支 push 與 pull request 開啟、更新或重新開啟時，自動使用標準 Ubuntu 24.04 runner／Node.js 24，依序執行 `npm ci --no-audit --no-fund`、`npm run typecheck`（四份型別設定）、`npm test` 與 `npm run build`。只跑分支 push，不跑 tag、排程或部署；失敗即停止，單次 job 最多 20 分鐘。同一事件種類／ref 的新執行取代舊執行，push 與 PR 不互相取消。PR 預設檢查 GitHub 的合併測試 ref，push 檢查該提交，兩者結果要分別查看。
+[Node.js CI](.github/workflows/ci.yml) 在分支 push 與 pull request 開啟、更新或重新開啟時，自動使用標準 Ubuntu 24.04 runner／Node.js 24，依序執行 `npm ci --no-audit --no-fund`、`npm run typecheck`（四份型別設定）、`npm test`、`npm run build` 與 `npm run test:server-package`。只跑分支 push，不跑 tag、排程或部署；失敗即停止，單次 job 最多 20 分鐘。同一事件種類／ref 的新執行取代舊執行，push 與 PR 不互相取消。PR 預設檢查 GitHub 的合併測試 ref，push 檢查該提交，兩者結果要分別查看。
 
-官方 actions 固定完整 commit SHA；token 僅 `contents: read`，checkout 不保留認證，不使用自訂 secrets、快取或上傳建置產物，也不更動分支保護。這是可重現的安裝、型別、既有自動測試與建置檢查；沒有執行 `npm audit`、啟動驗收、werift loopback、負載測試、原生瀏覽器／AT／硬體音訊或跨 NAT 驗收，不能當作全部 Gate 通過。需要的媒體驗證仍依 AGENTS.md 手動完成。首次或外部貢獻者的 PR 是否需批准執行，仍由 GitHub 的既有設定決定。
+官方 actions 固定完整 commit SHA；token 僅 `contents: read`，checkout 不保留認證，不使用自訂 secrets、快取或上傳建置產物，也不更動分支保護。這是可重現的安裝、型別、既有自動測試與建置檢查；另外包含 Linux 編譯後入口的本機啟停與 HTTP／WebSocket hello 交付檢查；沒有執行 `npm audit`、完整部署驗收、werift loopback、負載測試、原生瀏覽器／AT／硬體音訊或跨 NAT 驗收，不能當作全部 Gate 通過。需要的媒體驗證仍依 AGENTS.md 手動完成。首次或外部貢獻者的 PR 是否需批准執行，仍由 GitHub 的既有設定決定。
 
 
 ```bash

@@ -22,7 +22,8 @@
     "config:check": "node src/check-config.ts",
     "dev": "node --watch src/index.ts",
     "dev:web": "npm run dev -w web",
-    "build:compress": "node scripts/precompress.ts packages/client/dist web/dist"
+    "build:compress": "node scripts/precompress.ts packages/client/dist web/dist",
+    "test:server-package": "node scripts/check-server-package.ts"
   },
   "dependencies": {
     "@evan/opus": "1.0.3",
