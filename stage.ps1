@@ -1,4 +1,4 @@
-# Stage.js 控制腳本（Windows PowerShell 5.1+ / PowerShell 7）
+﻿# Stage.js 控制腳本（Windows PowerShell 5.1+ / PowerShell 7）
 # 用法：.\stage.ps1 <command> [args]，執行 `.\stage.ps1 help` 查看指令。
 [CmdletBinding()]
 param(
@@ -30,7 +30,7 @@ function Invoke-Checked([string]$File, [string[]]$Arguments) {
 
 function Test-Node {
   if (-not (Get-Command node -ErrorAction SilentlyContinue)) { Fail '找不到 node（需要 Node.js 24 以上）' }
-  $major = [int](& node -p 'process.versions.node.split(".")[0]')
+  $major = [int](& node -p 'parseInt(process.versions.node)')
   if ($major -lt 24) { Fail "Node.js 版本為 $(& node --version)，需要 24 以上" }
 }
 
@@ -62,6 +62,7 @@ function Start-Stage {
   if ($running) { Fail "已在執行中（pid $($running.Id)）" }
   if (-not (Test-Path $Entry)) { Fail "找不到 $Entry，請先執行 build" }
   Initialize-Config
+  New-Item -ItemType Directory -Path $RunDir -Force | Out-Null
   $startArgs = @{
     FilePath = 'node'; ArgumentList = "`"$Entry`""; WorkingDirectory = $Root
     RedirectStandardOutput = $LogFile; RedirectStandardError = $ErrFile; PassThru = $true

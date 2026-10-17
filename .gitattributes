@@ -1,0 +1,2 @@
+stage.ps1 text eol=lf
+test/fixtures/windows-stage/stage-before-run-directory.ps1 -text

@@ -107,6 +107,8 @@ Linux 上完成 `npm run build` 後，可執行 `npm run test:server-package`。
 
 `stage.sh start` 若已啟動背景程序卻無法寫入 `.run/stage.pid`，會終止並回收這次剛啟動的程序，再回報失敗，避免留下 `status`／`stop` 找不到的服務。失敗的 PID 路徑保留供你檢查目錄或寫入權限；這是啟動失敗清理，不是一般 `stop` 的優雅停止流程。
 
+`stage.ps1 start` 會在啟動程序前建立 `.run` 日誌／PID 目錄，支援乾淨下載後首次啟動；已存在的目錄保留，若同名路徑是檔案則在啟動前失敗。腳本以 UTF-8 BOM 保存，讓 Windows PowerShell 5.1 正確解讀繁體中文內容；PowerShell 7 亦使用同一份檔案。Node 主版本檢查使用不含內嵌引號的運算式，避免 5.1 的原生參數傳遞吃掉引號，最低需求仍為 Node.js 24。Windows 的 `stop` 仍使用程序終止，不宣稱提供 POSIX SIGTERM 的優雅關閉。
+
 `stage.sh restart` 在送出 SIGTERM 前先檢查 Node 版本、已建置的 server／設定檢查器與設定語法／schema；檢查失敗時不停止目前程序。請先執行 `build`，舊版建置若沒有 `dist/src/check-config.js` 也會拒絕 restart。檢查器與 server 使用同一份已建置 schema，不改用可能較新的 source schema。原有 timeout／PID 驗證仍優先；設定準備沿用 `start`，因此缺少預設設定時仍可能先由範例建立 `config.yaml`，而 checker 本身不寫入設定。`STAGE_CONFIG` 原值會保留給 checker，relative path 從腳本所在專案目錄解析，空值仍依 server 語意驗證並失敗。通過後仍依序 stop／start，不保證零停機或啟動成功，也不預測 port、TLS／media 資源、相依套件的所有 runtime 路徑或檢查後的檔案變更。其他控制指令與 Windows 腳本維持原本行為。
 
 Windows 用 `.\stage.ps1 <command>`，指令相同；Windows 無法對背景 node 送 SIGTERM，`stop` 為直接終止。
@@ -394,6 +396,8 @@ Web Component 的台上成員快照：公開台上名單也會記住同一次 st
 ### GitHub 自動驗證
 
 [Node.js CI](.github/workflows/ci.yml) 在分支 push 與 pull request 開啟、更新或重新開啟時，自動使用標準 Ubuntu 24.04 runner／Node.js 24，依序執行 `npm ci --no-audit --no-fund`、`npm run typecheck`（四份型別設定）、`npm test`、`npm run build` 與 `npm run test:server-package`。只跑分支 push，不跑 tag、排程或部署；失敗即停止，單次 job 最多 20 分鐘。同一事件種類／ref 的新執行取代舊執行，push 與 PR 不互相取消。PR 預設檢查 GitHub 的合併測試 ref，push 檢查該提交，兩者結果要分別查看。
+
+另有標準 Windows Server 2025 job，使用相同 Node.js 24 與固定 actions，僅執行 `node --test --test-timeout=120000 test/windowsStageStart.test.ts`，不安裝專案相依套件、不建置或部署服務。它要求 runner 的 Windows PowerShell 5.1 與 PowerShell 7 都存在，透過暫存腳本與受控 Node 程序檢查首次啟動、日誌／PID、狀態與停止；未修版本的失敗亦列入對照。此 job 最多 10 分鐘，Linux 上相應原生案例明確跳過，不能把跳過算成 Windows 通過。Windows job 的成功僅代表這些控制腳本情境，不是整個伺服器／WebRTC／硬體音訊的 Windows 驗收。
 
 官方 actions 固定完整 commit SHA；token 僅 `contents: read`，checkout 不保留認證，不使用自訂 secrets、快取或上傳建置產物，也不更動分支保護。這是可重現的安裝、型別、既有自動測試與建置檢查；另外包含 Linux 編譯後入口的本機啟停與 HTTP／WebSocket hello 交付檢查；沒有執行 `npm audit`、完整部署驗收、werift loopback、負載測試、原生瀏覽器／AT／硬體音訊或跨 NAT 驗收，不能當作全部 Gate 通過。需要的媒體驗證仍依 AGENTS.md 手動完成。首次或外部貢獻者的 PR 是否需批准執行，仍由 GitHub 的既有設定決定。
 

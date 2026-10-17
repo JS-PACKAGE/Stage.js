@@ -11,7 +11,7 @@ interface Workflow {
   on: Record<string, unknown>;
   permissions: Record<string, unknown>;
   concurrency: Record<string, unknown>;
-  jobs: { validate: { steps: Step[]; [key: string]: unknown } };
+  jobs: { validate: { steps: Step[]; [key: string]: unknown }; windows_scripts: { steps: Step[]; [key: string]: unknown } };
   [key: string]: unknown;
 }
 const workflow = document.toJS() as Workflow;
@@ -22,7 +22,7 @@ it('defines valid YAML and only branch-push and pull-request automation', () => 
   assert.deepEqual(Object.keys(workflow.on).sort(), ['pull_request', 'push']);
   assert.deepEqual(workflow.on.push, { branches: ['**'] });
   assert.equal(workflow.on.pull_request, null);
-  assert.deepEqual(Object.keys(workflow.jobs), ['validate']);
+  assert.deepEqual(Object.keys(workflow.jobs).sort(), ['validate', 'windows_scripts']);
 });
 
 it('limits the token to read-only contents without secrets or privileged event contexts', () => {
@@ -88,4 +88,25 @@ it('matches the repository Node major, lockfile and existing aggregate scripts',
   assert.ok(pkg.scripts.test.includes('npm run test -w packages/client'));
   assert.ok(pkg.scripts.build.includes('npm run build -w packages/client'));
   assert.ok(pkg.scripts.build.includes('npm run build -w web'));
+});
+
+
+it('keeps the Windows job to the approved isolated PowerShell startup checks', () => {
+  const job = workflow.jobs.windows_scripts;
+  assert.deepEqual(Object.keys(job).sort(), ['name', 'runs-on', 'steps', 'timeout-minutes']);
+  assert.equal(job['runs-on'], 'windows-2025');
+  assert.equal(job['timeout-minutes'], 10);
+  assert.equal(job.steps.length, 3);
+  assert.deepEqual(job.steps.slice(0, 2), workflow.jobs.validate.steps.slice(0, 2));
+  assert.deepEqual(job.steps[2], {
+    name: 'Check Windows startup scripts', shell: 'pwsh',
+    run: 'node --test --test-timeout=120000 test/windowsStageStart.test.ts',
+  });
+  assert.equal(job.permissions, undefined);
+  assert.equal(job.environment, undefined);
+  assert.equal(job.env, undefined);
+  assert.equal(job.strategy, undefined);
+  assert.equal(job.needs, undefined);
+  assert.equal(job['continue-on-error'], undefined);
+  assert.doesNotMatch(source, /ExecutionPolicy|Set-ExecutionPolicy|choco install|winget install|Install-Module/);
 });
