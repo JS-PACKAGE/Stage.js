@@ -60,9 +60,13 @@ async function fixture(t: TestContext, options: { deferLibrary?: boolean } = {})
   t.mock.timers.enable({ apis: ['setTimeout', 'setInterval'] });
   let now = 1000;
   t.mock.method(performance, 'now', () => now);
-  const nodes = new Map(['host', 'ws-path', 'room', 'code', 'name', 'status', 'hand-rejected', 'error-notice', 'last-error', 'error-dismiss', 'join', 'hand', 'mic', 'rename', 'room-name-panel', 'room-name-current', 'room-name-draft', 'room-name-update', 'hand-queue', 'hand-queue-summary', 'hand-queue-notice', 'hand-queue-list', 'stage-management', 'stage-management-summary', 'stage-management-notice', 'stage-management-list', 'stage', 'mic-retry', 'audio-retry', 'audio-retry-status', 'microphone-panel', 'microphone-device', 'microphone-refresh', 'microphone-apply', 'microphone-draft-notice', 'output-panel', 'output-device', 'output-refresh', 'output-apply', 'output-draft-notice', 'output-support', 'cancel-join', 'leave', 'close-room', 'audio', 'unlock'].map(id => [id, new EmbedNode()]));
+  const nodes = new Map(['host', 'ws-path', 'room', 'code', 'name', 'status', 'room-occupancy', 'own-connection-quality', 'speaking-summary', 'public-roster', 'public-roster-summary', 'public-roster-notice', 'public-roster-list', 'connection-stats-panel', 'connection-stats-update', 'connection-stats-text', 'hand-rejected', 'error-notice', 'last-error', 'error-dismiss', 'join', 'hand', 'mic', 'rename', 'room-name-panel', 'room-name-current', 'room-name-draft', 'room-name-update', 'hand-queue', 'hand-queue-summary', 'hand-queue-notice', 'hand-queue-search', 'hand-queue-clear', 'hand-queue-results', 'hand-queue-list', 'stage-management', 'stage-management-summary', 'stage-management-notice', 'stage-management-list', 'stage', 'mic-retry', 'audio-retry', 'audio-retry-status', 'microphone-panel', 'microphone-device', 'microphone-refresh', 'microphone-apply', 'microphone-draft-notice', 'mic-test-panel', 'mic-test-start', 'mic-test-cancel', 'mic-test-stop', 'mic-test-meter', 'mic-test-status', 'mic-test-notice', 'output-panel', 'output-device', 'output-refresh', 'output-apply', 'output-draft-notice', 'output-support', 'cancel-join', 'leave', 'close-room', 'audio', 'unlock'].map(id => [id, new EmbedNode()]));
   const node = (id: string): EmbedNode => { const found = nodes.get(id); assert.ok(found); return found; };
-  node('error-notice').hidden = true; node('hand-rejected').hidden = true;
+  node('public-roster').append(node('public-roster-summary'), node('public-roster-notice'), node('public-roster-list'));
+  node('public-roster').hidden = true;
+  node('connection-stats-panel').append(node('connection-stats-update'), node('connection-stats-text'));
+  node('mic-test-panel').append(...['mic-test-start', 'mic-test-cancel', 'mic-test-stop', 'mic-test-meter', 'mic-test-status', 'mic-test-notice'].map(node));
+  node('error-notice').hidden = true; node('hand-rejected').hidden = true; node('room-occupancy').hidden = true; node('own-connection-quality').hidden = true; node('speaking-summary').hidden = true;
   const cancel = node('cancel-join'); cancel.hidden = cancel.disabled = true; cancel.textContent = '取消連線';
   const form = node('join'), submit = new EmbedNode(), status = node('status'), leave = node('leave'), hand = node('hand');
   form.submitButton = submit; node('name').value = ' 測試聽眾 ';
@@ -78,8 +82,10 @@ async function fixture(t: TestContext, options: { deferLibrary?: boolean } = {})
   assert.equal(source.split("import './styles.css';").length, 2);
   const executable = stripTypeScriptTypes(source.replace("import './styles.css';", '').replace(dynamicImport, 'loadLibrary(moduleUrl)'));
   assert.doesNotMatch(executable, /\bimport\s*(?:\(|['"])/);
+  const pageDocument = Object.assign(new EventTarget(), { hidden: false, createElement(tag: string) { assert.equal(tag, 'option'); return new EmbedNode(); }, querySelector(selector: string) { assert.match(selector, /^#[a-z-]+$/); return node(selector.slice(1)); } });
+  const pageWindow = Reflect.get(globalThis, 'window') as EventTarget;
   runInNewContext(executable, {
-    document: { createElement(tag: string) { assert.equal(tag, 'option'); return new EmbedNode(); }, querySelector(selector: string) { assert.match(selector, /^#[a-z-]+$/); return node(selector.slice(1)); } },
+    document: pageDocument, window: pageWindow, AbortController,
     location: { search: '?room=same-room&code=TEST42', origin: 'https://stage.example.test' },
     URL, URLSearchParams, Error, Promise, performance, setTimeout, clearTimeout, setInterval, clearInterval,
     loadLibrary: async (url: string) => {

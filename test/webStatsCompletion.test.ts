@@ -19,7 +19,7 @@ async function setup(t: TestContext): Promise<App> {
   const h = sampleApp(); t.after(() => h.cleanup()); await flushSample(); h.sdk.snapshot(roomState()); return h;
 }
 function shown(h: Pick<App, 'find'>, rttMs: number, poor: boolean): void {
-  assert.match(connection(h).textContent, new RegExp(`延遲 ${rttMs} ms`));
+  assert.match(connection(h).textContent, new RegExp(`接收 RTT ${rttMs} ms`));
   assert.equal(connection(h).classList.contains('error'), poor);
 }
 function cleared(h: Pick<App, 'find'>): void {

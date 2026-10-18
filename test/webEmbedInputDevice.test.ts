@@ -58,7 +58,7 @@ it('embed HTML declares a hidden labeled manual microphone draft with separate a
   }
   assert.ok(html.indexOf(panel) > html.indexOf('</form>'));
   const source = readFileSync(new URL('../web/src/embed.ts', import.meta.url), 'utf8');
-  assert.doesNotMatch(source, /(?:local|session)Storage|\bgetUserMedia\b|\benumerateDevices\b|\bdevicechange\b|\bstartMicTest\b|\btestMicrophone\b/);
+  assert.doesNotMatch(source, /(?:local|session)Storage|\bgetUserMedia\b|\benumerateDevices\b|\bdevicechange\b|\btestMicrophone\b/);
 });
 
 it('whole embed never enumerates/applies before explicit actions, including entry, snapshots, unlock and elapsed time', async t => {

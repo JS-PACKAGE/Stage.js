@@ -13,15 +13,17 @@
     "web"
   ],
   "scripts": {
-    "build": "npm run build:server && npm run build -w packages/client && npm run build -w web && npm run build:compress",
+    "build": "npm run build:server && npm run build -w packages/client && npm run build -w web && npm run build:compress && npm run test:client-package",
     "build:server": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit -p tsconfig.json && npm run typecheck -w packages/client && npm run typecheck -w web",
     "test": "node --test --test-timeout=20000 \"test/**/*.test.ts\" && npm run test -w packages/client",
+    "test:client-package": "node scripts/check-client-package.ts",
     "start": "node dist/src/index.js",
     "config:check": "node src/check-config.ts",
     "dev": "node --watch src/index.ts",
     "dev:web": "npm run dev -w web",
-    "build:compress": "node scripts/precompress.ts packages/client/dist web/dist"
+    "build:compress": "node scripts/precompress.ts packages/client/dist web/dist",
+    "test:server-package": "node scripts/check-server-package.ts"
   },
   "dependencies": {
     "@evan/opus": "1.0.3",

@@ -1,4 +1,4 @@
-import { StageClient, decodeName, MAX_GAIN_DB, type ConnectionQuality, type StageEventMap } from './index.ts';
+import { StageClient, decodeName, MAX_GAIN_DB, type ConnectionQuality, type MicTest, type StageEventMap } from './index.ts';
 
 /** Every StageClient event, re-dispatched from the element as `stage-<type>`. */
 const EVENTS: (keyof StageEventMap)[] = [
@@ -11,7 +11,10 @@ const STYLE = `
 :host { display: block; font: inherit; color: var(--stage-fg, inherit); }
 [part=panel] { display: grid; gap: .5rem; padding: .75rem; border: 1px solid var(--stage-border, #8884); border-radius: var(--stage-radius, .5rem); background: var(--stage-bg, transparent); }
 [part=status] { margin: 0; }
+.room-occupancy { margin: 0; overflow-wrap: anywhere; }
 [part=quality] { margin: 0; font-size: .875em; }
+[part=connection-stats][hidden] { display: none; }
+[part=connection-stats] p { margin: .5rem 0 0; font-size: .875em; overflow-wrap: anywhere; }
 [part=speaking] { margin: 0; font-size: .875em; }
 [part=hand-rejection] { margin: 0; }
 [part=audio-recovery] { margin: 0; font-size: .875em; }
@@ -24,6 +27,9 @@ const STYLE = `
 [part=hands][hidden] { display: none; }
 [part=hands] ul { display: grid; gap: .5rem; padding-left: 1.25rem; }
 [part=hands] li { overflow-wrap: anywhere; }
+[part=hands] li[hidden] { display: none; }
+[part=hands] label { display: inline-flex; flex-wrap: wrap; align-items: center; gap: .5rem; }
+[part=hands] input { font: inherit; max-width: 100%; }
 [part=hands] button { margin-left: .5rem; }
 [part=stage-management][hidden] { display: none; }
 [part=stage-management] ul { display: grid; gap: .5rem; padding-left: 1.25rem; }
@@ -37,6 +43,9 @@ const STYLE = `
 [part=microphone][hidden] { display: none; }
 [part=microphone] p { flex-basis: 100%; margin: 0; font-size: .875em; }
 [part=microphone] select { font: inherit; max-width: 100%; }
+[part=mic-test] { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; }
+[part=mic-test][hidden] { display: none; }
+[part=mic-test] p { flex-basis: 100%; margin: 0; font-size: .875em; }
 [part=output-device] { display: flex; flex-wrap: wrap; align-items: center; gap: .5rem; }
 [part=output-device][hidden] { display: none; }
 [part=output-device] p { flex-basis: 100%; margin: 0; font-size: .875em; }
@@ -45,6 +54,7 @@ input[type=range] { flex: 1; min-width: 5rem; max-width: 12rem; }
 button { font: inherit; padding: .4rem .8rem; border-radius: var(--stage-radius, .5rem); border: 1px solid var(--stage-border, #8884); background: var(--stage-button-bg, #fff1); color: inherit; cursor: pointer; }
 button[hidden] { display: none; }
 button:disabled { opacity: .5; cursor: default; }
+button.danger { color: var(--stage-error, #dc2626); border-color: currentColor; }
 button.primary { background: var(--stage-accent, #2563eb); border-color: transparent; color: var(--stage-accent-fg, #fff); }
 `;
 
@@ -66,19 +76,63 @@ button.primary { background: var(--stage-accent, #2563eb); border-color: transpa
  * Controllers can lock/unlock other speakers' mute, explicitly apply a room-mix gain draft, remove them from the stage, or confirm a connected speaker's control handoff.
  * The microphone picker is an explicit draft, never an indicator of the actual capture device.
  * The output picker is also a draft; explicit refresh and submission never imply audible playback.
- * Style through `::part(panel|status|quality|speaking|hand-rejection|audio-recovery|audio-retry|actions|name|room-name|hands|stage-management|playback|microphone|output-device)` and the
+ * Style through `::part(panel|status|quality|connection-stats|public-roster|speaking|hand-rejection|audio-recovery|audio-retry|actions|name|room-name|hands|stage-management|playback|microphone|mic-test|output-device)` and the
  * `--stage-*` custom properties.
  */
 export class StageElement extends HTMLElement {
   static readonly observedAttributes = ['url', 'room', 'code', 'name', 'playback-muted', 'playback-volume'];
   private current: StageClient | null = null;
   private readonly status: HTMLParagraphElement;
+  private readonly occupancy: HTMLParagraphElement;
+  private occupancyOwner: { client: StageClient; roomId: string; participantId: string; generation: number } | undefined;
+  private occupancyReport: { room: number; stage: number; audience: number; maxAudience: number; maxSpeakers: number; controllerOnStage: boolean; last: boolean } | undefined;
+  // Weak identities fence re-emission of retired public snapshots without retaining their private data.
+  private readonly occupancySnapshots = new WeakSet<object>();
+  private occupancyRevision = 0;
+  private readonly publicRosterPanel: HTMLDetailsElement;
+  private readonly publicRosterSummary: HTMLElement;
+  private readonly publicRosterNotice: HTMLParagraphElement;
+  private readonly publicRosterList: HTMLUListElement;
+  private publicRosterOwner: { client: StageClient; roomId: string; participantId: string; generation: number } | undefined;
+  private publicRosterReport: { rows: { id: string; text: string }[]; last: boolean; awaiting: boolean } | undefined;
+  private readonly publicRosterSnapshots = new WeakSet<object>();
+  private publicRosterEventRevision = 0;
+  private publicRosterPending: {
+    revision: number; detail: object; anchor: StageElement['publicRosterOwner']; transitioned: boolean; invalid: boolean;
+  } | undefined;
+  private publicRosterRevision = 0;
+  private publicRosterPaintedOwner: StageElement['publicRosterOwner'];
+  private readonly publicRosterRows = new Map<string, HTMLLIElement>();
+  private publicRosterOrder: string[] = [];
   private readonly quality: HTMLParagraphElement;
   private qualityOwner: { client: StageClient; roomId: string; participantId: string; generation: number } | undefined;
   private qualityReport: Omit<ConnectionQuality, 'participantId'> | undefined;
+  private readonly qualitySnapshots = new WeakSet<object>();
+  private readonly qualityReceipts = new WeakSet<object>();
+  private qualityEventRevision = 0;
+  private qualityRevision = 0;
+  // Extra callback reconciliation repaints only changed projection; original paint triggers stay unconditional.
+  private qualityPaintedRevision = -1;
+  private qualityClearFirst = true;
+  private readonly connectionStatsPanel: HTMLDivElement;
+  private readonly connectionStatsUpdate: HTMLButtonElement;
+  private readonly connectionStatsText: HTMLParagraphElement;
+  private connectionStatsOwner: { client: StageClient; roomId: string; participantId: string; generation: number } | undefined;
+  private connectionStatsTerminalClient: StageClient | undefined;
+  private connectionStatsAttempt: object | undefined;
+  private connectionStatsReport: { inbound: { loss: number | undefined; rtt: number | undefined; buffer: number | undefined } | null;
+    outbound: { loss: number | undefined; rtt: number | undefined } | null } | undefined;
+  private connectionStatsFailed = false;
+  private connectionStatsLeaving = false;
   private readonly speaking: HTMLParagraphElement;
   private speakingOwner: { client: StageClient; roomId: string; participantId: string; generation: number } | undefined;
   private speakingReport: { ids: Set<string>; empty: boolean } | undefined;
+  private readonly speakingSnapshots = new WeakSet<object>();
+  private readonly speakingReceipts = new WeakSet<object>();
+  private readonly speakingSuppressed = new Set<string>();
+  private speakingEventRevision = 0;
+  private speakingRevision = 0;
+  private speakingPainted = { hidden: true, text: '' };
   private readonly handRejection: HTMLParagraphElement;
   private handRejectionOwner: { client: StageClient; roomId: string; participantId: string; generation: number } | undefined;
   /** Last failure (request rejected, mic denied…); stays until dismissed, the next action or join. */
@@ -100,6 +154,13 @@ export class StageElement extends HTMLElement {
   private readonly handQueueSummary: HTMLElement;
   private readonly handQueueNotice: HTMLParagraphElement;
   private readonly handQueueList: HTMLUListElement;
+  private readonly handQueueSearch: HTMLInputElement;
+  private readonly handQueueClear: HTMLButtonElement;
+  private readonly handQueueResults: HTMLParagraphElement;
+  private handQueueQuery = '';
+  private handQueueRevision = 0;
+  private handQueueTerminalClient: StageClient | undefined;
+  private handQueueAwaitingStateClient: StageClient | undefined;
   private handQueueOwner: { client: StageClient; roomId: string; participantId: string; generation: number } | undefined;
   private readonly handQueuePending = new Map<string, object>();
   private readonly handQueueRows = new Map<string, { node: HTMLLIElement; name: HTMLSpanElement; approve: HTMLButtonElement; reject: HTMLButtonElement }>();
@@ -135,6 +196,34 @@ export class StageElement extends HTMLElement {
   private microphoneTerminalClient: StageClient | undefined;
   private refreshAttempt: object | undefined;
   private inputDeviceAttempt: object | undefined;
+  private readonly micTestPanel: HTMLDivElement;
+  private readonly micTestStart: HTMLButtonElement;
+  private readonly micTestCancel: HTMLButtonElement;
+  private readonly micTestStop: HTMLButtonElement;
+  private readonly micTestMeter: HTMLMeterElement;
+  private readonly micTestStatus: HTMLParagraphElement;
+  // A binding is installed with a new client, never reconstructed from current during teardown.
+  private micTestBinding: { client: StageClient; generation: number; blocked: boolean; early: Set<string> } | undefined;
+  private micTestOwner: { binding: NonNullable<StageElement['micTestBinding']>; roomId: string; participantId: string } | undefined;
+  private micTestAttempt: { owner: NonNullable<StageElement['micTestOwner']>; controller: AbortController;
+    pending: boolean; retired: boolean; handle?: MicTest } | undefined;
+  private micTestMessage = '尚未開始麥克風音量測試。';
+  private micTestValue = 0;
+  private micTestTimer: ReturnType<typeof setTimeout> | undefined;
+  private micTestCleanup = 0;
+  private micTestPageHidden = false;
+  private micTestDocument: Document | undefined;
+  private micTestWindow: Window | undefined;
+  private readonly micTestStates = new WeakSet<object>();
+  private readonly micTestEarlyStates = new WeakSet<object>();
+  private readonly micTestVisibility = () => {
+    if (this.micTestDocument?.hidden) this.retireMicTest(true);
+    this.syncMicTest();
+  };
+  private readonly micTestPageHide = () => {
+    this.micTestPageHidden = true; this.retireMicTest(true); this.syncMicTest();
+  };
+  private readonly micTestPageShow = () => { this.micTestPageHidden = false; this.syncMicTest(); };
   private readonly outputDevicePanel: HTMLDivElement;
   private readonly outputDeviceSelect: HTMLSelectElement;
   private readonly outputDeviceRefresh: HTMLButtonElement;
@@ -146,6 +235,18 @@ export class StageElement extends HTMLElement {
   private errorRevision = 0;
   private readonly leaveStage: HTMLButtonElement;
   private readonly roomAction: HTMLButtonElement;
+  private readonly roomClose: HTMLButtonElement;
+  private readonly roomCloseNotice: HTMLParagraphElement;
+  private readonly roomActions: HTMLDivElement;
+  private readonly widgetRoot: ShadowRoot;
+  private roomCloseOwner: { client: StageClient; roomId: string; participantId: string; generation: number; revision: number } | undefined;
+  private roomCloseAuthority: { client: StageClient; roomId: string; participantId: string; generation: number; revision: number; awaitingState: boolean } | undefined;
+  private roomCloseTerminalClient: StageClient | undefined;
+  private roomCloseAttempt: { owner: NonNullable<StageElement['roomCloseOwner']>; revision: number; invalid: boolean; errorRevision: number } | undefined;
+  private roomCloseRenderRevision = 0;
+  // Dialog scopes outlive retired owners, but never the synchronous admission stack.
+  private roomCloseDialog: object | undefined;
+  private readonly stageTransferDialogs = new Set<object>();
   private leftRoom = false;
   private roomExit: object | undefined;
   private readonly listen: HTMLButtonElement;
@@ -165,7 +266,7 @@ export class StageElement extends HTMLElement {
 
   constructor() {
     super();
-    const root = this.attachShadow({ mode: 'open' });
+    const root = this.widgetRoot = this.attachShadow({ mode: 'open' });
     const style = document.createElement('style');
     style.textContent = STYLE;
     const panel = document.createElement('div');
@@ -174,9 +275,29 @@ export class StageElement extends HTMLElement {
     this.status.part.add('status');
     this.status.setAttribute('role', 'status');
     this.status.setAttribute('aria-live', 'polite');
+    this.occupancy = document.createElement('p');
+    this.occupancy.className = 'room-occupancy';
+    this.occupancy.hidden = true;
+    this.publicRosterPanel = document.createElement('details');
+    this.publicRosterPanel.part.add('public-roster');
+    this.publicRosterPanel.hidden = true;
+    this.publicRosterSummary = document.createElement('summary');
+    this.publicRosterSummary.textContent = '台上成員快照';
+    this.publicRosterNotice = document.createElement('p');
+    this.publicRosterList = document.createElement('ul');
+    this.publicRosterPanel.append(this.publicRosterSummary, this.publicRosterNotice, this.publicRosterList);
     this.quality = document.createElement('p');
     this.quality.part.add('quality');
     this.quality.hidden = true;
+    this.connectionStatsPanel = document.createElement('div');
+    this.connectionStatsPanel.part.add('connection-stats');
+    this.connectionStatsPanel.hidden = true;
+    this.connectionStatsUpdate = document.createElement('button');
+    this.connectionStatsUpdate.type = 'button';
+    this.connectionStatsUpdate.textContent = '更新我的連線統計';
+    this.connectionStatsUpdate.onclick = () => this.refreshConnectionStats();
+    this.connectionStatsText = document.createElement('p');
+    this.connectionStatsPanel.append(this.connectionStatsUpdate, this.connectionStatsText);
     this.speaking = document.createElement('p');
     this.speaking.part.add('speaking');
     this.speaking.hidden = true;
@@ -225,14 +346,26 @@ export class StageElement extends HTMLElement {
     this.handQueueSummary = document.createElement('summary');
     this.handQueueNotice = document.createElement('p');
     this.handQueueList = document.createElement('ul');
-    this.handQueuePanel.append(this.handQueueSummary, this.handQueueNotice, this.handQueueList);
+    const handQueueLabel = document.createElement('label');
+    handQueueLabel.textContent = '搜尋舉手者名稱';
+    this.handQueueSearch = document.createElement('input');
+    this.handQueueSearch.type = 'search';
+    this.handQueueSearch.oninput = () => this.filterHandQueue(false);
+    handQueueLabel.append(this.handQueueSearch);
+    this.handQueueClear = document.createElement('button');
+    this.handQueueClear.type = 'button'; this.handQueueClear.textContent = '清除搜尋';
+    this.handQueueClear.onclick = () => this.filterHandQueue(true);
+    this.handQueueResults = document.createElement('p');
+    this.handQueueResults.setAttribute('role', 'status');
+    this.handQueuePanel.append(this.handQueueSummary, this.handQueueNotice, handQueueLabel,
+      this.handQueueClear, this.handQueueResults, this.handQueueList);
     this.stageManagementPanel = document.createElement('details');
     this.stageManagementPanel.part.add('stage-management');
     this.stageManagementSummary = document.createElement('summary');
     this.stageManagementNotice = document.createElement('p');
     this.stageManagementList = document.createElement('ul');
     this.stageManagementPanel.append(this.stageManagementSummary, this.stageManagementNotice, this.stageManagementList);
-    const actions = document.createElement('div');
+    const actions = this.roomActions = document.createElement('div');
     actions.part.add('actions');
     this.unlock = document.createElement('button');
     this.unlock.type = 'button'; this.unlock.className = 'primary'; this.unlock.textContent = '啟用音訊';
@@ -272,6 +405,28 @@ export class StageElement extends HTMLElement {
     microphoneNotice.id = 'microphone-draft-notice';
     microphoneNotice.textContent = '草稿不代表目前實際擷取裝置；麥克風失敗後需另按「重試麥克風」。重新整理清單不會開啟麥克風；預設選項沿用 SDK 設定。';
     this.microphonePanel.append(microphoneLabel, this.microphoneSelect, this.microphoneRefresh, this.microphoneApply, microphoneNotice);
+    this.micTestPanel = document.createElement('div');
+    this.micTestPanel.id = 'mic-test-panel'; this.micTestPanel.part.add('mic-test');
+    this.micTestStart = document.createElement('button');
+    this.micTestStart.id = 'mic-test-start'; this.micTestStart.type = 'button'; this.micTestStart.textContent = '測試麥克風音量';
+    this.micTestStart.onclick = () => this.startMicTest();
+    this.micTestCancel = document.createElement('button');
+    this.micTestCancel.id = 'mic-test-cancel'; this.micTestCancel.type = 'button'; this.micTestCancel.textContent = '取消麥克風測試';
+    this.micTestCancel.onclick = () => this.stopMicTest();
+    this.micTestStop = document.createElement('button');
+    this.micTestStop.id = 'mic-test-stop'; this.micTestStop.type = 'button'; this.micTestStop.textContent = '停止麥克風測試';
+    this.micTestStop.onclick = () => this.stopMicTest();
+    const micTestLabel = document.createElement('label');
+    micTestLabel.textContent = '本機麥克風測試音量'; micTestLabel.setAttribute('for', 'mic-test-meter');
+    this.micTestMeter = document.createElement('meter');
+    this.micTestMeter.id = 'mic-test-meter'; this.micTestMeter.min = 0; this.micTestMeter.max = 1; this.micTestMeter.value = 0;
+    this.micTestMeter.setAttribute('aria-describedby', 'mic-test-notice');
+    this.micTestStatus = document.createElement('p'); this.micTestStatus.id = 'mic-test-status';
+    this.micTestStatus.setAttribute('role', 'status'); this.micTestStatus.setAttribute('aria-live', 'polite');
+    const micTestNotice = document.createElement('p'); micTestNotice.id = 'mic-test-notice';
+    micTestNotice.textContent = '僅量測本機音量，不會播放或傳送到舞台；不保證實際裝置或收音正常。測試使用已送出的選擇，未送出草稿不影響測試。取消無法關閉瀏覽器的權限提示。';
+    this.micTestPanel.append(this.micTestStart, this.micTestCancel, this.micTestStop, micTestLabel,
+      this.micTestMeter, this.micTestStatus, micTestNotice);
     this.outputDevicePanel = document.createElement('div');
     this.outputDevicePanel.part.add('output-device');
     const outputDeviceLabel = document.createElement('label');
@@ -309,6 +464,15 @@ export class StageElement extends HTMLElement {
     this.roomAction = document.createElement('button');
     this.roomAction.type = 'button';
     this.roomAction.onclick = () => this.changeRoomPresence();
+    this.roomClose = document.createElement('button');
+    this.roomClose.type = 'button'; this.roomClose.className = 'danger'; this.roomClose.textContent = '關閉房間';
+    this.roomClose.hidden = this.roomClose.disabled = true;
+    this.roomClose.setAttribute('aria-busy', 'false');
+    this.roomClose.setAttribute('aria-describedby', 'room-close-notice');
+    this.roomClose.onclick = () => this.closeRoom();
+    this.roomCloseNotice = document.createElement('p');
+    this.roomCloseNotice.id = 'room-close-notice'; this.roomCloseNotice.hidden = true;
+    this.roomCloseNotice.textContent = '關閉房間會讓所有人離場，且無法再加入此房間。離開房間只會讓你離場，房間可能保留並由其他人接任主控。';
     this.listen = this.button('靜音收聽', () => { this.playbackMuted = !this.playbackMuted; });
     this.listen.setAttribute('aria-label', '靜音收聽');
     this.playback = document.createElement('div');
@@ -330,8 +494,8 @@ export class StageElement extends HTMLElement {
     this.playback.append(volumeLabel, this.volume, this.volumeValue);
     this.retry = this.button('重試加入', () => { if (this.canRetry()) this.rejoin(); });
     this.cancelJoin = this.button('取消加入', () => this.cancelInitial?.());
-    actions.append(this.unlock, this.listen, this.hand, this.mic, this.micRetry, this.audioRetry, this.leaveStage, this.roomAction, this.retry, this.cancelJoin);
-    panel.append(this.status, this.quality, this.speaking, this.handRejection, this.error, this.errorDismiss, this.namePanel, this.roomNamePanel, this.handQueuePanel, this.stageManagementPanel, actions, this.audioRecovery, this.microphonePanel, this.outputDevicePanel, this.playback);
+    actions.append(this.unlock, this.listen, this.hand, this.mic, this.micRetry, this.audioRetry, this.leaveStage, this.roomAction, this.roomClose, this.retry, this.cancelJoin);
+    panel.append(this.status, this.occupancy, this.publicRosterPanel, this.quality, this.connectionStatsPanel, this.speaking, this.handRejection, this.error, this.errorDismiss, this.namePanel, this.roomNamePanel, this.handQueuePanel, this.stageManagementPanel, actions, this.roomCloseNotice, this.audioRecovery, this.microphonePanel, this.micTestPanel, this.outputDevicePanel, this.playback);
     root.append(style, panel);
     this.render();
   }
@@ -355,7 +519,11 @@ export class StageElement extends HTMLElement {
   }
 
   connectedCallback(): void { if (this.leftRoom) this.render(); else this.rejoin(); }
-  disconnectedCallback(): void { ++this.generation; void this.leave(); }
+  disconnectedCallback(): void {
+    const cleanup = this.retireMicTestBinding(), generation = ++this.generation;
+    this.detachMicTestListeners(); cleanup();
+    if (generation === this.generation) void this.leave();
+  }
   attributeChangedCallback(name: string, previous: string | null, next: string | null): void {
     if (previous === next) return;
     if (name === 'playback-volume') { this.current?.setPlaybackVolume(this.playbackVolume); this.renderVolume(); return; }
@@ -394,8 +562,10 @@ export class StageElement extends HTMLElement {
   }
 
   private rejoin(): void {
-    const generation = ++this.generation;
+    const cleanup = this.retireMicTestBinding(), generation = ++this.generation;
     this.leftRoom = false; this.roomExit = undefined;
+    cleanup();
+    if (generation !== this.generation) return;
     void this.leave().then(async () => {
       const room = this.getAttribute('room')?.trim(), name = this.getAttribute('name')?.trim();
       if (generation !== this.generation || !this.isConnected || !room || !name) { this.render(); return; }
@@ -403,6 +573,8 @@ export class StageElement extends HTMLElement {
       client.setPlaybackMuted(this.playbackMuted);
       client.setPlaybackVolume(this.playbackVolume);
       this.current = client;
+      this.micTestBinding = { client, generation, blocked: false, early: new Set() };
+      this.attachMicTestListeners();
       this.joinPhase = 'connecting';
       let receivedState = false;
       let terminal = false;
@@ -411,6 +583,7 @@ export class StageElement extends HTMLElement {
         if (generation !== this.generation || this.current !== client || !this.isConnected
           || !this.joinPhase || receivedState || terminal || client.state || client.status === 'reconnecting') return;
         cancelled = true;
+        this.detachMicTestListeners();
         this.hideCancel();
         this.joinPhase = undefined;
         this.retryAvailable = true;
@@ -421,77 +594,110 @@ export class StageElement extends HTMLElement {
       for (const type of EVENTS) {
         client.on(type, ({ detail }) => {
           if (generation !== this.generation || this.current !== client) return;
-          if (type === 'closed' || type === 'kicked') this.microphoneTerminalClient = client;
-          else if (type === 'state') this.microphoneTerminalClient = undefined;
-          if (type === 'closed' || type === 'kicked') this.outputDeviceTerminalClient = client;
-          else if (type === 'state') this.outputDeviceTerminalClient = undefined;
-          if (type === 'closed' || type === 'kicked') this.stageManagementTerminalClient = client;
-          else if (type === 'state') this.stageManagementTerminalClient = undefined;
-          if (type === 'closed' || type === 'kicked' || (type === 'status' && detail === 'disconnected')) this.audioRecoveryTerminalClient = client;
-          else if (type === 'state') this.audioRecoveryTerminalClient = undefined;
-          this.syncAudioRecovery();
-          // Revoke picker admission before any forwarded callback can click an old control.
-          this.syncMicrophoneOwner();
-          this.syncOutputDeviceOwner();
-          const micLifecycle = type === 'state' || type === 'status' || type === 'micerror' || type === 'micready'
-            || type === 'closed' || type === 'kicked';
-          if (micLifecycle) this.syncMicRetry();
-          if (type === 'state' || type === 'status' || type === 'closed' || type === 'kicked' || type === 'audioblocked') this.syncPlaybackOwner();
-          if (type === 'state' || type === 'status' || type === 'closed' || type === 'kicked') this.syncNameOwner();
-          if (type === 'state' || type === 'status' || type === 'closed' || type === 'kicked') this.syncRoomNameOwner();
-          if (type === 'state' || type === 'status' || type === 'closed' || type === 'kicked') this.syncHandQueue();
-          this.noteStageTransferEvent(type, detail);
-          this.syncStageManagement();
-          const ownId = client.me?.participantId;
-          if (type === 'closed' || type === 'kicked'
-            || (type === 'status' && (detail === 'reconnecting' || detail === 'disconnected'))
-            || (type === 'hand' && (detail as StageEventMap['hand']).raised && (detail as StageEventMap['hand']).participantId === ownId)
-            || (type === 'stagejoined' && (detail as StageEventMap['stagejoined']).participantId === ownId)
-            || (type === 'role' && (detail as StageEventMap['role']).role !== 'audience' && (detail as StageEventMap['role']).participantId === ownId)
-            || (type === 'transferred' && (detail as StageEventMap['transferred']).toId === ownId)) this.retireHandRejection();
-          else this.syncHandRejection(type === 'handrejected' ? detail as StageEventMap['handrejected'] : undefined);
-          if (type === 'closed' || type === 'kicked' || type === 'micerror'
-            || (type === 'status' && (detail === 'reconnecting' || detail === 'disconnected'))
-            || (type === 'stageleft' && (detail as StageEventMap['stageleft']).participantId === client.state?.me.participantId)) this.retireQualityOwner();
-          else if (type === 'quality') this.syncQualityOwner((detail as StageEventMap['quality']).participants);
-          else if (type === 'state' || type === 'status') this.syncQualityOwner();
-          if (type === 'closed' || type === 'kicked'
-            || (type === 'status' && (detail === 'reconnecting' || detail === 'disconnected'))) this.retireSpeakingOwner();
-          else if (type === 'speaking') this.syncSpeakingOwner({ participantIds: (detail as StageEventMap['speaking'] | null | undefined)?.participantIds });
-          else if (type === 'state' || type === 'status') this.syncSpeakingOwner();
-          // SDK status precedes state; a forwarded status listener may disconnect immediately.
-          if (type === 'state' || client.state) { receivedState = true; this.hideRetry(); this.hideCancel(); }
-          if (type === 'closed' || type === 'kicked') { terminal = true; this.micFailure = undefined; this.hideRetry(); this.hideCancel(); }
-          if (type === 'state' || type === 'closed' || type === 'kicked'
-            || (type === 'status' && detail === 'disconnected')) this.joinPhase = undefined;
-          if (type === 'audioblocked' && this.playbackOwner) { this.playbackOwner.notice++; this.unlock.hidden = false; this.unlock.disabled = Boolean(this.unlockAttempt); }
-          if (type === 'status' && detail === 'disconnected') {
-            this.hideCancel();
-            this.status.textContent = cancelled && !receivedState && !terminal ? '已取消加入。' : STATUS_LABELS.disconnected;
+          const publicRosterEvent = this.rememberPublicRosterEvent(type, detail);
+          try {
+            this.markMicTestEvent(client, type, detail);
+            const speakingEvent = this.rememberSpeakingEvent(type, detail);
+            const qualityEvent = this.rememberQualityEvent(type, detail);
+            // Retire the manual read before public authority getters can admit a genuine new entry.
+            if (type === 'closed' || type === 'kicked') this.connectionStatsTerminalClient = client;
+            else if (type === 'state') this.connectionStatsTerminalClient = undefined;
+            if (type === 'closed' || type === 'kicked'
+              || (type === 'status' && (detail === 'reconnecting' || detail === 'disconnected'))) this.retireConnectionStats();
+            if (type === 'closed' || type === 'kicked') this.stageManagementTerminalClient = client;
+            else if (type === 'state') this.stageManagementTerminalClient = undefined;
+            // Own-role deltas precede their snapshot. Fence both dialogs before any DOM setter can reenter.
+            this.noteRoomCloseEvent(type, detail);
+            this.noteStageTransferEvent(type, detail);
+            this.noteMicTestEvent(client, type, detail);
+            this.reconcileRoomClose();
+            this.noteQualityEvent(client, generation, type, detail, qualityEvent);
+            this.noteSpeakingEvent(client, generation, type, detail, speakingEvent);
+            if (type === 'closed' || type === 'kicked') this.microphoneTerminalClient = client;
+            else if (type === 'state') this.microphoneTerminalClient = undefined;
+            if (type === 'closed' || type === 'kicked') this.outputDeviceTerminalClient = client;
+            else if (type === 'state') this.outputDeviceTerminalClient = undefined;
+            if (type === 'closed' || type === 'kicked' || (type === 'status' && detail === 'disconnected')) this.audioRecoveryTerminalClient = client;
+            else if (type === 'state') this.audioRecoveryTerminalClient = undefined;
+            this.syncOccupancy(type === 'state' ? detail as StageEventMap['state'] : undefined,
+              type === 'closed' || type === 'kicked' || (type === 'status' && detail === 'disconnected'));
+            this.syncAudioRecovery();
+            // Revoke picker admission before any forwarded callback can click an old control.
+            this.syncMicrophoneOwner();
+            this.syncOutputDeviceOwner();
+            const micLifecycle = type === 'state' || type === 'status' || type === 'micerror' || type === 'micready'
+              || type === 'closed' || type === 'kicked';
+            if (micLifecycle) this.syncMicRetry();
+            if (type === 'state' || type === 'status' || type === 'closed' || type === 'kicked' || type === 'audioblocked') this.syncPlaybackOwner();
+            if (type === 'state' || type === 'status' || type === 'closed' || type === 'kicked') this.syncNameOwner();
+            if (type === 'state' || type === 'status' || type === 'closed' || type === 'kicked') this.syncRoomNameOwner();
+            if (type === 'state' || type === 'status' || type === 'closed' || type === 'kicked'
+              || type === 'role' || type === 'transferred') this.syncHandQueue();
+            this.syncStageManagement();
+            this.syncRoomClose();
+            const ownId = client.me?.participantId;
+            if (type === 'closed' || type === 'kicked'
+              || (type === 'status' && (detail === 'reconnecting' || detail === 'disconnected'))
+              || (type === 'hand' && (detail as StageEventMap['hand']).raised && (detail as StageEventMap['hand']).participantId === ownId)
+              || (type === 'stagejoined' && (detail as StageEventMap['stagejoined']).participantId === ownId)
+              || (type === 'role' && (detail as StageEventMap['role']).role !== 'audience' && (detail as StageEventMap['role']).participantId === ownId)
+              || (type === 'transferred' && (detail as StageEventMap['transferred']).toId === ownId)) this.retireHandRejection();
+            else this.syncHandRejection(type === 'handrejected' ? detail as StageEventMap['handrejected'] : undefined);
+            this.syncQualityOwner(type === 'quality' || type === 'state' || type === 'status' || type === 'closed'
+              || type === 'kicked' || type === 'micerror'
+              || (type === 'stageleft' && (detail as StageEventMap['stageleft']).participantId === ownId));
+            this.syncSpeakingOwner(type === 'speaking' || type === 'state' || type === 'status'
+              || type === 'closed' || type === 'kicked');
+            // SDK status precedes state; a forwarded status listener may disconnect immediately.
+            if (type === 'state' || client.state) { receivedState = true; this.hideRetry(); this.hideCancel(); }
+            if (type === 'closed' || type === 'kicked') { terminal = true; this.micFailure = undefined; this.hideRetry(); this.hideCancel(); }
+            if (type === 'state' || type === 'closed' || type === 'kicked'
+              || (type === 'status' && detail === 'disconnected')) this.joinPhase = undefined;
+            if (type === 'audioblocked' && this.playbackOwner) { this.playbackOwner.notice++; this.unlock.hidden = false; this.unlock.disabled = Boolean(this.unlockAttempt); }
+            if (type === 'status' && detail === 'disconnected') {
+              this.hideCancel();
+              this.status.textContent = cancelled && !receivedState && !terminal ? '已取消加入。' : STATUS_LABELS.disconnected;
+            }
+            if (type === 'closed') this.status.textContent = (detail as StageEventMap['closed']).reason === 'shutdown'
+              ? '伺服器維護或重新啟動，房間已關閉。' : '房間已關閉。';
+            if (type === 'kicked') this.status.textContent = '你已被主控移出房間。';
+            if (type === 'error' || type === 'micerror') this.show(detail);
+            if (type === 'micerror' && client.state && client.me?.onStage) {
+              this.micFailure = { client, roomId: client.state.roomId, participantId: client.me.participantId,
+                errorRevision: this.errorRevision, pending: false };
+            }
+            if (type === 'micready' && this.micFailure?.client === client) {
+              // micready is shared with preview and precedes sender installation.
+              if (this.micFailure.errorRevision === this.errorRevision) this.hideError();
+              this.micFailure = undefined;
+            }
+            // Revoke stale action admission before application event listeners can reenter.
+            if (micLifecycle) this.syncMicRetry();
+            this.syncOccupancy();
+            this.syncQualityOwner(false);
+            this.syncSpeakingOwner(false);
+            this.syncConnectionStats();
+            this.syncMicTest();
+            this.notePublicRosterEvent(client, generation, type, detail, publicRosterEvent);
+            this.syncPublicRoster();
+            this.dispatchEvent(new CustomEvent(`stage-${type}`, { detail, bubbles: true, composed: true }));
+            this.syncOccupancy();
+            this.syncQualityOwner(false);
+            this.syncSpeakingOwner(false);
+            this.syncConnectionStats();
+            this.syncMicTest();
+            // Application callbacks may retire this seat or mutate its exposed snapshot.
+            this.syncMicrophoneOwner();
+            this.syncOutputDeviceOwner();
+            this.syncStageManagement();
+            this.syncRoomClose();
+            this.syncHandRejection();
+            this.syncAudioRecovery();
+            this.syncPublicRoster();
+            if (type === 'state' || type === 'status' || type === 'mic' || type === 'closed' || type === 'kicked') this.render();
+          } finally {
+            if (this.publicRosterPending === publicRosterEvent.pending) this.publicRosterPending = undefined;
           }
-          if (type === 'closed') this.status.textContent = (detail as StageEventMap['closed']).reason === 'shutdown'
-            ? '伺服器維護或重新啟動，房間已關閉。' : '房間已關閉。';
-          if (type === 'kicked') this.status.textContent = '你已被主控移出房間。';
-          if (type === 'error' || type === 'micerror') this.show(detail);
-          if (type === 'micerror' && client.state && client.me?.onStage) {
-            this.micFailure = { client, roomId: client.state.roomId, participantId: client.me.participantId,
-              errorRevision: this.errorRevision, pending: false };
-          }
-          if (type === 'micready' && this.micFailure?.client === client) {
-            // micready is shared with preview and precedes sender installation.
-            if (this.micFailure.errorRevision === this.errorRevision) this.hideError();
-            this.micFailure = undefined;
-          }
-          // Revoke stale action admission before application event listeners can reenter.
-          if (micLifecycle) this.syncMicRetry();
-          this.dispatchEvent(new CustomEvent(`stage-${type}`, { detail, bubbles: true, composed: true }));
-          // Application callbacks may retire this seat or mutate its exposed snapshot.
-          this.syncMicrophoneOwner();
-          this.syncOutputDeviceOwner();
-          this.syncStageManagement();
-          this.syncHandRejection();
-          this.syncAudioRecovery();
-          if (type === 'state' || type === 'status' || type === 'mic' || type === 'closed' || type === 'kicked') this.render();
         });
       }
       this.hideError();
@@ -529,9 +735,16 @@ export class StageElement extends HTMLElement {
       return;
     }
     if (!this.current?.state || !this.current.me) return;
-    ++this.generation;
+    const cleanup = this.retireMicTestBinding(), generation = ++this.generation;
     const exit = {};
     this.leftRoom = true; this.roomExit = exit;
+    cleanup();
+    if (generation !== this.generation || this.roomExit !== exit) return;
+    this.retireConnectionStats();
+    this.retireOccupancy();
+    this.retirePublicRoster();
+    this.retireQualityOwner();
+    this.retireSpeakingOwner();
     this.hideError();
     // Retire the event lane before disconnect can synchronously invoke application callbacks.
     void this.leave().catch(error => {
@@ -543,6 +756,17 @@ export class StageElement extends HTMLElement {
   }
 
   private async leave(): Promise<void> {
+    const cleanup = this.retireMicTestBinding(), generation = this.generation;
+    this.connectionStatsLeaving = true;
+    this.detachMicTestListeners(); cleanup();
+    if (generation !== this.generation) return;
+    this.retireConnectionStats();
+    this.retireOccupancy();
+    this.retirePublicRoster();
+    this.retireQualityOwner();
+    this.retireSpeakingOwner();
+    this.retireRoomClose();
+    this.roomCloseAuthority = undefined; this.roomCloseTerminalClient = undefined;
     this.joinPhase = undefined;
     this.micFailure = undefined;
     this.microphoneTerminalClient = undefined;
@@ -551,13 +775,12 @@ export class StageElement extends HTMLElement {
     this.retireOutputDeviceOwner();
     this.retireNameOwner();
     this.retireRoomNameOwner();
+    this.handQueueTerminalClient = this.current ?? undefined;
     this.retireHandQueue();
     this.stageManagementTerminalClient = undefined;
     this.retireStageManagement();
     this.audioRecoveryTerminalClient = undefined;
     this.retireAudioRecovery();
-    this.retireQualityOwner();
-    this.retireSpeakingOwner();
     this.retireHandRejection();
     this.hideCancel();
     this.hideRetry();
@@ -567,19 +790,570 @@ export class StageElement extends HTMLElement {
     this.cooldownTimer = undefined; this.cooldownDue = 0;
     const client = this.current;
     this.current = null;
+    this.connectionStatsLeaving = false;
+    this.connectionStatsTerminalClient = undefined;
     this.unlock.hidden = true;
     this.render();
     await client?.disconnect();
   }
 
+  private retirePublicRoster(preserved?: StageElement['publicRosterPending']): void {
+    if (this.publicRosterPending && this.publicRosterPending !== preserved) this.publicRosterPending.invalid = true;
+    if (!this.publicRosterOwner && !this.publicRosterReport) return;
+    this.publicRosterOwner = undefined; this.publicRosterReport = undefined;
+    ++this.publicRosterRevision;
+  }
+
+  private rememberPublicRosterEvent(type: keyof StageEventMap, detail: StageEventMap[keyof StageEventMap]): {
+    revision: number; unseen: boolean; pending: StageElement['publicRosterPending'];
+  } {
+    const revision = ++this.publicRosterEventRevision;
+    const object = detail !== null && typeof detail === 'object';
+    const unseen = type === 'state' && object && !this.publicRosterSnapshots.has(detail);
+    // Reserve even rejected receipts without getters or DOM ahead of the existing consent fences.
+    if (type === 'state' && object) this.publicRosterSnapshots.add(detail);
+    const pending = this.publicRosterPending = unseen
+      ? { revision, detail, anchor: this.publicRosterOwner, transitioned: false, invalid: false } : undefined;
+    if (type === 'closed' || type === 'kicked' || (type === 'status' && detail === 'disconnected')) this.retirePublicRoster();
+    else if (this.publicRosterReport && ((type === 'status' && detail === 'reconnecting')
+      || type === 'role' || type === 'stageleft' || type === 'stagejoined' || type === 'transferred' || type === 'mic')) {
+      this.publicRosterReport.last = true;
+      this.publicRosterReport.awaiting = type !== 'status';
+      ++this.publicRosterRevision;
+    }
+    return { revision, unseen, pending };
+  }
+
+  private reconcilePublicRoster(): void {
+    for (;;) {
+      const pending = this.publicRosterPending;
+      const owner = this.publicRosterOwner ?? (pending && !pending.invalid ? pending.anchor : undefined);
+      if (!owner) return;
+      const revision = this.publicRosterRevision, client = owner.client;
+      const state = client.state, status = client.status;
+      const roomId = state?.roomId, participantId = state?.me?.participantId;
+      const current = (): boolean => pending === this.publicRosterPending && revision === this.publicRosterRevision
+        && owner === (this.publicRosterOwner ?? (pending && !pending.invalid ? pending.anchor : undefined));
+      if (!current()) continue;
+      // Observed identity loss retires this receipt even if a later getter restores old values.
+      if (!this.isConnected || this.current !== client || this.generation !== owner.generation
+        || roomId !== owner.roomId || participantId !== owner.participantId
+        || (status !== 'live' && status !== 'waiting' && status !== 'reconnecting')) {
+        // Only the exact new receipt may replace its original owner once. Keep its new seat
+        // anchored while predecessor getters run, even though the old report has been cleared.
+        const transition = pending && !pending.invalid && !pending.transitioned && pending.anchor === owner
+          && owner === this.publicRosterOwner && pending.revision === this.publicRosterEventRevision
+          && this.isConnected && this.current === client && this.generation === owner.generation
+          && state === pending.detail && (status === 'live' || status === 'waiting')
+          && typeof roomId === 'string' && Boolean(roomId.trim())
+          && typeof participantId === 'string' && Boolean(participantId.trim())
+          && (roomId !== owner.roomId || participantId !== owner.participantId)
+          && state === client.state && status === client.status;
+        if (!current()) continue;
+        if (transition && pending) {
+          pending.anchor = { client, generation: owner.generation, roomId: roomId!, participantId: participantId! };
+          pending.transitioned = true;
+        }
+        this.retirePublicRoster(transition ? pending : undefined);
+        this.noteRoomCloseEvent('status', status);
+        this.noteStageTransferEvent('status', status);
+        this.reconcileRoomClose();
+        continue;
+      }
+      if (state !== client.state || status !== client.status) continue;
+      if (!current()) continue;
+      if (status === 'reconnecting' && this.publicRosterReport && !this.publicRosterReport.last) {
+        this.publicRosterReport.last = true; ++this.publicRosterRevision;
+      }
+      return;
+    }
+  }
+
+  private notePublicRosterEvent(client: StageClient, generation: number, type: keyof StageEventMap,
+    detail: StageEventMap[keyof StageEventMap], event: ReturnType<StageElement['rememberPublicRosterEvent']>): void {
+    this.reconcilePublicRoster();
+    if (type !== 'state' || !event.unseen || !event.pending || event.pending.invalid
+      || event.pending !== this.publicRosterPending || event.revision !== this.publicRosterEventRevision
+      || this.current !== client || this.generation !== generation) return;
+    const revision = this.publicRosterRevision;
+    const state = client.state, status = client.status;
+    const roomId = state?.roomId, participantId = state?.me?.participantId;
+    if (!state || state !== detail || !this.isConnected || (status !== 'live' && status !== 'waiting')
+      || typeof roomId !== 'string' || !roomId.trim() || typeof participantId !== 'string' || !participantId.trim()) return;
+    const current = (): boolean => {
+      this.reconcilePublicRoster();
+      return !event.pending!.invalid && event.pending === this.publicRosterPending
+        && revision === this.publicRosterRevision && event.revision === this.publicRosterEventRevision && this.current === client && this.generation === generation
+        && this.isConnected && state === client.state && status === client.status
+        && roomId === state.roomId && participantId === state.me?.participantId
+        && revision === this.publicRosterRevision && event.revision === this.publicRosterEventRevision
+        && !event.pending!.invalid && event.pending === this.publicRosterPending;
+    };
+    const limit = state.limits?.maxSpeakers, people = state.speakers, controllerId = state.controllerId;
+    const rows: { id: string; text: string }[] = [], seen = new Set<string>();
+    let controllers = 0, speakers = 0;
+    let valid = typeof limit === 'number' && Number.isSafeInteger(limit) && limit > 0
+      && Array.isArray(people) && people.length - 1 <= limit
+      && typeof controllerId === 'string' && Boolean(controllerId.trim());
+    if (valid) {
+      const length = people.length;
+      for (let index = 0; index < length; index++) {
+        const person = people[index];
+        if (!person || typeof person !== 'object') { valid = false; break; }
+        const id = person.participantId, name = person.name, role = person.role, onStage = person.onStage;
+        const muted = person.muted, forceMuted = person.forceMuted, connected = person.connected;
+        if (typeof id !== 'string' || !id.trim() || seen.has(id) || typeof name !== 'string'
+          || onStage !== true || (role !== 'controller' && role !== 'speaker')
+          || (id === controllerId) !== (role === 'controller') || typeof muted !== 'boolean'
+          || typeof forceMuted !== 'boolean' || typeof connected !== 'boolean' || (forceMuted && !muted)) {
+          valid = false; break;
+        }
+        seen.add(id);
+        if (role === 'controller') controllers++; else speakers++;
+        if (controllers > 1 || speakers > limit) { valid = false; break; }
+        rows.push({ id, text: `${decodeName(name)} · ${role === 'controller' ? '主控' : '發言者'} · ${forceMuted ? '主控鎖定靜音' : muted ? '已靜音' : '未靜音'} · ${connected ? '控制連線已連接' : '控制連線中斷，保留席位'}` });
+      }
+    }
+    if (!current()) return;
+    if (!valid) { this.retirePublicRoster(); return; }
+    if (!this.publicRosterOwner) this.publicRosterOwner = { client, generation, roomId, participantId };
+    this.publicRosterReport = { rows, last: false, awaiting: false };
+    ++this.publicRosterRevision;
+  }
+
+  /** Only admitted state receipts read the public roster; ordinary paints use copied text. */
+  private syncPublicRoster(repair = false): void {
+    this.reconcilePublicRoster();
+    const owner = this.publicRosterOwner, report = this.publicRosterReport, revision = this.publicRosterRevision;
+    const current = (): boolean => {
+      this.reconcilePublicRoster();
+      if (revision !== this.publicRosterRevision || owner !== this.publicRosterOwner) {
+        // A host setter can finish an old write after the nested winner has already painted.
+        this.syncPublicRoster(true); return false;
+      }
+      return true;
+    };
+    if (!report || owner !== this.publicRosterPaintedOwner) {
+      if (!this.publicRosterPanel.hidden) this.publicRosterPanel.hidden = true;
+      if (!current()) return;
+      if (this.publicRosterPanel.open) this.publicRosterPanel.open = false;
+      if (!current()) return;
+      if (this.publicRosterRows.size || this.publicRosterOrder.length || repair) {
+        this.publicRosterRows.clear(); this.publicRosterOrder = [];
+        this.publicRosterList.replaceChildren();
+        if (!current()) return;
+      }
+      this.publicRosterPaintedOwner = owner;
+    }
+    const status = owner?.client.status;
+    if (!current()) return;
+    const notice = !report ? '' : `${report.last ? status === 'reconnecting' ? '重新連線中，上次快照' : report.awaiting ? '上次快照，等待新快照' : '上次快照' : '最近快照'}：${report.rows.length ? '依台上順序列出成員。' : '沒有台上成員。'}靜音與控制連線旗標僅代表收到的快照，包含斷線保留席位，不代表正在發言或可聽見音訊。`;
+    if (this.publicRosterNotice.textContent !== notice) this.publicRosterNotice.textContent = notice;
+    if (!current()) return;
+    const rows = report?.rows ?? [];
+    for (const item of rows) {
+      let row = this.publicRosterRows.get(item.id);
+      if (!row) {
+        row = document.createElement('li');
+        if (!current()) return;
+        this.publicRosterRows.set(item.id, row);
+      }
+      if (row.textContent !== item.text) row.textContent = item.text;
+      if (!current()) return;
+    }
+    const order = rows.map(item => item.id);
+    if (repair || order.length !== this.publicRosterOrder.length || order.some((id, index) => id !== this.publicRosterOrder[index])) {
+      this.publicRosterOrder = order;
+      const retained = new Set(order);
+      for (const id of this.publicRosterRows.keys()) if (!retained.has(id)) this.publicRosterRows.delete(id);
+      this.publicRosterList.replaceChildren(...order.map(id => this.publicRosterRows.get(id)!));
+      if (!current()) return;
+    }
+    if (report && this.publicRosterPanel.hidden) this.publicRosterPanel.hidden = false;
+    current();
+  }
+
+  private retireOccupancy(): void {
+    ++this.occupancyRevision;
+    this.occupancyOwner = undefined; this.occupancyReport = undefined;
+  }
+
+  /** Counts come only from new authoritative states, never status or membership deltas. */
+  private syncOccupancy(snapshot?: StageEventMap['state'], terminal = false): void {
+    const revision = ++this.occupancyRevision;
+    const client = this.current, state = client?.state, me = state?.me;
+    const owner = this.occupancyOwner;
+    const sameOwner = owner && owner.client === client && owner.generation === this.generation
+      && owner.roomId === state?.roomId && owner.participantId === me?.participantId;
+    const active = client?.status === 'waiting' || client?.status === 'live';
+    const joined = this.isConnected && client && state && typeof state.roomId === 'string' && state.roomId.trim()
+      && typeof me?.participantId === 'string' && me.participantId.trim();
+    if (terminal || !joined || (!active && client.status !== 'reconnecting') || !sameOwner) {
+      this.occupancyOwner = undefined; this.occupancyReport = undefined;
+    }
+    const unseen = snapshot && !this.occupancySnapshots.has(snapshot);
+    if (snapshot) this.occupancySnapshots.add(snapshot);
+    if (!terminal && joined && active && snapshot === state && unseen) {
+      this.occupancyOwner = undefined; this.occupancyReport = undefined;
+      const limits = state.limits, audience = state.audienceCount;
+      const count = (value: unknown): value is number => typeof value === 'number' && Number.isSafeInteger(value) && value >= 0;
+      if (limits && typeof limits === 'object' && !Array.isArray(limits) && count(limits.maxAudience) && limits.maxAudience > 0
+        && count(limits.maxSpeakers) && limits.maxSpeakers > 0 && count(audience)
+        && typeof state.controllerId === 'string' && state.controllerId.trim() && Array.isArray(state.speakers)) {
+        const seen = new Set<string>();
+        let controllerOnStage = false, valid = true;
+        for (const person of state.speakers) {
+          if (!person || typeof person.participantId !== 'string' || !person.participantId.trim()
+            || seen.has(person.participantId) || person.onStage !== true
+            || (person.role !== 'controller' && person.role !== 'speaker')
+            || (person.participantId === state.controllerId) !== (person.role === 'controller')) { valid = false; break; }
+          seen.add(person.participantId);
+          if (person.role === 'controller') controllerOnStage = true;
+        }
+        const stage = state.speakers.length - Number(controllerOnStage), room = audience + stage;
+        if (valid && count(stage) && count(room) && stage <= limits.maxSpeakers && room <= limits.maxAudience) {
+          this.occupancyOwner = { client, roomId: state.roomId, participantId: me.participantId, generation: this.generation };
+          this.occupancyReport = { room, stage, audience, maxAudience: limits.maxAudience,
+            maxSpeakers: limits.maxSpeakers, controllerOnStage, last: false };
+        }
+      }
+    }
+    const report = this.occupancyReport;
+    if (report && client?.status === 'reconnecting') report.last = true;
+    const status = client?.status;
+    const current = (): boolean => {
+      if (revision !== this.occupancyRevision) return false;
+      const accepted = this.occupancyOwner;
+      if (report && (!accepted || !this.isConnected || this.current !== accepted.client
+        || this.generation !== accepted.generation || accepted.client.state?.roomId !== accepted.roomId
+        || accepted.client.me?.participantId !== accepted.participantId || accepted.client.status !== status)) {
+        this.syncOccupancy(); return false;
+      }
+      return true;
+    };
+    const text = report ? `房間席位（${report.last ? client?.status === 'reconnecting' ? '重新連線中，上次快照' : '上次快照' : '最近快照'}）：主控以外 ${report.room} / ${report.maxAudience} 人，其中台上 ${report.stage} / ${report.maxSpeakers} 人、觀眾 ${report.audience} 人；主控另計 1 人（${report.controllerOnStage ? '台上' : '台下'}）。含斷線保留席位。` : '';
+    if (!report && !this.occupancy.hidden) this.occupancy.hidden = true;
+    // A host setter can synchronously retire or replace the seat while this paragraph is painted.
+    if (!current()) return;
+    if (this.occupancy.textContent !== text) this.occupancy.textContent = text;
+    if (!current()) return;
+    if (report && this.occupancy.hidden) this.occupancy.hidden = false;
+    current();
+  }
+
+  private retireRoomClose(): void {
+    if (this.roomCloseAttempt) this.roomCloseAttempt.invalid = true;
+    this.roomCloseOwner = undefined; this.roomCloseAttempt = undefined;
+  }
+
+  private noteRoomCloseEvent(type: keyof StageEventMap, detail: StageEventMap[keyof StageEventMap]): void {
+    const client = this.current, authority = this.roomCloseAuthority;
+    if (type === 'closed' || type === 'kicked' || (type === 'status' && detail === 'disconnected')) {
+      this.roomCloseTerminalClient = client ?? undefined; this.retireRoomClose(); return;
+    }
+    if (type === 'state') {
+      this.roomCloseTerminalClient = undefined;
+      if (this.roomCloseAuthority) this.roomCloseAuthority.awaitingState = false;
+    }
+    const role = type === 'role' ? detail as StageEventMap['role'] : undefined;
+    const transfer = type === 'transferred' ? detail as StageEventMap['transferred'] : undefined;
+    // Both dialogs consume known loss using copied IDs before either helper reads public getters.
+    if (authority && authority.client === client && authority.generation === this.generation
+      && ((role && role.participantId === authority.participantId && role.role !== 'controller')
+        || (transfer && transfer.fromId === authority.participantId && transfer.toId !== authority.participantId))) {
+      this.roomCloseAuthority = { ...authority, revision: authority.revision + 1, awaitingState: true };
+      this.retireRoomClose();
+    }
+    if (type === 'status' && detail === 'reconnecting' && this.roomCloseAttempt) this.roomCloseAttempt.invalid = true;
+  }
+
+  private roomCloseMounted(): boolean {
+    return this.isConnected && this.roomClose.isConnected && this.widgetRoot.contains(this.roomActions)
+      && this.roomActions.contains(this.roomClose);
+  }
+
+  private canCloseRoom(): boolean {
+    const owner = this.roomCloseOwner, client = owner?.client;
+    return Boolean(owner && client && this.current === client && this.generation === owner.generation
+      && client.state?.roomId === owner.roomId && client.me?.participantId === owner.participantId
+      && client.me?.role === 'controller' && client.me.connected === true
+      && (client.status === 'waiting' || client.status === 'live') && this.roomCloseTerminalClient !== client
+      && !this.roomCloseAuthority?.awaitingState && this.roomCloseAuthority?.revision === owner.revision
+      && typeof client.closeRoom === 'function' && typeof window.confirm === 'function' && this.roomCloseMounted());
+  }
+
+  private reconcileRoomClose(): void {
+    const client = this.current, state = client?.state, me = client?.me;
+    const active = client?.status === 'waiting' || client?.status === 'live';
+    const authority = this.roomCloseAuthority;
+    if (authority && (authority.client !== client || authority.generation !== this.generation
+      || authority.roomId !== state?.roomId || authority.participantId !== me?.participantId)) this.roomCloseAuthority = undefined;
+    if (!this.isConnected || !client || !state || me?.role !== 'controller' || this.roomCloseTerminalClient === client
+      || (!active && client.status !== 'reconnecting') || typeof client.closeRoom !== 'function' || this.roomCloseAuthority?.awaitingState) {
+      this.retireRoomClose();
+    } else {
+      const owner = this.roomCloseOwner;
+      if (!owner || owner.client !== client || owner.generation !== this.generation
+        || owner.roomId !== state.roomId || owner.participantId !== me.participantId) {
+        this.retireRoomClose();
+        // Reconnect can retain a controller tenure, but cannot establish consent for a new one.
+        if (active && me.connected) {
+          this.roomCloseAuthority ??= { client, roomId: state.roomId, participantId: me.participantId,
+            generation: this.generation, revision: 0, awaitingState: false };
+          this.roomCloseOwner = { client, roomId: state.roomId, participantId: me.participantId,
+            generation: this.generation, revision: this.roomCloseAuthority.revision };
+        }
+      }
+    }
+    if (this.roomCloseAttempt && !this.canCloseRoom()) this.roomCloseAttempt.invalid = true;
+  }
+
+  private syncRoomClose(): void {
+    this.reconcileRoomClose();
+    const owner = this.roomCloseOwner, attempt = this.roomCloseAttempt, revision = ++this.roomCloseRenderRevision;
+    const allowed = this.canCloseRoom(), hidden = !owner, disabled = !allowed || Boolean(attempt), busy = String(Boolean(attempt));
+    const current = (): boolean => {
+      if (revision !== this.roomCloseRenderRevision) return false;
+      // A host setter can change the exposed snapshot or detach a control without rendering.
+      this.reconcileRoomClose();
+      if (this.roomCloseOwner !== owner || this.roomCloseAttempt !== attempt || this.canCloseRoom() !== allowed) {
+        this.syncRoomClose(); return false;
+      }
+      return true;
+    };
+    if (this.roomClose.hidden !== hidden) this.roomClose.hidden = hidden;
+    if (!current()) return;
+    if (this.roomClose.disabled !== disabled) this.roomClose.disabled = disabled;
+    if (!current()) return;
+    if (this.roomClose.getAttribute('aria-busy') !== busy) this.roomClose.setAttribute('aria-busy', busy);
+    if (!current()) return;
+    if (this.roomCloseNotice.hidden !== hidden) this.roomCloseNotice.hidden = hidden;
+    current();
+  }
+
+  private closeRoom(): void {
+    if (this.roomCloseDialog || this.stageTransferDialogs.size) return;
+    const dialog = this.roomCloseDialog = {};
+    let owner: StageElement['roomCloseOwner'], attempt: StageElement['roomCloseAttempt'];
+    const owns = (): boolean => Boolean(owner && attempt && this.roomCloseOwner === owner && this.roomCloseAttempt === attempt);
+    const eligible = (): boolean => owns() && !attempt!.invalid && attempt!.revision === owner!.revision && this.canCloseRoom();
+    const releaseDialog = (): void => { if (this.roomCloseDialog === dialog) this.roomCloseDialog = undefined; };
+    void (async () => {
+      try {
+        this.reconcileRoomClose(); owner = this.roomCloseOwner;
+        if (!owner || this.roomCloseAttempt || !this.canCloseRoom()) { this.syncRoomClose(); return; }
+        attempt = this.roomCloseAttempt = { owner, revision: owner.revision, invalid: false, errorRevision: this.errorRevision };
+        this.syncRoomClose();
+        if (!eligible()) return;
+        if (!window.confirm('確定關閉此房間並讓所有人離場？關閉後無法再加入此房間。')) return;
+        this.syncRoomClose();
+        if (!eligible()) return;
+        const result = owner.client.closeRoom();
+        releaseDialog();
+        // ACK is not terminal truth: only the SDK's closed/kicked lifecycle changes room presence.
+        await result;
+      } catch (error) {
+        if (owns()) {
+          try { this.syncRoomClose(); } catch { /* A failed DOM write can be reconciled on the next action. */ }
+          if (eligible() && this.errorRevision === attempt!.errorRevision) this.show(error);
+        }
+      } finally {
+        releaseDialog();
+        if (owns()) {
+          this.roomCloseAttempt = undefined;
+          try { this.syncRoomClose(); } catch { /* Release the exact token even if a host setter throws. */ }
+        }
+      }
+    })();
+  }
+
+  private retireConnectionStats(): void {
+    this.connectionStatsOwner = undefined; this.connectionStatsAttempt = undefined;
+    this.connectionStatsReport = undefined; this.connectionStatsFailed = false;
+  }
+
+  private connectionStatsMounted(): boolean {
+    return this.isConnected && this.connectionStatsPanel.isConnected && this.connectionStatsUpdate.isConnected
+      && this.connectionStatsText.isConnected && this.widgetRoot.contains(this.connectionStatsPanel)
+      && this.connectionStatsPanel.contains(this.connectionStatsUpdate) && this.connectionStatsPanel.contains(this.connectionStatsText);
+  }
+
+  private connectionStatsIdentityReader() {
+    const stats = this.connectionStatsOwner;
+    const close = this.roomCloseAttempt, closeOwner = close?.owner;
+    const transfer = this.stageTransferAttempt, transferOwner = this.stageManagementOwner;
+    const observe = (field: string, value: unknown): void => {
+      const lost = (owner: NonNullable<StageElement['connectionStatsOwner']>): boolean =>
+        owner.client !== this.current || owner.generation !== this.generation || field === 'unreadable'
+        || ((field === 'state' || field === 'me') && !value)
+        || (field === 'status' && value !== 'waiting' && value !== 'live')
+        || (field === 'roomId' && value !== owner.roomId) || (field === 'participantId' && value !== owner.participantId);
+      // Consume each observation before another public getter can restore identity or admit a new dialog.
+      if (close && (!closeOwner || lost(closeOwner))) close.invalid = true;
+      if (transfer && (!transferOwner || lost(transferOwner))) transfer.invalid = true;
+      if (stats && this.connectionStatsOwner === stats && lost(stats)) this.retireConnectionStats();
+    };
+    return <T>(field: 'state' | 'me' | 'status' | 'roomId' | 'participantId', get: () => T): T => {
+      let value: T;
+      try { value = get(); }
+      catch (error) { observe('unreadable', undefined); throw error; }
+      observe(field, value); return value;
+    };
+  }
+
+  /** Manual readership needs a current seat, not a publisher, microphone, or new passive report. */
+  private reconcileConnectionStats(): void {
+    for (;;) {
+      const owner = this.connectionStatsOwner, client = this.current, generation = this.generation;
+      const read = this.connectionStatsIdentityReader();
+      const state = read('state', () => client?.state), me = read('me', () => client?.me), status = read('status', () => client?.status);
+      const roomId = read('roomId', () => state?.roomId), participantId = read('participantId', () => me?.participantId);
+      if (owner !== this.connectionStatsOwner || client !== this.current || generation !== this.generation
+        || state !== read('state', () => client?.state) || status !== read('status', () => client?.status)
+        || roomId !== read('roomId', () => read('state', () => client?.state)?.roomId)
+        || participantId !== read('participantId', () => read('me', () => client?.me)?.participantId)) continue;
+      const eligible = Boolean(client && state && me && typeof roomId === 'string' && typeof participantId === 'string'
+        && (status === 'waiting' || status === 'live') && this.connectionStatsTerminalClient !== client
+        && !this.connectionStatsLeaving && !this.leftRoom && !this.roomExit && this.connectionStatsMounted());
+      const lost = Boolean(owner && (!eligible || owner.client !== client || owner.generation !== generation
+        || owner.roomId !== roomId || owner.participantId !== participantId));
+      if (lost) this.retireConnectionStats();
+      const retained = this.connectionStatsOwner;
+      this.reconcileRoomClose();
+      const transfer = this.stageTransferAttempt;
+      if (transfer && !this.canTransferStage(transfer.id, transfer.node)) transfer.invalid = true;
+      if (retained !== this.connectionStatsOwner || client !== this.current || generation !== this.generation
+        || state !== read('state', () => client?.state) || status !== read('status', () => client?.status)
+        || roomId !== read('roomId', () => read('state', () => client?.state)?.roomId)
+        || participantId !== read('participantId', () => read('me', () => client?.me)?.participantId)
+        || eligible !== Boolean(client && state && me
+          && typeof roomId === 'string' && typeof participantId === 'string'
+          && (status === 'waiting' || status === 'live') && this.connectionStatsTerminalClient !== client
+          && !this.connectionStatsLeaving && !this.leftRoom && !this.roomExit && this.connectionStatsMounted())) continue;
+      if (eligible && !retained) this.connectionStatsOwner = { client: client!, generation, roomId: roomId!, participantId: participantId! };
+      return;
+    }
+  }
+
+  private connectionStatsMessage(): string {
+    const report = this.connectionStatsReport;
+    if (!report) return this.connectionStatsFailed ? '無法讀取連線統計，請稍後手動再試。' : '尚未手動讀取連線統計。';
+    const loss = (value: number | undefined): string => value === undefined ? '—' : value.toFixed(1);
+    const ms = (value: number | undefined): string => value === undefined ? '—' : String(Math.round(value));
+    const inbound = report.inbound, outbound = report.outbound;
+    const receive = inbound ? `接收掉包 ${loss(inbound.loss)}% · 接收 RTT ${ms(inbound.rtt)} ms · 接收緩衝 ${ms(inbound.buffer)} ms` : '接收：暫無統計';
+    const send = outbound ? `傳送掉包 ${loss(outbound.loss)}% · 傳送 RTT ${ms(outbound.rtt)} ms` : '傳送：暫無統計';
+    return `上次手動讀取（SDK 取樣區間）：${receive}；${send}。RTT 不是端到端音訊延遲；不保證資料即時或目前可聽。`
+      + (this.connectionStatsFailed ? '本次讀取失敗，仍顯示上次手動讀取結果。' : '');
+  }
+
+  private syncConnectionStats(): void {
+    for (;;) {
+      // Existing leave teardown has earlier host callbacks; defer new DOM until its current=null fence.
+      if (this.current && (this.connectionStatsLeaving || this.leftRoom || this.roomExit)) {
+        this.retireConnectionStats(); return;
+      }
+      this.reconcileConnectionStats();
+      const owner = this.connectionStatsOwner, attempt = this.connectionStatsAttempt;
+      const report = this.connectionStatsReport, failed = this.connectionStatsFailed;
+      const hidden = !owner, busy = Boolean(attempt), disabled = hidden || busy;
+      const text = hidden ? '' : this.connectionStatsMessage();
+      // Reproject after every changed setter, including a stale outer setter that overwrites a nested winner.
+      if (hidden && !this.connectionStatsPanel.hidden) { this.connectionStatsPanel.hidden = true; continue; }
+      if (this.connectionStatsText.textContent !== text) { this.connectionStatsText.textContent = text; continue; }
+      if (this.connectionStatsUpdate.disabled !== disabled) { this.connectionStatsUpdate.disabled = disabled; continue; }
+      if (this.connectionStatsUpdate.getAttribute('aria-busy') !== String(busy)) {
+        this.connectionStatsUpdate.setAttribute('aria-busy', String(busy)); continue;
+      }
+      const label = busy ? '讀取中…' : '更新我的連線統計';
+      if (this.connectionStatsUpdate.textContent !== label) { this.connectionStatsUpdate.textContent = label; continue; }
+      if (this.connectionStatsPanel.hidden !== hidden) { this.connectionStatsPanel.hidden = hidden; continue; }
+      this.reconcileConnectionStats();
+      if (owner === this.connectionStatsOwner && attempt === this.connectionStatsAttempt
+        && report === this.connectionStatsReport && failed === this.connectionStatsFailed) return;
+    }
+  }
+
+  private projectConnectionStats(raw: unknown, current: () => boolean): StageElement['connectionStatsReport'] {
+    if (!raw || typeof raw !== 'object' || Array.isArray(raw)) throw new Error();
+    const direction = (key: 'inbound' | 'outbound') => {
+      const value: unknown = (raw as Record<string, unknown>)[key];
+      if (!current()) return undefined;
+      if (value === null || value === undefined) return null;
+      if (typeof value !== 'object' || Array.isArray(value)) throw new Error();
+      return value as Record<string, unknown>;
+    };
+    const numeric = (value: unknown, max = Infinity, factor = 1): number | undefined => {
+      if (typeof value !== 'number' || !Number.isFinite(value) || value < 0 || value > max) return undefined;
+      const converted = value * factor;
+      return Number.isFinite(converted) ? converted : undefined;
+    };
+    const inbound = direction('inbound');
+    if (!current()) return undefined;
+    let receive: NonNullable<StageElement['connectionStatsReport']>['inbound'] = null;
+    if (inbound) {
+      const loss = numeric(inbound.lossPercent, 100); if (!current()) return undefined;
+      const rtt = numeric(inbound.rtt, Infinity, 1000); if (!current()) return undefined;
+      const buffer = numeric(inbound.bufferMs); if (!current()) return undefined;
+      receive = { loss, rtt, buffer };
+    }
+    const outbound = direction('outbound');
+    if (!current()) return undefined;
+    let send: NonNullable<StageElement['connectionStatsReport']>['outbound'] = null;
+    if (outbound) {
+      const loss = numeric(outbound.lossPercent, 100); if (!current()) return undefined;
+      const rtt = numeric(outbound.rtt, Infinity, 1000); if (!current()) return undefined;
+      send = { loss, rtt };
+    }
+    return { inbound: receive, outbound: send };
+  }
+
+  private refreshConnectionStats(): void {
+    if (this.connectionStatsLeaving || this.leftRoom || this.roomExit) return;
+    if (this.connectionStatsUpdate.disabled || this.connectionStatsUpdate.hidden || this.connectionStatsPanel.hidden
+      || !this.connectionStatsMounted()) return;
+    this.syncConnectionStats();
+    const owner = this.connectionStatsOwner;
+    if (!owner || this.connectionStatsAttempt) return;
+    // Reserve before any getStats lookup or DOM callback can invoke the retained handler again.
+    const attempt = this.connectionStatsAttempt = {};
+    this.connectionStatsFailed = false;
+    const current = (): boolean => {
+      this.syncConnectionStats();
+      return this.connectionStatsOwner === owner && this.connectionStatsAttempt === attempt;
+    };
+    void (async () => {
+      try {
+        if (!current()) return;
+        const read = owner.client.getStats;
+        if (!current()) return;
+        if (typeof read !== 'function') throw new Error();
+        const pending = read.call(owner.client);
+        const active = current();
+        // Consume even a retired native promise; UI retirement does not cancel SDK sampling or its deltas.
+        const raw: unknown = await pending;
+        if (!current() || !active) return;
+        const report = this.projectConnectionStats(raw, current);
+        if (!current() || !report) return;
+        this.connectionStatsReport = report;
+      } catch {
+        if (current()) this.connectionStatsFailed = true;
+      } finally {
+        if (this.connectionStatsOwner === owner && this.connectionStatsAttempt === attempt) this.connectionStatsAttempt = undefined;
+        this.syncConnectionStats();
+      }
+    })();
+  }
+
   private retireQualityOwner(): void {
-    this.qualityOwner = undefined; this.qualityReport = undefined;
-    this.quality.textContent = ''; this.quality.hidden = true;
+    ++this.qualityRevision;
+    this.qualityOwner = undefined; this.qualityReport = undefined; this.qualityClearFirst = true;
   }
 
   private retireSpeakingOwner(): void {
+    ++this.speakingRevision;
     this.speakingOwner = undefined; this.speakingReport = undefined;
-    this.speaking.textContent = ''; this.speaking.hidden = true;
+    this.speakingSuppressed.clear();
   }
 
   private retireHandRejection(): void {
@@ -605,79 +1379,252 @@ export class StageElement extends HTMLElement {
     if (this.handRejection.textContent !== text) this.handRejection.textContent = text;
   }
 
-  /** A resumed SDK getter can retain the old report; only a new event establishes this owner's set. */
-  private syncSpeakingOwner(report?: { participantIds: unknown }): void {
-    const client = this.current, state = client?.state, me = state?.me;
-    if (!this.isConnected || !client || !state || !me
-      || (client.status !== 'waiting' && client.status !== 'live')) {
-      this.retireSpeakingOwner(); return;
+  private rememberSpeakingEvent(type: keyof StageEventMap, detail: StageEventMap[keyof StageEventMap]): { revision: number; unseen: boolean } {
+    const revision = ++this.speakingEventRevision;
+    const identities = type === 'state' ? this.speakingSnapshots : type === 'speaking' ? this.speakingReceipts : undefined;
+    const object = detail !== null && (typeof detail === 'object' || typeof detail === 'function');
+    const unseen = !object || !identities?.has(detail as object);
+    // Reserve even rejected envelopes before public getters can reenter. Primitive malformed reports stay unknown.
+    if (identities && object) identities.add(detail as object);
+    if (type === 'closed' || type === 'kicked'
+      || (type === 'status' && (detail === 'reconnecting' || detail === 'disconnected'))) this.retireSpeakingOwner();
+    else if (type === 'stageleft' || (type === 'role' && (detail as StageEventMap['role']).role === 'audience')) {
+      const id = (detail as StageEventMap['stageleft']).participantId;
+      if (revision === this.speakingEventRevision && typeof id === 'string') {
+        this.speakingSuppressed.add(id);
+        this.speakingReport?.ids.delete(id);
+        ++this.speakingRevision;
+      }
     }
-    const owner = this.speakingOwner;
-    if (!owner || owner.client !== client || owner.generation !== this.generation
-      || owner.roomId !== state.roomId || owner.participantId !== me.participantId) {
-      this.retireSpeakingOwner();
-      this.speakingOwner = { client, roomId: state.roomId, participantId: me.participantId, generation: this.generation };
-    }
-    if (report) {
-      const ids = Array.isArray(report.participantIds) ? [...report.participantIds] : undefined;
-      // Copy before forwarding the mutable event; malformed synthetic reports are not evidence of silence.
-      this.speakingReport = ids?.every(id => typeof id === 'string') ? { ids: new Set(ids), empty: !ids.length } : undefined;
-    }
-    const current = this.speakingReport;
-    this.speaking.hidden = false;
-    if (!current) { this.speaking.textContent = '發言偵測：等待伺服器回報。'; return; }
-    if (current.empty) { this.speaking.textContent = '最近收到的發言回報：未偵測到發言。'; return; }
-    const seen = new Set<string>(), names: string[] = [];
-    for (const person of state.speakers) {
-      if (!person.onStage || (person.role !== 'speaker' && person.role !== 'controller')
-        || !current.ids.has(person.participantId) || seen.has(person.participantId)) continue;
-      seen.add(person.participantId);
-      // Control-socket grace can retain media, so connected is deliberately not an eligibility test.
-      names.push(decodeName(person.name));
-    }
-    // A later stage entry must not revive an ID from an earlier, unmatched or removed seat.
-    current.ids = seen;
-    this.speaking.textContent = names.length ? `最近收到的發言回報：${names.join('、')}（${names.length} 人）。`
-      : '最近收到的發言回報：沒有可對應的台上成員。';
+    return { revision, unseen };
   }
 
-  /** Reports have no timestamp or media epoch; only a new event may supply this seat's values. */
-  private syncQualityOwner(reports?: readonly ConnectionQuality[]): void {
-    const client = this.current, state = client?.state, me = state?.me;
-    if (!this.isConnected || !client || !state || !me?.onStage
-      || client.status === 'reconnecting' || client.status === 'disconnected') {
-      this.retireQualityOwner(); return;
+  /** Room-wide readership survives own-stage loss; only connection and entry identity bind its tenure. */
+  private reconcileSpeakingOwner(): void {
+    for (;;) {
+      const owner = this.speakingOwner;
+      if (!owner) return;
+      const revision = this.speakingRevision, client = owner.client;
+      const state = client.state, status = client.status;
+      const roomId = state?.roomId, participantId = state?.me?.participantId;
+      const currentState = client.state, currentStatus = client.status;
+      if (owner !== this.speakingOwner || revision !== this.speakingRevision) continue;
+      if (state !== currentState || status !== currentStatus) continue;
+      if (this.isConnected && this.current === client && this.generation === owner.generation
+        && roomId === owner.roomId && participantId === owner.participantId
+        && (status === 'waiting' || status === 'live')) return;
+      this.retireSpeakingOwner();
+      // A corrective paint must not allow its setters to restore either pending dialog's consent.
+      this.noteRoomCloseEvent('status', currentStatus);
+      this.noteStageTransferEvent('status', currentStatus);
+      this.reconcileRoomClose();
     }
-    const owner = this.qualityOwner;
-    if (!owner || owner.client !== client || owner.generation !== this.generation
-      || owner.roomId !== state.roomId || owner.participantId !== me.participantId) {
+  }
+
+  private noteSpeakingEvent(client: StageClient, generation: number, type: keyof StageEventMap,
+    detail: StageEventMap[keyof StageEventMap], event: { revision: number; unseen: boolean }): void {
+    this.reconcileSpeakingOwner();
+    if (event.revision !== this.speakingEventRevision || this.current !== client || this.generation !== generation) return;
+    if (type === 'state' && event.unseen) {
+      const state = client.state, status = client.status;
+      const roomId = state?.roomId, participantId = state?.me?.participantId;
+      const eligible = state && state === detail && this.isConnected && participantId !== undefined
+        && (status === 'waiting' || status === 'live') && state === client.state && status === client.status;
+      this.reconcileSpeakingOwner();
+      if (eligible && event.revision === this.speakingEventRevision && this.current === client && this.generation === generation) {
+        if (!this.speakingOwner) this.speakingOwner = { client, roomId: roomId!, participantId, generation };
+        // Releasing suppression never repopulates the already-pruned historical report.
+        this.speakingSuppressed.clear();
+        ++this.speakingRevision;
+      }
+    }
+    this.reconcileSpeakingOwner();
+    const owner = this.speakingOwner;
+    if (type !== 'speaking' || !event.unseen || !owner || event.revision !== this.speakingEventRevision) return;
+    const raw = (detail as StageEventMap['speaking'] | null | undefined)?.participantIds;
+    const ids: unknown[] | undefined = Array.isArray(raw) ? [...raw] : undefined;
+    const report = ids?.every((id): id is string => typeof id === 'string')
+      ? { ids: new Set(ids.filter(id => !this.speakingSuppressed.has(id))), empty: ids.length === 0 } : undefined;
+    this.reconcileSpeakingOwner();
+    if (owner !== this.speakingOwner || event.revision !== this.speakingEventRevision) return;
+    this.speakingReport = report; ++this.speakingRevision;
+  }
+
+  private speakingProjection(): { hidden: boolean; text: string; revision: number } {
+    for (;;) {
+      this.reconcileSpeakingOwner();
+      const owner = this.speakingOwner, report = this.speakingReport, revision = this.speakingRevision;
+      const client = this.current, generation = this.generation, state = client?.state, status = client?.status;
+      // SDK status can precede the first receipt for a new identity. This placeholder admits no report.
+      const placeholder = !owner && state?.me && !this.speakingSnapshots.has(state) && this.isConnected
+        && (status === 'waiting' || status === 'live');
+      const hidden = !owner && !placeholder;
+      let text = hidden ? '' : '發言偵測：等待伺服器回報。';
+      let seen: Set<string> | undefined;
+      if (owner && report) {
+        if (report.empty) text = '最近收到的發言回報：未偵測到發言。';
+        else {
+          seen = new Set<string>(); const names: string[] = [];
+          for (const person of state?.speakers ?? []) {
+            const id = person.participantId, onStage = person.onStage, role = person.role;
+            if (!onStage || (role !== 'speaker' && role !== 'controller') || !report.ids.has(id)
+              || this.speakingSuppressed.has(id) || seen.has(id)) continue;
+            seen.add(id);
+            // Read the live public roster on every original render, including disconnected grace seats.
+            names.push(decodeName(person.name));
+          }
+          text = names.length ? `最近收到的發言回報：${names.join('、')}（${names.length} 人）。`
+            : '最近收到的發言回報：沒有可對應的台上成員。';
+        }
+      }
+      const sameSnapshot = state === client?.state && status === client?.status;
+      // Always reconcile the live winner, even after a getter completed a newer nested report.
+      this.reconcileSpeakingOwner();
+      if (revision !== this.speakingRevision || owner !== this.speakingOwner || client !== this.current
+        || generation !== this.generation || !sameSnapshot) continue;
+      if (seen && report) report.ids = seen;
+      return { hidden, text, revision };
+    }
+  }
+
+  /** New events supply activity; rendering only maps and permanently prunes that copied report. */
+  private syncSpeakingOwner(force = true): void {
+    const projection = this.speakingProjection();
+    if (!force && projection.hidden === this.speakingPainted.hidden && projection.text === this.speakingPainted.text) return;
+    const current = (): boolean => {
+      const next = this.speakingProjection();
+      if (next.revision !== projection.revision || next.hidden !== projection.hidden || next.text !== projection.text) {
+        // A host setter may finish its old write after a nested painter; its cached paint is no longer proof.
+        this.syncSpeakingOwner(); return false;
+      }
+      return true;
+    };
+    // Keep ordinary unconditional replacement and its hidden-then-text order, including host descendant repair.
+    if (projection.hidden) {
+      this.speaking.textContent = projection.text;
+      if (!current()) return;
+      this.speaking.hidden = true;
+    } else {
+      this.speaking.hidden = false;
+      if (!current()) return;
+      this.speaking.textContent = projection.text;
+    }
+    if (current()) this.speakingPainted = projection;
+  }
+
+  /** Retirement is pure: a corrective DOM write must never precede the dialog authority fences. */
+  private reconcileQualityOwner(): void {
+    for (;;) {
+      const owner = this.qualityOwner;
+      if (!owner) return;
+      const revision = this.qualityRevision, client = owner.client;
+      const status = client.status, state = client.state;
+      // Public getters can finish nested work before returning. Recheck the live owner, not just this painter.
+      const currentState = client.state, currentStatus = client.status;
+      if (owner !== this.qualityOwner || revision !== this.qualityRevision) continue;
+      if (state !== currentState || status !== currentStatus) continue;
+      if (this.isConnected && this.current === client && this.generation === owner.generation
+        && state?.roomId === owner.roomId && state.me.participantId === owner.participantId
+        && state.me.onStage && (status === 'waiting' || status === 'live')) return;
       this.retireQualityOwner();
-      this.qualityOwner = { client, roomId: state.roomId, participantId: me.participantId, generation: this.generation };
+      this.noteRoomCloseEvent('status', currentStatus);
+      this.noteStageTransferEvent('status', currentStatus);
+      this.reconcileRoomClose();
+      // Either authority getter may have admitted a newer entry; reconcile that entry too.
     }
-    if (reports !== undefined) {
-      let report: ConnectionQuality | undefined;
-      for (const candidate of reports) if (candidate.participantId === me.participantId) report = candidate;
-      // The event remains public and mutable; retain only primitive values from its full replacement set.
-      this.qualityReport = report ? {
-        uplinkLossPercent: typeof report.uplinkLossPercent === 'number' ? report.uplinkLossPercent : undefined,
-        downlinkLossPercent: typeof report.downlinkLossPercent === 'number' ? report.downlinkLossPercent : undefined,
-        rttMs: typeof report.rttMs === 'number' ? report.rttMs : undefined,
-      } : undefined;
+  }
+
+  private rememberQualityEvent(type: keyof StageEventMap, detail: StageEventMap[keyof StageEventMap]): { revision: number; unseen: boolean } {
+    const revision = ++this.qualityEventRevision;
+    const identities = type === 'state' ? this.qualitySnapshots : type === 'quality' ? this.qualityReceipts : undefined;
+    const unseen = Boolean(identities && detail && !identities.has(detail as object));
+    // Consume before any public getter: even rejected or superseded receipts cannot gain authority on replay.
+    if (identities && detail) identities.add(detail as object);
+    const ownId = this.qualityOwner?.participantId;
+    // Known loss must precede even authority getters: a nested report alone cannot outrun retirement.
+    if (type === 'closed' || type === 'kicked'
+      || (type === 'status' && (detail === 'reconnecting' || detail === 'disconnected'))
+      || (ownId !== undefined && type === 'stageleft' && (detail as StageEventMap['stageleft']).participantId === ownId)
+      || (ownId !== undefined && type === 'role' && (detail as StageEventMap['role']).participantId === ownId
+        && (detail as StageEventMap['role']).role === 'audience')) this.retireQualityOwner();
+    else if (type === 'micerror') {
+      ++this.qualityRevision; this.qualityReport = undefined; this.qualityClearFirst = true;
     }
-    const report = this.qualityReport;
-    this.quality.hidden = !report;
-    if (!report) { this.quality.textContent = ''; return; }
+    return { revision, unseen };
+  }
+
+  private noteQualityEvent(client: StageClient, generation: number, type: keyof StageEventMap,
+    detail: StageEventMap[keyof StageEventMap], event: { revision: number; unseen: boolean }): void {
+    if (event.revision !== this.qualityEventRevision || this.current !== client || this.generation !== generation) return;
+    const snapshot = type === 'state' ? detail as StageEventMap['state'] : undefined;
+    const receipt = type === 'quality' ? detail as StageEventMap['quality'] : undefined;
+    this.reconcileQualityOwner();
+    const state = client.state;
+    if (event.revision !== this.qualityEventRevision || this.current !== client || this.generation !== generation) return;
+    if (snapshot && event.unseen && snapshot === state && this.isConnected && state.me.onStage
+      && (client.status === 'waiting' || client.status === 'live')
+      && snapshot === client.state && this.current === client && this.generation === generation
+      && event.revision === this.qualityEventRevision) {
+      if (!this.qualityOwner) {
+        this.qualityOwner = { client, roomId: state.roomId, participantId: state.me.participantId, generation };
+        ++this.qualityRevision; this.qualityClearFirst = false;
+      }
+    }
+    this.reconcileQualityOwner();
+    const owner = this.qualityOwner;
+    if (!receipt || !event.unseen || !owner || event.revision !== this.qualityEventRevision) return;
+    let report: ConnectionQuality | undefined;
+    for (const candidate of receipt.participants) if (candidate.participantId === owner.participantId) report = candidate;
+    // Preserve the last whole own item, and copy only its primitives before forwarding the raw detail.
+    const up = report?.uplinkLossPercent, down = report?.downlinkLossPercent, rtt = report?.rttMs;
+    const copied = report ? {
+      uplinkLossPercent: typeof up === 'number' ? up : undefined,
+      downlinkLossPercent: typeof down === 'number' ? down : undefined,
+      rttMs: typeof rtt === 'number' ? rtt : undefined,
+    } : undefined;
+    this.reconcileQualityOwner();
+    if (owner !== this.qualityOwner || event.revision !== this.qualityEventRevision) return;
+    ++this.qualityRevision; this.qualityReport = copied; this.qualityClearFirst = false;
+  }
+
+  /** Reports have no timestamp or media epoch; only a new admitted receipt supplies values. */
+  private syncQualityOwner(force = true): void {
+    this.reconcileQualityOwner();
+    if (!force && this.qualityPaintedRevision === this.qualityRevision) return;
+    const revision = this.qualityRevision, report = this.qualityReport;
+    const current = (): boolean => {
+      const before = this.qualityRevision;
+      // Even a superseded painter must observe silent ownership loss after nested newer work.
+      this.reconcileQualityOwner();
+      if (before !== this.qualityRevision) { this.syncQualityOwner(); return false; }
+      return revision === this.qualityRevision;
+    };
     const percent = (value: number | undefined) => typeof value === 'number' && Number.isFinite(value) && value >= 0 && value <= 100 ? `${value.toFixed(1)}%` : '—';
     const rtt = (value: number | undefined) => typeof value === 'number' && Number.isFinite(value) && value >= 0 ? `${Math.round(value)} ms` : '—';
-    this.quality.textContent = `你的連線品質（最近收到）：上行掉包 ${percent(report.uplinkLossPercent)} · 下行掉包 ${percent(report.downlinkLossPercent)} · RTT ${rtt(report.rttMs)}（非端到端音訊延遲）`;
+    const text = report ? `你的連線品質（最近收到）：上行掉包 ${percent(report.uplinkLossPercent)} · 下行掉包 ${percent(report.downlinkLossPercent)} · RTT ${rtt(report.rttMs)}（非端到端音訊延遲）` : '';
+    // Keep unconditional text replacement, including repair of same-text host-added descendants.
+    if (this.qualityClearFirst) {
+      this.quality.textContent = text;
+      if (!current()) return;
+      this.quality.hidden = !report;
+    } else {
+      this.quality.hidden = !report;
+      if (!current()) return;
+      this.quality.textContent = text;
+    }
+    if (current()) {
+      this.qualityPaintedRevision = revision;
+      if (this.qualityOwner) this.qualityClearFirst = false;
+    }
   }
 
   private retireNameOwner(): void {
     this.nameOwner = undefined; this.nameAttempt = undefined;
     this.nameInput.value = ''; this.acceptedName.textContent = '';
-    this.namePanel.hidden = true;
-    this.nameInput.disabled = this.nameUpdate.disabled = true;
-    this.nameUpdate.removeAttribute('aria-busy');
+    if (!this.namePanel.hidden) this.namePanel.hidden = true;
+    if (!this.nameUpdate.disabled) this.nameUpdate.disabled = true;
+    if (!this.nameInput.disabled) this.nameInput.disabled = true;
+    if (this.nameUpdate.hasAttribute('aria-busy')) this.nameUpdate.removeAttribute('aria-busy');
   }
 
   private syncNameOwner(): void {
@@ -694,9 +1641,12 @@ export class StageElement extends HTMLElement {
     }
     // A same-seat snapshot (including resume) must not replace an unsent or rejected draft.
     this.acceptedName.textContent = `目前名稱：${decodeName(me.name)}`;
-    this.namePanel.hidden = false; this.nameInput.disabled = false;
-    this.nameUpdate.disabled = client.status === 'reconnecting' || Boolean(this.nameAttempt);
-    this.nameUpdate.setAttribute('aria-busy', String(Boolean(this.nameAttempt)));
+    if (this.namePanel.hidden) this.namePanel.hidden = false;
+    if (this.nameInput.disabled) this.nameInput.disabled = false;
+    const disabled = client.status === 'reconnecting' || Boolean(this.nameAttempt);
+    if (this.nameUpdate.disabled !== disabled) this.nameUpdate.disabled = disabled;
+    const busy = String(Boolean(this.nameAttempt));
+    if (this.nameUpdate.getAttribute('aria-busy') !== busy) this.nameUpdate.setAttribute('aria-busy', busy);
   }
 
   private updateName(): void {
@@ -725,38 +1675,130 @@ export class StageElement extends HTMLElement {
     })();
   }
 
-  private retireHandQueue(): void {
-    this.handQueueOwner = undefined; this.handQueuePending.clear();
-    for (const row of this.handQueueRows.values()) {
-      for (const control of [row.approve, row.reject]) { control.disabled = true; control.setAttribute('aria-busy', 'false'); }
+  private invalidateHandQueue(): void {
+    this.handQueueOwner = undefined; this.handQueuePending.clear(); this.handQueueQuery = '';
+    this.handQueueRevision++;
+  }
+
+  private noteHandQueueEvent(type: keyof StageEventMap, detail: StageEventMap[keyof StageEventMap]): void {
+    const client = this.current, owner = this.handQueueOwner;
+    if (type === 'closed' || type === 'kicked' || (type === 'status' && detail === 'disconnected')) {
+      this.handQueueTerminalClient = client ?? undefined; this.invalidateHandQueue(); return;
     }
-    if (this.handQueueRows.size) this.handQueueList.replaceChildren();
+    if (type === 'state') {
+      this.handQueueTerminalClient = undefined; this.handQueueAwaitingStateClient = undefined;
+    }
+    const role = type === 'role' ? detail as StageEventMap['role'] : undefined;
+    const transfer = type === 'transferred' ? detail as StageEventMap['transferred'] : undefined;
+    // A control-loss delta precedes its snapshot; copied owner IDs avoid reopening old private data.
+    const lost = owner && ((role && role.participantId === owner.participantId && role.role !== 'controller')
+      || (transfer && transfer.fromId === owner.participantId && transfer.toId !== owner.participantId));
+    if (lost && this.handQueueOwner === owner && this.current === client && owner.client === client && owner.generation === this.generation) {
+      this.handQueueAwaitingStateClient = client ?? undefined; this.invalidateHandQueue();
+    }
+  }
+
+  private retireHandQueue(): void {
+    this.invalidateHandQueue();
+    const revision = this.handQueueRevision, rows = [...this.handQueueRows.values()];
     this.handQueueRows.clear(); this.handQueueOrder = [];
-    this.handQueuePanel.hidden = true; this.handQueuePanel.open = false;
-    this.handQueueSummary.textContent = ''; this.handQueueNotice.textContent = '';
+    const current = () => {
+      if (revision === this.handQueueRevision && !this.handQueueOwner) return true;
+      this.syncHandQueue(); return false;
+    };
+    for (const row of rows) {
+      for (const control of [row.approve, row.reject]) {
+        control.disabled = true; if (!current()) return;
+        control.setAttribute('aria-busy', 'false'); if (!current()) return;
+      }
+    }
+    if (rows.length) { this.handQueueList.replaceChildren(); if (!current()) return; }
+    this.handQueuePanel.hidden = true; if (!current()) return;
+    this.handQueuePanel.open = false; if (!current()) return;
+    this.handQueueSummary.textContent = ''; if (!current()) return;
+    this.handQueueNotice.textContent = ''; if (!current()) return;
+    this.handQueueSearch.disabled = true; if (!current()) return;
+    if (this.handQueueSearch.value !== '') {
+      if (!current()) return;
+      this.handQueueSearch.value = ''; if (!current()) return;
+    }
+    if (!current()) return;
+    this.handQueueClear.disabled = true; if (!current()) return;
+    this.handQueueResults.textContent = ''; current();
+  }
+
+  private handQueueInputCurrent(owner: NonNullable<StageElement['handQueueOwner']>, revision: number): boolean {
+    if (this.handQueueOwner !== owner || this.handQueueRevision !== revision || this.current !== owner.client
+      || this.generation !== owner.generation || !this.isConnected) return false;
+    const state = owner.client.state, me = owner.client.me, status = owner.client.status;
+    const roomId = state?.roomId, participantId = me?.participantId, role = me?.role, connected = this.isConnected;
+    return this.handQueueOwner === owner && this.handQueueRevision === revision && this.current === owner.client
+      && this.generation === owner.generation && connected && roomId === owner.roomId
+      && participantId === owner.participantId && role === 'controller' && status !== 'disconnected'
+      && this.handQueueTerminalClient !== owner.client && this.handQueueAwaitingStateClient !== owner.client;
+  }
+
+  private filterHandQueue(clear: boolean): void {
+    const owner = this.handQueueOwner, revision = this.handQueueRevision;
+    if (!owner || !this.handQueueInputCurrent(owner, revision)) { this.syncHandQueue(); return; }
+    const unavailable = this.handQueuePanel.hidden || this.handQueueSearch.disabled;
+    if (!this.handQueueInputCurrent(owner, revision)) { this.syncHandQueue(); return; }
+    if (unavailable) return;
+    const query = clear ? '' : this.handQueueSearch.value;
+    // A host getter can replace this owner or run a newer input handler synchronously.
+    if (!this.handQueueInputCurrent(owner, revision)) { this.syncHandQueue(); return; }
+    this.handQueueQuery = query; this.handQueueRevision++;
+    this.syncHandQueue();
   }
 
   private syncHandQueue(): void {
-    const client = this.current, state = client?.state, me = client?.me;
-    if (!this.isConnected || !client || !state || me?.role !== 'controller' || client.status === 'disconnected') {
+    let revision = ++this.handQueueRevision;
+    const client = this.current, generation = this.generation;
+    const state = client?.state, me = client?.me, status = client?.status;
+    const roomId = state?.roomId, participantId = me?.participantId, role = me?.role, connected = this.isConnected;
+    const unchanged = () => revision === this.handQueueRevision && this.current === client && this.generation === generation;
+    if (!unchanged()) { this.syncHandQueue(); return; }
+    if (!connected || !client || !state || role !== 'controller' || status === 'disconnected'
+      || this.handQueueTerminalClient === client || this.handQueueAwaitingStateClient === client) {
       this.retireHandQueue(); return;
     }
-    const owner = this.handQueueOwner;
-    if (!owner || owner.client !== client || owner.generation !== this.generation
-      || owner.roomId !== state.roomId || owner.participantId !== me.participantId) {
+    let owner = this.handQueueOwner;
+    if (!owner || owner.client !== client || owner.generation !== generation
+      || owner.roomId !== roomId || owner.participantId !== participantId) {
       this.retireHandQueue();
-      this.handQueueOwner = { client, roomId: state.roomId, participantId: me.participantId, generation: this.generation };
+      const retiredRevision = this.handQueueRevision;
+      const latestState = client.state, latestMe = client.me, latestStatus = client.status;
+      const latestRoomId = latestState?.roomId, latestId = latestMe?.participantId, latestRole = latestMe?.role, connected = this.isConnected;
+      if (retiredRevision !== this.handQueueRevision || this.handQueueOwner || this.current !== client || this.generation !== generation
+        || latestState !== state || latestRoomId !== roomId || latestId !== participantId || latestRole !== 'controller'
+        || latestStatus !== status || !connected || this.handQueueTerminalClient === client
+        || this.handQueueAwaitingStateClient === client) { this.syncHandQueue(); return; }
+      this.handQueueOwner = owner = { client, roomId: roomId!, participantId: participantId!, generation };
+      revision = ++this.handQueueRevision;
     }
+    const current = () => {
+      const latestState = client.state, latestMe = client.me, latestStatus = client.status;
+      const latestRoomId = latestState?.roomId, latestId = latestMe?.participantId, latestRole = latestMe?.role, connected = this.isConnected;
+      if (unchanged() && this.handQueueOwner === owner && connected && latestState === state
+        && latestRoomId === owner.roomId && latestId === participantId && latestRole === 'controller' && latestStatus === status
+        && this.handQueueTerminalClient !== client && this.handQueueAwaitingStateClient !== client) return true;
+      this.syncHandQueue(); return false;
+    };
+    if (!current()) return;
     const seen = new Set<string>();
     const people = state.hands.filter(person => {
       if (seen.has(person.participantId) || person.role !== 'audience' || !person.handRaised || person.onStage) return false;
       seen.add(person.participantId); return true;
     });
-    const reconnecting = client.status === 'reconnecting';
-    this.handQueuePanel.hidden = false;
+    const query = this.handQueueQuery.trim().toLowerCase(), reconnecting = status === 'reconnecting';
+    if (!current()) return;
+    this.handQueuePanel.hidden = false; if (!current()) return;
     this.handQueueSummary.textContent = `舉手申請（${people.length}）${reconnecting ? ' · 上次收到' : ''}`;
+    if (!current()) return;
     this.handQueueNotice.textContent = reconnecting ? '重新連線中，暫時不能處理申請。'
       : people.length ? '請選擇要核准上台或婉拒的申請；是否可上台仍由伺服器決定。' : '目前沒有舉手申請。';
+    if (!current()) return;
+    let matching = 0;
     for (const person of people) {
       const id = person.participantId;
       let row = this.handQueueRows.get(id);
@@ -768,39 +1810,88 @@ export class StageElement extends HTMLElement {
         const currentRow = row;
         approve.onclick = () => this.moderateHand(id, currentRow.node, true);
         reject.onclick = () => this.moderateHand(id, currentRow.node, false);
-        node.append(name, approve, reject); this.handQueueRows.set(id, row);
+        node.append(name, approve, reject);
+        if (!current()) return;
+        this.handQueueRows.set(id, row);
       }
-      const name = decodeName(person.name);
+      const name = decodeName(person.name), hidden = !name.toLowerCase().includes(query);
+      if (!hidden) matching++;
+      if (!current()) return;
       const label = `${name}${person.connected ? '' : '（暫時離線）'}`;
-      if (row.name.textContent !== label) row.name.textContent = label;
+      if (row.name.textContent !== label) { if (!current()) return; row.name.textContent = label; }
+      if (!current()) return;
       const approveLabel = `核准 ${name} 上台`, rejectLabel = `婉拒 ${name} 的舉手申請`;
-      if (row.approve.getAttribute('aria-label') !== approveLabel) row.approve.setAttribute('aria-label', approveLabel);
-      if (row.reject.getAttribute('aria-label') !== rejectLabel) row.reject.setAttribute('aria-label', rejectLabel);
+      if (row.approve.getAttribute('aria-label') !== approveLabel) {
+        if (!current()) return; row.approve.setAttribute('aria-label', approveLabel);
+      }
+      if (!current()) return;
+      if (row.reject.getAttribute('aria-label') !== rejectLabel) {
+        if (!current()) return; row.reject.setAttribute('aria-label', rejectLabel);
+      }
+      if (!current()) return;
+      if (row.node.hidden !== hidden) { if (!current()) return; row.node.hidden = hidden; }
+      if (!current()) return;
       const pending = this.handQueuePending.has(id);
       for (const control of [row.approve, row.reject]) {
-        const disabled = reconnecting || pending, busy = String(pending);
-        if (control.disabled !== disabled) control.disabled = disabled;
-        if (control.getAttribute('aria-busy') !== busy) control.setAttribute('aria-busy', busy);
+        const disabled = reconnecting || pending || hidden, busy = String(pending);
+        if (control.disabled !== disabled) { if (!current()) return; control.disabled = disabled; }
+        if (!current()) return;
+        if (control.getAttribute('aria-busy') !== busy) { if (!current()) return; control.setAttribute('aria-busy', busy); }
+        if (!current()) return;
       }
     }
     for (const [id, row] of this.handQueueRows) if (!seen.has(id)) {
-      for (const control of [row.approve, row.reject]) { control.disabled = true; control.setAttribute('aria-busy', 'false'); }
       this.handQueueRows.delete(id);
+      for (const control of [row.approve, row.reject]) {
+        control.disabled = true; if (!current()) return;
+        control.setAttribute('aria-busy', 'false'); if (!current()) return;
+      }
     }
     const order = people.map(person => person.participantId);
     if (order.length !== this.handQueueOrder.length || order.some((id, index) => id !== this.handQueueOrder[index])) {
       this.handQueueList.replaceChildren(...order.map(id => this.handQueueRows.get(id)!.node));
+      if (!current()) return;
       this.handQueueOrder = order;
     }
+    if (this.handQueueSearch.disabled) { if (!current()) return; this.handQueueSearch.disabled = false; }
+    if (!current()) return;
+    if (this.handQueueSearch.value !== this.handQueueQuery) {
+      if (!current()) return; this.handQueueSearch.value = this.handQueueQuery;
+    }
+    if (!current()) return;
+    const clearDisabled = !this.handQueueQuery;
+    if (this.handQueueClear.disabled !== clearDisabled) { if (!current()) return; this.handQueueClear.disabled = clearDisabled; }
+    if (!current()) return;
+    const results = `符合 ${matching} / ${people.length} 筆舉手申請。${people.length && !matching ? '沒有符合搜尋的舉手者。' : ''}`;
+    if (this.handQueueResults.textContent !== results) { if (!current()) return; this.handQueueResults.textContent = results; }
+    current();
   }
 
   private moderateHand(id: string, node: HTMLLIElement, approve: boolean): void {
     this.syncHandQueue();
-    const owner = this.handQueueOwner, row = this.handQueueRows.get(id);
-    if (!owner || !row || row.node !== node || this.handQueuePanel.hidden
-      || owner.client.status === 'reconnecting' || this.handQueuePending.has(id)) return;
+    const owner = this.handQueueOwner, row = this.handQueueRows.get(id), revision = this.handQueueRevision;
+    if (!owner || !row || row.node !== node || this.handQueuePending.has(id)) return;
+    const hidden = row.node.hidden || this.handQueuePanel.hidden || owner.client.status === 'reconnecting';
+    if (!this.handQueueInputCurrent(owner, revision) || hidden || this.handQueueRows.get(id) !== row) {
+      this.syncHandQueue(); return;
+    }
     const attempt = {};
-    this.handQueuePending.set(id, attempt); this.syncHandQueue(); this.hideError();
+    this.handQueuePending.set(id, attempt); this.syncHandQueue();
+    const admitted = (): boolean => {
+      const revision = this.handQueueRevision;
+      if (this.handQueueOwner !== owner || this.handQueuePending.get(id) !== attempt || this.handQueueRows.get(id) !== row) return false;
+      const hidden = row.node.hidden || this.handQueuePanel.hidden || owner.client.status === 'reconnecting';
+      return this.handQueueInputCurrent(owner, revision) && !hidden && this.handQueuePending.get(id) === attempt
+        && this.handQueueRows.get(id) === row;
+    };
+    const cancel = () => {
+      if (this.handQueuePending.get(id) === attempt) this.handQueuePending.delete(id);
+      this.syncHandQueue();
+    };
+    // The new filter's getters/setters may revoke this row while its pending state is painted.
+    if (!admitted()) { cancel(); return; }
+    this.hideError();
+    if (!admitted()) { cancel(); return; }
     const current = (): boolean => {
       if (this.handQueueOwner !== owner || this.handQueuePending.get(id) !== attempt) return false;
       this.syncHandQueue();
@@ -996,8 +2087,9 @@ export class StageElement extends HTMLElement {
 
   private noteStageTransferEvent(type: keyof StageEventMap, detail: StageEventMap[keyof StageEventMap]): void {
     const owner = this.stageManagementOwner;
-    if (!owner) return;
-    if (type === 'state') { owner.transferAwaitingState = false; return; }
+    if (!owner) { this.noteHandQueueEvent(type, detail); return; }
+    if ((type === 'closed' || type === 'kicked' || (type === 'status' && (detail === 'reconnecting' || detail === 'disconnected')))
+      && this.stageTransferAttempt) this.stageTransferAttempt.invalid = true;
     const role = type === 'role' ? detail as StageEventMap['role'] : undefined;
     const left = type === 'stageleft' ? detail as StageEventMap['stageleft'] : undefined;
     const transferred = type === 'transferred' ? detail as StageEventMap['transferred'] : undefined;
@@ -1009,6 +2101,19 @@ export class StageElement extends HTMLElement {
       owner.transferRevision++; owner.transferAwaitingState = true;
       if (this.stageTransferAttempt) this.stageTransferAttempt.invalid = true;
     }
+    // Keep both dialog fences ahead of new filter reads, including getters on event details.
+    this.noteHandQueueEvent(type, detail);
+    const client = this.current, state = client?.state, me = client?.me;
+    if (owner !== this.stageManagementOwner) return;
+    const sameController = owner.client === client && owner.generation === this.generation
+      && state?.roomId === owner.roomId && me?.participantId === owner.participantId
+      && me.role === 'controller' && me.connected === true;
+    // A replacement snapshot can emit status before state; observe its own-seat loss before DOM sync.
+    if (!sameController) {
+      owner.transferRevision++; owner.transferAwaitingState = true;
+      if (this.stageTransferAttempt) this.stageTransferAttempt.invalid = true;
+    }
+    if (type === 'state') { owner.transferAwaitingState = !sameController; return; }
   }
 
   private canTransferStage(id: string, node: HTMLLIElement): boolean {
@@ -1022,38 +2127,48 @@ export class StageElement extends HTMLElement {
   }
 
   private transferStageControl(id: string, node: HTMLLIElement): void {
-    this.syncStageManagement();
-    const owner = this.stageManagementOwner;
-    if (!owner || this.stageTransferAttempt || !this.canTransferStage(id, node)) return;
-    const attempt = { id, node, revision: owner.transferRevision, invalid: false };
-    this.stageTransferAttempt = attempt; this.syncStageManagement();
-    const current = (): boolean => {
-      if (this.stageManagementOwner !== owner || this.stageTransferAttempt !== attempt) return false;
+    const dialog = {};
+    this.stageTransferDialogs.add(dialog);
+    const releaseDialog = (): void => { this.stageTransferDialogs.delete(dialog); };
+    try {
+      // Reconcile even when a close dialog excludes this admission.
       this.syncStageManagement();
-      return this.stageManagementOwner === owner && this.stageTransferAttempt === attempt;
-    };
-    const eligible = (): boolean => current() && !attempt.invalid && owner.transferRevision === attempt.revision && this.canTransferStage(id, node);
-    void (async () => {
-      try {
-        if (!eligible()) return;
-        const target = owner.client.state!.speakers.find(person => person.participantId === id && person.role === 'speaker' && person.onStage)!;
-        if (!window.confirm(`確定將控制權移交給 ${decodeName(target.name)}？你將失去主控權限，但保留目前台位並留在房間。`) || !eligible()) return;
-        this.hideError();
-        await owner.client.transferControl(id);
-      } catch (error) {
-        if (current() && !attempt.invalid && this.stageManagementRows.get(id)?.node === node) this.show(error);
-      } finally {
-        if (current()) { this.stageTransferAttempt = undefined; this.syncStageManagement(); }
-      }
-    })();
+      const owner = this.stageManagementOwner;
+      if (this.roomCloseDialog || !owner || this.stageTransferAttempt || !this.canTransferStage(id, node)) { releaseDialog(); return; }
+      const attempt = { id, node, revision: owner.transferRevision, invalid: false };
+      this.stageTransferAttempt = attempt; this.syncStageManagement();
+      const current = (): boolean => {
+        if (this.stageManagementOwner !== owner || this.stageTransferAttempt !== attempt) return false;
+        this.syncStageManagement();
+        return this.stageManagementOwner === owner && this.stageTransferAttempt === attempt;
+      };
+      const eligible = (): boolean => current() && !attempt.invalid && owner.transferRevision === attempt.revision && this.canTransferStage(id, node);
+      void (async () => {
+        try {
+          if (!eligible()) return;
+          const target = owner.client.state!.speakers.find(person => person.participantId === id && person.role === 'speaker' && person.onStage)!;
+          if (!window.confirm(`確定將控制權移交給 ${decodeName(target.name)}？你將失去主控權限，但保留目前台位並留在房間。`) || !eligible()) return;
+          this.hideError();
+          const result = owner.client.transferControl(id);
+          releaseDialog();
+          await result;
+        } catch (error) {
+          if (current() && !attempt.invalid && this.stageManagementRows.get(id)?.node === node) this.show(error);
+        } finally {
+          releaseDialog();
+          if (current()) { this.stageTransferAttempt = undefined; this.syncStageManagement(); }
+        }
+      })();
+    } catch (error) { releaseDialog(); throw error; }
   }
 
   private retireRoomNameOwner(): void {
     this.roomNameOwner = undefined; this.roomNameAttempt = undefined;
     this.roomNameInput.value = ''; this.acceptedRoomName.textContent = '';
-    this.roomNamePanel.hidden = true;
-    this.roomNameInput.disabled = this.roomNameUpdate.disabled = true;
-    this.roomNameUpdate.removeAttribute('aria-busy');
+    if (!this.roomNamePanel.hidden) this.roomNamePanel.hidden = true;
+    if (!this.roomNameUpdate.disabled) this.roomNameUpdate.disabled = true;
+    if (!this.roomNameInput.disabled) this.roomNameInput.disabled = true;
+    if (this.roomNameUpdate.hasAttribute('aria-busy')) this.roomNameUpdate.removeAttribute('aria-busy');
   }
 
   private syncRoomNameOwner(): void {
@@ -1070,9 +2185,12 @@ export class StageElement extends HTMLElement {
     }
     // Same-controller snapshots and reconnects update the accepted value, never the draft.
     this.acceptedRoomName.textContent = `目前房間名稱：${decodeName(state.name)}`;
-    this.roomNamePanel.hidden = false; this.roomNameInput.disabled = false;
-    this.roomNameUpdate.disabled = client.status === 'reconnecting' || Boolean(this.roomNameAttempt);
-    this.roomNameUpdate.setAttribute('aria-busy', String(Boolean(this.roomNameAttempt)));
+    if (this.roomNamePanel.hidden) this.roomNamePanel.hidden = false;
+    if (this.roomNameInput.disabled) this.roomNameInput.disabled = false;
+    const disabled = client.status === 'reconnecting' || Boolean(this.roomNameAttempt);
+    if (this.roomNameUpdate.disabled !== disabled) this.roomNameUpdate.disabled = disabled;
+    const busy = String(Boolean(this.roomNameAttempt));
+    if (this.roomNameUpdate.getAttribute('aria-busy') !== busy) this.roomNameUpdate.setAttribute('aria-busy', busy);
   }
 
   private updateRoomName(): void {
@@ -1215,6 +2333,228 @@ export class StageElement extends HTMLElement {
       && !this.current?.state && this.current?.status !== 'reconnecting';
   }
 
+  private attachMicTestListeners(): void {
+    if (this.micTestDocument) return;
+    this.micTestPageHidden = false;
+    this.micTestDocument = document; this.micTestWindow = window;
+    document.addEventListener?.('visibilitychange', this.micTestVisibility);
+    window.addEventListener('pagehide', this.micTestPageHide);
+    window.addEventListener('pageshow', this.micTestPageShow);
+  }
+
+  private detachMicTestListeners(): void {
+    const doc = this.micTestDocument, win = this.micTestWindow;
+    this.micTestDocument = undefined; this.micTestWindow = undefined;
+    doc?.removeEventListener?.('visibilitychange', this.micTestVisibility);
+    win?.removeEventListener('pagehide', this.micTestPageHide);
+    win?.removeEventListener('pageshow', this.micTestPageShow);
+  }
+
+  private retireMicTestBinding(): () => void {
+    this.micTestBinding = undefined;
+    // Departing-client cleanup must not recreate controller consent under the new generation.
+    this.roomCloseTerminalClient = this.current ?? undefined;
+    this.stageManagementTerminalClient = this.current ?? undefined;
+    this.retireRoomClose();
+    if (this.stageTransferAttempt) this.stageTransferAttempt.invalid = true;
+    return this.revokeMicTest(true);
+  }
+
+  private disposeMicTest(handle: MicTest): void {
+    ++this.micTestCleanup;
+    try { handle.stop(); } catch { /* A retired handle cannot report into a newer test. */ }
+    finally { --this.micTestCleanup; }
+  }
+
+  private retireMicTest(dropOwner: boolean, message = '麥克風音量測試已停止。'): void {
+    this.revokeMicTest(dropOwner, message)();
+  }
+
+  private revokeMicTest(dropOwner: boolean, message = '麥克風音量測試已停止。'): () => void {
+    const attempt = this.micTestAttempt, handle = attempt?.handle;
+    // Retire all authority before abort, stop, or a host DOM callback can reenter.
+    if (dropOwner) this.micTestOwner = undefined;
+    this.micTestValue = 0; this.micTestMessage = message;
+    const timer = this.micTestTimer; this.micTestTimer = undefined;
+    if (attempt) {
+      attempt.retired = true; attempt.handle = undefined;
+      if (!attempt.pending) this.micTestAttempt = undefined;
+    }
+    return () => {
+      ++this.micTestCleanup;
+      try {
+        clearTimeout(timer);
+        try { attempt?.controller.abort(); } catch { /* Stop the owned handle even if an abort listener fails. */ }
+        if (handle) this.disposeMicTest(handle);
+      } finally { --this.micTestCleanup; }
+    };
+  }
+
+  private micTestMounted(): boolean {
+    return this.isConnected && Boolean(this.micTestDocument) && this.micTestPanel.isConnected
+      && this.widgetRoot.contains(this.micTestPanel)
+      && [this.micTestStart, this.micTestCancel, this.micTestStop, this.micTestMeter, this.micTestStatus]
+        .every(node => node.isConnected && this.micTestPanel.contains(node));
+  }
+
+  private readMicTestOwner(): StageElement['micTestOwner'] {
+    const binding = this.micTestBinding;
+    const valid = () => Boolean(binding && this.micTestBinding === binding && this.current === binding.client
+      && this.generation === binding.generation && !binding.blocked
+      && !this.micTestCleanup && !this.leftRoom && !this.roomExit && !this.connectionStatsLeaving
+      && !this.micTestPageHidden && !this.micTestDocument?.hidden && this.micTestMounted());
+    if (!binding || !valid()) return;
+    // Preserve existing dialog invalidation when a public getter exposes a transient identity loss.
+    const read = this.connectionStatsIdentityReader(), client = binding.client;
+    const state = read('state', () => client.state); if (!valid() || !state) return;
+    const me = read('me', () => client.me); if (!valid() || !me) return;
+    const status = read('status', () => client.status); if (!valid() || (status !== 'waiting' && status !== 'live')) return;
+    const roomId = read('roomId', () => state.roomId); if (!valid() || typeof roomId !== 'string' || !roomId.trim()) return;
+    const participantId = read('participantId', () => me.participantId);
+    if (!valid() || typeof participantId !== 'string' || !participantId.trim() || binding.early.has(participantId)) return;
+    const connected = me.connected; if (!valid() || connected !== true) return;
+    const onStage = me.onStage; if (!valid() || onStage !== false) return;
+    if (read('state', () => client.state) !== state || !valid()
+      || read('me', () => client.me) !== me || !valid()
+      || read('status', () => client.status) !== status || !valid()
+      || read('roomId', () => state.roomId) !== roomId || !valid()
+      || read('participantId', () => me.participantId) !== participantId || !valid()
+      || me.connected !== true || !valid() || me.onStage !== false || !valid() || binding.early.has(participantId)) return;
+    return { binding, roomId, participantId };
+  }
+
+  private markMicTestEvent(client: StageClient, type: keyof StageEventMap, detail: StageEventMap[keyof StageEventMap]): void {
+    const binding = this.micTestBinding;
+    if (!binding || binding.client !== client || binding.generation !== this.generation) return;
+    // Notification fences precede all authority getters; cleanup follows the existing consent fences.
+    if (type === 'closed' || type === 'kicked'
+      || (type === 'status' && (detail === 'reconnecting' || detail === 'disconnected'))) binding.blocked = true;
+    if (type === 'invite' || type === 'stagejoined') binding.early.add((detail as StageEventMap['stagejoined']).participantId);
+  }
+
+  private noteMicTestEvent(client: StageClient, type: keyof StageEventMap, detail: StageEventMap[keyof StageEventMap]): void {
+    const binding = this.micTestBinding;
+    if (!binding || binding.client !== client || binding.generation !== this.generation) return;
+    if (type === 'closed' || type === 'kicked' || (type === 'status' && detail === 'disconnected')) this.detachMicTestListeners();
+    if (type === 'invite' || type === 'stagejoined') {
+      // A status callback can deliver this notice before its already-installed snapshot emits state.
+      const state = this.connectionStatsIdentityReader()('state', () => client.state);
+      if (state && this.micTestBinding === binding) this.micTestEarlyStates.add(state);
+    }
+    if (binding.blocked || (this.micTestOwner && binding.early.has(this.micTestOwner.participantId))) {
+      this.retireMicTest(true);
+    }
+    if (type === 'state'  && detail && typeof detail === 'object' && !this.micTestStates.has(detail)) {
+      const state = this.connectionStatsIdentityReader()('state', () => client.state);
+      if (this.micTestBinding === binding && this.current === client && this.generation === binding.generation && state === detail) {
+        this.attachMicTestListeners();
+        if (this.micTestBinding !== binding || this.current !== client || this.generation !== binding.generation) return;
+        this.micTestStates.add(detail); binding.blocked = false;
+        if (!this.micTestEarlyStates.has(detail)) binding.early.clear();
+      }
+    }
+    this.syncMicTest();
+  }
+
+  private syncMicTest(): void {
+    for (;;) {
+      const before = this.micTestOwner;
+      let observed: StageElement['micTestOwner'];
+      try { observed = this.readMicTestOwner(); } catch { observed = undefined; }
+      if (before !== this.micTestOwner) continue;
+      if (!observed || (before && (before.binding !== observed.binding
+        || before.roomId !== observed.roomId || before.participantId !== observed.participantId))) {
+        if (before) { this.retireMicTest(true); continue; }
+      } else if (!before) {
+        this.micTestOwner = observed; this.micTestMessage = '尚未開始麥克風音量測試。'; this.micTestValue = 0;
+      }
+      const owner = this.micTestOwner, attempt = this.micTestAttempt;
+      const pending = Boolean(attempt?.pending && !attempt.retired && attempt.owner === owner);
+      const active = Boolean(attempt?.handle && !attempt.retired && attempt.owner === owner);
+      const hidden = !owner, busy = Boolean(attempt?.pending);
+      const disabled = hidden || Boolean(attempt) || Boolean(this.inputDeviceAttempt) || Boolean(this.micTestCleanup);
+      const message = hidden ? '' : pending ? '等待麥克風權限；可取消本次測試。'
+        : active ? '正在量測本機麥克風音量。' : busy ? '正在取消麥克風測試，請稍候。' : this.micTestMessage;
+      // Recompute after every changed setter so a stale outer paint cannot overwrite a nested entry.
+      if (hidden && !this.micTestPanel.hidden) { this.micTestPanel.hidden = true; continue; }
+      if (this.micTestStart.disabled !== disabled) { this.micTestStart.disabled = disabled; continue; }
+      if (this.micTestStart.getAttribute('aria-busy') !== String(busy)) { this.micTestStart.setAttribute('aria-busy', String(busy)); continue; }
+      if (this.micTestCancel.hidden !== !pending) { this.micTestCancel.hidden = !pending; continue; }
+      if (this.micTestCancel.disabled !== !pending) { this.micTestCancel.disabled = !pending; continue; }
+      if (this.micTestStop.hidden !== !active) { this.micTestStop.hidden = !active; continue; }
+      if (this.micTestStop.disabled !== !active) { this.micTestStop.disabled = !active; continue; }
+      if (Number(this.micTestMeter.value) !== this.micTestValue) { this.micTestMeter.value = this.micTestValue; continue; }
+      if (this.micTestStatus.textContent !== message) { this.micTestStatus.textContent = message; continue; }
+      if (this.micTestPanel.hidden !== hidden) { this.micTestPanel.hidden = hidden; continue; }
+      return;
+    }
+  }
+
+  private currentMicTest(attempt: NonNullable<StageElement['micTestAttempt']>): boolean {
+    this.syncMicTest();
+    return this.micTestAttempt === attempt && !attempt.retired && this.micTestOwner === attempt.owner;
+  }
+
+  private startMicTest(): void {
+    if (this.micTestCleanup || this.inputDeviceAttempt || this.micTestAttempt) return;
+    this.syncMicTest();
+    const owner = this.micTestOwner;
+    if (!owner || this.micTestStart.disabled || this.micTestPanel.hidden || this.micTestAttempt || this.inputDeviceAttempt) return;
+    const attempt = this.micTestAttempt = { owner, controller: new AbortController(), pending: true, retired: false } as NonNullable<StageElement['micTestAttempt']>;
+    void (async () => {
+      try {
+        if (!this.currentMicTest(attempt) || this.inputDeviceAttempt) return;
+        const start = owner.binding.client.startMicTest;
+        if (!this.currentMicTest(attempt) || this.inputDeviceAttempt) return;
+        if (typeof start !== 'function') throw new Error();
+        const handle = await start.call(owner.binding.client, { signal: attempt.controller.signal });
+        if (!this.currentMicTest(attempt)) { this.disposeMicTest(handle); return; }
+        attempt.pending = false; attempt.handle = handle;
+        this.sampleMicTest(attempt);
+      } catch {
+        if (this.currentMicTest(attempt)) this.retireMicTest(false, '無法完成麥克風音量測試，請手動再試。');
+      } finally {
+        attempt.pending = false;
+        if (this.micTestAttempt === attempt && !attempt.handle) this.micTestAttempt = undefined;
+        this.syncMicTest();
+      }
+    })();
+  }
+
+  private stopMicTest(): void {
+    const attempt = this.micTestAttempt;
+    if (!attempt || !this.currentMicTest(attempt)) return;
+    this.retireMicTest(false); this.syncMicTest();
+  }
+
+  private sampleMicTest(attempt: NonNullable<StageElement['micTestAttempt']>): void {
+    try {
+      if (!this.currentMicTest(attempt) || !attempt.handle) return;
+      const handle = attempt.handle, stopped = handle.stopped;
+      if (!this.currentMicTest(attempt)) return;
+      if (stopped) { this.retireMicTest(false, '麥克風音量測試已結束。'); this.syncMicTest(); return; }
+      const level = handle.level;
+      if (!this.currentMicTest(attempt)) return;
+      const value = level.call(handle);
+      if (!this.currentMicTest(attempt)) return;
+      const ended = handle.stopped;
+      if (!this.currentMicTest(attempt)) return;
+      if (ended) { this.retireMicTest(false, '麥克風音量測試已結束。'); this.syncMicTest(); return; }
+      this.micTestValue = typeof value === 'number' && Number.isFinite(value) ? Math.min(1, Math.max(0, value)) : 0;
+      this.syncMicTest();
+      if (!this.currentMicTest(attempt)) return;
+      const timer = setTimeout(() => {
+        if (this.micTestTimer !== timer) return;
+        this.micTestTimer = undefined; this.sampleMicTest(attempt);
+      }, 100);
+      this.micTestTimer = timer;
+    } catch {
+      if (this.currentMicTest(attempt)) {
+        this.retireMicTest(false, '無法完成麥克風音量測試，請手動再試。'); this.syncMicTest();
+      }
+    }
+  }
+
   private replaceMicrophoneOptions(inputs: readonly MediaDeviceInfo[], draft: string): void {
     const initial = document.createElement('option');
     initial.value = ''; initial.textContent = '預設（依 SDK 設定）';
@@ -1301,19 +2641,25 @@ export class StageElement extends HTMLElement {
       || this.refreshAttempt || this.inputDeviceAttempt) return;
     const draft = this.microphoneSelect.value;
     const attempt = this.inputDeviceAttempt = {};
-    this.syncMicrophoneOwner(); this.hideError();
+    this.retireMicTest(false);
+    this.syncMicrophoneOwner(); this.syncMicTest(); this.hideError();
     const current = () => {
       if (this.microphoneOwner !== owner || this.inputDeviceAttempt !== attempt) return false;
       this.syncMicrophoneOwner();
       return this.microphoneOwner === owner && this.inputDeviceAttempt === attempt;
     };
     void (async () => {
-      try { await owner.client.setInputDevice(draft); }
+      try {
+        if (!current()) return;
+        const apply = owner.client.setInputDevice;
+        if (!current()) return;
+        await apply.call(owner.client, draft);
+      }
       catch (error) { if (current()) this.show(error); }
       finally {
         if (current()) {
           // Fulfillment can be a stage-transition no-op. Neither it nor shared micready proves capture.
-          this.inputDeviceAttempt = undefined; this.syncMicrophoneOwner();
+          this.inputDeviceAttempt = undefined; this.syncMicrophoneOwner(); this.syncMicTest();
         }
       }
     })();
@@ -1461,7 +2807,8 @@ export class StageElement extends HTMLElement {
   private renderVolume(): void {
     const percent = Math.round(this.playbackVolume * 100);
     this.volume.value = String(percent);
-    this.volume.setAttribute('aria-valuetext', `${percent}%`);
+    const valueText = `${percent}%`;
+    if (this.volume.getAttribute('aria-valuetext') !== valueText) this.volume.setAttribute('aria-valuetext', valueText);
     this.volumeValue.textContent = `${percent}%`;
   }
 
@@ -1527,17 +2874,21 @@ export class StageElement extends HTMLElement {
   }
 
   private render(): void {
+    this.syncOccupancy();
     this.syncAudioRecovery();
     this.syncPlaybackOwner();
     this.syncMicRetry();
     this.syncMicrophoneOwner();
+    this.syncMicTest();
     this.syncOutputDeviceOwner();
     this.syncNameOwner();
     this.syncRoomNameOwner();
     this.syncHandQueue();
     this.syncStageManagement();
+    this.syncRoomClose();
     this.syncQualityOwner();
     this.syncSpeakingOwner();
+    this.syncConnectionStats();
     this.syncHandRejection();
     const client = this.current;
     const me = client?.me ?? null;
@@ -1573,7 +2924,8 @@ export class StageElement extends HTMLElement {
     this.listen.hidden = !me;
     this.listen.disabled = !client || this.pendingActions.has(this.listen);
     this.listen.textContent = this.playbackMuted ? '恢復收聽' : '靜音收聽';
-    this.listen.setAttribute('aria-pressed', String(this.playbackMuted));
+    const pressed = String(this.playbackMuted);
+    if (this.listen.getAttribute('aria-pressed') !== pressed) this.listen.setAttribute('aria-pressed', pressed);
     this.playback.hidden = !me;
     this.volume.disabled = !client || !me;
     this.renderVolume();
@@ -1587,6 +2939,7 @@ export class StageElement extends HTMLElement {
     this.mic.setAttribute('aria-pressed', String(Boolean(me?.muted)));
     this.leaveStage.textContent = me?.onStage ? '離開舞台' : '返回舞台';
     this.leaveStage.disabled = !this.canUseStage() || this.pendingActions.has(this.leaveStage);
+    this.syncPublicRoster();
   }
 }
 

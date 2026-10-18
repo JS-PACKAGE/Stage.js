@@ -154,8 +154,34 @@ audienceFilterClear.onclick = () => {
   if (!canFilterAudience()) return;
   audienceSearch.value = ''; applyAudienceFilter();
 };
+const handFilter = element('section', 'panel hand-filter');
+handFilter.hidden = true;
+const handSearch = element('input');
+handSearch.type = 'search'; handSearch.id = 'hand-queue-search'; handSearch.autocomplete = 'off';
+handSearch.disabled = true; handSearch.setAttribute('aria-describedby', 'hand-queue-results');
+const handSearchLabel = element('label', '', '搜尋舉手者名稱');
+handSearchLabel.setAttribute('for', handSearch.id);
+const handFilterCount = element('p', 'muted');
+handFilterCount.id = 'hand-queue-results'; handFilterCount.setAttribute('role', 'status');
+const handFilterClear = element('button', '', '清除舉手搜尋');
+handFilterClear.id = 'hand-queue-clear'; handFilterClear.type = 'button'; handFilterClear.disabled = true;
+handFilter.append(handSearchLabel, handSearch, handFilterClear, handFilterCount);
+interface HandFilterRow { row: HTMLLIElement; id: string; sourceName: string; name: string }
+let handFilterIdentity = '', handFilterDraft = '';
+let handFilterGeneration = 0, handFilterRevision = 0;
+let handFilterPainting = false, handFilterDirty = false;
+let handFilterRows: HandFilterRow[] = [];
+handSearch.oninput = () => {
+  const revision = ++handFilterRevision, value = handSearch.value;
+  if (revision !== handFilterRevision || !canFilterHands()) return;
+  handFilterDraft = value; applyHandFilter();
+};
+handFilterClear.onclick = () => {
+  if (!canFilterHands()) return;
+  handFilterDraft = ''; applyHandFilter();
+};
 const content = element('main');
-app.append(header, notices, errorBox, audienceFilter, content);
+app.append(header, notices, errorBox, audienceFilter, handFilter, content);
 const stageQuality = element('details', 'panel stage-quality');
 stageQuality.id = 'stage-quality'; stageQuality.hidden = true;
 const stageQualitySummary = element('summary', '', '舞台連線品質');
@@ -164,29 +190,55 @@ const stageQualityList = element('ul', 'stage-quality-list');
 stageQuality.append(stageQualitySummary, stageQualityStatus, stageQualityList);
 app.append(stageQuality);
 let stageQualityIdentity = '';
+let stageQualitySuppressedState: RoomStatePayload | undefined;
+let stageQualityRevision = 0;
 let stageQualityReconnecting = false;
 let stageQualityReports = new Map<string, ConnectionQuality>();
 const stageQualityRows = new Map<string, HTMLLIElement>();
 let stageQualityOrder: string[] = [];
+function qualityDetailsUpdate(): () => boolean {
+  const revision = ++stageQualityRevision, state = client.state, generation = roomActionGeneration;
+  return () => revision === stageQualityRevision && state === client.state && generation === roomActionGeneration;
+}
 function clearQualityDetailsReports(): void {
   stageQualityReports.clear(); stageQualityRows.clear(); stageQualityOrder = [];
   stageQualityList.replaceChildren();
 }
-function resetQualityDetails(): void {
+function resetQualityDetails(current = qualityDetailsUpdate()): boolean {
   stageQualityIdentity = ''; stageQualityReconnecting = false;
-  stageQuality.hidden = true; stageQuality.removeAttribute('open');
-  stageQualityStatus.textContent = ''; clearQualityDetailsReports();
+  stageQualityReports.clear(); stageQualityRows.clear(); stageQualityOrder = [];
+  stageQuality.hidden = true;
+  if (!current()) return false;
+  stageQuality.removeAttribute('open');
+  if (!current()) return false;
+  stageQualityStatus.textContent = '';
+  if (!current()) return false;
+  stageQualityList.replaceChildren();
+  return current();
+}
+function suppressQualityDetails(): void {
+  const state = client.state;
+  if (!state || stageQualitySuppressedState === state) return;
+  // Role/stage deltas precede their snapshot; reserve loss before any observable reset.
+  stageQualitySuppressedState = state;
+  resetQualityDetails();
 }
 /** Reports have no timestamp or room epoch; accept them only in the current eligible view. */
 function syncQualityDetails(reports?: readonly ConnectionQuality[]): void {
-  const state = client.state, me = state?.me;
-  if (!state || !me || (me.role !== 'controller' && !me.onStage)) { resetQualityDetails(); return; }
+  const state = client.state, me = state?.me, current = qualityDetailsUpdate();
+  if (stageQualitySuppressedState || !state || !me || (me.role !== 'controller' && !me.onStage)) {
+    resetQualityDetails(current); return;
+  }
   const identity = JSON.stringify([state.roomId, me.participantId]);
-  if (identity !== stageQualityIdentity) { resetQualityDetails(); stageQualityIdentity = identity; }
+  if (identity !== stageQualityIdentity) {
+    if (!resetQualityDetails(current)) return;
+    stageQualityIdentity = identity;
+  }
   stageQuality.hidden = false;
-  const reconnecting = client.status === 'reconnecting';
-  if (reconnecting && !stageQualityReconnecting) clearQualityDetailsReports();
+  if (!current()) return;
+  const reconnecting = client.status === 'reconnecting', clearReports = reconnecting && !stageQualityReconnecting;
   stageQualityReconnecting = reconnecting;
+  if (clearReports) { clearQualityDetailsReports(); if (!current()) return; }
   const speakers = state.speakers.filter(person => person.onStage);
   const ids = new Set(speakers.map(person => person.participantId));
   if (reports !== undefined && !reconnecting) {
@@ -208,11 +260,13 @@ function syncQualityDetails(reports?: readonly ConnectionQuality[]): void {
     if (!row) { row = element('li'); row.dataset.participantId = person.participantId; stageQualityRows.set(person.participantId, row); }
     const text = `${decodeName(person.name)}：上行掉包 ${percent(report.uplinkLossPercent)} · 下行掉包 ${percent(report.downlinkLossPercent)} · RTT ${rtt(report.rttMs)}`;
     if (row.textContent !== text) row.textContent = text;
+    if (!current()) return;
   }
   for (const id of stageQualityRows.keys()) if (!order.includes(id)) stageQualityRows.delete(id);
   if (order.length !== stageQualityOrder.length || order.some((id, index) => id !== stageQualityOrder[index])) {
-    stageQualityList.replaceChildren(...order.map(id => stageQualityRows.get(id)!));
     stageQualityOrder = order;
+    stageQualityList.replaceChildren(...order.map(id => stageQualityRows.get(id)!));
+    if (!current()) return;
   }
   stageQualityStatus.textContent = order.length
     ? '最近收到的伺服器回報；RTT 不是端到端音訊延遲。'
@@ -368,6 +422,11 @@ client.on('micready', () => {
 });
 navigator.mediaDevices?.addEventListener('devicechange', () => { void refreshDevices().catch(() => {}); });
 void refreshDevices().catch(() => {});
+// Reserve public snapshot ownership before existing UI callbacks can reenter the SDK.
+client.on('state', prepareOccupancyState);
+client.on('status', prepareOccupancyStatus);
+client.on('closed', retireOccupancy);
+client.on('kicked', retireOccupancy);
 /** Muted room microphones have a known zero level; only previews or unmuted stage mics need polling. */
 let meterTimer: ReturnType<typeof setInterval> | undefined;
 /** Only preview capture is abortable here, never setInputDevice or the room microphone. */
@@ -447,13 +506,18 @@ async function run(action: () => Promise<unknown>, target?: HTMLButtonElement, g
   finally { if (target?.isConnected) target.disabled = false; updateCooldown(); syncMeter(); }
 }
 /** Room controls retain their pending state when snapshots replace their DOM nodes. */
-function resetRoomActions(identity: string): void {
-  if (roomActionIdentity === identity) return;
-  roomActionIdentity = identity; roomActionGeneration++; pendingRoomActions.clear();
+function resetRoomActions(identity: string): number {
+  if (roomActionIdentity === identity) return roomActionGeneration;
+  roomActionIdentity = identity; const generation = ++roomActionGeneration; pendingRoomActions.clear();
   audioRetryNotice.hidden = true; audioRetryNotice.textContent = '';
   handRejectionRoomActive = identity !== ''; retireHandRejection();
   pendingAudioUnlock = undefined;
   micRetryAvailable = micRetryPending = false; micNotice = '';
+  // Retire the previous seat's history only after its actions and polls have lost ownership.
+  if (generation !== roomActionGeneration) return generation;
+  connectionLine.textContent = '';
+  if (generation === roomActionGeneration) connectionLine.classList.toggle('error', false);
+  return generation;
 }
 function roomButton(key: string, label: string, action: () => Promise<unknown>, className = '', canAct?: () => boolean): HTMLButtonElement {
   const node = element('button', className, label);
@@ -517,7 +581,8 @@ function runLanding(operation: 'create' | 'join', action: (isCancelled: () => bo
   if (signaling.error) { showError(signaling.error); return; }
   const revision = landingRevision;
   const entry = { operation, revision, cancelled: false, entered: false };
-  landingEntry = entry; busy = true; syncLandingActions();
+  retireOccupancy();
+  landingEntry = entry; busy = true; syncLandingActions(); renderOccupancy();
   void run(() => action(() => entry.cancelled), undefined, undefined, () => !entry.cancelled, error => {
     const message = error instanceof Error ? error.message : '操作失敗，請稍後再試。';
     if (landingEntry !== entry || entry.entered || client.state || revision !== landingRevision
@@ -551,18 +616,21 @@ function field(form: HTMLFormElement, label: string, name: string, value = '', r
   return input;
 }
 function landing(): void {
+  retireOccupancy();
+  // Drop ownership before any reset can synchronously deliver another speaking callback.
+  resetSpeaking();
   handRejectionRoomActive = false; retireHandRejection();
   stopRoomTimers();
-  resetQualityDetails();
+  stageQualitySuppressedState = undefined; resetQualityDetails();
   stagePermissionOwner = undefined;
   landingRevision += 1;
   ownHandPosition.hidden = true; ownHandPosition.textContent = '';
   resetAudienceFilter();
   renderedRoomSignature = renderedSpeakingSignature = renderedQualitySignature = undefined; renderedGainInputs.length = 0;
   renderedAudienceHeading = undefined;
-  personRows.clear(); speakingIds.clear();
   resetMicSettings();
   resetRoomActions('');
+  resetHandFilter();
   cooldownButton = null; renderedReturnStage = null; renderedRoomActions = []; scheduleCooldown(0);
   brand.textContent = 'Stage.js 音訊舞台';
   const intro = element('section', 'intro');
@@ -611,15 +679,16 @@ function landing(): void {
   cancel.id = 'landing-cancel'; cancel.type = 'button'; cancel.dataset.landingCancel = 'true';
   cancel.onclick = () => {
     if (!cancel.isConnected || !canCancelLanding()) return;
+    retireOccupancy();
     landingEntry!.cancelled = true;
-    syncLandingActions();
+    syncLandingActions(); renderOccupancy();
     void run(() => client.disconnect());
   };
   const progress = element('p', 'muted');
   progress.id = 'landing-progress'; progress.dataset.landingProgress = 'true';
   progress.setAttribute('role', 'status'); progress.setAttribute('aria-live', 'polite');
   content.replaceChildren(intro, grid, progress, cancel);
-  syncLandingActions(); renderNotices();
+  syncLandingActions(); renderNotices(); renderOccupancy();
 }
 function syncMicRetry(): void {
   if (!micRetryButton) return;
@@ -722,29 +791,262 @@ function syncAudienceFilter(state: RoomStatePayload): void {
   audienceFilter.hidden = false; audienceSearch.disabled = false;
   applyAudienceFilter();
 }
+function resetHandFilter(): void {
+  handFilterIdentity = ''; handFilterDraft = ''; handFilterRows = [];
+  handFilterGeneration = roomActionGeneration;
+  applyHandFilter();
+}
+function canFilterHands(): boolean {
+  const revision = handFilterRevision, state = client.state;
+  const eligible = Boolean(state?.me.role === 'controller' && handFilterIdentity
+    && handFilterIdentity === JSON.stringify([state.roomId, state.me.participantId]));
+  return eligible && revision === handFilterRevision && handFilterGeneration === roomActionGeneration;
+}
+function applyHandFilter(): void {
+  ++handFilterRevision; handFilterDirty = true;
+  if (handFilterPainting) return;
+  handFilterPainting = true;
+  try {
+    // A finite nested input/state callback may overwrite a DOM setter after its newer paint.
+    while (handFilterDirty) {
+      handFilterDirty = false;
+      const revision = handFilterRevision, rows = handFilterRows, draft = handFilterDraft;
+      const active = canFilterHands(), query = draft.trim().normalize('NFC').toLowerCase();
+      const current = () => revision === handFilterRevision && rows === handFilterRows;
+      const write = (action: () => void): boolean => {
+        if (!current()) { handFilterDirty = true; return false; }
+        action();
+        if (!current()) { handFilterDirty = true; return false; }
+        return true;
+      };
+      if (!write(() => { if (handSearch.value !== draft) handSearch.value = draft; })) continue;
+      if (!write(() => { handFilter.hidden = !active; handSearch.disabled = !active; })) continue;
+      let visible = 0;
+      for (const { row, name } of rows) {
+        const matches = name.includes(query);
+        if (!write(() => { if (row.hidden !== !matches) row.hidden = !matches; })) break;
+        if (matches) visible++;
+      }
+      if (!current()) { handFilterDirty = true; continue; }
+      if (!write(() => { handFilterClear.disabled = !active || !draft; })) continue;
+      const text = !active ? '' : `符合 ${visible} / ${rows.length} 筆舉手申請。${query && !visible && rows.length ? '沒有符合搜尋的舉手者。' : ''}`;
+      write(() => { if (handFilterCount.textContent !== text) handFilterCount.textContent = text; });
+    }
+  } finally { handFilterPainting = false; }
+}
+function syncHandFilter(state: RoomStatePayload): void {
+  if (state !== client.state) return;
+  if (state.me.role !== 'controller') { resetHandFilter(); return; }
+  const identity = JSON.stringify([state.roomId, state.me.participantId]);
+  if (handFilterIdentity !== identity || handFilterGeneration !== roomActionGeneration) handFilterDraft = '';
+  handFilterIdentity = identity; handFilterGeneration = roomActionGeneration;
+  applyHandFilter();
+}
+function handActionButton(entry: HandFilterRow, key: string, label: string,
+  method: 'approve' | 'reject' | 'transferControl' | 'kick', className = '', confirmation?: string): HTMLButtonElement {
+  const generation = roomActionGeneration, identity = roomActionIdentity;
+  const canAct = (): boolean => {
+    const revision = handFilterRevision, state = client.state, query = handSearch.value;
+    const eligible = Boolean(state?.me.role === 'controller' && generation === roomActionGeneration
+      && identity === roomActionIdentity && identity === handFilterIdentity
+      && identity === JSON.stringify([state.roomId, state.me.participantId])
+      && client.status !== 'reconnecting' && client.status !== 'disconnected'
+      && entry.row.isConnected && node.isConnected && node.parentNode?.parentNode === entry.row
+      && handFilterRows.includes(entry) && !entry.row.hidden && query === handFilterDraft
+      && entry.name.includes(query.trim().normalize('NFC').toLowerCase())
+      && state.hands.some(person => person.participantId === entry.id && person.name === entry.sourceName));
+    const currentState = client.state;
+    return eligible && state === currentState && revision === handFilterRevision && generation === roomActionGeneration;
+  };
+  const node = roomButton(key, label, async () => {
+    // Room action admission paints pending/error state; that work can retire this filtered row.
+    if (!canAct() || (confirmation && (!window.confirm(confirmation) || !canAct()))) return;
+    const command = client[method];
+    if (canAct()) await command.call(client, entry.id);
+  }, className, canAct);
+  return node;
+}
+const roomOccupancy = element('p', 'muted room-occupancy');
+roomOccupancy.id = 'room-occupancy'; roomOccupancy.hidden = true;
+interface OccupancyReport {
+  roomId: string; participantId: string;
+  room: number; stage: number; audience: number; maxAudience: number; maxSpeakers: number;
+  controllerOnStage: boolean; stale: boolean;
+}
+let occupancyReport: OccupancyReport | undefined;
+let occupancyRevision = 0;
+let occupancyPainting = false;
+const occupancyReceipts = new WeakSet<object>();
+// Logical retirement is separate from painting so existing action ownership changes run first.
+function retireOccupancy(): void { occupancyRevision++; occupancyReport = undefined; }
+function projectOccupancy(state: RoomStatePayload): OccupancyReport | undefined {
+  const roomId = state.roomId, participantId = state.me?.participantId, controllerId = state.controllerId;
+  const limits = state.limits, audience = state.audienceCount;
+  const maxAudience = limits?.maxAudience, maxSpeakers = limits?.maxSpeakers, speakers = state.speakers;
+  if (typeof roomId !== 'string' || !roomId.trim() || typeof participantId !== 'string' || !participantId.trim()
+    || typeof controllerId !== 'string' || !controllerId.trim() || !Array.isArray(speakers)
+    || !limits || typeof limits !== 'object' || Array.isArray(limits)
+    || !Number.isSafeInteger(audience) || audience < 0 || !Number.isSafeInteger(maxAudience) || maxAudience <= 0
+    || !Number.isSafeInteger(maxSpeakers) || maxSpeakers <= 0) return;
+  const ids = new Set<string>();
+  let controllerOnStage = false;
+  for (const person of speakers) {
+    if (!person || typeof person.participantId !== 'string' || !person.participantId.trim() || ids.has(person.participantId)
+      || person.onStage !== true || (person.role !== 'speaker' && person.role !== 'controller')
+      || (person.role === 'controller') !== (person.participantId === controllerId)) return;
+    ids.add(person.participantId);
+    if (person.participantId === controllerId) controllerOnStage = true;
+  }
+  const stage = ids.size - Number(controllerOnStage), room = audience + stage;
+  if (!Number.isSafeInteger(room) || room > maxAudience || stage > maxSpeakers) return;
+  return { roomId, participantId, room, stage, audience, maxAudience, maxSpeakers, controllerOnStage, stale: false };
+}
+function reconcileOccupancy(): void {
+  const report = occupancyReport;
+  if (!report) return;
+  if (report.roomId !== client.state?.roomId || report.participantId !== client.state?.me?.participantId
+    || !['waiting', 'live', 'reconnecting'].includes(client.status)) { retireOccupancy(); return; }
+  if (client.status === 'reconnecting' && !report.stale) { report.stale = true; occupancyRevision++; }
+}
+function prepareOccupancyState({ detail }: { detail: RoomStatePayload }): void {
+  const revision = ++occupancyRevision;
+  const object = detail && typeof detail === 'object', unseen = object && !occupancyReceipts.has(detail);
+  if (object) occupancyReceipts.add(detail);
+  if (!unseen || detail !== client.state || (client.status !== 'waiting' && client.status !== 'live')) {
+    reconcileOccupancy(); return;
+  }
+  const report = projectOccupancy(detail);
+  // Public getters can synchronously replace this receipt or retire the room.
+  if (revision !== occupancyRevision || detail !== client.state
+    || (client.status !== 'waiting' && client.status !== 'live')) return;
+  occupancyReport = report;
+}
+function prepareOccupancyStatus(): void { occupancyRevision++; reconcileOccupancy(); }
+function renderOccupancy(): void {
+  if (occupancyPainting) return;
+  occupancyPainting = true;
+  try {
+    // Nested callbacks reserve their output first; drain finite changes without trusting a paint cache.
+    for (;;) {
+      reconcileOccupancy();
+      // A predecessor UI setter may emit status before the new state reaches renderRoom.
+      // Retire old-room commands before this independent paragraph exposes the new seat.
+      const identity = client.state ? JSON.stringify([client.state.roomId, client.state.me.participantId]) : '';
+      if (identity !== roomActionIdentity) { resetRoomActions(identity); continue; }
+      const revision = occupancyRevision, report = occupancyReport, connectionStatus = client.status;
+      const roomId = client.state?.roomId, participantId = client.state?.me?.participantId;
+      const current = (): boolean => {
+        if (connectionStatus !== client.status || roomId !== client.state?.roomId
+          || participantId !== client.state?.me?.participantId) {
+          // A host setter can alter public ownership without an SDK event. Fence old actions first.
+          reconcileOccupancy();
+          resetRoomActions(client.state ? JSON.stringify([client.state.roomId, client.state.me.participantId]) : '');
+          syncRoomActions();
+          return false;
+        }
+        return revision === occupancyRevision && report === occupancyReport;
+      };
+      const freshness = connectionStatus === 'reconnecting' ? '重新連線中，上次快照' : report?.stale ? '上次快照' : '最近快照';
+      const text = report ? `房間席位（${freshness}）：主控以外 ${report.room} / ${report.maxAudience} 人，其中台上 ${report.stage} / ${report.maxSpeakers} 人、觀眾 ${report.audience} 人；主控另計 1 人（${report.controllerOnStage ? '台上' : '台下'}）。含斷線保留席位。` : '';
+      if (!report && !roomOccupancy.hidden) { roomOccupancy.hidden = true; if (!current()) continue; }
+      if (roomOccupancy.textContent !== text) { roomOccupancy.textContent = text; if (!current()) continue; }
+      if (report && roomOccupancy.hidden) { roomOccupancy.hidden = false; if (!current()) continue; }
+      if (current()) return;
+    }
+  } finally { occupancyPainting = false; }
+}
+let speakingDirtyIds = new Set<string>();
+let speakingRowsRevision = 0;
+let speakingPaintRevision: number | undefined;
+let speakingRevision = 0;
+let speakingIdentity = '';
+let speakingState: RoomStatePayload | undefined;
+let speakingRetired = false;
+let speakingReconnectState: RoomStatePayload | null = null;
+function resetSpeaking(): void {
+  speakingRevision++; speakingIdentity = ''; speakingState = undefined;
+  speakingRetired = false; speakingReconnectState = null;
+  speakingRowsRevision++; personRows.clear(); speakingIds = new Set(); speakingDirtyIds = new Set();
+}
+/** The SDK retains its last report across socket loss; that is not a current activity indication. */
+function retireSpeaking(): void {
+  speakingRevision++;
+  speakingRetired = true; speakingReconnectState = client.state; speakingState = undefined;
+  updateSpeaking(new Set());
+}
+function acceptSpeakingState(state: RoomStatePayload): void {
+  if (state !== client.state) return;
+  const identity = JSON.stringify([state.roomId, state.me.participantId]);
+  if (client.status === 'reconnecting' || client.status === 'disconnected') {
+    speakingIdentity = identity; speakingRetired = true; speakingState = undefined; return;
+  }
+  if (identity !== speakingIdentity) {
+    speakingIdentity = identity; speakingRetired = false; speakingReconnectState = null;
+  }
+  // Status is emitted before state on resume. Neither status alone nor a pre-loss replay admits reports.
+  speakingState = state !== speakingReconnectState ? state : undefined;
+}
+function updateSpeaking(ids: Set<string>): void {
+  const previous = speakingIds, revision = speakingRowsRevision, dirty = speakingDirtyIds;
+  speakingIds = ids; renderedSpeakingSignature = JSON.stringify([...ids]);
+  for (const id of previous) if (!ids.has(id)) dirty.add(id);
+  for (const id of ids) if (!previous.has(id)) dirty.add(id);
+  if (speakingPaintRevision === revision) return;
+  speakingPaintRevision = revision;
+  try {
+    // Nested receipts reserve their desired set first. Drain only dirty IDs until finite callbacks settle.
+    while (dirty.size && speakingRowsRevision === revision) {
+      const id = dirty.values().next().value!; dirty.delete(id);
+      for (const row of personRows.get(id) ?? []) {
+        if (speakingRowsRevision !== revision) return;
+        const active = speakingIds.has(id);
+        if (row.classList.contains('speaking') !== active) row.classList.toggle('speaking', active);
+        if (speakingRowsRevision !== revision) return;
+        // A before-write callback can return into an older toggle after reserving a newer report.
+        if (row.classList.contains('speaking') !== speakingIds.has(id)) dirty.add(id);
+      }
+    }
+  } finally {
+    if (speakingPaintRevision === revision) speakingPaintRevision = undefined;
+  }
+}
+function effectiveRoomCode(state: RoomStatePayload): string | undefined {
+  return state.code ?? (createdRoom?.roomId === state.roomId ? createdRoom.code : undefined);
+}
+function invitationUrl(state: RoomStatePayload, roomCode = effectiveRoomCode(state)): URL {
+  const link = new URL(location.origin);
+  link.pathname = location.pathname;
+  link.searchParams.set('room', state.roomId);
+  if (signaling.path !== '/ws') link.searchParams.set('wsPath', signaling.path);
+  if (state.codeRequired && roomCode) link.searchParams.set('code', roomCode);
+  return link;
+}
 function renderRoom(state: RoomStatePayload): void {
+  const generation = resetRoomActions(JSON.stringify([state.roomId, state.me.participantId]));
+  if (generation !== roomActionGeneration) return;
+  const qualityState = client.state;
   syncQualityDetails();
-  resetRoomActions(JSON.stringify([state.roomId, state.me.participantId]));
+  if (generation !== roomActionGeneration || qualityState !== client.state) return;
   if (!state.me.onStage) {
     if (micRetryPending) micNotice = '';
     micRetryAvailable = micRetryPending = false;
   }
-  const roomCode = state.code ?? (createdRoom?.roomId === state.roomId ? createdRoom.code : undefined);
+  const roomCode = effectiveRoomCode(state);
   // Separate already-applied overlays from structural state; dirty sliders still reset to server state.
   const { audienceCount, ...roomStructure } = state;
-  const audienceTitle = `觀眾 · ${audienceCount}/${state.limits.maxAudience}`;
+  const audienceTitle = `觀眾 · ${audienceCount} 人`;
   const signature = JSON.stringify([roomStructure, roomCode, client.status]);
-  const speakingSignature = JSON.stringify([...client.speaking]);
+  const currentSpeaking = new Set(speakingRetired ? speakingIds : client.speaking);
+  const speakingSignature = JSON.stringify([...currentSpeaking]);
   const qualitySignature = JSON.stringify([...quality]);
   if (signature === renderedRoomSignature && speakingSignature === renderedSpeakingSignature
     && qualitySignature === renderedQualitySignature && !renderedGainInputs.some(({ input, value }) => input.value !== value)) {
     status.textContent = statusLabels[client.status];
     if (renderedAudienceHeading && renderedAudienceHeading.textContent !== audienceTitle) renderedAudienceHeading.textContent = audienceTitle;
-    syncAudienceFilter(state); updateCooldown(); renderNotices(true); return;
+    syncAudienceFilter(state); syncHandFilter(state); updateCooldown(); renderNotices(true); return;
   }
-  renderedGainInputs.length = 0; audienceFilterRows.length = 0;
-  personRows.clear(); speakingIds = new Set(client.speaking);
-  const generation = roomActionGeneration;
+  renderedGainInputs.length = 0; audienceFilterRows.length = 0; handFilterRows = []; handFilterRevision++;
+  speakingRevision++; speakingRowsRevision++; personRows.clear(); speakingDirtyIds = new Set(); speakingIds = currentSpeaking;
   brand.textContent = decodeName(state.name);
   status.textContent = statusLabels[client.status];
   cooldownButton = null;
@@ -763,15 +1065,26 @@ function renderRoom(state: RoomStatePayload): void {
       await client.setRoomName(name);
     }, '', () => renameRoom.isConnected && canRenameRoom());
     summary.append(renameRoom);
-    const link = new URL(location.origin);
-    link.pathname = location.pathname;
-    link.searchParams.set('room', state.roomId);
-    if (signaling.path !== '/ws') link.searchParams.set('wsPath', signaling.path);
-    if (state.codeRequired && roomCode) link.searchParams.set('code', roomCode);
+    const link = invitationUrl(state, roomCode);
     const inviteLink = element('input', 'invite-link');
     inviteLink.value = link.href; inviteLink.readOnly = true;
     inviteLink.setAttribute('aria-label', '邀請連結');
-    const copy = button('複製邀請連結', async () => {
+    const copy = element('button', '', '複製邀請連結');
+    copy.type = 'button';
+    const canCopy = (requireIdle = false): boolean => {
+      try {
+        if (requireIdle && copy.disabled) return false;
+        const current = client.state;
+        if (!current || current.roomId !== titleRoomId || current.me.participantId !== titleParticipantId
+          || current.me.role !== 'controller' || invitationUrl(current).href !== link.href) return false;
+        return copy.isConnected && inviteLink.isConnected && copy.parentNode === inviteLink.parentNode
+          && content.querySelector<HTMLInputElement>('.invite-link') === inviteLink && inviteLink.value === link.href
+          && current === client.state && generation === roomActionGeneration && (!requireIdle || !copy.disabled);
+      } catch { return false; }
+    };
+    const copyInvitation = async () => {
+      // A host callback during run's DOM writes may have retired the admitted resource.
+      if (!canCopy()) return;
       const sequence = ++inviteCopySequence;
       let copied = false;
       try { await navigator.clipboard.writeText(link.href); copied = true; }
@@ -783,7 +1096,12 @@ function renderRoom(state: RoomStatePayload): void {
       if (copied) invitation = '已複製邀請連結，請只分享給受邀者。';
       else { currentLink.focus(); currentLink.select(); invitation = '請長按或使用複製快捷鍵複製已選取的連結。'; }
       renderNotices();
-    });
+    };
+    copy.onclick = () => {
+      // SDK snapshots are installed before the sample's state listener replaces the old nodes.
+      if (!canCopy(true)) return;
+      void run(copyInvitation, copy);
+    };
     summary.append(inviteLink, copy);
     if (state.codeRequired) summary.append(roomButton('rotate-code', '更換房間代碼', async () => {
       if (!window.confirm('更換後舊代碼與舊邀請連結立即失效，已在房內的人不受影響。確定更換？')) return;
@@ -836,12 +1154,14 @@ function renderRoom(state: RoomStatePayload): void {
     actions.append(cooldownButton);
   }
   actions.append(button('離開房間', async () => {
+    retireOccupancy();
     handRejectionRoomActive = false; retireHandRejection();
     // Leaving after a pre-ACK snapshot also retires that entry's local feedback.
     if (landingEntry) landingEntry.cancelled = true;
     micTest?.stop(); micTest = null;
     testButton.textContent = '測試麥克風'; testButton.setAttribute('aria-pressed', 'false');
-    await client.disconnect(); createdRoom = null; micNotice = invitation = ''; landing();
+    const disconnect = client.disconnect(); renderOccupancy();
+    await disconnect; createdRoom = null; micNotice = invitation = ''; landing();
   }));
   if (controller) actions.append(roomButton('close', '關閉房間', async () => {
     if (window.confirm('確定關閉房間並讓所有人離場？')) await client.closeRoom();
@@ -869,7 +1189,7 @@ function renderRoom(state: RoomStatePayload): void {
   renderedReturnStage = content.querySelector<HTMLButtonElement>('[data-return-stage]');
   renderedAudienceHeading = audienceHeading;
   renderedRoomSignature = signature; renderedSpeakingSignature = speakingSignature; renderedQualitySignature = qualitySignature;
-  syncAudienceFilter(state); updateCooldown(); renderNotices(true);
+  syncAudienceFilter(state); syncHandFilter(state); updateCooldown(); renderNotices(true);
 }
 function panelList(title: string, people: ParticipantView[], controller: boolean, kind: 'speaker' | 'hand'): HTMLElement {
   const panel = element('section', 'panel');
@@ -886,7 +1206,7 @@ function personRow(person: ParticipantView, controller: boolean, kind: 'speaker'
   if (kind === 'audience') audienceFilterRows.push({ row, name: decodeName(person.name).normalize('NFC').toLowerCase() });
   const rows = personRows.get(person.participantId);
   if (rows) rows.push(row); else personRows.set(person.participantId, [row]);
-  row.classList.toggle('speaking', client.speaking.has(person.participantId));
+  row.classList.toggle('speaking', speakingIds.has(person.participantId));
   const identity = element('div', 'identity');
   identity.append(element('strong', '', decodeName(person.name)), element('span', 'badge', roleLabels[person.role]));
   if (!person.connected) identity.append(element('span', 'badge', '連線中斷'));
@@ -902,7 +1222,15 @@ function personRow(person: ParticipantView, controller: boolean, kind: 'speaker'
       && client.status !== 'reconnecting' && client.me?.role === 'controller'
       && client.state?.audience?.some((p) => p.participantId === id));
     const actions = element('div', 'actions');
-    if (kind === 'hand') actions.append(roomButton(`stage:${id}`, '核准上台', () => client.approve(id), 'primary'), roomButton(`stage:${id}`, '婉拒', () => client.reject(id)));
+    if (kind === 'hand') {
+      const entry = { row, id, sourceName: person.name, name: name.normalize('NFC').toLowerCase() };
+      handFilterRows.push(entry);
+      actions.append(handActionButton(entry, `stage:${id}`, '核准上台', 'approve', 'primary'),
+        handActionButton(entry, `stage:${id}`, '婉拒', 'reject'),
+        handActionButton(entry, 'transfer', '移交控制權', 'transferControl', '', `確定將控制權移交給 ${name}？`),
+        handActionButton(entry, `kick:${id}`, '踢出房間', 'kick', 'danger', `確定將 ${name} 踢出房間？若要防止對方再進來，請接著更換房間代碼。`));
+      row.append(actions); return row;
+    }
     if (kind === 'speaker') actions.append(gainSlider(person), roomButton(`force-mute:${id}`, forceMuted ? '解除強制靜音' : '強制靜音', () => forceMuted ? client.forceUnmute(id) : client.forceMute(id)), roomButton(`stage:${id}`, '移出舞台', () => client.removeFromStage(id)));
     actions.append(roomButton('transfer', '移交控制權', async () => {
       if (window.confirm(`確定將控制權移交給 ${name}？`) && canManageAudience()) await client.transferControl(id);
@@ -984,8 +1312,16 @@ function scheduleCooldown(remaining: number): void {
     cooldownTimer = timer; cooldownDue = due;
   }
 }
-client.on('state', ({ detail }) => { if (landingEntry) landingEntry.entered = true; renderRoom(detail); });
+client.on('state', ({ detail }) => {
+  acceptSpeakingState(detail);
+  // Only a new current snapshot resolves early loss; status/report sync still sees the old seat.
+  if (detail === client.state && detail !== stageQualitySuppressedState) stageQualitySuppressedState = undefined;
+  if (landingEntry) landingEntry.entered = true;
+  try { renderRoom(detail); } finally { renderOccupancy(); }
+});
 client.on('status', ({ detail }) => {
+  if (detail === 'disconnected' && !client.state) resetSpeaking();
+  else if (detail === 'reconnecting' || detail === 'disconnected') retireSpeaking();
   if (detail === 'reconnecting' || detail === 'disconnected') {
     retireHandRejection(); audioRetryNotice.hidden = true; audioRetryNotice.textContent = '';
   }
@@ -1002,8 +1338,16 @@ client.on('status', ({ detail }) => {
 });
 client.on('hand', ({ detail }) => { if (detail.raised && detail.participantId === client.me?.participantId) retireHandRejection(); });
 client.on('stagejoined', ({ detail }) => { if (detail.participantId === client.me?.participantId) retireHandRejection(); });
-client.on('role', ({ detail }) => { if (detail.role !== 'audience' && detail.participantId === client.me?.participantId) retireHandRejection(); });
-client.on('transferred', ({ detail }) => { if (detail.toId === client.me?.participantId) retireHandRejection(); });
+client.on('role', ({ detail }) => {
+  if (detail.participantId !== client.me?.participantId) return;
+  if (detail.role === 'audience') suppressQualityDetails();
+  else retireHandRejection();
+});
+client.on('transferred', ({ detail }) => {
+  const me = client.me;
+  if (detail.fromId === me?.participantId && !me.onStage) suppressQualityDetails();
+  if (detail.toId === client.me?.participantId) retireHandRejection();
+});
 client.on('handrejected', ({ detail }) => {
   // Events carry no raise identifier; copy the current-seat ownership before observable work.
   const generation = roomActionGeneration;
@@ -1026,6 +1370,7 @@ client.on('invite', ({ detail }) => {
   }
 });
 client.on('stageleft', ({ detail }) => {
+  if (detail.participantId === client.me?.participantId && detail.role !== 'controller') suppressQualityDetails();
   if (detail.participantId === client.me?.participantId) { stagePermissionOwner = undefined; invitation = detail.reason === 'removed' ? '主控已將你移出舞台，你仍可收聽。' : ''; renderNotices(); }
 });
 client.on('micerror', ({ detail }) => { micRetryPending = false; micRetryAvailable = Boolean(client.me?.onStage); micNotice = `${detail.message}（${detail.name}）`; renderNotices(); });
@@ -1033,15 +1378,12 @@ client.on('audioblocked', () => { audioBlocked = true; renderNotices(); });
 client.on('error', ({ detail }) => showError(detail.message));
 // Toggle in place: a full re-render every few hundred ms would reset focus and scroll.
 client.on('speaking', ({ detail }) => {
+  const revision = ++speakingRevision;
   const ids = new Set(detail.participantIds);
-  for (const id of speakingIds) {
-    if (!ids.has(id)) for (const row of personRows.get(id) ?? []) row.classList.toggle('speaking', false);
-  }
-  for (const id of ids) {
-    if (!speakingIds.has(id)) for (const row of personRows.get(id) ?? []) row.classList.toggle('speaking', true);
-  }
-  speakingIds = ids;
-  renderedSpeakingSignature = JSON.stringify([...ids]);
+  if (revision !== speakingRevision || !speakingIdentity || speakingState !== client.state
+    || client.status === 'reconnecting' || client.status === 'disconnected') return;
+  speakingRetired = false; speakingReconnectState = null;
+  updateSpeaking(ids);
 });
 client.on('quality', ({ detail }) => {
   syncQualityDetails(detail.participants);
@@ -1060,13 +1402,20 @@ function refreshConnectionLine(): void {
     // A newer pending poll must not starve completed samples; older completions cannot replace newer results.
     if (!client.state || document.hidden || generation !== roomActionGeneration || sequence <= connectionResultWatermark) return;
     connectionResultWatermark = sequence;
-    const parts: string[] = [];
-    if (inbound?.lossPercent !== undefined) parts.push(`收聽掉包 ${inbound.lossPercent.toFixed(1)}%`);
-    if (outbound?.lossPercent !== undefined) parts.push(`發言掉包 ${outbound.lossPercent.toFixed(1)}%`);
-    const rtt = inbound?.rtt ?? outbound?.rtt;
-    if (rtt !== undefined) parts.push(`延遲 ${Math.round(rtt * 1000)} ms`);
-    if (inbound?.bufferMs !== undefined) parts.push(`緩衝 ${Math.round(inbound.bufferMs)} ms`);
-    connectionLine.textContent = parts.length ? `你的連線：${parts.join(' · ')}` : '';
+    const milliseconds = (value: number | undefined, scale = 1): string => {
+      if (value === undefined) return '—';
+      const ms = value * scale;
+      return Number.isFinite(ms) ? String(Math.round(ms)) : '—';
+    };
+    const receive = inbound
+      ? `接收掉包 ${inbound.lossPercent?.toFixed(1) ?? '—'}% · 接收 RTT ${milliseconds(inbound.rtt, 1000)} ms · 接收緩衝 ${milliseconds(inbound.bufferMs)} ms`
+      : '接收：暫無統計';
+    const send = outbound
+      ? `傳送掉包 ${outbound.lossPercent?.toFixed(1) ?? '—'}% · 傳送 RTT ${milliseconds(outbound.rtt, 1000)} ms`
+      : '傳送：暫無統計';
+    connectionLine.textContent = inbound || outbound
+      ? `你的連線（上次完成讀取；SDK 取樣區間）：${receive}；${send}。RTT 不是端到端音訊延遲；不保證資料即時或目前可聽。`
+      : '';
     connectionLine.classList.toggle('error', Math.max(inbound?.lossPercent ?? 0, outbound?.lossPercent ?? 0) >= POOR_LOSS_PERCENT);
   }, () => {});
 }
@@ -1089,6 +1438,9 @@ function stopRoomTimers(): void {
 }
 client.on('state', syncRoomTimers);
 client.on('status', syncRoomTimers);
+client.on('status', renderOccupancy);
+client.on('closed', renderOccupancy);
+client.on('kicked', renderOccupancy);
 // Page-lifetime listener, like the client/device listeners; landing previews also use it.
 document.addEventListener('visibilitychange', () => {
   connectionResultWatermark = ++connectionPollSequence; // Retire pending UI results without resetting SDK delta baselines.
@@ -1096,5 +1448,7 @@ document.addEventListener('visibilitychange', () => {
   // A resumed SDK sample can span the hidden interval since the last completed stats sample.
   if (!document.hidden) refreshConnectionLine();
 });
+// Keep this passive paragraph outside the retained room tree and existing live notices.
+app.append(roomOccupancy, content, stageQuality, settings);
 landing();
 if (signaling.error) showError(signaling.error);

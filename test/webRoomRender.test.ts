@@ -134,10 +134,10 @@ const changes: { name: string; change(state: RoomStatePayload): void; check(h: A
   { name: 'speaker removal', change: state => { state.speakers.pop(); }, check: h => assert.equal(rows(h).some(row => row.dataset.participantId === 'speaker-1'), false) },
   { name: 'speaker ordering', change: state => { state.speakers.reverse(); }, check: h => assert.equal(rows(h)[0]!.dataset.participantId, 'speaker-1') },
   { name: 'hand queue', change: state => { state.hands = []; }, check: h => assert.match(h.app.textContent, /舉手佇列 · 0/) },
-  { name: 'audience count', change: state => { state.audienceCount = 9; }, check: h => assert.match(h.app.textContent, /觀眾 · 9\/300/) },
+  { name: 'audience count', change: state => { state.audienceCount = 9; }, check: h => assert.match(h.app.textContent, /觀眾 · 9 人/) },
   { name: 'audience list visibility', change: state => { delete state.audience; }, check: h => assert.match(h.app.textContent, /觀眾名單僅提供給主控/) },
   { name: 'speaker limit', change: state => { state.limits.maxSpeakers = 4; }, check: h => assert.match(h.app.textContent, /發言者 2\/4/) },
-  { name: 'audience limit', change: state => { state.limits.maxAudience = 99; }, check: h => assert.match(h.app.textContent, /觀眾 · 2\/99/) },
+  { name: 'audience limit', change: state => { state.limits.maxAudience = 99; }, check: h => assert.match(h.app.textContent, /觀眾 · 2 人/) },
   { name: 'room code policy', change: state => { state.codeRequired = true; }, check: h => assert.match(h.app.textContent, /房間代碼：未提供/) },
   { name: 'room code', change: state => { state.codeRequired = true; state.code = 'NEW123'; }, check: h => assert.match(h.find(node => node.classList.contains('invite-link')).value as string, /code=NEW123/) },
 ];
@@ -262,7 +262,7 @@ it('whole sample keeps microphone retry pending and independent meter and stats 
   h.sdk.micLevelValue = 0.4; h.clock.advance(2000);
   assert.equal(h.id('mic-level').value, 0.4); assert.equal(h.sdk.polls.length, 1); assert.ok(h.sdk.micLevelReads >= 40);
   h.sdk.polls[0]!.resolve({ inbound: { lossPercent: 2, rtt: 0.02 }, outbound: null }); await flushSample();
-  assert.match(h.app.textContent, /收聽掉包 2.0% · 延遲 20 ms/); assert.equal(retries, 1);
+  assert.match(h.app.textContent, /接收掉包 2.0% · 接收 RTT 20 ms/); assert.equal(retries, 1);
   h.sdk.emit('micready', undefined); assert.equal(h.app.descendants().some(node => node.id === 'mic-retry'), false);
   h.sdk.snapshot(clone(state)); assert.equal(h.counts.replacements, 0); assert.equal(retries, 1);
   const offstage = roomState(); offstage.status = 'live'; h.sdk.snapshot(offstage);
@@ -508,7 +508,7 @@ it('whole sample retains bounded room references for 50 fresh count-only snapsho
   for (let index = 1; index <= 50; index++) {
     const next = clone(state); next.audienceCount = 200 + index; assert.notEqual(next, h.sdk.state);
     h.sdk.snapshot(next); assert.equal(audienceHeading(h), heading);
-    assert.equal(heading.textContent, `觀眾 · ${200 + index}/300`); correctHeadings++;
+    assert.equal(heading.textContent, `觀眾 · ${200 + index} 人`); correctHeadings++;
     sameNodes(rows(h), people); sameNodes(h.main.descendants(), content);
     const current = h.references(); assert.equal(current.heading, heading); sameNodes(current.people, refs.people);
     assert.equal(current.gains.length, 0); assert.equal(current.audience.length, 0); assert.equal(current.pending, 0);
@@ -523,15 +523,15 @@ it('whole sample updates current count on the same mutable snapshot and uses the
   const heading = audienceHeading(h), people = rows(h); h.reset();
   for (const count of [0, 300, 12, 1]) {
     state.audienceCount = count; h.sdk.snapshot(state);
-    assert.equal(audienceHeading(h), heading); assert.equal(heading.textContent, `觀眾 · ${count}/300`);
+    assert.equal(audienceHeading(h), heading); assert.equal(heading.textContent, `觀眾 · ${count} 人`);
     sameNodes(rows(h), people);
   }
   assert.deepEqual({ ...h.counts }, { created: 0, replacements: 0, rows: 0 });
   state.audienceCount = 5; state.limits.maxAudience = 99; h.sdk.snapshot(state);
   assert.equal(h.counts.replacements, 1); const current = audienceHeading(h); assert.notEqual(current, heading);
-  assert.equal(current.textContent, '觀眾 · 5/99'); state.audienceCount = 0; h.sdk.snapshot(state);
-  assert.equal(audienceHeading(h), current); assert.equal(current.textContent, '觀眾 · 0/99');
-  assert.equal(h.counts.replacements, 1); assert.equal(heading.textContent, '觀眾 · 1/300');
+  assert.equal(current.textContent, '觀眾 · 5 人'); state.audienceCount = 0; h.sdk.snapshot(state);
+  assert.equal(audienceHeading(h), current); assert.equal(current.textContent, '觀眾 · 0 人');
+  assert.equal(h.counts.replacements, 1); assert.equal(heading.textContent, '觀眾 · 1 人');
 });
 
 it('whole sample count changes cannot hide other structural fields, controller roster changes or unknown metadata', async t => {
@@ -550,7 +550,7 @@ it('whole sample count changes cannot hide other structural fields, controller r
     change.change(next); next.audienceCount++; h.reset(); h.sdk.snapshot(next);
     assert.equal(h.counts.replacements, 1, change.name); assert.equal(old.every(row => !row.isConnected), true, change.name);
     assert.notEqual(audienceHeading(h), oldHeading, change.name);
-    assert.equal(audienceHeading(h).textContent, `觀眾 · ${next.audienceCount}/${next.limits.maxAudience}`);
+    assert.equal(audienceHeading(h).textContent, `觀眾 · ${next.audienceCount} 人`);
     const current = rows(h); h.sdk.snapshot({ ...clone(next), audienceCount: next.audienceCount + 1 });
     assert.equal(h.counts.replacements, 1, change.name); sameNodes(rows(h), current);
   }
@@ -589,14 +589,14 @@ it('whole sample count-only updates preserve pending hand, cooldown, notices, er
   assert.equal(action(h, 'hand'), hand); assert.equal(hand.attributes['aria-busy'], 'true'); assert.equal(hand.disabled, true);
   assert.deepEqual(h.clock.timeouts(), [timer]); assert.deepEqual([...h.clock.jobs.keys()], intervals);
   assert.equal(notices(h).textContent, noticeText); assert.equal(errorBox(h).textContent, '保留操作錯誤。');
-  assert.equal(audienceHeading(h).textContent, '觀眾 · 201/300'); assertSpeaking(h, ['speaker-0']);
+  assert.equal(audienceHeading(h).textContent, '觀眾 · 201 人'); assertSpeaking(h, ['speaker-0']);
   assert.equal(people.find(row => row.dataset.participantId === 'speaker-0')!.querySelector('.badge.quality')?.textContent, '連線不穩 12%');
   assert.equal(h.counts.replacements, 0); assert.equal(h.counts.rows, 0);
   h.clock.advance(2000); assert.equal(h.sdk.polls.length, 1); assert.equal(hand.disabled, true);
   h.sdk.polls[0]!.resolve({ inbound: { rtt: 0.02 }, outbound: null });
   pending.reject(new Error('current count rejection')); await flushSample();
   assert.equal(hand.disabled, false); assert.equal(errorBox(h).textContent, 'current count rejection');
-  assert.equal(h.clock.timeouts().length, 0); assert.match(h.app.textContent, /延遲 20 ms/);
+  assert.equal(h.clock.timeouts().length, 0); assert.match(h.app.textContent, /接收 RTT 20 ms/);
   const raised = countOnlyState(true); h.sdk.snapshot(clone(raised));
   const position = h.find(node => node.classList.contains('own-hand-position')), raisedRows = rows(h); h.reset();
   assert.equal(position.textContent, '你的舉手位置：佇列第 8 位。');
@@ -629,10 +629,10 @@ it('whole sample count-only updates preserve controller filter, scalar handlers 
   const slider = gain(h); slider.value = '4'; assert.ok(slider.onchange); slider.onchange(); await flushSample();
   assert.deepEqual(calls, ['mute', 'forceMute:speaker-0', 'transfer:speaker-0', 'kick:speaker-0', 'gain:speaker-0:4']);
   assert.deepEqual(dialogs, ['確定將控制權移交給 Speaker 0？', '確定將 Speaker 0 踢出房間？若要防止對方再進來，請接著更換房間代碼。']);
-  assert.equal(audienceHeading(h), heading); assert.equal(heading.textContent, '觀眾 · 3/300'); assert.equal(h.counts.replacements, 0);
+  assert.equal(audienceHeading(h), heading); assert.equal(heading.textContent, '觀眾 · 3 人'); assert.equal(h.counts.replacements, 0);
   current.audienceCount++; h.sdk.snapshot(clone(current));
   assert.equal(h.counts.replacements, 1, 'dirty gain remains an authoritative reset');
-  assert.notEqual(gain(h), slider); assert.equal(gain(h).value, '0'); assert.equal(audienceHeading(h).textContent, '觀眾 · 4/300');
+  assert.notEqual(gain(h), slider); assert.equal(gain(h).value, '0'); assert.equal(audienceHeading(h).textContent, '觀眾 · 4 人');
   assert.equal(search.value, 'absent name'); assert.equal(rows(h).filter(row => row.hidden).length, 2);
 });
 
@@ -645,12 +645,12 @@ for (const overlay of ['speaking', 'quality'] as const) {
     if (overlay === 'speaking') emitSpeaking(h, ['speaker-0']);
     else h.sdk.emit('quality', { participants: [shared] });
     state.audienceCount++; h.sdk.snapshot(clone(state)); sameNodes(rows(h), people);
-    assert.equal(h.counts.replacements, 0); assert.equal(audienceHeading(h).textContent, '觀眾 · 3/300');
+    assert.equal(h.counts.replacements, 0); assert.equal(audienceHeading(h).textContent, '觀眾 · 3 人');
     if (overlay === 'speaking') { shared.uplinkLossPercent = 15; shared.rttMs = 80; emitSpeaking(h, ['speaker-1']); }
     else { h.sdk.speaking.add('audience-0'); h.sdk.emit('quality', { participants: [shared] }); }
     state.audienceCount++; h.sdk.snapshot(clone(state));
     assert.equal(h.counts.replacements, 1); assert.equal(people.every(row => !row.isConnected), true);
-    assert.equal(audienceHeading(h).textContent, '觀眾 · 4/300');
+    assert.equal(audienceHeading(h).textContent, '觀眾 · 4 人');
     if (overlay === 'speaking') {
       assertSpeaking(h, ['speaker-1']);
       const duplicates = rows(h).filter(row => row.dataset.participantId === 'audience-0'); assert.equal(duplicates.length, 2);
@@ -672,10 +672,10 @@ it('whole sample count update still misses for speaking event/getter disagreemen
   h.sdk.emit('quality', { participants: [{ participantId: 'speaker-0', uplinkLossPercent: 12 }] });
   state.audienceCount++; h.sdk.snapshot(clone(state));
   assert.equal(h.counts.replacements, 2); assert.notEqual(gain(h), slider); assert.equal(gain(h).value, '0');
-  assert.notEqual(audienceHeading(h), oldHeading); assert.equal(audienceHeading(h).textContent, '觀眾 · 4/300');
+  assert.notEqual(audienceHeading(h), oldHeading); assert.equal(audienceHeading(h).textContent, '觀眾 · 4 人');
   assertSpeaking(h, ['speaker-0']); const current = gain(h);
   emitSpeaking(h, ['speaker-1']); state.audienceCount++; h.sdk.snapshot(clone(state));
-  assert.equal(gain(h), current); assert.equal(h.counts.replacements, 2); assert.equal(audienceHeading(h).textContent, '觀眾 · 5/300');
+  assert.equal(gain(h), current); assert.equal(h.counts.replacements, 2); assert.equal(audienceHeading(h).textContent, '觀眾 · 5 人');
 });
 
 it('whole sample commits the audience heading only after successful replacement and leaves discarded headings untouched', async t => {
@@ -692,17 +692,17 @@ it('whole sample commits the audience heading only after successful replacement 
   assert.throws(() => h.sdk.snapshot(changed), /controlled count replacement failure/); assert.ok(discarded);
   assert.equal(audienceHeading(h), old); assert.equal(h.references().heading, old); assert.equal(discarded.isConnected, false);
   h.sdk.snapshot({ ...clone(state), audienceCount: 3 });
-  assert.equal(audienceHeading(h), old); assert.equal(old.textContent, '觀眾 · 3/300'); assert.equal(discarded.textContent, '觀眾 · 2/300');
+  assert.equal(audienceHeading(h), old); assert.equal(old.textContent, '觀眾 · 3 人'); assert.equal(discarded.textContent, '觀眾 · 2 人');
   h.sdk.snapshot(changed); const current = audienceHeading(h); assert.notEqual(current, old); assert.notEqual(current, discarded);
   assert.equal(h.references().heading, current); h.sdk.snapshot({ ...clone(changed), audienceCount: 4 });
-  assert.equal(current.textContent, '觀眾 · 4/300'); assert.equal(old.textContent, '觀眾 · 3/300'); assert.equal(discarded.textContent, '觀眾 · 2/300');
+  assert.equal(current.textContent, '觀眾 · 4 人'); assert.equal(old.textContent, '觀眾 · 3 人'); assert.equal(discarded.textContent, '觀眾 · 2 人');
 });
 
 for (const transition of ['leave', 'disconnect', 'closed', 'kicked'] as const) {
   it(`whole sample ${transition} releases the audience heading and isolates count updates after same-identity rejoin`, async t => {
     const h = await setup(t), state = managementState(); h.sdk.snapshot(clone(state));
     const old = audienceHeading(h), people = rows(h); h.sdk.snapshot({ ...clone(state), audienceCount: 3 });
-    assert.equal(old.textContent, '觀眾 · 3/300');
+    assert.equal(old.textContent, '觀眾 · 3 人');
     if (transition === 'leave') { h.button('離開房間').click(); await flushSample(); }
     else if (transition === 'disconnect') await h.sdk.disconnect();
     else await h.sdk.terminal(transition, transition === 'closed' ? 'shutdown' : undefined);
@@ -711,7 +711,7 @@ for (const transition of ['leave', 'disconnect', 'closed', 'kicked'] as const) {
     assert.equal(old.isConnected, false); assert.equal(people.every(row => !row.isConnected), true);
     h.sdk.snapshot({ ...clone(state), audienceCount: 4 }); const current = audienceHeading(h); assert.notEqual(current, old); h.reset();
     h.sdk.snapshot({ ...clone(state), audienceCount: 5 });
-    assert.equal(audienceHeading(h), current); assert.equal(current.textContent, '觀眾 · 5/300'); assert.equal(old.textContent, '觀眾 · 3/300');
+    assert.equal(audienceHeading(h), current); assert.equal(current.textContent, '觀眾 · 5 人'); assert.equal(old.textContent, '觀眾 · 3 人');
     assert.equal(h.references().heading, current); assert.equal(h.counts.replacements, 0); assert.equal(h.counts.rows, 0);
   });
 }

@@ -85,7 +85,12 @@ cmd_start() {
   mkdir -p "$RUN_DIR"
   nohup node "$ENTRY" >>"$LOG_FILE" 2>&1 &
   pid=$!
-  printf '%s\n' "$pid" >"$PID_FILE"
+  if ! printf '%s\n' "$pid" >"$PID_FILE"; then
+    # A failed start must not leave an untracked child, even if it ignores TERM.
+    kill -KILL "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    die "無法寫入 PID 檔：$PID_FILE"
+  fi
   # 設定錯誤或 port 被占用時程序會立刻退出，稍等一下再確認
   sleep 1
   if kill -0 "$pid" 2>/dev/null; then

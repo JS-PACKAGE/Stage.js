@@ -1,0 +1,52 @@
+import {
+  StageClient, StageError, MAX_GAIN_DB, decodeName,
+  type StageEventMap, type StageClientOptions, type StageClientEventOptions, type ClientStatus,
+  type ParticipantView, type RoomStatePayload, type Role, type StageStatus, type ErrorCode,
+  type IceServerConfig, type ConnectionQuality, type AudioDevices, type AudioStats,
+  type StageStats, type MicTest, type MicTestOptions,
+} from '@stage-js/client';
+import {
+  StageElement, defineStageElement, StageClient as ElementClient, StageError as ElementError,
+  type StageEventMap as ElementEvents,
+} from '@stage-js/client/element';
+
+declare const client: StageClient;
+declare const element: StageElement;
+const shared: ElementClient = client;
+const options: StageClientOptions = { url: 'wss://stage.example.test/ws' };
+const subscription: StageClientEventOptions = { once: true, signal: new AbortController().signal };
+const cancel: () => void = client.on('state', event => {
+  const room: RoomStatePayload = event.detail;
+  const id: string = room.roomId;
+  // @ts-expect-error Room snapshots are not strings, including when declaration dependencies are absent.
+  const bad: string = event.detail;
+  void id; void bad;
+}, subscription);
+client.on('hand', event => {
+  const participantId: string = event.detail.participantId;
+  const raised: boolean = event.detail.raised;
+  // @ts-expect-error Hand detail does not contain room state.
+  const room: RoomStatePayload = event.detail;
+  void participantId; void raised; void room;
+});
+client.on('error', event => {
+  const error: ElementError = event.detail;
+  void error;
+});
+// @ts-expect-error The public event map rejects misspelled events.
+client.on('misspelled-event', () => {});
+// @ts-expect-error Subscription options reject non-boolean once values.
+client.on('state', () => {}, { once: 'yes' });
+// @ts-expect-error Required URL options cannot be omitted.
+const invalidOptions: StageClientOptions = {};
+const underlying: StageClient | null = element.client;
+const event: ElementEvents['state'] = null! as StageEventMap['state'];
+const status: ClientStatus = client.status;
+const controlLimit: number = client.rateLimits.controlPerSecond;
+const error: ErrorCode | 'timeout' | 'disconnected' | 'media_error' | 'queue_full' = new StageError('timeout', 'test').code;
+const gain: number = MAX_GAIN_DB;
+const name: string = decodeName('&amp;');
+defineStageElement('consumer-stage');
+type PublicTypes = [ParticipantView, Role, StageStatus, IceServerConfig, ConnectionQuality, AudioDevices, AudioStats, StageStats, MicTest, MicTestOptions];
+void shared; void options; void cancel; void underlying; void event; void status; void controlLimit;
+void error; void gain; void name; void invalidOptions;

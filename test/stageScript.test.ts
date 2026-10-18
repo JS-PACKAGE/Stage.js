@@ -15,6 +15,7 @@ const MOCKED_CALLS = new Set([
   'kill -TERM "$pid"',
   'while kill -0 "$pid" 2>/dev/null; do',
   'kill -KILL "$pid" 2>/dev/null || true',
+  'wait "$pid" 2>/dev/null || true',
   'command -v node >/dev/null 2>&1 || die "找不到 node（需要 Node.js 24 以上）"',
   'major=$(node -p \'process.versions.node.split(".")[0]\')',
   '[ "$major" -ge 24 ] || die "Node.js 版本為 $(node --version)，需要 24 以上"',
@@ -29,7 +30,7 @@ const MOCKED_CALLS = new Set([
 function assertMockableScript(): void {
   for (const line of SCRIPT.split('\n')) {
     const code = line.trim();
-    if (!code.startsWith('#') && /\b(?:kill|sleep|node|nohup)\b/.test(code)) {
+    if (!code.startsWith('#') && /\b(?:kill|sleep|wait|node|nohup)\b/.test(code)) {
       assert.ok(MOCKED_CALLS.has(code), `Unreviewed process operation: ${code}`);
     }
   }
@@ -54,6 +55,7 @@ sleep() {
   printf 'sleep %s\n' "$*" >> "$TRACE"
   [ "$#" -eq 1 ] && [ "$1" = 1 ] || exit 93
 }
+wait() { printf 'wait %s\n' "$*" >> "$TRACE"; return 97; }
 # Simulate read errors independently of the runner's filesystem permissions.
 od() {
   if [ "$PID_READ_FAIL" = 1 ]; then

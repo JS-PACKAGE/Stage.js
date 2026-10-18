@@ -28,6 +28,7 @@ const PROCESS_LINES = new Set([
   'kill -TERM "$pid"',
   'while kill -0 "$pid" 2>/dev/null; do',
   'kill -KILL "$pid" 2>/dev/null || true',
+  'wait "$pid" 2>/dev/null || true',
   'node "$CHECKER"',
   'install      安裝依賴（npm ci）',
   'run) check_node; ensure_config; exec node "$ENTRY" ;;',
@@ -41,7 +42,7 @@ const PROCESS_LINES = new Set([
 function assertMockableScript(script: string): void {
   for (const line of script.split('\n')) {
     const code = line.trim();
-    if (!code.startsWith('#') && /\b(?:kill|sleep|node|nohup|npm|npx|exec|eval|env|setsid|bash|dash|sh|python|python3|perl|ruby|curl|wget)\b/.test(code)) {
+    if (!code.startsWith('#') && /\b(?:kill|sleep|wait|node|nohup|npm|npx|exec|eval|env|setsid|bash|dash|sh|python|python3|perl|ruby|curl|wget)\b/.test(code)) {
       assert.ok(PROCESS_LINES.has(code), `Unreviewed process operation: ${code}`);
     }
   }
@@ -260,6 +261,7 @@ it('rejects unreviewed process wrappers, direct startup and checker arguments be
   assertMockableScript(SCRIPT);
   for (const replacement of [
     'command kill -TERM "$pid"', '/bin/kill -TERM "$pid"', 'builtin kill -TERM "$pid"',
+    'command wait "$pid"', '/bin/wait "$pid"', 'builtin wait "$pid"',
     'exec node "$ENTRY"', 'node "$ROOT/src/check-config.ts"', 'node "$CHECKER" "$cfg"',
   ]) {
     const mutated = SCRIPT.replace('  node "$CHECKER"', `  ${replacement}`);
