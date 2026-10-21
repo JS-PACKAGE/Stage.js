@@ -22,8 +22,8 @@ class Socket {
   deliver(message: unknown) { this.onmessage?.({ data: JSON.stringify(message) }); }
   hello() {
     this.readyState = Socket.OPEN;
-    this.deliver({ type: 'hello', protocol: 1, serverVersion: 'test',
-      limits: { controlPerSecond: 20, icePerSecond: 30, handRaiseIntervalMs: 10000 } });
+    this.deliver({ type: 'hello', instance: 'test-instance', protocol: 1, serverVersion: 'test',
+      limits: { controlPerSecond: 20, icePerSecond: 30, handRaiseIntervalMs: 10000, chatIntervalMs: 1000, reactionIntervalMs: 250 } });
   }
   close() { this.readyState = 3; this.onclose?.(); }
 }
@@ -53,7 +53,7 @@ const entryType = (operation: Operation) => operation === 'join' ? 'join' : 'roo
 function inputs(operation: Operation, suffix = 'A', optional = true): EntryOptions {
   return operation === 'join'
     ? { roomId: `room-${suffix}`, name: `Name ${suffix}`, ...(optional ? { code: `code-${suffix}` } : {}) }
-    : { name: `Name ${suffix}`, ...(optional ? { roomName: `Room ${suffix}`, codeRequired: true, token: `token-${suffix}` } : {}) };
+    : { name: `Name ${suffix}`, ...(optional ? { roomName: `Room ${suffix}`, codeRequired: true, recording: false, recordingAvailable: false, token: `token-${suffix}` } : {}) };
 }
 function fields(request: Request): Omit<Request, 'requestId'> {
   const { requestId: _, ...payload } = request;
@@ -71,7 +71,7 @@ function assertError(outcome: Outcome, code: StageError['code']) {
   assert.equal(outcome.error.code, code);
 }
 function snapshot(role: RoomStatePayload['me']['role'], code?: string): RoomStatePayload {
-  return { roomId: 'room-A', name: 'Room A', codeRequired: true, code, status: 'live',
+  return { roomId: 'room-A', name: 'Room A', codeRequired: true, recording: false, recordingAvailable: false, code, status: 'live',
     controllerId: 'self', audienceCount: 1, speakers: [], hands: [], resumeToken: 'seat-A',
     limits: { maxSpeakers: 8, maxAudience: 300 },
     me: { participantId: 'self', name: 'Name A', role, onStage: false, handRaised: false,

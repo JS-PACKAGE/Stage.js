@@ -30,8 +30,8 @@ async function fixture(t: TestContext) {
     }
   });
   const connected = client.connect(), socket = Socket.latest;
-  socket.deliver({ type: 'hello', protocol: 1, serverVersion: 'event-test',
-    limits: { controlPerSecond: 20, icePerSecond: 30, handRaiseIntervalMs: 10000 } });
+  socket.deliver({ type: 'hello', instance: 'test-instance', protocol: 1, serverVersion: 'event-test',
+    limits: { controlPerSecond: 20, icePerSecond: 30, handRaiseIntervalMs: 10000, chatIntervalMs: 1000, reactionIntervalMs: 250 } });
   await connected;
   const hand = (participantId = 'participant', raised = true) => socket.deliver({ type: raised ? 'hand:raise' : 'hand:withdraw', participantId });
   return { client, hand };

@@ -31,8 +31,8 @@ class Socket {
   send(data: string): void { assert.equal(this.readyState, Socket.OPEN); this.sent.push(JSON.parse(data) as Request); }
   deliver(message: unknown): void { this.onmessage?.({ data: JSON.stringify(message) }); }
   hello(): void {
-    this.deliver({ type: 'hello', protocol: 1, serverVersion: 'test',
-      limits: { controlPerSecond: 2000, icePerSecond: 2000, handRaiseIntervalMs: 10000 } });
+    this.deliver({ type: 'hello', instance: 'test-instance', protocol: 1, serverVersion: 'test',
+      limits: { controlPerSecond: 2000, icePerSecond: 2000, handRaiseIntervalMs: 10000, chatIntervalMs: 1000, reactionIntervalMs: 250 } });
   }
   close(): void { this.readyState = 3; this.onclose?.(); }
 }
@@ -59,7 +59,7 @@ function action(h: View, key: string, text?: string): SampleNode {
   assert.ok(nodes.length, `missing room control ${key}`); return nodes[0]!;
 }
 const errorBox = (h: View): SampleNode => h.find(node => node.attributes.role === 'alert');
-const forms = (h: View): SampleNode[] => h.app.descendants().filter(node => node.tagName === 'form');
+const forms = (h: View): SampleNode[] => h.app.descendants().filter(node => node.tagName === 'form' && !node.classList.contains('chat-form'));
 function controllerState(onStage = false): RoomStatePayload {
   const state = roomState({ role: 'controller', onStage }); state.controllerId = state.me.participantId;
   const audience = roomState({ participantId: 'other', name: '其他觀眾', handRaised: true }).me;

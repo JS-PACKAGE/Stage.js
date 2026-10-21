@@ -23,6 +23,9 @@ try {
   transport.addPublisher('room', 'speaker', pcm => mixer.push('speaker', pcm));
   transport.addPublisher('room', 'blocked', () => { rejectedFrames++; });
   transport.setMixedStream('room', mixer);
+  // The recording taps the shared full-mix encode: it must decode to the speaker's audio.
+  const recorded: (Uint8Array | null)[] = [];
+  transport.setRecording('room', packet => recorded.push(packet));
   const tracks = new Map<string, MediaStreamTrack>();
   for (const id of ['speaker', 'audience', 'blocked']) {
     const client = new RTCPeerConnection({ codecs: { audio: [opusCodec(config.audio)], video: [] }, iceServers: [] }); clients.set(id, client);
@@ -59,6 +62,14 @@ try {
   assert.ok(audienceEnergy > 0.001, `audience audio silent (${audienceEnergy})`);
   assert.ok(selfEnergy < 0.00001, `mix-minus leaked own audio (${selfEnergy})`);
   assert.equal(rejectedFrames, 0);
+  transport.setRecording('room', null);
+  const recordedFrames = recorded.length;
+  const recordDecoder = new OpusDecoder(config.audio.sampleRate);
+  let recordedEnergy = 0, recordedSamples = 0;
+  for (const packet of recorded) if (packet) for (const s of recordDecoder.decode(packet)) { recordedEnergy += s * s; recordedSamples++; }
+  recordedEnergy /= Math.max(1, recordedSamples);
+  assert.ok(recordedFrames > 20 && recorded.filter(Boolean).length > 20, `recording got only ${recordedFrames} frames`);
+  assert.ok(recordedEnergy > 0.001, `recording silent (${recordedEnergy})`);
   const blockedStats = await clients.get('blocked')!.getStats();
   let blockedPacketsSent = 0;
   for (const stat of blockedStats.values()) {
@@ -106,7 +117,7 @@ try {
   audienceEnergy = 0;
   await sleep(600);
   assert.ok(received > audienceBefore + 10 && audienceEnergy > 0.001, `audience lost the speaker after their ICE restart (${received - audienceBefore} packets, energy ${audienceEnergy})`);
-  console.log(`PASS mediaWorkers=${config.rtc.mediaWorkers} packets=${received} audienceEnergy=${audienceEnergy.toFixed(6)} selfEnergy=${selfEnergy.toFixed(6)} blockedPacketsSent=${blockedPacketsSent} blockedFrames=${rejectedFrames}; renegotiation promotedFrames=${promotedFrames}; iceRestart packetsAfter=${received - packetsBeforeRestart} PASS`);
+  console.log(`PASS mediaWorkers=${config.rtc.mediaWorkers} packets=${received} audienceEnergy=${audienceEnergy.toFixed(6)} selfEnergy=${selfEnergy.toFixed(6)} blockedPacketsSent=${blockedPacketsSent} blockedFrames=${rejectedFrames}; recording frames=${recordedFrames} energy=${recordedEnergy.toFixed(6)}; renegotiation promotedFrames=${promotedFrames}; iceRestart packetsAfter=${received - packetsBeforeRestart} PASS`);
 } catch (error) { console.error('FAIL', error); process.exitCode = 1; }
 finally {
   clearInterval(timer); mixer.stop();

@@ -22,7 +22,7 @@ function state(me: Partial<ParticipantView> = {}, speakers?: ParticipantView[]):
   const own = { ...person('controller', '甲', 'controller'), ...me };
   return { roomId: 'same-room', name: 'Synthetic room', controllerId: 'controller', me: own,
     speakers: speakers ?? [...(own.onStage ? [own] : []), person('target')], hands: [], audienceCount: 0,
-    limits: { maxSpeakers: 8, maxAudience: 300 }, status: 'live', codeRequired: true,
+    limits: { maxSpeakers: 8, maxAudience: 300 }, status: 'live', codeRequired: true, recording: false, recordingAvailable: false,
     code: 'PRIVATE-CODE', resumeToken: 'PRIVATE-TOKEN' };
 }
 function audience(speakers = [person('controller', '甲', 'controller'), person('target')]): RoomStatePayload {
@@ -551,7 +551,7 @@ it('embed speaking actual role→stageleft→state gap suppresses a new report w
 
 async function enter(t: TestContext, snapshot: RoomStatePayload) {
   const h = await actualApp(t); h.form.submit(); await flush(); const socket = StageSocket.instances.at(-1)!;
-  socket.deliver({ type: 'hello', protocol: 1, serverVersion: 'test', limits: { controlPerSecond: 2000, icePerSecond: 2000, handRaiseIntervalMs: 10000 } });
+  socket.deliver({ type: 'hello', instance: 'test-instance', protocol: 1, serverVersion: 'test', limits: { controlPerSecond: 2000, icePerSecond: 2000, handRaiseIntervalMs: 10000, chatIntervalMs: 1000, reactionIntervalMs: 250 } });
   await h.until(() => socket.sent.some(m => m.type === 'join'), 'join request'); const request = socket.sent.find(m => m.type === 'join')!;
   socket.deliver({ type: 'room:state', ...snapshot }); socket.deliver({ type: 'ok', requestId: request.requestId });
   await h.until(() => StagePeer.instances.at(-1)?.signalingState === 'stable' && StagePeer.instances.at(-1)?.localDescription !== null, 'negotiation');
@@ -582,7 +582,7 @@ for (const role of ['controller', 'speaker', 'audience'] as const)
   });
 it('embed speaking actual SDK state-before-join-ACK disconnect permanently retires that entry', async t => {
   const h = await actualApp(t); h.form.submit(); await flush(); const socket = StageSocket.instances[0]!;
-  socket.deliver({ type: 'hello', protocol: 1, serverVersion: 'test', limits: { controlPerSecond: 2000, icePerSecond: 2000, handRaiseIntervalMs: 10000 } });
+  socket.deliver({ type: 'hello', instance: 'test-instance', protocol: 1, serverVersion: 'test', limits: { controlPerSecond: 2000, icePerSecond: 2000, handRaiseIntervalMs: 10000, chatIntervalMs: 1000, reactionIntervalMs: 250 } });
   await h.until(() => socket.sent.some(m => m.type === 'join'), 'join'); const snapshot = actualState(); snapshot.speakers = [person('target')];
   socket.deliver({ type: 'room:state', ...snapshot }); const client = h.clients[0] as StageClient, node = h.node('speaking-summary');
   socket.deliver({ type: 'speaking', participantIds: ['target'] }); shown(node, summary('乙'));
@@ -600,7 +600,7 @@ for (const terminal of ['closed', 'shutdown', 'kicked'] as const)
       : { type: 'room:closed', roomId: 'same-room', ...(terminal === 'shutdown' ? { reason: 'shutdown' as const } : {}) });
     await flush(); assert.equal(entered, true); assert.equal(h.clients.length, 2); empty(node); assert.equal(h.status.textContent, '連線中…');
     const next = StageSocket.instances.at(-1)!;
-    next.deliver({ type: 'hello', protocol: 1, serverVersion: 'test', limits: { controlPerSecond: 2000, icePerSecond: 2000, handRaiseIntervalMs: 10000 } });
+    next.deliver({ type: 'hello', instance: 'test-instance', protocol: 1, serverVersion: 'test', limits: { controlPerSecond: 2000, icePerSecond: 2000, handRaiseIntervalMs: 10000, chatIntervalMs: 1000, reactionIntervalMs: 250 } });
     await h.until(() => next.sent.some(m => m.type === 'join'), 'replacement join'); const request = next.sent.find(m => m.type === 'join')!;
     next.deliver({ type: 'room:state', ...snapshot }); next.deliver({ type: 'ok', requestId: request.requestId }); await h.tick(20);
     next.deliver({ type: 'speaking', participantIds: [] }); shown(node, SILENT);

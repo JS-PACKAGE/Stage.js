@@ -1,10 +1,11 @@
 import { StageClient, decodeName, MAX_GAIN_DB, type ConnectionQuality, type MicTest, type StageEventMap } from './index.ts';
 
-/** Every StageClient event, re-dispatched from the element as `stage-<type>`. */
-const EVENTS: (keyof StageEventMap)[] = [
-  'state', 'status', 'created', 'closed', 'kicked', 'hand', 'handrejected', 'invite', 'stagejoined', 'stageleft',
-  'transferred', 'mic', 'role', 'error', 'micerror', 'micready', 'audioblocked', 'speaking', 'quality',
-];
+/** Every StageClient event, re-dispatched from the element as `stage-<type>`; a Record so a new event cannot be missed. */
+const EVENTS = Object.keys({
+  state: true, status: true, created: true, closed: true, kicked: true, hand: true, handrejected: true, invite: true, stagejoined: true, stageleft: true,
+  transferred: true, mic: true, role: true, error: true, micerror: true, micready: true, audioblocked: true, speaking: true, quality: true,
+  chat: true, chathistory: true, reaction: true,
+} satisfies Record<keyof StageEventMap, true>) as (keyof StageEventMap)[];
 const STATUS_LABELS = { waiting: '等待發言', live: '直播中', reconnecting: '重新連線中', disconnected: '未連線' };
 
 const STYLE = `
@@ -2899,7 +2900,7 @@ export class StageElement extends HTMLElement {
       const raised = handIndex < 0 ? '已舉手'
         : `已舉手（${client!.status === 'reconnecting' ? '上次' : ''}佇列第 ${handIndex + 1} 位）`;
       const where = me.onStage ? (me.forceMuted ? '台上（主控已鎖定靜音）' : me.muted ? '台上（已靜音）' : '台上') : me.handRaised ? raised : '收聽中';
-      this.status.textContent = `${decodeName(state.name)} · ${STATUS_LABELS[client!.status]} · ${where}`;
+      this.status.textContent = `${decodeName(state.name)} · ${STATUS_LABELS[client!.status]} · ${where}${state.recording ? ' · ● 錄音中' : ''}`;
     } else if (this.joinPhase) {
       this.status.textContent = this.joinPhase === 'connecting' ? '連線中…' : '正在加入房間…';
     } else if (!client) {

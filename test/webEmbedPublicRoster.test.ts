@@ -92,7 +92,7 @@ function state(patch: Partial<RoomStatePayload> = {}): RoomStatePayload {
   return { roomId: 'same-room', name: 'Public room', controllerId: 'host',
     me: person('reader', { name: 'Private reader', role: 'audience', onStage: false }),
     speakers: [person('host', { role: 'controller' }), person('target')], hands: [], audienceCount: 1,
-    limits: { maxSpeakers: 8, maxAudience: 300 }, status: 'live', codeRequired: true,
+    limits: { maxSpeakers: 8, maxAudience: 300 }, status: 'live', codeRequired: true, recording: false, recordingAvailable: false,
     code: 'PRIVATE-CODE', resumeToken: 'PRIVATE-TOKEN', ...patch };
 }
 function publish(sdk: EmbedSdk, snapshot = state()): void { sdk.state = snapshot; sdk.me = snapshot.me; sdk.emit('state', snapshot); }

@@ -52,7 +52,7 @@ class Peer {
 
 const state: RoomStatePayload = {
   roomId: 'room', name: 'Room', controllerId: 'host', speakers: [], hands: [], audienceCount: 1,
-  codeRequired: false, limits: { maxSpeakers: 8, maxAudience: 300 }, status: 'live', resumeToken: 'test-resume-token',
+  codeRequired: false, recording: false, recordingAvailable: false, limits: { maxSpeakers: 8, maxAudience: 300 }, status: 'live', resumeToken: 'test-resume-token',
   me: { participantId: 'guest', name: 'Guest', role: 'audience', onStage: false, handRaised: false,
     muted: false, forceMuted: false, gainDb: 0, connected: true, joinedAt: 0 },
 };
@@ -65,8 +65,8 @@ function assertError(error: unknown, code: StageError['code'], message?: string)
 }
 function hello(socket: Socket, handRaiseIntervalMs = 10000): void {
   socket.readyState = Socket.OPEN;
-  socket.deliver({ type: 'hello', protocol: 1, serverVersion: 'test',
-    limits: { controlPerSecond: 20, icePerSecond: 30, handRaiseIntervalMs } });
+  socket.deliver({ type: 'hello', instance: 'test-instance', protocol: 1, serverVersion: 'test',
+    limits: { chatIntervalMs: 1000, reactionIntervalMs: 250, controlPerSecond: 20, icePerSecond: 30, handRaiseIntervalMs } });
 }
 function accounting(client: StageClient) {
   return { pacing: [client['nextControlAt'], client['nextIceAt'], client['lastSendAt']],

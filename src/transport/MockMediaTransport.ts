@@ -5,6 +5,7 @@ import type {
   MediaTransport,
   MediaTransportCallbacks,
   MixedPcmSource,
+  MixPacketSink,
   NegotiationPolicy,
   TransportStats,
 } from './MediaTransport.ts';
@@ -24,6 +25,8 @@ interface MockRoom {
   muted: Set<string>;
   subscribers: Set<string>;
   unsubscribeMix?: () => void;
+  /** Gets one fake packet per mixed frame: `[0xf8, silent ? 0 : 1]` (a CELT 20 ms TOC byte, then a marker). */
+  recording?: MixPacketSink;
 }
 
 /**
@@ -89,7 +92,12 @@ export class MockMediaTransport implements MediaTransport {
     r.unsubscribeMix?.();
     r.unsubscribeMix = source?.onFrame((frame) => {
       for (const id of r.subscribers) r.peers.get(id)?.received.push((frame.minus(id) ?? frame.full).slice());
+      r.recording?.(Uint8Array.of(0xf8, frame.silent ? 0 : 1));
     });
+  }
+
+  setRecording(roomId: string, sink: MixPacketSink | null): void {
+    this.room(roomId).recording = sink ?? undefined;
   }
 
   subscribe(roomId: string, participantId: string): void {

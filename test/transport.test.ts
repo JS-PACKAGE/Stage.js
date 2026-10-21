@@ -88,8 +88,8 @@ describe('downlink fan-out', () => {
       assert.equal(t.payloads.length, 1, 'one encode for the whole room');
       t = await tick(false);
       assert.ok(t.payloads.every((p) => p.length === 0), 'silent room: empty payloads (DTX) instead of encoding');
-      const skipped = (await transport.metrics()).find((m) => m.name === 'stage_mix_frames_silent_skipped_total')!;
-      assert.equal(skipped.value, 1);
+      const skipped = (await transport.metrics()).filter(m => m.type !== 'histogram').find(m => m.name === 'stage_mix_frames_silent_skipped_total')!;
+      assert.ok(skipped.type === 'counter' && skipped.value === 1);
       t = await tick(true);
       assert.ok(t.payloads.some((p) => p.length > 2), 'encodes again as soon as someone speaks');
       assert.ok(!t.same('a', 'b'), 'and the speaker is back on its own mix-minus');
@@ -106,7 +106,7 @@ describe('downlink fan-out', () => {
       assert.ok(t!.same('a', 'b'), 'zero PCM shares the full mix after a second');
       t = await tick(zero);
       assert.ok(t.payloads.every(p => p.length === 0), 'zero PCM reaches the idle DTX fast path');
-      const skipped = (await transport.metrics()).find(m => m.name === 'stage_mix_frames_silent_skipped_total')!;
+      const skipped = (await transport.metrics()).filter(m => m.type !== 'histogram').find(m => m.name === 'stage_mix_frames_silent_skipped_total')!;
       assert.equal(skipped.value, 1);
     } finally { await transport.close(); }
   });

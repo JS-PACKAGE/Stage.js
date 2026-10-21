@@ -16,7 +16,7 @@ class Socket {
   close() { this.readyState = 3; if (!this.deferClose) this.onclose?.(); }
 }
 const flush = async () => { for (let i = 0; i < 12; i++) await Promise.resolve(); };
-const hello = (socket: Socket) => socket.deliver({ type: 'hello', protocol: 1, serverVersion: 'test', limits: { controlPerSecond: 20, icePerSecond: 30, handRaiseIntervalMs: 10000 } });
+const hello = (socket: Socket) => socket.deliver({ type: 'hello', instance: 'test-instance', protocol: 1, serverVersion: 'test', limits: { controlPerSecond: 20, icePerSecond: 30, handRaiseIntervalMs: 10000, chatIntervalMs: 1000, reactionIntervalMs: 250 } });
 function setup(t: TestContext) {
   Socket.instances = [];
   const originals = new Map(['window', 'WebSocket'].map(key => [key, Object.getOwnPropertyDescriptor(globalThis, key)]));

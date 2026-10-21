@@ -24,6 +24,10 @@
 
 ## 房間操作
 
+聊天與反應（任何已進房者）：`sendChat(text)`、`react(emoji)`（`emoji` 取自匯出的 `REACTIONS`）。兩者都依伺服器下發的 `rateLimits.chatIntervalMs`／`reactionIntervalMs` 在本機先擋，過快時拒絕並拋出 `StageError('rate_limited')`，不會送出而被伺服器斷線。`chatMessages` 為目前保留的訊息（含進房補送的歷史，最多 200 則）；事件 `chat`（單則 `{messageId, participantId, name, text, sentAt}`）、`chathistory`（`{messages}`，進房或回座時整批取代）、`reaction`（`{participantId, name, emoji}`）。`name`、`text` 同樣先 `decodeName()` 再以 `textContent` 顯示。
+
+錄音（主控，伺服器開啟 `recording.enabled` 時 `state.recordingAvailable` 為 true）：`startRecording()`、`stopRecording()`。錄音中所有人的 `state.recording` 為 true，嵌入時請明顯標示（`<stage-client>` 會在狀態列顯示「● 錄音中」）。
+
 `createRoom({name, roomName?, codeRequired?, token?})` 回傳 `{roomId, code?}`；伺服器設定 `rooms.createToken` 時須傳入 `token`。加入後用 `raiseHand` / `withdrawHand`，在台用 `mute` / `unmute` / `leaveStage`；主控用 `approve(id)`、`reject(id)`、`returnToStage()`、`transferControl(id)`、`forceMute(id)`、`forceUnmute(id)`、`setGain(id, gainDb)`（調整此人在混音中的音量，±`MAX_GAIN_DB` dB，0 還原；目前值見 `ParticipantView.gainDb`）、`removeFromStage(id)`、`kick(id)`（踢出房間）、`setRoomName(name)`（修改房間名稱）、`rotateCode()`（更換房間代碼，新代碼見主控的 `state.code`）、`closeRoom()`。`disconnect()` 停止自動重連。請求在伺服器 `ok` 後完成，失敗拋出有 `code` 的 `StageError`；逾時預設為 15 秒（可用 `requestTimeoutMs` 調整；另加本機排程等待）。舉手間隔依伺服器設定（`rateLimits.handRaiseIntervalMs`，預設 10 秒），`handCooldownMs` 可供倒數 UI 使用。
 
 `createRoom`／`join` 在通過即時本機容量檢查後、任何等待前複製該次參數。hello、pacing 或 ACK 等待期間修改原物件，不會改變這次送出的欄位或成功後保存的回座 roomId／code／name；下一次明確呼叫會讀取新的值。支援的參數皆為字串／布林等基本值，採淺層複製，不凍結或修改呼叫端物件，也不更改驗證、修剪或錯誤順序。主控已收到的權威房間代碼仍依下述規則更新。
@@ -164,6 +168,7 @@ WebSocket 建構失敗、hello 逾時或尚未進房的連線關閉，也會釋�
 - 兩者不傳控制訊息、不改麥克風、其他人音量或主控的 `setGain`。可於連線前使用，斷線回座、`disconnect()` 後重用同一 client 都會保留。
 - 自訂 `audioElement` 的既有 `volume`／`muted` 原樣保留；getters 即時讀取該元件，因此外部變更也會反映。音量支援依瀏覽器而異（部分行動瀏覽器僅能使用系統音量）。不會繞過自動播放政策，仍須處理 `audioblocked`／`unlockAudio()`。
 - 完整範例的「音訊設定」提供收聽音量滑桿與獨立的靜音收聽按鈕。
+
 
 ## 音訊裝置與麥克風測試
 

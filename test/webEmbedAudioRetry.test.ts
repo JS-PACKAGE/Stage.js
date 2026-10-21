@@ -282,7 +282,7 @@ it('embed actual SDK socket loss settles public pending while its native offer l
   button(h).click(); await flush(); assert.equal(entered, 1); control(h, { pending: true });
   socket.close(); await flush(); assert.equal(client.status, 'reconnecting'); control(h, { disabled: true }); hiddenFeedback(h);
   await h.tick(500); const resumed = StageSocket.instances.at(-1)!; assert.notEqual(resumed, socket);
-  resumed.deliver({ type: 'hello', protocol: 1, serverVersion: 'test', limits: { controlPerSecond: 2000, icePerSecond: 2000, handRaiseIntervalMs: 10000 } });
+  resumed.deliver({ type: 'hello', instance: 'test-instance', protocol: 1, serverVersion: 'test', limits: { controlPerSecond: 2000, icePerSecond: 2000, handRaiseIntervalMs: 10000, chatIntervalMs: 1000, reactionIntervalMs: 250 } });
   await h.until(() => resumed.sent.some(message => message.type === 'join'), 'automatic control resume');
   const join = resumed.sent.find(message => message.type === 'join')!;
   resumed.deliver({ type: 'room:state', ...actualState({ role: 'audience' }) }); resumed.deliver({ type: 'ok', requestId: join.requestId });

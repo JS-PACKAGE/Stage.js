@@ -30,8 +30,8 @@ class Socket {
   deliver(message: unknown) { this.onmessage?.({ data: JSON.stringify(message) }); }
   hello() {
     this.readyState = Socket.OPEN;
-    this.deliver({ type: 'hello', protocol: 1, serverVersion: 'test',
-      limits: { controlPerSecond: 20, icePerSecond: 30, handRaiseIntervalMs: 10000 } });
+    this.deliver({ type: 'hello', instance: 'test-instance', protocol: 1, serverVersion: 'test',
+      limits: { controlPerSecond: 20, icePerSecond: 30, handRaiseIntervalMs: 10000, chatIntervalMs: 1000, reactionIntervalMs: 250 } });
   }
   close() { this.readyState = 3; this.onclose?.(); }
 }
@@ -69,7 +69,7 @@ function latestJoin(socket: Socket): Request {
   return request;
 }
 function snapshot(suffix: string): RoomStatePayload {
-  return { roomId: entry(suffix).roomId, name: `Synthetic room ${suffix}`, codeRequired: true,
+  return { roomId: entry(suffix).roomId, name: `Synthetic room ${suffix}`, codeRequired: true, recording: false, recordingAvailable: false,
     status: 'live', controllerId: 'synthetic-controller', audienceCount: 1, speakers: [], hands: [],
     resumeToken: `synthetic-seat-${suffix}`, limits: { maxSpeakers: 8, maxAudience: 300 },
     me: { participantId: `synthetic-self-${suffix}`, name: entry(suffix).name, role: 'audience',

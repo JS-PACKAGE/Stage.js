@@ -255,7 +255,7 @@ it('actual SDK reconnect keeps search history while resume ACK alone cannot admi
   const { h, socket, room, deliver } = await actual(t), original = rows(h)[19]!; query(h, 'ALPHA'); panel(h).open = true;
   socket.close(); await flush(); assert.equal(rows(h)[19], original); assert.equal(search(h).value, 'ALPHA'); locked(original, false, true);
   query(h, '陳小明'); force(original); await h.tick(500); const resumed = StageSocket.instances.at(-1)!; assert.notEqual(resumed, socket);
-  resumed.deliver({ type: 'hello', protocol: 1, serverVersion: 'test', limits: { controlPerSecond: 2000, icePerSecond: 2000, handRaiseIntervalMs: 10000 } });
+  resumed.deliver({ type: 'hello', instance: 'test-instance', protocol: 1, serverVersion: 'test', limits: { controlPerSecond: 2000, icePerSecond: 2000, handRaiseIntervalMs: 10000, chatIntervalMs: 1000, reactionIntervalMs: 250 } });
   await h.until(() => resumed.sent.some(m => m.type === 'join'), 'resume join');
   const request = resumed.sent.find(m => m.type === 'join')!; assert.equal(request.resumeToken, room.get('guest')!.resumeToken);
   resumed.deliver({ type: 'ok', requestId: request.requestId }); await flush(); locked(original, false, true); force(original);

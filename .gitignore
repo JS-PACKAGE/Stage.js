@@ -9,3 +9,5 @@ config.yaml
 *.key
 *.crt
 .DS_Store
+# 錄音檔（recording.dir 預設值）
+recordings/

@@ -34,9 +34,9 @@
 - 交付必要文件四件（README／AGENTS／CLAUDE／PLAN）後才收尾實作。
 
 ### 範圍外
-- 影片、螢幕分享、文字聊天室。
-- 錄音存檔與回放、直播轉推（RTMP／HLS）。
-- 帳號系統與持久化（使用者、舞台、操作紀錄均記憶體保存，重啟即失）。
+- 影片、螢幕分享。（文字聊天與表情反應已於 2026-10-10 依需求加入，見十二-22。）
+- 回放、直播轉推（RTMP／HLS）。（伺服器端 Ogg/Opus 錄音已於 2026-10-10 依需求加入，見十二-23。）
+- 帳號系統。（房間狀態可選擇存檔、重啟後恢復，2026-10-10 依需求加入，見十二-24；預設仍只存在記憶體。）
 - 套件發布（npm）：只開源倉庫供 clone，不發套件（見假設 6）。
 - 其他網站的整合案本身（各站程式）；本專案交付 client 函式庫＋範例前端。
 
@@ -920,3 +920,9 @@ N 路混音管線（decode→mix→encode）、不含自己的台上混音、lim
 
 
 250. **Windows restart 先驗證替代啟動條件（第230批，2026-10-17）：** immutable229 的 Windows restart 直接 Stop-Stage 後 Start-Stage，Node／建置入口／設定缺失等可預先偵測的問題會在舊程序停止後才失敗；Linux 已有 built checker 預檢。新增獨立 Restart-Stage，先檢查 Node 及原生命令退出狀態、已建置 server／check-config.js 檔案、沿用 Initialize-Config，再不帶 positional config 參數執行已建置檢查器，成功才使用既有 stop／start。保留原始 STAGE_CONFIG、專案根目錄相對路徑與非零退出結果；不改其他命令、一般 PID 身分／並行／stop 政策，不保證零停機、runtime 資源或檢查後檔案未變更。原生 Windows fixtures 比較 immutable baseline 與候選，必須在 finally 前觀察失敗候選保留舊程序／PID且沒有 stop 或替代 launch，成功重啟則確認受控程序替換，並涵蓋 Node 輸出24卻非零與 checker 失敗。沿用免安裝 Windows job，以受控 checker 驗證命令順序／參數／CWD／環境與退出語意；實際 built checker／schema 由原 Linux gates 驗證，不稱原生完整設定／server驗收。不變更 CI 設定、依賴、SDK／server／media／protocol。須獨立 hash-bound 審查、本地完整 gates 與 exact-head Ubuntu／Windows CI 終態成功，所有 HOLD 及 browser／AT／ICE／硬體音訊限制保持。
+
+251. **文字聊天與表情反應**（2026-10-10 依需求加入）：C→S `chat:send {text}`、`reaction {emoji}`；S→C `chat {messageId, participantId, name, text, sentAt}`、`reaction {participantId, name, emoji}`、`chat:history {messages}`（進房與回座時補送最近 `rooms.chatHistory` 則，記憶體保存）。聊天內容比照 name 清洗（保留換行、最多連續兩個空行）後 HTML 轉義，長度 ≤ `limits.chatMaxLength`；emoji 限 `REACTIONS` 白名單。每連線聊天每 `limits.chatIntervalMs`、反應每 `limits.reactionIntervalMs` 至多一次，超過比照 `hand:raise` 以 1008 斷線，兩值經 `hello.limits` 下發供 client 自行節流。聊天內容不入日誌。伺服器錯誤訊息維持固定英文；SDK 沿用 main 的原始錯誤契約，UI 沿用既有繁中提示。
+
+252. **錄音**（2026-10-10 依需求加入）：C→S `recording:start`／`recording:stop`（主控限定，伺服器 `recording.enabled` 才可用，否則 `forbidden`；重複開始／停止為 `conflict`）。`MediaTransport.setRecording(roomId, sink)` 把觀眾那一路完整混音的**既有共用編碼**依混音順序交給 sink（沒人收聽完整混音時才額外加一份編碼），不另開 encoder；靜音略過編碼、codec 落後丟幀或編碼失敗的幀以 `null` 交付，寫檔時補成保留原 Opus 幀數的零長度幀（解碼端 PLC），時間軸不位移。`src/recording/oggOpus.ts` 依 RFC 7845 封裝（mono、pre-skip 0、每頁至多 50 包且 ≤255 lacing），`recorder.ts` 寫 `<recording.dir>/<roomId>-<UTC 時間>.opus`；寫檔失敗只記 error、不影響房間。`room:state` 增 `recording`（錄音中，所有人都看得到）與 `recordingAvailable`。單次錄音逾 `recording.maxDurationMinutes` 自動停止；關房、停機時停止並等檔案寫完。
+
+253. **重啟後恢復**（2026-10-10 依需求加入）：`persistence.stateFile` 非空時，hub 每 `saveIntervalMs` 定期刷新（包含安靜房間；慢速寫入時不累積待寫工作）把所有房間（`Room.snapshotForRestart()`：代碼、參與者與 resumeToken、台位、舉手順序、靜音與增益；聊天紀錄）原子寫入 JSON（mode 600），停機時再寫一次。此時停機**不送** `room:closed`，連線以 1001 關閉，client 視同斷線自動重連；新程序啟動時 `Room.restore()` 逐欄重建並以目前設定的上限重驗不變量（不符者略過並記 warning），所有人標為斷線、保留席位 `restoreGraceMs`（主控取它與 `controllerGraceMs` 較大者），期間以 resumeToken `join` 回座，逾時照一般斷線規則移除或自動移交、無人回來即關房。`hello.instance` 每次啟動不同，client 回座時發現變了就重建 PeerConnection（舊的對端已不存在）。錄音不跨重啟：停機時停止並寫完檔案。狀態檔超過 `restoreGraceMs` 未更新即不採用。

@@ -1,17 +1,41 @@
 import { monitorEventLoopDelay } from 'node:perf_hooks';
 
-export interface MetricSample {
-  name: string;
-  help: string;
-  type: 'counter' | 'gauge';
-  value: number;
-}
+export type MetricSample =
+  | { name: string; help: string; type: 'counter' | 'gauge'; value: number }
+  | { name: string; help: string; type: 'histogram'; histogram: Histogram };
 
 /** Prometheus text exposition format (0.0.4). */
 export function renderPrometheus(samples: MetricSample[]): string {
   let out = '';
-  for (const s of samples) out += `# HELP ${s.name} ${s.help}\n# TYPE ${s.name} ${s.type}\n${s.name} ${Number.isFinite(s.value) ? s.value : 0}\n`;
+  for (const s of samples) {
+    out += `# HELP ${s.name} ${s.help}\n# TYPE ${s.name} ${s.type}\n`;
+    if (s.type !== 'histogram') { out += `${s.name} ${Number.isFinite(s.value) ? s.value : 0}\n`; continue; }
+    const h = s.histogram;
+    let cumulative = 0;
+    h.bounds.forEach((le, i) => { cumulative += h.counts[i]!; out += `${s.name}_bucket{le="${le}"} ${cumulative}\n`; });
+    out += `${s.name}_bucket{le="+Inf"} ${h.count}\n${s.name}_sum ${h.sum}\n${s.name}_count ${h.count}\n`;
+  }
   return out;
+}
+
+/** Fixed-bucket histogram (seconds); `observe` allocates nothing, so it can sit on per-frame paths. */
+export class Histogram {
+  readonly bounds: readonly number[];
+  /** Per-bucket (not cumulative) counts; the last slot is beyond the largest bound. */
+  readonly counts: number[];
+  sum = 0;
+  count = 0;
+  constructor(bounds: readonly number[]) {
+    this.bounds = bounds;
+    this.counts = new Array<number>(bounds.length + 1).fill(0);
+  }
+  observe(value: number): void {
+    let i = 0;
+    while (i < this.bounds.length && value > this.bounds[i]!) i++;
+    this.counts[i]!++;
+    this.sum += value;
+    this.count++;
+  }
 }
 
 /** Monotonic counters shared by every room mixer (rooms come and go; totals must not drop). */

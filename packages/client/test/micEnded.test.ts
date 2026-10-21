@@ -33,7 +33,7 @@ function replayListeners(source: ReturnType<typeof stream>, callbacks: ReturnTyp
 }
 function state(onStage: boolean, muted = false): RoomStatePayload {
   return { roomId: 'room', name: 'Room', controllerId: 'host', speakers: [], hands: [], audienceCount: 1,
-    codeRequired: false, limits: { maxSpeakers: 8, maxAudience: 300 }, status: 'live', resumeToken: 'test-resume-token',
+    codeRequired: false, recording: false, recordingAvailable: false, limits: { maxSpeakers: 8, maxAudience: 300 }, status: 'live', resumeToken: 'test-resume-token',
     me: { participantId: 'guest', name: 'Guest', role: onStage ? 'speaker' : 'audience', onStage,
       handRaised: false, muted, forceMuted: false, gainDb: 0, connected: true, joinedAt: 0 } };
 }
@@ -50,8 +50,8 @@ class Socket {
   onclose: (() => void) | null = null;
   constructor() {
     Socket.instances.push(this);
-    queueMicrotask(() => this.deliver({ type: 'hello', protocol: 1, serverVersion: 'test',
-      limits: { controlPerSecond: 2000, icePerSecond: 2000, handRaiseIntervalMs: 10000 } }));
+    queueMicrotask(() => this.deliver({ type: 'hello', instance: 'test-instance', protocol: 1, serverVersion: 'test',
+      limits: { controlPerSecond: 2000, icePerSecond: 2000, handRaiseIntervalMs: 10000, chatIntervalMs: 1000, reactionIntervalMs: 250 } }));
   }
   deliver(message: ServerMessage) {
     if (message.type === 'room:state') { this.onStage = message.me.onStage; this.snapshot = message; }

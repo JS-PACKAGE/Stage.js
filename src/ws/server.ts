@@ -19,7 +19,8 @@ import { ValidationError, parseClientMessage } from './validate.ts';
 
 export interface StageServer {
   listen(): Promise<AddressInfo>;
-  close(): Promise<void>;
+  /** `keepRooms`: rooms will be restored after a restart, so clients are not told they closed (see `StageHub.shutdown`). */
+  close(keepRooms?: boolean): Promise<void>;
 }
 
 export interface StageServerDeps {
@@ -279,7 +280,7 @@ export function createStageServer(deps: StageServerDeps): StageServer {
       });
       return promise;
     },
-    close: () => {
+    close: (keepRooms = false) => {
       if (closing) return closing;
       stopping = true;
       for (const session of sessions) session.stopInput();
@@ -287,7 +288,7 @@ export function createStageServer(deps: StageServerDeps): StageServer {
         clearInterval(heartbeat);
         clearTimeout(reloadTimer);
         for (const w of watchers) w.close();
-        try { await hub.shutdown(); }
+        try { await hub.shutdown(keepRooms); }
         finally {
           // A graceful close flushes the `room:closed` frames queued above; terminate() could drop them.
           const drained = Promise.all([...sessions].map((s) => new Promise<void>(resolve => s.ws.once('close', () => resolve()))));

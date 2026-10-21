@@ -1,6 +1,6 @@
-import type { ClientMessageMap, ClientMessageType, ErrorCode, IceCandidatePayload, ParticipantView, RateLimits, RoomStatePayload, ServerMessage, ServerMessageMap } from '../../../shared/protocol.ts';
-export type { ParticipantView, RoomStatePayload, Role, StageStatus, ErrorCode, IceServerConfig, ConnectionQuality } from '../../../shared/protocol.ts';
-export { MAX_GAIN_DB } from '../../../shared/protocol.ts';
+import type { ChatMessage, ClientMessageMap, ClientMessageType, ErrorCode, IceCandidatePayload, ParticipantView, RateLimits, Reaction, RoomStatePayload, ServerMessage, ServerMessageMap } from '../../../shared/protocol.ts';
+export type { ParticipantView, RoomStatePayload, Role, StageStatus, ErrorCode, IceServerConfig, ConnectionQuality, ChatMessage, Reaction } from '../../../shared/protocol.ts';
+export { MAX_GAIN_DB, REACTIONS } from '../../../shared/protocol.ts';
 
 export function decodeName(value: string): string {
   const entities: Record<string, string> = { '&amp;': '&', '&lt;': '<', '&gt;': '>', '&quot;': '"', '&#39;': "'" };
@@ -146,6 +146,11 @@ export interface StageEventMap {
   speaking: { participantIds: string[] };
   /** Full replacement of available publisher reports, possibly empty; controller and stage only. */
   quality: ServerMessageMap['quality'];
+  /** One new chat message (text and name are HTML-escaped: render with textContent after `decodeName`). */
+  chat: ChatMessage;
+  /** Recent chat replayed on join or rejoin; replaces `chatMessages`. */
+  chathistory: { messages: ChatMessage[] };
+  reaction: ServerMessageMap['reaction'];
 }
 interface StatsCounters { timestamp: number; bytes?: number; received?: number; lost?: number; bufferDelay?: number; emitted?: number }
 const finite = (value: unknown): number | undefined => typeof value === 'number' && Number.isFinite(value) ? value : undefined;
@@ -157,7 +162,9 @@ type JoinOptions = { roomId: string; code?: string; name: string; resumeToken?: 
 type AcceptedName = { readonly roomId: string; readonly participantId: string; readonly revision: number; readonly name: string };
 const DEFAULT_REQUEST_TIMEOUT = 15000;
 /** Until the server's `hello` says otherwise: the config.example.yaml defaults. */
-const DEFAULT_LIMITS: RateLimits = { controlPerSecond: 20, icePerSecond: 30, handRaiseIntervalMs: 10000 };
+const DEFAULT_LIMITS: RateLimits = { controlPerSecond: 20, icePerSecond: 30, handRaiseIntervalMs: 10000, chatIntervalMs: 1000, reactionIntervalMs: 250 };
+/** Client-side cap on kept chat messages; the server's own history is usually shorter. */
+const MAX_CHAT_MESSAGES = 200;
 const KEEPALIVE_INTERVAL_MS = 15000;
 /** Two missed keepalive rounds. */
 const KEEPALIVE_TIMEOUT_MS = 2 * KEEPALIVE_INTERVAL_MS + 5000;
@@ -215,6 +222,9 @@ export class StageClient extends EventTarget {
   private answerTimer: ReturnType<typeof setTimeout> | undefined;
   private limits: RateLimits = DEFAULT_LIMITS;
   private lastHandAt = -Infinity;
+  private lastChatAt = -Infinity;
+  private lastReactionAt = -Infinity;
+  private chatLog: ChatMessage[] = [];
   private nextControlAt = 0;
   private nextIceAt = 0;
   /** Latest scheduled send of any kind: the server processes frames in arrival order, so ICE must never overtake its offer. */
@@ -227,6 +237,9 @@ export class StageClient extends EventTarget {
   private lastHeardAt = 0;
   private iceServers: RTCIceServer[] = [];
   private iceRestartTimer: ReturnType<typeof setTimeout> | undefined;
+  private serverInstance: string | undefined;
+  /** Set when we reconnected to a restarted server: the next snapshot rebuilds the PeerConnection. */
+  private mediaStale = false;
 
   constructor(options: StageClientOptions) {
     super();
@@ -266,6 +279,8 @@ export class StageClient extends EventTarget {
   get me(): ParticipantView | null { return this.snapshot?.me ?? null; }
   /** Participants currently audible in the mix (server voice activity). */
   get speaking(): ReadonlySet<string> { return this.speakingIds; }
+  /** Chat messages since joining (plus replayed history), oldest first. */
+  get chatMessages(): readonly ChatMessage[] { return this.chatLog; }
   get handCooldownMs(): number { return Math.max(0, this.limits.handRaiseIntervalMs - (performance.now() - this.lastHandAt)); }
   /** Limits the connected server enforces per connection (from `hello`; defaults before connecting). */
   get rateLimits(): RateLimits { return this.limits; }
@@ -512,7 +527,12 @@ export class StageClient extends EventTarget {
         this.lastHeardAt = performance.now();
         try {
           const message = JSON.parse(String(event.data)) as ServerMessage;
-          if (message.type === 'hello') { this.limits = message.limits; ready = true; clearTimeout(timer); clearHello(); this.startKeepalive(ws); resolve(); }
+          if (message.type === 'hello') {
+            // A different server process (restart with persisted rooms): our PeerConnection's other end is gone.
+            if (this.serverInstance !== undefined && this.serverInstance !== message.instance) this.mediaStale = true;
+            this.serverInstance = message.instance;
+            this.limits = message.limits; ready = true; clearTimeout(timer); clearHello(); this.startKeepalive(ws); resolve();
+          }
           void this.receive(message).catch((error: unknown) => this.report(error));
         } catch { this.report(new StageError('bad_request', '收到無法解析的伺服器訊息。')); }
       };
@@ -650,6 +670,18 @@ export class StageClient extends EventTarget {
     this.lastHandAt = performance.now();
     return this.request('hand:raise', {});
   }
+  /** Send a chat message (≤ `limits.chatMaxLength` characters on the server; paced by `rateLimits.chatIntervalMs`). */
+  sendChat(text: string): Promise<void> {
+    if (performance.now() - this.lastChatAt < this.limits.chatIntervalMs) return Promise.reject(new StageError('rate_limited', '訊息傳送過快，請稍候。'));
+    this.lastChatAt = performance.now();
+    return this.request('chat:send', { text });
+  }
+  /** Send an emoji reaction from `REACTIONS`; paced by `rateLimits.reactionIntervalMs`. */
+  react(emoji: Reaction): Promise<void> {
+    if (performance.now() - this.lastReactionAt < this.limits.reactionIntervalMs) return Promise.reject(new StageError('rate_limited', '反應送出過快，請稍候。'));
+    this.lastReactionAt = performance.now();
+    return this.request('reaction', { emoji });
+  }
   /** Change only your own display name; the server sanitizes it and publishes authoritative state. */
   setName(name: string): Promise<void> { return this.request('participant:rename', { name }); }
   /** Update the room display name (controller only); the server snapshot is authoritative. */
@@ -675,6 +707,9 @@ export class StageClient extends EventTarget {
   setGain(id: string, gainDb: number): Promise<void> { return this.request('mic:gain', { targetId: id, gainDb }); }
   /** Controller only: issue a new room code (code-protected rooms); people already inside stay. */
   rotateCode(): Promise<void> { return this.request('room:rotate-code', {}); }
+  /** Controller only, when `state.recordingAvailable`: record the room's mix on the server (`state.recording` turns true for everyone). */
+  startRecording(): Promise<void> { return this.request('recording:start', {}); }
+  stopRecording(): Promise<void> { return this.request('recording:stop', {}); }
   closeRoom(): Promise<void> { return this.request('room:close', {}); }
   async disconnect(): Promise<void> {
     this.intentional = true;
@@ -693,6 +728,7 @@ export class StageClient extends EventTarget {
     this.snapshot = null;
     this.lastHandAt = -Infinity;
     this.speakingIds = new Set();
+    this.chatLog = [];
     this.stopKeepalive();
     const socket = this.socket;
     this.socket = null;
@@ -799,7 +835,7 @@ export class StageClient extends EventTarget {
         // First snapshot of a (new) identity → fresh PeerConnection. A resumed seat keeps the one that
         // survived the ws drop unless the network side died meanwhile.
         const pcState = this.pc?.connectionState;
-        if (!this.pc || this.pcParticipantId !== state.me.participantId || pcState === 'failed' || pcState === 'closed') this.createMedia();
+        if (!this.pc || this.mediaStale || this.pcParticipantId !== state.me.participantId || pcState === 'failed' || pcState === 'closed') { this.mediaStale = false; this.createMedia(); }
         this.syncMedia();
         break;
       }
@@ -832,6 +868,7 @@ export class StageClient extends EventTarget {
       }
       // Either way the seat is gone: forget the session so the socket close does not trigger a rejoin.
       case 'room:closed': case 'kicked':
+        this.chatLog = [];
         await this.disconnect();
         if (message.type === 'kicked') this.emit('kicked', { roomId: message.roomId });
         else this.emit('closed', message.reason ? { roomId: message.roomId, reason: message.reason } : { roomId: message.roomId });
@@ -855,6 +892,15 @@ export class StageClient extends EventTarget {
       case 'role:update': this.emit('role', { participantId: message.participantId, role: message.role, reason: message.reason }); break;
       case 'speaking': this.speakingIds = new Set(message.participantIds); this.emit('speaking', { participantIds: message.participantIds }); break;
       case 'quality': this.emit('quality', { participants: message.participants }); break;
+      case 'chat': {
+        const { type: _type, ...chat } = message;
+        this.chatLog.push(chat);
+        if (this.chatLog.length > MAX_CHAT_MESSAGES) this.chatLog.shift();
+        this.emit('chat', chat);
+        break;
+      }
+      case 'chat:history': this.chatLog = message.messages.slice(-MAX_CHAT_MESSAGES); this.emit('chathistory', { messages: this.chatLog }); break;
+      case 'reaction': this.emit('reaction', { participantId: message.participantId, name: message.name, emoji: message.emoji }); break;
     }
   }
   private scheduleReconnect(): void {

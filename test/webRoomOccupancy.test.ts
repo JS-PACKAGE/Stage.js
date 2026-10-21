@@ -21,7 +21,7 @@ function snapshot(options: { audience?: number; stage?: number; controllerOnStag
     speakers: [...(controllerOnStage ? [person('controller', 'controller')] : []),
       ...Array.from({ length: options.stage ?? 1 }, (_, i) => person(`speaker-${i}`, 'speaker'))],
     hands: [], audienceCount: options.audience ?? 2, limits: { maxAudience: options.maxAudience ?? 300, maxSpeakers: options.maxSpeakers ?? 8 },
-    status: 'live', codeRequired: false,
+    status: 'live', codeRequired: false, recording: false, recordingAvailable: false,
     me: person(options.participantId ?? (viewer === 'controller' ? 'controller' : viewer === 'speaker' ? 'speaker-0' : 'listener'), viewer,
       viewer === 'controller' ? controllerOnStage : viewer === 'speaker') };
 }

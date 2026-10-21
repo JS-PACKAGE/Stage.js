@@ -38,8 +38,8 @@ function state(handRaised: boolean, overrides: Partial<ParticipantView> = {}): R
   return snapshot;
 }
 async function hello(h: ActualApp, socket: StageSocket) {
-  socket.deliver({ type: 'hello', protocol: 1, serverVersion: 'test',
-    limits: { controlPerSecond: 2000, icePerSecond: 2000, handRaiseIntervalMs: 10000 } });
+  socket.deliver({ type: 'hello', instance: 'test-instance', protocol: 1, serverVersion: 'test',
+    limits: { controlPerSecond: 2000, icePerSecond: 2000, handRaiseIntervalMs: 10000, chatIntervalMs: 1000, reactionIntervalMs: 250 } });
   await h.until(() => socket.sent.some(message => message.type === 'join'), 'real SDK join frame');
   const request = socket.sent.find((message): message is Extract<ClientMessage, { type: 'join' }> => message.type === 'join');
   assert.ok(request); return request;

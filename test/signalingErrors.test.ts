@@ -150,7 +150,7 @@ async function setup(t: TestContext) {
     assert.equal(room.peers.get(listener.id), listenerPeer);
     assert.equal(room.subscribers.has(listener.id), true);
     assert.equal(mixer.sourceCount, publishers);
-    assert.equal(hub.metrics().find(sample => sample.name === 'stage_publishers')!.value, publishers);
+    assert.equal(hub.metrics().filter(sample => sample.type !== 'histogram').find(sample => sample.name === 'stage_publishers')!.value, publishers);
     assert.deepEqual(roomCloses, []);
     for (const session of [speaker.session, listener.session]) {
       assert.equal(hub.isJoined(session), true);

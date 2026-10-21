@@ -294,8 +294,8 @@ class Socket {
   deliver(message: unknown): void { this.onmessage?.({ data: JSON.stringify(message) }); }
   hello(): void {
     this.readyState = Socket.OPEN;
-    this.deliver({ type: 'hello', protocol: 1, serverVersion: 'test',
-      limits: { controlPerSecond: 20, icePerSecond: 30, handRaiseIntervalMs: 10000 } });
+    this.deliver({ type: 'hello', instance: 'test-instance', protocol: 1, serverVersion: 'test',
+      limits: { controlPerSecond: 20, icePerSecond: 30, handRaiseIntervalMs: 10000, chatIntervalMs: 1000, reactionIntervalMs: 250 } });
   }
   close(): void { this.closeCalls++; this.readyState = 2; }
 }
@@ -353,7 +353,7 @@ for (const action of ['create', 'join'] as const) {
     if (action === 'create') { state.controllerId = state.me.participantId; state.codeRequired = true; }
     // The authoritative snapshot opens room controls before the entry request's ACK.
     old.deliver({ type: 'room:state', ...state }); await flushSample();
-    assert.ok(sdk.state); assert.equal(h.app.descendants().filter(node => node.tagName === 'form').length, 0);
+    assert.ok(sdk.state); assert.equal(h.app.descendants().filter(node => node.tagName === 'form' && !node.classList.contains('chat-form')).length, 0);
     h.button('離開房間').click();
     assert.equal(old.closeCalls, 1); assert.equal(sdk.state, null); assert.equal(sdk.status, 'disconnected');
     assertLocked(forms(h), true); assertCancel(h, false);
@@ -416,8 +416,8 @@ for (const action of ['create', 'join'] as const) {
       const replacementAction = action === 'create' ? 'join' : 'create';
       landing[replacementAction].form.submit(); assertLocked(landing, true); assertCancel(h, true);
       assert.equal(Socket.instances.length, 2); const current = Socket.instances[1]!;
-      oldMessage?.({ data: JSON.stringify({ type: 'hello', protocol: 1, serverVersion: 'retired',
-        limits: { controlPerSecond: 20, icePerSecond: 30, handRaiseIntervalMs: 10000 } }) });
+      oldMessage?.({ data: JSON.stringify({ type: 'hello', instance: 'test-instance', protocol: 1, serverVersion: 'retired',
+        limits: { controlPerSecond: 20, icePerSecond: 30, handRaiseIntervalMs: 10000, chatIntervalMs: 1000, reactionIntervalMs: 250 } }) });
       if (old.sent[0]) oldMessage?.({ data: JSON.stringify({ type: 'ok', requestId: old.sent[0].requestId }) });
       oldMessage?.({ data: JSON.stringify({ type: 'room:created', roomId: 'retired-room', code: 'RETIRED' }) });
       for (const message of [

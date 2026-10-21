@@ -1,15 +1,17 @@
 import {
   CLIENT_MESSAGE_TYPES,
   MAX_GAIN_DB,
+  REACTIONS,
   type ClientMessage,
   type ClientMessageType,
   type IceCandidatePayload,
+  type Reaction,
   type SessionDescriptionPayload,
 } from '../../shared/protocol.ts';
 import type { AppConfig } from '../config.ts';
 import { StageError } from '../model/errors.ts';
 
-export type ValidationLimits = Pick<AppConfig['limits'], 'nameMaxLength' | 'codeMaxLength' | 'sdpMaxLength'>;
+export type ValidationLimits = Pick<AppConfig['limits'], 'nameMaxLength' | 'codeMaxLength' | 'sdpMaxLength' | 'chatMaxLength'>;
 
 /** Failed validation; `requestId` is echoed when it could be read safely. */
 export class ValidationError extends StageError {
@@ -41,6 +43,22 @@ export function sanitizeName(raw: unknown, maxLength: number): string | undefine
       if (++length > maxLength) return undefined;
     }
   }
+  return cleaned.replace(/[&<>"']/g, (c) => HTML_ESCAPES[c] ?? c);
+}
+
+/** Chat text: like names, but line breaks survive (normalized to `\n`, at most two in a row). */
+export function sanitizeChat(raw: unknown, maxLength: number): string | undefined {
+  if (typeof raw !== 'string') return undefined;
+  const cleaned = raw
+    .normalize('NFC')
+    .replace(/\r\n?|[\u2028\u2029]/g, '\n')
+    .split('\n')
+    .map((line) => line.replace(UNSAFE_CHARS_RE, '').trimEnd())
+    .join('\n')
+    .replace(/\n{3,}/g, '\n\n')
+    .trim();
+  const length = [...cleaned].length;
+  if (length === 0 || length > maxLength) return undefined;
   return cleaned.replace(/[&<>"']/g, (c) => HTML_ESCAPES[c] ?? c);
 }
 
@@ -118,6 +136,8 @@ export function parseClientMessage(text: string, limits: ValidationLimits): Clie
     case 'stage:leave':
     case 'mic:mute':
     case 'mic:unmute':
+    case 'recording:start':
+    case 'recording:stop':
       return { type: t, requestId: rid };
     case 'participant:rename':
     case 'room:rename':
@@ -135,6 +155,13 @@ export function parseClientMessage(text: string, limits: ValidationLimits): Clie
       if (typeof gainDb !== 'number' || !Number.isFinite(gainDb) || Math.abs(gainDb) > MAX_GAIN_DB) bad('gainDb');
       // One decimal is far below audibility; keeps the shared state free of float noise.
       return { type: t, requestId: rid, targetId: id('targetId'), gainDb: Math.round((gainDb as number) * 10) / 10 };
+    }
+    case 'chat:send':
+      return { type: t, requestId: rid, text: sanitizeChat(m.text, limits.chatMaxLength) ?? bad('text') };
+    case 'reaction': {
+      const emoji = m.emoji;
+      if (typeof emoji !== 'string' || !(REACTIONS as readonly string[]).includes(emoji)) bad('emoji');
+      return { type: t, requestId: rid, emoji: emoji as Reaction };
     }
     case 'rtc:offer':
     case 'rtc:answer':

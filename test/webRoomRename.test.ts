@@ -242,7 +242,7 @@ it('whole sample public SDK room-title command routes through validator and real
   let answer = ' Cafe\u0301\u0000 & <茶> ', oldServer = false, held: ServerMessage | undefined;
   const h = sampleApp({ sdk, decodeName, prompt: () => answer }); cleanup = () => h.cleanup();
   const socket = StageSocket.instances[0]!;
-  socket.deliver({ type: 'hello', protocol: 1, serverVersion: 'test', limits: { controlPerSecond: 2000, icePerSecond: 2000, handRaiseIntervalMs: 10000 } });
+  socket.deliver({ type: 'hello', instance: 'test-instance', protocol: 1, serverVersion: 'test', limits: { controlPerSecond: 2000, icePerSecond: 2000, handRaiseIntervalMs: 10000, chatIntervalMs: 1000, reactionIntervalMs: 250 } });
   await boundary.until(() => socket.sent.some(message => message.type === 'join'), 'public SDK join request');
   const joining = socket.sent.find(message => message.type === 'join')!;
   socket.deliver(host.s.last('room:state')!); socket.deliver({ type: 'ok', requestId: joining.requestId });

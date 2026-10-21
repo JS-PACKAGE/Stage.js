@@ -35,13 +35,13 @@ class Peer {
 }
 
 const flush = async () => { for (let i = 0; i < 20; i++) await Promise.resolve(); };
-const hello = (socket: Socket) => socket.deliver({ type: 'hello', protocol: 1, serverVersion: 'test',
-  limits: { controlPerSecond: 20, icePerSecond: 30, handRaiseIntervalMs: 10000 } });
+const hello = (socket: Socket) => socket.deliver({ type: 'hello', instance: 'test-instance', protocol: 1, serverVersion: 'test',
+  limits: { controlPerSecond: 20, icePerSecond: 30, handRaiseIntervalMs: 10000, chatIntervalMs: 1000, reactionIntervalMs: 250 } });
 function state(options: { roomId?: string; code?: string; role?: RoomStatePayload['me']['role'];
   codeRequired?: boolean; status?: RoomStatePayload['status']; resumeToken?: string } = {}): RoomStatePayload {
   const { roomId = 'room', code, role = 'controller', codeRequired = true, status = 'live', resumeToken = 'seat-token' } = options;
   return { roomId, name: roomId, controllerId: role === 'controller' ? 'self' : 'other', speakers: [], hands: [],
-    audienceCount: role === 'audience' ? 1 : 0, codeRequired, status, code, resumeToken,
+    audienceCount: role === 'audience' ? 1 : 0, codeRequired, status, code, resumeToken, recording: false, recordingAvailable: false,
     limits: { maxSpeakers: 8, maxAudience: 300 },
     me: { participantId: 'self', name: 'Self', role, onStage: false, handRaised: false,
       muted: false, forceMuted: false, gainDb: 0, connected: true, joinedAt: 0 } };

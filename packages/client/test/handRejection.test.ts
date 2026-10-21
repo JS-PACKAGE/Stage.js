@@ -23,8 +23,8 @@ class Socket {
   deliver(message: ServerMessage) { this.onmessage?.({ data: JSON.stringify(message) }); }
   hello() {
     this.readyState = Socket.OPEN;
-    this.deliver({ type: 'hello', protocol: 1, serverVersion: 'test',
-      limits: { controlPerSecond: 20, icePerSecond: 30, handRaiseIntervalMs: 10000 } });
+    this.deliver({ type: 'hello', instance: 'test-instance', protocol: 1, serverVersion: 'test',
+      limits: { controlPerSecond: 20, icePerSecond: 30, handRaiseIntervalMs: 10000, chatIntervalMs: 1000, reactionIntervalMs: 250 } });
   }
   close() { this.readyState = 3; this.onclose?.(); }
 }
@@ -57,7 +57,7 @@ function snapshot(options: Partial<Pick<RoomStatePayload, 'roomId' | 'status'>> 
   const me: RoomStatePayload['me'] = { participantId: 'self', name: 'Self', role: 'audience', onStage: false,
     handRaised: false, muted: false, forceMuted: false, gainDb: 0, connected: true, joinedAt: 0, ...options.me };
   return { roomId: options.roomId ?? 'room', name: 'Room', controllerId: 'host', speakers: [],
-    hands: me.handRaised ? [me] : [], audienceCount: 1, codeRequired: false, status: options.status ?? 'live',
+    hands: me.handRaised ? [me] : [], audienceCount: 1, codeRequired: false, recording: false, recordingAvailable: false, status: options.status ?? 'live',
     resumeToken: `seat-${me.participantId}`, limits: { maxSpeakers: 8, maxAudience: 300 }, me };
 }
 const deliverState = (socket: Socket, state: RoomStatePayload) => socket.deliver({ type: 'room:state', ...state });

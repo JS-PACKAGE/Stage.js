@@ -27,8 +27,8 @@ async function command(h: App, socket: StageSocket, type: 'hand:raise' | 'hand:w
   const request = controls(socket).at(-1)!; assert.equal(request.type, type); return request;
 }
 async function joinRequest(h: App, socket: StageSocket) {
-  socket.deliver({ type: 'hello', protocol: 1, serverVersion: 'test',
-    limits: { controlPerSecond: 2000, icePerSecond: 2000, handRaiseIntervalMs: 10000 } });
+  socket.deliver({ type: 'hello', instance: 'test-instance', protocol: 1, serverVersion: 'test',
+    limits: { controlPerSecond: 2000, icePerSecond: 2000, handRaiseIntervalMs: 10000, chatIntervalMs: 1000, reactionIntervalMs: 250 } });
   await h.until(() => socket.sent.some(message => message.type === 'join'), 'resume request');
   const request = socket.sent.find((message): message is Extract<ClientMessage, { type: 'join' }> => message.type === 'join');
   assert.ok(request); return request;

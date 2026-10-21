@@ -240,7 +240,7 @@ for (const pending of [false, true]) {
     const captures = h.captures.length, calls = h.calls(); h.socket.close(); await flush();
     assert.equal(client.status, 'reconnecting'); retry(h.micRetry, false, pending, true); forceInvoke(h.micRetry); assert.equal(h.calls(), calls);
     await h.tick(500); const resumed = StageSocket.instances.at(-1)!; assert.notEqual(resumed, h.socket);
-    resumed.deliver({ type: 'hello', protocol: 1, serverVersion: 'test', limits: { controlPerSecond: 2000, icePerSecond: 2000, handRaiseIntervalMs: 10000 } });
+    resumed.deliver({ type: 'hello', instance: 'test-instance', protocol: 1, serverVersion: 'test', limits: { controlPerSecond: 2000, icePerSecond: 2000, handRaiseIntervalMs: 10000, chatIntervalMs: 1000, reactionIntervalMs: 250 } });
     await h.until(() => resumed.sent.some(message => message.type === 'join'), 'resume join');
     const join = resumed.sent.find(message => message.type === 'join')!;
     resumed.deliver({ type: 'room:state', ...actualState(onstage) }); resumed.deliver({ type: 'ok', requestId: join.requestId }); await h.tick();

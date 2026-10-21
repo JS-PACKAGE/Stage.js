@@ -85,7 +85,7 @@ async function widgetFixture(t: TestContext, initial = baseState()) {
   const until = async (check: () => boolean, reason: string): Promise<void> => { for (let count = 0; count < 100 && !check(); count++) await tick(); assert.ok(check(), reason); };
   const joinLatest = async (snapshot = initial) => {
     await flush(); const socket = StageSocket.instances.at(-1)!; assert.ok(socket);
-    socket.deliver({ type: 'hello', protocol: 1, serverVersion: 'fixture', limits: { controlPerSecond: 2000, icePerSecond: 2000, handRaiseIntervalMs: 10000 } });
+    socket.deliver({ type: 'hello', instance: 'test-instance', protocol: 1, serverVersion: 'fixture', limits: { controlPerSecond: 2000, icePerSecond: 2000, handRaiseIntervalMs: 10000, chatIntervalMs: 1000, reactionIntervalMs: 250 } });
     await until(() => socket.sent.some(message => message.type === 'join'), 'actual SDK join');
     const join = socket.sent.find(message => message.type === 'join')!;
     socket.deliver({ type: 'room:state', ...snapshot }); socket.deliver({ type: 'ok', requestId: join.requestId });

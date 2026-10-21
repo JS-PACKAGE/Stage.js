@@ -59,7 +59,7 @@ function assertNoSelection(h: App): void {
 }
 function assertLanding(h: App): void {
   assert.equal(h.sdk.state, null); assert.equal(h.sdk.status, 'disconnected');
-  assert.equal(h.app.descendants().filter(node => node.tagName === 'form').length, 2);
+  assert.equal(h.app.descendants().filter(node => node.tagName === 'form' && !node.classList.contains('chat-form')).length, 2);
   assert.equal(h.app.descendants().filter(node => node.classList.contains('invite-link')).length, 0);
   assert.equal(h.clock.jobs.size, 0);
 }

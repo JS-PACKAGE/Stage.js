@@ -210,7 +210,7 @@ class MicContext {
 }
 function actualState(overrides: Partial<ParticipantView> = {}): RoomStatePayload {
   return { roomId: 'same-room', name: '測試舞台', controllerId: 'host', speakers: [], hands: [], audienceCount: 1,
-    codeRequired: false, limits: { maxSpeakers: 8, maxAudience: 300 }, status: 'live', resumeToken: 'test-resume',
+    codeRequired: false, recording: false, recordingAvailable: false, limits: { maxSpeakers: 8, maxAudience: 300 }, status: 'live', resumeToken: 'test-resume',
     me: { participantId: 'guest', name: '測試聽眾', role: 'audience', onStage: false, handRaised: false,
       muted: false, forceMuted: false, gainDb: 0, connected: true, joinedAt: 0, ...overrides } };
 }
@@ -268,7 +268,7 @@ async function actualApp(t: TestContext) {
   return { mic, status, leave, clients, tracks, tick,
     async join(): Promise<MicSocket> {
       form.submit(); await flush(); const socket = MicSocket.instances.at(-1); assert.ok(socket);
-      socket.deliver({ type: 'hello', protocol: 1, serverVersion: 'test', limits: { controlPerSecond: 2000, icePerSecond: 2000, handRaiseIntervalMs: 10000 } });
+      socket.deliver({ type: 'hello', instance: 'test-instance', protocol: 1, serverVersion: 'test', limits: { controlPerSecond: 2000, icePerSecond: 2000, handRaiseIntervalMs: 10000, chatIntervalMs: 1000, reactionIntervalMs: 250 } });
       await flush(); await tick(); const request = socket.sent.find(message => message.type === 'join'); assert.ok(request);
       socket.deliver({ type: 'room:state', ...actualState() }); socket.deliver({ type: 'ok', requestId: request.requestId }); await flush(); return socket;
     },
@@ -334,7 +334,7 @@ it('whole embed actual SDK socket recovery preserves the microphone track and re
   assertMic(h.mic, { hidden: false, disabled: true, muted: false, busy: false }); h.mic.invoke();
   assert.equal(socket.sent.filter(message => message.type === 'mic:mute').length, 1);
   await h.tick(500); const resumed = MicSocket.instances.at(-1)!; assert.notEqual(resumed, socket);
-  resumed.deliver({ type: 'hello', protocol: 1, serverVersion: 'test', limits: { controlPerSecond: 2000, icePerSecond: 2000, handRaiseIntervalMs: 10000 } });
+  resumed.deliver({ type: 'hello', instance: 'test-instance', protocol: 1, serverVersion: 'test', limits: { controlPerSecond: 2000, icePerSecond: 2000, handRaiseIntervalMs: 10000, chatIntervalMs: 1000, reactionIntervalMs: 250 } });
   await flush(); await h.tick(); const join = resumed.sent.find(message => message.type === 'join'); assert.ok(join);
   resumed.deliver({ type: 'room:state', ...actualState({ role: 'speaker', onStage: true, muted: true }) });
   resumed.deliver({ type: 'ok', requestId: join.requestId }); await flush();

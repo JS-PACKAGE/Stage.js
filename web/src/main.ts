@@ -1,5 +1,5 @@
-import { MAX_GAIN_DB, StageClient, decodeName } from '../../packages/client/src/index.ts';
-import type { ConnectionQuality, MicTest, ParticipantView, RoomStatePayload } from '../../packages/client/src/index.ts';
+import { MAX_GAIN_DB, REACTIONS, StageClient, decodeName } from '../../packages/client/src/index.ts';
+import type { ChatMessage, ConnectionQuality, MicTest, ParticipantView, RoomStatePayload } from '../../packages/client/src/index.ts';
 import './styles.css';
 
 const app = document.querySelector<HTMLDivElement>('#app')!;
@@ -616,6 +616,7 @@ function field(form: HTMLFormElement, label: string, name: string, value = '', r
   return input;
 }
 function landing(): void {
+  chatList.replaceChildren();
   retireOccupancy();
   // Drop ownership before any reset can synchronously deliver another speaking callback.
   resetSpeaking();
@@ -1053,6 +1054,7 @@ function renderRoom(state: RoomStatePayload): void {
   const controller = state.me.role === 'controller';
   const summary = element('section', 'panel room-summary');
   summary.append(element('h2', '', '房間資訊'), element('p', '', `房間 ID：${state.roomId}`));
+  if (state.recording) summary.append(element('p', 'badge recording', '● 錄音中：此房間的混音正在被錄下'));
   if (controller) {
     summary.append(element('p', '', state.codeRequired ? `房間代碼：${roomCode ?? '未提供'}` : '不需要房間代碼'));
     const titleRoomId = state.roomId, titleParticipantId = state.me.participantId;
@@ -1109,6 +1111,11 @@ function renderRoom(state: RoomStatePayload): void {
       if (generation !== roomActionGeneration) return;
       invitation = '已更換房間代碼，請重新分享邀請連結。'; renderNotices();
     }));
+    if (state.recordingAvailable) summary.append(state.recording
+      ? button('停止錄音', () => client.stopRecording(), 'danger')
+      : button('開始錄音', async () => {
+        if (window.confirm('錄音會把所有人聽到的混音存到伺服器，房內每個人都會看到「錄音中」。確定開始？')) await client.startRecording();
+      }));
   }
   const controls = element('section', 'panel');
   controls.append(element('h2', '', `你好，${decodeName(state.me.name)}`), element('p', '', `${roleLabels[state.me.role]}${state.me.forceMuted ? ' · 主控已鎖定靜音' : ''}`), connectionLine, ownHandPosition, handRejectionNotice);
@@ -1182,7 +1189,7 @@ function renderRoom(state: RoomStatePayload): void {
     if (state.audience.length === 0) audience.append(element('p', 'muted', '目前沒有觀眾。'));
     audience.append(list);
   } else audience.append(element('p', 'muted', '觀眾名單僅提供給主控。'));
-  grid.append(audience);
+  grid.append(audience, chatPanel);
   const top = element('div', 'landing-grid'); top.append(summary, controls);
   content.replaceChildren(top, grid);
   renderedRoomActions = Array.from(content.querySelectorAll<HTMLButtonElement | HTMLInputElement>('[data-room-action]'));
@@ -1282,6 +1289,55 @@ function updateCooldown(): void {
   syncRoomActions();
   scheduleCooldown(cooldownButton?.isConnected ? remainingMs : 0);
 }
+/** Chat lives outside `renderRoom` so a state update keeps the draft, the focus and the scroll position. */
+const chatPanel = element('section', 'panel chat');
+const chatList = element('ol', 'chat-log');
+chatList.setAttribute('aria-live', 'polite');
+const reactionFeed = element('div', 'reaction-feed');
+reactionFeed.setAttribute('aria-hidden', 'true');
+const reactionBar = element('div', 'actions reactions');
+for (const emoji of REACTIONS) {
+  const react = button(emoji, () => client.react(emoji));
+  react.setAttribute('aria-label', `送出反應 ${emoji}`);
+  reactionBar.append(react);
+}
+const chatForm = element('form', 'chat-form');
+const chatInput = element('textarea');
+chatInput.rows = 2; chatInput.placeholder = '輸入訊息，Enter 送出，Shift+Enter 換行';
+chatInput.setAttribute('aria-label', '聊天訊息');
+chatForm.append(chatInput, element('button', 'primary', '送出'));
+chatForm.onsubmit = (event) => {
+  event.preventDefault();
+  const text = chatInput.value.trim();
+  if (!text) return;
+  void run(async () => { await client.sendChat(text); chatInput.value = ''; }, chatForm.querySelector('button')!);
+};
+chatInput.onkeydown = (event) => {
+  if (event.key === 'Enter' && !event.shiftKey && !event.isComposing) { event.preventDefault(); chatForm.requestSubmit(); }
+};
+chatPanel.append(element('h2', '', '聊天'), reactionFeed, chatList, reactionBar, chatForm);
+function chatItem(message: ChatMessage): HTMLLIElement {
+  const item = element('li');
+  const time = new Date(message.sentAt).toLocaleTimeString('zh-TW', { hour: '2-digit', minute: '2-digit' });
+  item.append(element('strong', '', decodeName(message.name)), element('time', 'muted', time), element('p', '', decodeName(message.text)));
+  if (message.participantId === client.me?.participantId) item.classList.add('mine');
+  return item;
+}
+function appendChat(messages: readonly ChatMessage[], replace: boolean): void {
+  const atBottom = chatList.scrollHeight - chatList.scrollTop - chatList.clientHeight < 40;
+  if (replace) chatList.replaceChildren();
+  for (const message of messages) chatList.append(chatItem(message));
+  while (chatList.childElementCount > 200) chatList.firstElementChild!.remove();
+  if (atBottom || replace) chatList.scrollTop = chatList.scrollHeight;
+}
+client.on('chat', ({ detail }) => appendChat([detail], false));
+client.on('chathistory', ({ detail }) => appendChat(detail.messages, true));
+client.on('reaction', ({ detail }) => {
+  const bubble = element('span', 'reaction', `${detail.emoji} ${decodeName(detail.name)}`);
+  reactionFeed.append(bubble);
+  while (reactionFeed.childElementCount > 12) reactionFeed.firstElementChild!.remove();
+  setTimeout(() => bubble.remove(), 3000);
+});
 function syncHandPosition(): void {
   const state = client.state, me = state?.me;
   const visible = Boolean(me?.handRaised && !me.onStage && me.role !== 'controller');

@@ -599,3 +599,191 @@ describe('ephemeral TURN credentials', () => {
     assert.notEqual(usernames[0], usernames[1]);
   });
 });
+
+describe('chat and reactions', () => {
+  it('broadcasts chat to the room, keeps only the last rooms.chatHistory and replays them to joiners', async () => {
+    const h = harness(testConfig((c) => { c.rooms.chatHistory = 2; }));
+    const host = await h.create('Host');
+    const alice = await h.join(host.roomId, host.code, 'Alice');
+    for (const text of ['one', 'two', 'three']) assert.equal(await h.req(alice.s, { type: 'chat:send', text }), 'ok');
+    const seen = host.s.all('chat');
+    assert.deepEqual(seen.map((m) => [m.participantId, m.name, m.text]), [[alice.id, 'Alice', 'one'], [alice.id, 'Alice', 'two'], [alice.id, 'Alice', 'three']]);
+    assert.ok(seen[0]!.messageId < seen[1]!.messageId && seen[1]!.messageId < seen[2]!.messageId, 'ids increase');
+    const bob = await h.join(host.roomId, host.code, 'Bob');
+    assert.deepEqual(bob.s.last('chat:history')!.messages.map((m) => m.text), ['two', 'three']);
+  });
+
+  it('sends no history when there is none or it is disabled', async () => {
+    const h = harness(testConfig((c) => { c.rooms.chatHistory = 0; }));
+    const host = await h.create();
+    assert.equal(await h.req(host.s, { type: 'chat:send', text: 'hi' }), 'ok');
+    const late = await h.join(host.roomId, host.code, 'Late');
+    assert.equal(late.s.all('chat:history').length, 0);
+  });
+
+  it('broadcasts reactions with the sender name and needs a joined session', async () => {
+    const h = harness();
+    const host = await h.create('Host');
+    const alice = await h.join(host.roomId, host.code, 'Alice');
+    assert.equal(await h.req(alice.s, { type: 'reaction', emoji: '👏' }), 'ok');
+    assert.deepEqual(host.s.last('reaction'), { type: 'reaction', participantId: alice.id, name: 'Alice', emoji: '👏' });
+    const stranger = new FakeSession();
+    h.hub.attach(stranger);
+    assert.equal(await h.req(stranger, { type: 'chat:send', text: 'hi' }), 'not_joined');
+  });
+});
+
+describe('recording', () => {
+  function recorderHarness(enabled = true) {
+    const files: { roomId: string; packets: (Uint8Array | null)[]; stopped: boolean }[] = [];
+    const h = harness(testConfig((c) => { c.recording.enabled = enabled; c.recording.maxDurationMinutes = 1; }), {
+      startRecording: (roomId) => {
+        const file = { roomId, packets: [] as (Uint8Array | null)[], stopped: false };
+        files.push(file);
+        return { file: `${roomId}.opus`, sink: (p) => { if (!file.stopped) file.packets.push(p); }, stop: async () => { file.stopped = true; } };
+      },
+    });
+    return { h, files };
+  }
+
+  it('lets only the controller record, shows it to everyone and feeds the mix to the file until stopped', async () => {
+    const { h, files } = recorderHarness();
+    const host = await h.create();
+    const aud = await h.join(host.roomId, host.code, 'Alice');
+    assert.equal(aud.s.last('room:state')!.recordingAvailable, true);
+    assert.equal(await h.req(aud.s, { type: 'recording:start' }), 'forbidden');
+    assert.equal(await h.req(host.s, { type: 'recording:stop' }), 'conflict', 'nothing to stop');
+    assert.equal(await h.req(host.s, { type: 'recording:start' }), 'ok');
+    assert.equal(aud.s.last('room:state')!.recording, true, 'the audience is told');
+    assert.equal(await h.req(host.s, { type: 'recording:start' }), 'conflict');
+    // Frames exist only while someone feeds the mixer: the controller publishes.
+    assert.equal(await h.req(host.s, { type: 'rtc:offer', payload: SENDRECV_OFFER }), 'ok');
+    h.mixers.get(host.roomId)!.tick();
+    h.mixers.get(host.roomId)!.tick();
+    assert.equal(files[0]!.packets.length, 2, 'one packet per mixed frame');
+    assert.equal(await h.req(host.s, { type: 'recording:stop' }), 'ok');
+    assert.equal(files[0]!.stopped, true);
+    assert.equal(aud.s.last('room:state')!.recording, false);
+    h.mixers.get(host.roomId)!.tick();
+    assert.equal(files[0]!.packets.length, 2, 'nothing after stop');
+  });
+
+  it('stops on its own after maxDurationMinutes and when the room closes', async () => {
+    const { h, files } = recorderHarness();
+    const host = await h.create();
+    assert.equal(await h.req(host.s, { type: 'recording:start' }), 'ok');
+    h.timers.find((t) => !t.cleared && t.ms === 60_000)!.fn();
+    await nextTurn();
+    assert.equal(files[0]!.stopped, true);
+    assert.equal(host.s.last('room:state')!.recording, false);
+    assert.equal(await h.req(host.s, { type: 'recording:start' }), 'ok', 'can record again');
+    assert.equal(await h.req(host.s, { type: 'room:close' }), 'ok');
+    assert.equal(files[1]!.stopped, true);
+  });
+
+  it('is unavailable when the server disables it', async () => {
+    const { h } = recorderHarness(false);
+    const host = await h.create();
+    assert.equal(host.s.last('room:state')!.recordingAvailable, false);
+    assert.equal(await h.req(host.s, { type: 'recording:start' }), 'forbidden');
+  });
+});
+
+describe('persistence across a restart', () => {
+  async function savedRoom() {
+    const config = testConfig((c) => { c.persistence.restoreGraceMs = 120_000; });
+    const before = harness(config);
+    const host = await before.create('Host');
+    const sp = await before.join(host.roomId, host.code, 'Sam');
+    const aud = await before.join(host.roomId, host.code, 'Ann');
+    await before.req(sp.s, { type: 'hand:raise' });
+    await before.req(host.s, { type: 'stage:approve', targetId: sp.id });
+    await before.req(aud.s, { type: 'hand:raise' });
+    await before.req(aud.s, { type: 'chat:send', text: 'hello' });
+    const tokens = { host: host.s.last('room:state')!.resumeToken!, sp: sp.s.last('room:state')!.resumeToken!, aud: aud.s.last('room:state')!.resumeToken! };
+    await before.hub.shutdown(true);
+    assert.equal(host.s.all('room:closed').length, 0, 'nobody is told the room closed');
+    // Round-trip through JSON like the state file does.
+    const state = JSON.parse(JSON.stringify(before.hub.exportState()));
+    return { config, state, host, sp, aud, tokens };
+  }
+
+  it('restores seats, stage, hands and chat; people resume with their tokens', async () => {
+    const { config, state, host, sp, aud, tokens } = await savedRoom();
+    const after = harness(config);
+    assert.equal(after.hub.restore(state), 1);
+    const resume = async (name: string, resumeToken: string) => {
+      const s = new FakeSession();
+      after.hub.attach(s);
+      assert.equal(await after.req(s, { type: 'join', roomId: host.roomId, code: host.code, name, resumeToken }), 'ok');
+      return s;
+    };
+    const hs = await resume('Host', tokens.host);
+    const ss = await resume('Sam', tokens.sp);
+    const as = await resume('Ann', tokens.aud);
+    const st = as.last('room:state')!;
+    assert.equal(hs.last('room:state')!.me.participantId, host.id);
+    assert.equal(ss.last('room:state')!.me.participantId, sp.id);
+    assert.equal(st.me.participantId, aud.id);
+    assert.deepEqual(st.speakers.map((p) => p.participantId), [host.id, sp.id]);
+    assert.deepEqual(st.hands.map((p) => p.participantId), [aud.id]);
+    assert.deepEqual(as.last('chat:history')!.messages.map((m) => m.text), ['hello']);
+    assert.ok(st.speakers.every((p) => p.connected));
+    assert.equal(await after.req(ss, { type: 'rtc:offer', payload: SENDRECV_OFFER }), 'ok', 'restored speaker may publish again');
+  });
+
+  it('drops participants who do not come back within restoreGraceMs and closes an abandoned room', async () => {
+    const { config, state, host, tokens } = await savedRoom();
+    const after = harness(config);
+    after.hub.restore(state);
+    const s = new FakeSession();
+    after.hub.attach(s);
+    assert.equal(await after.req(s, { type: 'join', roomId: host.roomId, code: host.code, name: 'Host', resumeToken: tokens.host }), 'ok');
+    for (const t of after.timers.filter((x) => !x.cleared && x.ms === 120_000)) t.fn();
+    await nextTurn();
+    for (const t of after.timers.filter((x) => !x.cleared && x.ms < 120_000)) t.fn();
+    await nextTurn();
+    const st = s.last('room:state')!;
+    assert.deepEqual(st.speakers.map((p) => p.participantId), [host.id], 'the others are gone');
+    assert.equal(st.hands.length, 0);
+
+    const nobody = harness(config);
+    nobody.hub.restore(state);
+    for (const t of nobody.timers.filter((x) => !x.cleared)) t.fn();
+    await nextTurn();
+    assert.equal(nobody.hub.roomCount, 0, 'no one returned: room closed');
+  });
+
+  it('skips a saved room that no longer fits the configured limits', async () => {
+    const { state } = await savedRoom();
+    const after = harness(testConfig((c) => { c.limits.maxAudiencePerRoom = 1; }));
+    assert.equal(after.hub.restore(state), 0);
+    assert.equal(after.hub.roomCount, 0);
+  });
+});
+
+it('rotated admission codes stay revoked after a persisted restart', async () => {
+  const before = harness();
+  const host = await before.create();
+  const revision = before.hub.stateRevision;
+  assert.equal(await before.req(host.s, { type: 'room:rotate-code' }), 'ok');
+  assert.ok(before.hub.stateRevision > revision);
+  const code = host.s.last('room:state')!.code!;
+  const after = harness();
+  assert.equal(after.hub.restore(JSON.parse(JSON.stringify(before.hub.exportState()))), 1);
+  const guest = new FakeSession(); after.hub.attach(guest);
+  assert.equal(await after.req(guest, { type: 'join', roomId: host.roomId, code: host.code, name: 'Guest' }), 'unauthorized');
+  assert.equal(await after.req(guest, { type: 'join', roomId: host.roomId, code, name: 'Guest' }), 'ok');
+  await before.hub.shutdown(); await after.hub.shutdown();
+});
+
+it('disabling chat history discards persisted chat before replay and the next save', async () => {
+  const before = harness(); const host = await before.create();
+  await before.req(host.s, { type: 'chat:send', text: 'old private history' });
+  const after = harness(testConfig(c => { c.rooms.chatHistory = 0; }));
+  assert.equal(after.hub.restore(JSON.parse(JSON.stringify(before.hub.exportState()))), 1);
+  const guest = await after.join(host.roomId, host.code, 'Guest');
+  assert.equal(guest.s.all('chat:history').length, 0);
+  assert.deepEqual(after.hub.exportState().rooms[0]!.chat, []);
+  await before.hub.shutdown(); await after.hub.shutdown();
+});

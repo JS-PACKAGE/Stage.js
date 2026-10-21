@@ -29,7 +29,7 @@ function fixture(serverClose: Close = async () => {}, transportClose: Close = as
   };
   // Evaluate the exact production tail, without importing startup or exposing the real process.
   const { stop } = runInNewContext(stripTypeScriptTypes(`${shutdownSource}\n({ stop });`), {
-    process, log, Error,
+    process, log, Error, clearInterval, saveTimer: undefined, stateFile: '',
     server: { close() { calls.push('server.close'); return serverClose(); } },
     transport: { close() { calls.push('transport.close'); return transportClose(); } },
   }, { timeout: 1000, filename: 'cli-shutdown.vm.js' }) as { stop: Stop };

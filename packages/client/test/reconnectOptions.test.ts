@@ -18,7 +18,7 @@ class Socket {
 
 const MAX_DELAY = 2147483647;
 const flush = async () => { for (let i = 0; i < 12; i++) await Promise.resolve(); };
-const hello = (socket: Socket) => socket.deliver({ type: 'hello', protocol: 1, serverVersion: 'test', limits: { controlPerSecond: 20, icePerSecond: 30, handRaiseIntervalMs: 10000 } });
+const hello = (socket: Socket) => socket.deliver({ type: 'hello', instance: 'test-instance', protocol: 1, serverVersion: 'test', limits: { controlPerSecond: 20, icePerSecond: 30, handRaiseIntervalMs: 10000, chatIntervalMs: 1000, reactionIntervalMs: 250 } });
 const invalidValues: unknown[] = [NaN, Infinity, -Infinity, -1, -Number.MIN_VALUE, MAX_DELAY + 1, Number.MAX_VALUE, '500', null, undefined, true, false, {}, [], 1n, Symbol('delay')];
 
 describe('client reconnect options', () => {

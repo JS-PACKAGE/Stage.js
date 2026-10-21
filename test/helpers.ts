@@ -6,7 +6,7 @@ import { parseConfig, type AppConfig } from '../src/config.ts';
 import { silentLogger, type Logger } from '../src/log.ts';
 import { RoomMixer } from '../src/mixer/RoomMixer.ts';
 import { MockMediaTransport } from '../src/transport/MockMediaTransport.ts';
-import { StageHub, type Session } from '../src/ws/hub.ts';
+import { StageHub, type HubDeps, type Session } from '../src/ws/hub.ts';
 
 export function testConfig(patch?: (c: AppConfig) => void): AppConfig {
   const config = parseConfig(parse(readFileSync(new URL('../config.example.yaml', import.meta.url), 'utf8')));
@@ -57,7 +57,9 @@ type DistributiveOmit<T, K extends PropertyKey> = T extends unknown ? Omit<T, K>
 
 let rid = 0;
 
-export function harness(config = testConfig(), log: Logger = silentLogger): Harness {
+export function harness(config = testConfig(), logOrExtra: Logger | Pick<HubDeps, 'startRecording'> = silentLogger): Harness {
+  const log = 'info' in logOrExtra ? logOrExtra : silentLogger;
+  const extra = 'info' in logOrExtra ? undefined : logOrExtra;
   const timers: Harness['timers'] = [];
   const clock = { now: 1_000_000 };
   const mixers = new Map<string, RoomMixer>();
@@ -86,6 +88,7 @@ export function harness(config = testConfig(), log: Logger = silentLogger): Harn
       mixers.set(roomId, m);
       return m;
     },
+    ...extra,
   });
   const h: Harness = {
     hub,

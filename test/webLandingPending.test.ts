@@ -101,13 +101,13 @@ for (const action of ['create', 'join'] as const) {
     landing[action].form.submit(); assertPending(landing, true); snapshotBeforeAck(h, action);
     assert.equal(h.pending(action).status, 'pending');
     for (const entry of Object.values(landing)) { assert.equal(entry.form.isConnected, false); assert.equal(entry.submit.isConnected, false); }
-    assert.equal(h.app.descendants().filter(node => node.tagName === 'form').length, 0);
+    assert.equal(h.app.descendants().filter(node => node.tagName === 'form' && !node.classList.contains('chat-form')).length, 0);
     const key = action === 'create' ? 'mute' : 'hand';
     const control = () => h.find(node => node.dataset.roomAction === key);
     control().click(); assert.equal(action === 'create' ? muteCalls : h.sdk.raises.length, 1);
     const state = h.sdk.state; assert.ok(state);
     h.acknowledge(action); await flushSample();
-    assert.equal(h.sdk.state, state); assert.equal(h.app.descendants().filter(node => node.tagName === 'form').length, 0);
+    assert.equal(h.sdk.state, state); assert.equal(h.app.descendants().filter(node => node.tagName === 'form' && !node.classList.contains('chat-form')).length, 0);
     assertPending(landing, true); // Detached controls retain their last rendered state.
     assert.equal(control().disabled, true); assert.equal(control().attributes['aria-busy'], 'true');
     control().click(); assert.equal(action === 'create' ? muteCalls : h.sdk.raises.length, 1);
@@ -133,7 +133,7 @@ for (const action of ['create', 'join'] as const) {
     assertPending(replacement, false); assertPending(retired, true); assert.equal(h.clock.jobs.size, 0);
     replacement[opposite].form.submit(); assert.equal(h.requestCount(), 2); assertPending(replacement, true);
     assert.equal(errorBox(h).hidden, true); snapshotBeforeAck(h, opposite); h.acknowledge(opposite); await flushSample();
-    assert.equal(h.sdk.state?.roomId, 'same-room'); assert.equal(h.app.descendants().filter(node => node.tagName === 'form').length, 0);
+    assert.equal(h.sdk.state?.roomId, 'same-room'); assert.equal(h.app.descendants().filter(node => node.tagName === 'form' && !node.classList.contains('chat-form')).length, 0);
     assertPending(retired, true); assertPending(replacement, true); assert.equal(errorBox(h).hidden, true);
     assert.equal(h.clock.intervals(2000).length, 1); h.sdk.assertSettled();
   });

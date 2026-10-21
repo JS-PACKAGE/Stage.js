@@ -62,9 +62,9 @@ describe('SDK keepalive shares control pacing', () => {
     clients.push(client); return client;
   }
   function hello(socket: Socket, controlPerSecond = 1, icePerSecond = 30): void {
-    const limits: RateLimits = { controlPerSecond, icePerSecond, handRaiseIntervalMs: 10000 };
+    const limits: RateLimits = { controlPerSecond, icePerSecond, handRaiseIntervalMs: 10000, chatIntervalMs: 1000, reactionIntervalMs: 250 };
     socket.limiter = new ConnectionRateLimiter({ ...testConfig().limits, ...limits }, now);
-    socket.deliver({ type: 'hello', protocol: 1, serverVersion: 'test', limits });
+    socket.deliver({ type: 'hello', instance: 'test-instance', protocol: 1, serverVersion: 'test', limits });
   }
   async function connect(client: StageClient, controlPerSecond = 1, icePerSecond = 30): Promise<Socket> {
     const ready = client.connect(), socket = Socket.instances.at(-1)!;

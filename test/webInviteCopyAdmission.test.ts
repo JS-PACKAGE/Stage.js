@@ -16,7 +16,7 @@ const currentError = '保留目前操作錯誤。';
 function state(): RoomStatePayload {
   const s = roomState({ participantId: 'fictional-host', role: 'controller' });
   return { ...s, roomId: 'fictional-room', controllerId: s.me.participantId, audience: [], audienceCount: 0,
-    codeRequired: true, code: 'FICTIONAL_OLD', resumeToken: 'fictional-resume' };
+    codeRequired: true, recording: false, recordingAvailable: false, code: 'FICTIONAL_OLD', resumeToken: 'fictional-resume' };
 }
 
 type StateChange = 'room' | 'participant' | 'code' | 'role' | 'code-required' | 'room-name' | 'own-name';
@@ -65,11 +65,11 @@ async function setup(t: TestContext, location = new URL('https://sample.test/'))
   async function join(s = state()) {
     const form = h.find(node => node.tagName === 'form' && node.children.some(child => child.tagName === 'h2' && child.textContent === '加入房間'));
     for (const [name, value] of Object.entries({ roomId: s.roomId, code: s.code!, name: s.me.name })) {
-      const input = form.descendants().find(node => node.name === name); assert.ok(input); input.value = value;
+      const input = form.descendants().filter(node => node.type !== 'histogram').find(node => node.name === name); assert.ok(input); input.value = value;
     }
     form.submit(); await flushSample();
     const socket = StageSocket.instances.at(-1)!;
-    socket.deliver({ type: 'hello', protocol: 1, serverVersion: 'test', limits: { controlPerSecond: 2000, icePerSecond: 2000, handRaiseIntervalMs: 10000 } });
+    socket.deliver({ type: 'hello', instance: 'test-instance', protocol: 1, serverVersion: 'test', limits: { controlPerSecond: 2000, icePerSecond: 2000, handRaiseIntervalMs: 10000, chatIntervalMs: 1000, reactionIntervalMs: 250 } });
     await until(() => socket.sent.some(message => message.type === 'join'));
     const request = socket.sent.find(message => message.type === 'join')!;
     socket.deliver({ type: 'room:state', ...s }); socket.deliver({ type: 'ok', requestId: request.requestId });

@@ -153,7 +153,7 @@ function replacement(client: StageClient, update: Partial<RoomStatePayload> = {}
   const old = client.state!;
   return { roomId: old.roomId, name: old.name, controllerId: old.controllerId,
     speakers: old.speakers.map(person => ({ ...person })), hands: [], audienceCount: old.audienceCount,
-    codeRequired: false, limits: { ...old.limits }, status: old.status, me: { ...old.me }, ...update };
+    codeRequired: false, recording: false, recordingAvailable: false, limits: { ...old.limits }, status: old.status, me: { ...old.me }, ...update };
 }
 async function receive(client: StageClient, state: RoomStatePayload): Promise<void> {
   await client['receive']({ type: 'room:state', ...state }); await drain();

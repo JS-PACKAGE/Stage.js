@@ -67,8 +67,8 @@ for (const stall of ['hello', 'resume ACK'] as const) {
       });
       if (attempt === 2 && stall === 'hello') { socket.pause(); return; }
       socket.send(JSON.stringify({
-        type: 'hello', protocol: 1, serverVersion: 'test',
-        limits: { controlPerSecond: 20, icePerSecond: 30, handRaiseIntervalMs: 10000 },
+        type: 'hello', instance: 'test-instance', protocol: 1, serverVersion: 'test',
+        limits: { controlPerSecond: 20, icePerSecond: 30, handRaiseIntervalMs: 10000, chatIntervalMs: 1000, reactionIntervalMs: 250 },
       }));
     });
     try {

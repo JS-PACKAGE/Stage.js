@@ -1,4 +1,5 @@
 import { readFileSync } from 'node:fs';
+import { availableParallelism } from 'node:os';
 import { LineCounter, parse, YAMLParseError } from 'yaml';
 import type { IceServerConfig } from '../shared/protocol.ts';
 
@@ -44,6 +45,12 @@ export interface AppConfig {
     joinTimeoutMs: number;
     /** Concurrent ws connections per client address (0 = unlimited). */
     maxConnectionsPerIp: number;
+    /** Longest chat message in characters after sanitizing. */
+    chatMaxLength: number;
+    /** Minimum gap between one connection's chat messages (violation closes with 1008, like hand:raise). */
+    chatIntervalMs: number;
+    /** Minimum gap between one connection's reactions. */
+    reactionIntervalMs: number;
   };
   rooms: {
     codeLength: number;
@@ -55,6 +62,8 @@ export interface AppConfig {
     presenceBroadcastMs: number;
     /** How often publishers' connection quality goes to the controller and stage (0 = never). */
     qualityIntervalMs: number;
+    /** Chat messages kept per room and replayed to joiners (0 = no history). */
+    chatHistory: number;
     /** Non-empty: `room:create` must carry this token (empty = anyone may create rooms). */
     createToken: string;
   };
@@ -121,6 +130,22 @@ export interface AppConfig {
     /** Ephemeral TURN (coturn use-auth-secret); empty `urls` disables it. */
     turn: { urls: string[]; secret: string; ttlSeconds: number };
   };
+  recording: {
+    /** Whether controllers may record their room's mix. */
+    enabled: boolean;
+    /** Where `.opus` files go; relative paths resolve against the repo root. */
+    dir: string;
+    /** A recording stops on its own after this long, bounding disk use. */
+    maxDurationMinutes: number;
+  };
+  persistence: {
+    /** JSON file the rooms are saved to and restored from; empty disables persistence. */
+    stateFile: string;
+    /** How often state and liveness are written (also written on shutdown). */
+    saveIntervalMs: number;
+    /** Restored participants get this long to reconnect; a file older than this is ignored. */
+    restoreGraceMs: number;
+  };
   log: { level: 'debug' | 'info' | 'warn' | 'error' };
 }
 
@@ -174,6 +199,14 @@ function iceServers(v: unknown, path: string): IceServerConfig[] {
     if (e.credential !== undefined) out.credential = str(e, 'credential', p);
     return out;
   });
+}
+
+/**
+ * `rtc.mediaWorkers: auto`: cores left after the main thread and the codec workers, never below the
+ * 2 that the 300-listener cap needs (load-test), capped at 8 to bound idle threads on large hosts.
+ */
+export function autoMediaWorkers(codecWorkers: number, cores = availableParallelism()): number {
+  return Math.min(8, Math.max(2, cores - 1 - codecWorkers));
 }
 
 // Node timer delays above this value normalize to 1ms instead of a longer wait.
@@ -243,6 +276,9 @@ export function parseConfig(raw: unknown): AppConfig {
     sdpMaxLength: int(l, 'sdpMaxLength', 'limits', 256),
     joinTimeoutMs: int(l, 'joinTimeoutMs', 'limits', 0, MAX_TIMER_DELAY_MS),
     maxConnectionsPerIp: int(l, 'maxConnectionsPerIp', 'limits', 0),
+    chatMaxLength: l.chatMaxLength === undefined ? 500 : int(l, 'chatMaxLength', 'limits', 1, 2000),
+    chatIntervalMs: l.chatIntervalMs === undefined ? 1000 : int(l, 'chatIntervalMs', 'limits', 0),
+    reactionIntervalMs: l.reactionIntervalMs === undefined ? 250 : int(l, 'reactionIntervalMs', 'limits', 0),
   };
 
   const r = obj(root.rooms, 'rooms');
@@ -253,6 +289,7 @@ export function parseConfig(raw: unknown): AppConfig {
     heartbeatIntervalMs: int(r, 'heartbeatIntervalMs', 'rooms', 1000, MAX_TIMER_DELAY_MS),
     presenceBroadcastMs: int(r, 'presenceBroadcastMs', 'rooms', 0, 10000),
     qualityIntervalMs: int(r, 'qualityIntervalMs', 'rooms', 0, 60000),
+    chatHistory: r.chatHistory === undefined ? 50 : int(r, 'chatHistory', 'rooms', 0, 1000),
     createToken: str(r, 'createToken', 'rooms'),
   };
   if (rooms.codeLength > limits.codeMaxLength) throw new ConfigError('rooms.codeLength: exceeds limits.codeMaxLength');
@@ -353,16 +390,31 @@ export function parseConfig(raw: unknown): AppConfig {
     iceServers: iceServers(t.iceServers, 'rtc.iceServers'),
     serverIceServers: iceServers(t.serverIceServers, 'rtc.serverIceServers'),
     portRange,
-    mediaWorkers: int(t, 'mediaWorkers', 'rtc', 0, 64),
+    mediaWorkers: t.mediaWorkers === 'auto' ? autoMediaWorkers(audio.codecWorkers) : int(t, 'mediaWorkers', 'rtc', 0, 64),
     mediaWorkerTimeoutMs: t.mediaWorkerTimeoutMs === undefined ? 30000 : int(t, 'mediaWorkerTimeoutMs', 'rtc', 1, 300000),
     turn,
+  };
+
+  const rc = obj(root.recording === undefined ? { enabled: false, dir: 'recordings', maxDurationMinutes: 240 } : root.recording, 'recording');
+  const recording: AppConfig['recording'] = {
+    enabled: bool(rc, 'enabled', 'recording'),
+    dir: str(rc, 'dir', 'recording'),
+    maxDurationMinutes: int(rc, 'maxDurationMinutes', 'recording', 1, 24 * 60),
+  };
+  if (recording.enabled && recording.dir === '') throw new ConfigError('recording.dir: required when recording is enabled');
+
+  const ps = obj(root.persistence === undefined ? { stateFile: '', saveIntervalMs: 2000, restoreGraceMs: 120000 } : root.persistence, 'persistence');
+  const persistence: AppConfig['persistence'] = {
+    stateFile: str(ps, 'stateFile', 'persistence'),
+    saveIntervalMs: int(ps, 'saveIntervalMs', 'persistence', 500, 600_000),
+    restoreGraceMs: int(ps, 'restoreGraceMs', 'persistence', 1000, MAX_TIMER_DELAY_MS),
   };
 
   const lg = obj(root.log, 'log');
   const level = str(lg, 'level', 'log');
   if (!['debug', 'info', 'warn', 'error'].includes(level)) throw new ConfigError('log.level: debug|info|warn|error');
 
-  return { server, limits, rooms, audio, rtc, log: { level: level as AppConfig['log']['level'] } };
+  return { server, limits, rooms, audio, rtc, recording, persistence, log: { level: level as AppConfig['log']['level'] } };
 }
 
 export function loadConfig(path: string): AppConfig {

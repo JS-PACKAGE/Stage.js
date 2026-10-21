@@ -26,7 +26,7 @@ const connection = (h: App) => h.find(node => node.classList.contains('connectio
 
 it('whole sample joins through its form, isolates preview generations across same-identity rejoin, and keeps the post-disconnect shutdown notice', async t => {
   const h = sampleApp(); t.after(() => h.cleanup()); await flushSample();
-  assert.equal(h.app.descendants().filter(node => node.tagName === 'form').length, 2);
+  assert.equal(h.app.descendants().filter(node => node.tagName === 'form' && !node.classList.contains('chat-form')).length, 2);
   assert.equal(h.id('microphone-device').children.length, 2);
   assert.equal(h.id('playback-volume').value, '100');
   assert.equal(h.clock.jobs.size, 0);
@@ -36,7 +36,7 @@ it('whole sample joins through its form, isolates preview generations across sam
   assert.equal(h.id('microphone-device').disabled, true);
   const leaving = h.sdk.disconnect();
   assert.equal(canceled.status, 'rejected', 'the SDK cancels pending capture on disconnect');
-  assert.equal(h.app.descendants().filter(node => node.tagName === 'form').length, 2);
+  assert.equal(h.app.descendants().filter(node => node.tagName === 'form' && !node.classList.contains('chat-form')).length, 2);
   submitJoin(h); h.sdk.acceptJoin(roomState()); h.id('mic-test').click();
   const replacement = h.sdk.previews[1]!;
   await leaving; await flushSample();
@@ -67,7 +67,7 @@ it('whole sample joins through its form, isolates preview generations across sam
   assert.equal(notices(h).textContent, '', 'disconnect renders landing before the closed notification');
   await closing; await flushSample();
   assert.match(notices(h).textContent, /伺服器維護或重新啟動/);
-  assert.equal(h.app.descendants().filter(node => node.tagName === 'form').length, 2);
+  assert.equal(h.app.descendants().filter(node => node.tagName === 'form' && !node.classList.contains('chat-form')).length, 2);
   assert.equal(h.clock.jobs.size, 0); assert.equal(current.stops, 1); assert.equal(h.id('mic-level').value, 0);
   assert.deepEqual(h.sdk.events.slice(-2), ['status', 'closed']); h.sdk.assertSettled();
 });

@@ -34,8 +34,8 @@ it('cancels a real pre-hello connection before its paused WebSocket close handsh
       this.on('error', error => socketErrors.push(error));
     }
   }
-  const hello = { type: 'hello', protocol: 1, serverVersion: 'test',
-    limits: { controlPerSecond: 20, icePerSecond: 30, handRaiseIntervalMs: 10000 } };
+  const hello = { type: 'hello', instance: 'test-instance', protocol: 1, serverVersion: 'test',
+    limits: { controlPerSecond: 20, icePerSecond: 30, handRaiseIntervalMs: 10000, chatIntervalMs: 1000, reactionIntervalMs: 250 } };
   const server = new WebSocketServer({ host: '127.0.0.1', port: 0 });
   let client: StageClient | undefined;
   server.on('connection', socket => {

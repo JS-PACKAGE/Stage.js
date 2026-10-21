@@ -22,8 +22,8 @@ class Socket {
   deliver(message: unknown) { this.onmessage?.({ data: JSON.stringify(message) }); }
   hello(controlPerSecond = 20) {
     this.readyState = Socket.OPEN;
-    this.deliver({ type: 'hello', protocol: 1, serverVersion: 'test',
-      limits: { controlPerSecond, icePerSecond: 30, handRaiseIntervalMs: 10000 } });
+    this.deliver({ type: 'hello', instance: 'test-instance', protocol: 1, serverVersion: 'test',
+      limits: { controlPerSecond, icePerSecond: 30, handRaiseIntervalMs: 10000, chatIntervalMs: 1000, reactionIntervalMs: 250 } });
   }
   // Native close() does not dispatch close until the handshake completes.
   close() { this.readyState = 2; }
@@ -62,7 +62,7 @@ const code = (expected: StageError['code']) => (error: unknown) => error instanc
 function assertCode(error: unknown, expected: StageError['code']) { assert.ok(code(expected)(error), `${String(error)} should be ${expected}`); }
 function snapshot(roomId = 'old-room', id = 'guest'): RoomStatePayload {
   return { roomId, name: 'Room', controllerId: 'host', speakers: [], hands: [], audienceCount: 1,
-    codeRequired: false, limits: { maxSpeakers: 8, maxAudience: 300 }, status: 'live', resumeToken: 'resume',
+    codeRequired: false, recording: false, recordingAvailable: false, limits: { maxSpeakers: 8, maxAudience: 300 }, status: 'live', resumeToken: 'resume',
     me: { participantId: id, name: 'Guest', role: 'audience', onStage: false, handRaised: false,
       muted: false, forceMuted: false, gainDb: 0, connected: true, joinedAt: 0 } };
 }

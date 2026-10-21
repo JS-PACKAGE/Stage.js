@@ -32,7 +32,7 @@ async function withFixture(run: (fixture: Fixture) => Promise<void>, scenario = 
       server: { host: '192.0.2.1', port: 1, tls: { certFile: 'not-read', keyFile: 'not-read' }, metrics: { enabled: true, token: 'not-used' }, trustProxy: true },
       rtc: { iceServers: ['not-contacted'], serverIceServers: ['not-contacted'], mediaWorkers: 8, turn: { secret: 'not-used' } },
       audio: { codecWorkers: 8 }, rooms: { createToken: 'not-used' }, log: { level: 'error' },
-      limits: { controlPerSecond: 7, icePerSecond: 13, handRaiseIntervalMs: 250 },
+      limits: { controlPerSecond: 7, icePerSecond: 13, handRaiseIntervalMs: 250, chatIntervalMs: 1000, reactionIntervalMs: 250 },
     }));
     await writeFile(join(fixture.repositoryDirectory, 'config.yaml'), 'This user config must never be parsed.');
     await writeFile(join(fixture.repositoryDirectory, 'src', 'source.js'), 'throw new Error("Checkout source was executed");');

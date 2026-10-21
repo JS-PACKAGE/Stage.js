@@ -265,7 +265,7 @@ it('whole sample and real SDK receive quality without signaling requests, new pe
   boundary.form.submit(); await flushSample(); const sdk = boundary.clients[0]!;
   const h = sampleApp({ sdk, decodeName }); cleanup = () => h.cleanup();
   const socket = StageSocket.instances[0]!;
-  socket.deliver({ type: 'hello', protocol: 1, serverVersion: 'test', limits: { controlPerSecond: 2000, icePerSecond: 2000, handRaiseIntervalMs: 10000 } });
+  socket.deliver({ type: 'hello', instance: 'test-instance', protocol: 1, serverVersion: 'test', limits: { controlPerSecond: 2000, icePerSecond: 2000, handRaiseIntervalMs: 10000, chatIntervalMs: 1000, reactionIntervalMs: 250 } });
   await boundary.until(() => socket.sent.some(message => message.type === 'join'), 'public SDK join request');
   const request = socket.sent.find(message => message.type === 'join')!;
   const state = actualState(); state.speakers = [{ ...state.me, participantId: 'speaker-0', name: '台上甲', role: 'speaker', onStage: true }];

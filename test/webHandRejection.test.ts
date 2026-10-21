@@ -152,10 +152,10 @@ async function actualSample(t: TestContext, state: RoomStatePayload) {
   }
   const form = h.find(node => node.tagName === 'form' && node.children.some(child => child.tagName === 'h2' && child.textContent === '加入房間'));
   for (const [key, value] of Object.entries({ roomId: state.roomId, name: state.me.name })) {
-    const field = form.descendants().find(node => node.name === key)!; field.value = value;
+    const field = form.descendants().filter(node => node.type !== 'histogram').find(node => node.name === key)!; field.value = value;
   }
   form.submit(); await flushSample(); const socket = StageSocket.instances.at(-1)!;
-  socket.deliver({ type: 'hello', protocol: 1, serverVersion: 'test', limits: { controlPerSecond: 2000, icePerSecond: 2000, handRaiseIntervalMs: 10000 } });
+  socket.deliver({ type: 'hello', instance: 'test-instance', protocol: 1, serverVersion: 'test', limits: { controlPerSecond: 2000, icePerSecond: 2000, handRaiseIntervalMs: 10000, chatIntervalMs: 1000, reactionIntervalMs: 250 } });
   await until(() => socket.sent.some(message => message.type === 'join'));
   const request = socket.sent.find(message => message.type === 'join')!;
   socket.deliver({ type: 'room:state', ...state }); socket.deliver({ type: 'ok', requestId: request.requestId });

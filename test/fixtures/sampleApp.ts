@@ -2,7 +2,7 @@ import assert from 'node:assert/strict';
 import { readFileSync } from 'node:fs';
 import { stripTypeScriptTypes } from 'node:module';
 import { runInNewContext } from 'node:vm';
-import { MAX_GAIN_DB } from '../../shared/protocol.ts';
+import { MAX_GAIN_DB, REACTIONS } from '../../shared/protocol.ts';
 import type { ParticipantView, RoomStatePayload } from '../../shared/protocol.ts';
 
 /** Bounded DOM fixture; browser/CSS/permission behavior is not modeled. */
@@ -269,7 +269,7 @@ export function roomState(me: Partial<ParticipantView> = {}): RoomStatePayload {
   const person: ParticipantView = { participantId: 'same-person', name: '測試聽眾', role: 'audience', onStage: false,
     handRaised: false, muted: false, forceMuted: false, gainDb: 0, connected: true, joinedAt: 1, ...me };
   return { roomId: 'same-room', name: '測試舞台', controllerId: 'controller', speakers: person.onStage ? [person] : [],
-    hands: person.handRaised ? [person] : [], audienceCount: person.onStage ? 0 : 1, codeRequired: false,
+    hands: person.handRaised ? [person] : [], audienceCount: person.onStage ? 0 : 1, codeRequired: false, recording: false, recordingAvailable: false,
     limits: { maxSpeakers: 8, maxAudience: 300 }, status: person.onStage ? 'live' : 'waiting', me: person };
 }
 export async function flushSample(): Promise<void> { for (let i = 0; i < 16; i++) await Promise.resolve(); }
@@ -306,8 +306,8 @@ function mountSampleApp<Client extends SampleClient = SampleSdk>(options: Sample
     querySelector: (selector: string) => documentRoot.querySelector(selector) };
   const source = options.source ?? readFileSync(new URL('../../web/src/main.ts', import.meta.url), 'utf8');
   const imports = [
-    "import { MAX_GAIN_DB, StageClient, decodeName } from '../../packages/client/src/index.ts';",
-    "import type { ConnectionQuality, MicTest, ParticipantView, RoomStatePayload } from '../../packages/client/src/index.ts';",
+    "import { MAX_GAIN_DB, REACTIONS, StageClient, decodeName } from '../../packages/client/src/index.ts';",
+    "import type { ChatMessage, ConnectionQuality, MicTest, ParticipantView, RoomStatePayload } from '../../packages/client/src/index.ts';",
     "import './styles.css';",
   ];
   const lines = source.split('\n'); assert.deepEqual(lines.slice(0, 3), imports, 'review the fixture when sample imports change');
@@ -327,7 +327,7 @@ function mountSampleApp<Client extends SampleClient = SampleSdk>(options: Sample
     StageClient: function (clientOptions: { url: string }) {
       constructions++; assert.equal(clientOptions.url, options.expectedSdkUrl ?? 'wss://sample.test/ws'); return sdk;
     },
-    decodeName: options.decodeName ?? ((value: string) => value), MAX_GAIN_DB, URL, URLSearchParams, Error, AbortController,
+    decodeName: options.decodeName ?? ((value: string) => value), MAX_GAIN_DB, REACTIONS, URL, URLSearchParams, Error, AbortController,
     performance: { now: () => clock.now },
     setTimeout: clock.setTimeout, clearTimeout: clock.clear, setInterval: clock.setInterval, clearInterval: clock.clear,
   }, { timeout: 1000, filename: 'web/src/main.ts', contextCodeGeneration: { strings: false, wasm: false } });

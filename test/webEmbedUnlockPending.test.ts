@@ -47,8 +47,8 @@ function controls(h: View) {
   });
 }
 function hello(socket: StageSocket): void {
-  socket.deliver({ type: 'hello', protocol: 1, serverVersion: 'test',
-    limits: { controlPerSecond: 2000, icePerSecond: 2000, handRaiseIntervalMs: 10000 } });
+  socket.deliver({ type: 'hello', instance: 'test-instance', protocol: 1, serverVersion: 'test',
+    limits: { controlPerSecond: 2000, icePerSecond: 2000, handRaiseIntervalMs: 10000, chatIntervalMs: 1000, reactionIntervalMs: 250 } });
 }
 
 for (const phase of ['pre-entry', 'live', 'reconnecting'] as const) {

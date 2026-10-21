@@ -290,7 +290,7 @@ for (const normal of [false, true]) {
     await f.until(() => f.finished.has('late-join') && (f.detachCounts.get(guest.session) ?? 0) >= 1 && !f.h.hub.isJoined(guest.session), 'late join binding detached after drain');
     await host.client.ok({ type: 'mic:mute', requestId: 'room-barrier' });
     const state = host.client.state();
-    assert.equal(f.h.hub.metrics().find(sample => sample.name === 'stage_sessions')!.value, 1);
+    assert.equal(f.h.hub.metrics().filter(sample => sample.type !== 'histogram').find(sample => sample.name === 'stage_sessions')!.value, 1);
     if (normal) assert.deepEqual(state.audience, []);
     else {
       assert.equal(state.audience?.length, 1);
@@ -320,7 +320,7 @@ it('cleans a late room-create binding after a synthetic pre-dispatch delay', { t
   release.resolve();
   await f.until(() => f.finished.has('late-create') && (f.detachCounts.get(creator.session) ?? 0) >= 1 && !f.h.hub.isJoined(creator.session), 'late create binding detached after drain');
   assert.equal(f.h.hub.roomCount, 1, 'controller disconnect still uses controller grace');
-  assert.equal(f.h.hub.metrics().find(sample => sample.name === 'stage_sessions')!.value, 0);
+  assert.equal(f.h.hub.metrics().filter(sample => sample.type !== 'histogram').find(sample => sample.name === 'stage_sessions')!.value, 0);
   assert.equal(f.h.timers.filter(timer => !timer.cleared).length, 1, 'the disconnected controller has one grace timer');
 });
 

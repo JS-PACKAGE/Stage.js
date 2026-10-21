@@ -25,8 +25,8 @@ class Socket {
   deliver(message: ServerMessage) { this.onmessage?.({ data: JSON.stringify(message) }); }
   hello() {
     this.readyState = Socket.OPEN;
-    this.deliver({ type: 'hello', protocol: 1, serverVersion: 'test',
-      limits: { controlPerSecond: 20, icePerSecond: 30, handRaiseIntervalMs: 10000 } });
+    this.deliver({ type: 'hello', instance: 'test-instance', protocol: 1, serverVersion: 'test',
+      limits: { controlPerSecond: 20, icePerSecond: 30, handRaiseIntervalMs: 10000, chatIntervalMs: 1000, reactionIntervalMs: 250 } });
   }
   close() { this.readyState = 3; this.onclose?.(); }
 }
@@ -62,7 +62,7 @@ function snapshot(name = 'Original room', options: { roomId?: string; participan
     muted: false, forceMuted: false, gainDb: 3, connected: true, joinedAt: 123 };
   return { roomId, name, controllerId: role === 'controller' ? participantId : 'host',
     speakers: onStage ? [me] : [], hands: [], audienceCount: role === 'audience' ? 1 : 0,
-    codeRequired: true, status, resumeToken: `seat-${participantId}`, limits: { maxSpeakers: 8, maxAudience: 300 },
+    codeRequired: true, recording: false, recordingAvailable: false, status, resumeToken: `seat-${participantId}`, limits: { maxSpeakers: 8, maxAudience: 300 },
     ...(role === 'controller' ? { code: 'room-code', audience: [] } : {}), me };
 }
 const deliverState = (socket: Socket, state: RoomStatePayload) => socket.deliver({ type: 'room:state', ...state });

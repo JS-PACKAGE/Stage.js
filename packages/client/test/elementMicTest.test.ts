@@ -102,7 +102,7 @@ export function byId(element: Widget, id: string): HostNode {
 }
 export const flush = async (): Promise<void> => { for (let i = 0; i < 35; i++) await Promise.resolve(); };
 export function state(overrides: Partial<RoomStatePayload> = {}): RoomStatePayload { return { roomId: 'same-room', name: '測試舞台', controllerId: 'host', speakers: [], hands: [], audienceCount: 1,
-    codeRequired: false, limits: { maxSpeakers: 8, maxAudience: 300 }, status: 'live', resumeToken: 'test-resume',
+    codeRequired: false, recording: false, recordingAvailable: false, limits: { maxSpeakers: 8, maxAudience: 300 }, status: 'live', resumeToken: 'test-resume',
     me: { participantId: 'guest', name: '測試聽眾', role: 'audience', onStage: false, handRaised: false, muted: false,
       forceMuted: false, gainDb: 0, connected: true, joinedAt: 0 }, ...overrides }; }
 
@@ -136,7 +136,7 @@ export async function widgetFixture(t: TestContext, initial = state()) {
   const until = async (check: () => boolean, reason: string): Promise<void> => { for (let count = 0; count < 100 && !check(); count++) await tick(); assert.ok(check(), reason); };
   const joinLatest = async (snapshot = initial) => {
     await flush(); const socket = StageSocket.instances.at(-1)!; assert.ok(socket);
-    socket.deliver({ type: 'hello', protocol: 1, serverVersion: 'fixture', limits: { controlPerSecond: 2000, icePerSecond: 2000, handRaiseIntervalMs: 10000 } });
+    socket.deliver({ type: 'hello', instance: 'test-instance', protocol: 1, serverVersion: 'fixture', limits: { controlPerSecond: 2000, icePerSecond: 2000, handRaiseIntervalMs: 10000, chatIntervalMs: 1000, reactionIntervalMs: 250 } });
     await until(() => socket.sent.some(message => message.type === 'join'), 'actual SDK join');
     const join = socket.sent.find(message => message.type === 'join')!;
     socket.deliver({ type: 'room:state', ...snapshot }); socket.deliver({ type: 'ok', requestId: join.requestId });
@@ -483,7 +483,7 @@ it('same-client explicit SDK reentry restores widget listeners only on current a
   const h = await widgetFixture(t); await h.client.disconnect(); await flush();
   assert.equal(getEventListeners(h.pageDocument, 'visibilitychange').length, 0); assert.equal(getEventListeners(h.pageWindow, 'pagehide').length, 0);
   const connected = h.client.connect(); await flush();
-  StageSocket.instances.at(-1)!.deliver({ type: 'hello', protocol: 1, serverVersion: 'fixture', limits: { controlPerSecond: 2000, icePerSecond: 2000, handRaiseIntervalMs: 10000 } });
+  StageSocket.instances.at(-1)!.deliver({ type: 'hello', instance: 'test-instance', protocol: 1, serverVersion: 'fixture', limits: { controlPerSecond: 2000, icePerSecond: 2000, handRaiseIntervalMs: 10000, chatIntervalMs: 1000, reactionIntervalMs: 250 } });
   await connected; const joined = h.client.join({ roomId: 'same-room', name: 'Restored' }); await h.joinLatest(); await joined;
   assert.equal(getEventListeners(h.pageDocument, 'visibilitychange').length, 1); assert.equal(h.captures.length, 0); await active(h);
 });

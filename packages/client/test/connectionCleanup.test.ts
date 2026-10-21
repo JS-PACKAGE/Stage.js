@@ -15,7 +15,7 @@ class Socket {
   constructor(_url: string) { if (Socket.failConstruction) throw new Error('invalid URL'); Socket.instances.push(this); }
   send(data: string) { const request = JSON.parse(data); if (request.requestId) queueMicrotask(() => this.deliver({ type: 'ok', requestId: request.requestId })); }
   deliver(message: unknown) { this.onmessage?.({ data: JSON.stringify(message) }); }
-  hello() { this.readyState = 1; this.deliver({ type: 'hello', protocol: 1, serverVersion: 'test', limits: { controlPerSecond: 20, icePerSecond: 30, handRaiseIntervalMs: 10000 } }); }
+  hello() { this.readyState = 1; this.deliver({ type: 'hello', instance: 'test-instance', protocol: 1, serverVersion: 'test', limits: { controlPerSecond: 20, icePerSecond: 30, handRaiseIntervalMs: 10000, chatIntervalMs: 1000, reactionIntervalMs: 250 } }); }
   close() { this.readyState = 3; if (!this.deferClose) this.onclose?.(); }
 }
 class Audio {

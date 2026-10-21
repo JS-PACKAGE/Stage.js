@@ -64,8 +64,8 @@ class Socket {
   deliver(message: unknown): void { this.onmessage?.({ data: JSON.stringify(message) }); }
   hello(): void {
     this.readyState = Socket.OPEN;
-    this.deliver({ type: 'hello', protocol: 1, serverVersion: 'test',
-      limits: { controlPerSecond: 20, icePerSecond: 30, handRaiseIntervalMs: 10000 } });
+    this.deliver({ type: 'hello', instance: 'test-instance', protocol: 1, serverVersion: 'test',
+      limits: { controlPerSecond: 20, icePerSecond: 30, handRaiseIntervalMs: 10000, chatIntervalMs: 1000, reactionIntervalMs: 250 } });
   }
   // Deliberately stall the close handshake to exercise SDK local cancellation.
   close(): void { this.closeCalls++; this.readyState = 2; }
@@ -183,7 +183,7 @@ for (const action of ['create', 'join'] as const) {
       await flushSample(); assertProgress(h); assertLocked(forms(h), false); assert.equal(errorBox(h).hidden, true);
       const fresh = h.start(opposite(action)); assert.equal(Socket.instances.length, 2);
       for (const message of [
-        { type: 'hello', protocol: 1, serverVersion: 'retired', limits: { controlPerSecond: 20, icePerSecond: 30, handRaiseIntervalMs: 10000 } },
+        { type: 'hello', instance: 'test-instance', protocol: 1, serverVersion: 'retired', limits: { controlPerSecond: 20, icePerSecond: 30, handRaiseIntervalMs: 10000, chatIntervalMs: 1000, reactionIntervalMs: 250 } },
         ...(request ? [{ type: 'ok', requestId: request.requestId }] : []),
         { type: 'room:created', roomId: 'retired-room', code: 'RETIRED' },
         { type: 'room:state', ...roomState(), roomId: 'retired-room' },

@@ -1,9 +1,9 @@
 import type { AppConfig } from '../config.ts';
 import { samplesPerFrame } from '../config.ts';
 import type { Logger } from '../log.ts';
-import type { MetricSample } from '../metrics.ts';
+import { Histogram, type MetricSample } from '../metrics.ts';
 import type { IceCandidatePayload, SessionDescriptionPayload } from '../../shared/protocol.ts';
-import type { AudioFrameHandler, MediaTransport, MediaTransportCallbacks, MixedPcmSource, MixFrame, NegotiationPolicy, TransportStats } from './MediaTransport.ts';
+import type { AudioFrameHandler, MediaTransport, MediaTransportCallbacks, MixedPcmSource, MixFrame, MixPacketSink, NegotiationPolicy, TransportStats } from './MediaTransport.ts';
 import { CodecPool, type EncodeItem } from './codecPool.ts';
 import { RtpReorderBuffer } from './jitter.ts';
 import { MediaShard } from './mediaShards.ts';
@@ -28,6 +28,8 @@ interface FanoutPlan {
   /** One empty payload per frame: what hosts get instead of an encode while the room is silent. */
   silence: Uint8Array[];
   targets: [PeerHost, [id: string, frame: number][]][];
+  /** Index of the full-mix frame for the recording, -1 when not recording. */
+  recordAt: number;
 }
 interface Room {
   id: string;
@@ -47,6 +49,9 @@ interface Room {
   silentTicks: number;
   /** This tick's routing, reused across ticks; compared against `plan`. */
   scratch: { ids: string[]; hosts: PeerHost[]; keys: string[]; pcms: Float32Array[] };
+  /** Recording sink of the full mix; packets reach it in mixer order through `recordTail`. */
+  recording: MixPacketSink | undefined;
+  recordTail: Promise<void>;
   detach?: () => void;
 }
 /** Encoder keys of the audience mixes; participant ids (base64url) key their mix-minus encoders. */
@@ -79,6 +84,8 @@ export class WeriftMediaTransport implements MediaTransport {
   private readonly codecs: CodecPool;
   private readonly hosts: PeerHost[];
   private readonly counters = { uplinkPackets: 0, uplinkConcealed: 0, shedFrames: 0, encodeFailures: 0, silentSkipped: 0 };
+  /** Mixer tick → encoded payloads back from the codec worker: the server's own share of downlink latency. */
+  private readonly encodeLatency = new Histogram([0.001, 0.002, 0.005, 0.01, 0.02, 0.05, 0.1, 0.25]);
   /** `createHosts` replaces the configured werift hosts (tests drive the fan-out through fakes). */
   constructor(config: AppConfig, callbacks: MediaTransportCallbacks, log: Logger, createHosts?: (events: PeerHostEvents) => PeerHost[]) {
     this.config = config; this.callbacks = callbacks; this.log = log;
@@ -109,6 +116,7 @@ export class WeriftMediaTransport implements MediaTransport {
       { name: 'stage_mix_frames_shed_total', help: 'Mixed frames dropped because a codec worker fell behind.', type: 'counter', value: c.shedFrames },
       { name: 'stage_encode_failures_total', help: 'Mixed frames whose encode failed.', type: 'counter', value: c.encodeFailures },
       { name: 'stage_mix_frames_silent_skipped_total', help: 'Mixed frames not encoded because nobody had been audible for a while (sent as DTX).', type: 'counter', value: c.silentSkipped },
+      { name: 'stage_mix_encode_seconds', help: 'Time from a mixer tick to its encoded downlink payloads (codec worker round trip).', type: 'histogram', histogram: this.encodeLatency },
     ];
   }
   private room(id: string): Room {
@@ -116,7 +124,7 @@ export class WeriftMediaTransport implements MediaTransport {
     if (!room) {
       room = {
         id, peers: new Map(), publishers: new Map(), subscribers: new Set(), uplinks: new Map(), downlinkLoss: new Map(), lowTier: new Set(), silentFrames: new Map(),
-        plan: undefined, silentTicks: 0, scratch: { ids: [], hosts: [], keys: [], pcms: [] },
+        plan: undefined, silentTicks: 0, scratch: { ids: [], hosts: [], keys: [], pcms: [] }, recording: undefined, recordTail: Promise.resolve(),
       };
       this.rooms.set(id, room);
     }
@@ -206,6 +214,11 @@ export class WeriftMediaTransport implements MediaTransport {
     room.detach?.(); room.detach = undefined;
     if (source) room.detach = source.onFrame(frame => this.sendFrame(room, frame));
   }
+  setRecording(roomId: string, sink: MixPacketSink | null): void {
+    const room = this.room(roomId);
+    room.recording = sink ?? undefined;
+    room.plan = undefined;
+  }
   private sendFrame(room: Room, frame: MixFrame): void {
     const plan = this.fanout(room, frame);
     if (!plan.frames.length) return;
@@ -214,18 +227,33 @@ export class WeriftMediaTransport implements MediaTransport {
     if (this.config.audio.opus.dtx && room.silentTicks > SKIP_SILENCE_AFTER_MS / this.config.audio.frameMs && !this.codecs.backlog(room.id)) {
       this.counters.silentSkipped++;
       for (const [host, list] of plan.targets) host.send({ roomId: room.id, payloads: plan.silence, targets: list });
+      this.record(room, plan, undefined);
       return;
     }
     // Shed frames instead of queueing unbounded latency when the room's worker falls behind.
     if (this.codecs.backlog(room.id) >= this.config.audio.mixer.maxBufferedFrames) {
       this.counters.shedFrames++;
       this.log.warn('Codec worker behind; dropping mixed frame', { roomId: room.id, seq: frame.seq });
+      this.record(room, plan, undefined);
       return;
     }
-    this.codecs.encode(room.id, plan.frames).then(payloads => {
+    const started = performance.now();
+    const encoded = this.codecs.encode(room.id, plan.frames);
+    encoded.then(payloads => {
+      this.encodeLatency.observe((performance.now() - started) / 1000);
       if (this.rooms.get(room.id) !== room) return;
       for (const [host, list] of plan.targets) host.send({ roomId: room.id, payloads, targets: list });
     }, (err: Error) => { this.counters.encodeFailures++; this.log.warn('Mixed frame encode failed', { roomId: room.id, error: err.message }); });
+    this.record(room, plan, encoded);
+  }
+  /** Queue this frame's full-mix packet (none when `encoded` is undefined or fails) behind the previous ones. */
+  private record(room: Room, plan: FanoutPlan, encoded: Promise<Uint8Array[]> | undefined): void {
+    const sink = room.recording;
+    if (!sink || plan.recordAt < 0) return;
+    const at = plan.recordAt;
+    const previous = room.recordTail;
+    const packet = encoded ? encoded.then(payloads => payloads[at] ?? null, () => null) : Promise.resolve(null);
+    room.recordTail = Promise.all([packet, previous]).then(([p]) => { if (room.recording === sink) sink(p); });
   }
   /** This tick's routing; the cached plan when nothing about it changed. */
   private fanout(room: Room, frame: MixFrame): FanoutPlan {
@@ -241,7 +269,7 @@ export class WeriftMediaTransport implements MediaTransport {
     }
     ids.length = hosts.length = keys.length = pcms.length = n;
     const cached = room.plan;
-    if (cached && this.planMatches(cached, n, ids, hosts, keys, pcms)) return cached;
+    if (cached && this.planMatches(cached, n, ids, hosts, keys, pcms, frame.full)) return cached;
     const frames: EncodeItem[] = [];
     const frameOf: number[] = [];
     const index = new Map<string, number>();
@@ -255,16 +283,21 @@ export class WeriftMediaTransport implements MediaTransport {
       if (!list) { list = []; targets.set(hosts[i]!, list); }
       list.push([ids[i]!, at]);
     }
-    room.plan = { ids: ids.slice(), hosts: hosts.slice(), frameOf, frames, silence: frames.map(() => new Uint8Array(0)), targets: [...targets] };
+    let recordAt = -1;
+    if (room.recording) {
+      // The recording is the audience mix: share its encode, or add it when nobody listens to it.
+      recordAt = index.get(FULL_MIX) ?? frames.push({ key: FULL_MIX, pcm: frame.full, low: false }) - 1;
+    }
+    room.plan = { ids: ids.slice(), hosts: hosts.slice(), frameOf, frames, silence: frames.map(() => new Uint8Array(0)), targets: [...targets], recordAt };
     return room.plan;
   }
-  private planMatches(plan: FanoutPlan, n: number, ids: string[], hosts: PeerHost[], keys: string[], pcms: Float32Array[]): boolean {
+  private planMatches(plan: FanoutPlan, n: number, ids: string[], hosts: PeerHost[], keys: string[], pcms: Float32Array[], full: Float32Array): boolean {
     if (plan.ids.length !== n) return false;
     for (let i = 0; i < n; i++) {
       const item = plan.frames[plan.frameOf[i]!]!;
       if (plan.ids[i] !== ids[i] || plan.hosts[i] !== hosts[i] || item.key !== keys[i] || item.pcm !== pcms[i]) return false;
     }
-    return true;
+    return plan.recordAt < 0 || plan.frames[plan.recordAt]!.pcm === full;
   }
   /**
    * A source's own mix-minus, or undefined once it has been silent for SHARE_SILENT_AFTER_MS: its

@@ -20,8 +20,8 @@ async function start(t: TestContext) {
   return { ...h, cancel, submit, socket };
 }
 async function hello(h: Awaited<ReturnType<typeof start>>, socket = h.socket) {
-  socket.deliver({ type: 'hello', protocol: 1, serverVersion: 'test',
-    limits: { controlPerSecond: 2000, icePerSecond: 2000, handRaiseIntervalMs: 10000 } });
+  socket.deliver({ type: 'hello', instance: 'test-instance', protocol: 1, serverVersion: 'test',
+    limits: { controlPerSecond: 2000, icePerSecond: 2000, handRaiseIntervalMs: 10000, chatIntervalMs: 1000, reactionIntervalMs: 250 } });
   await h.until(() => socket.sent.some(message => message.type === 'join'), 'join request');
   const request = socket.sent.find((message): message is Extract<ClientMessage, { type: 'join' }> => message.type === 'join');
   assert.ok(request); return request;
@@ -115,8 +115,8 @@ for (const phase of ['hello', 'join'] as const) {
     h.cancel.click(); h.form.submit(); submission(h.submit, true); cancelControl(h.cancel, true); await flush();
     const current = StageSocket.instances.at(-1)!; assert.notEqual(current, retired);
     const notice = h.status.textContent;
-    retired.deliver({ type: 'hello', protocol: 1, serverVersion: 'test',
-      limits: { controlPerSecond: 2000, icePerSecond: 2000, handRaiseIntervalMs: 10000 } });
+    retired.deliver({ type: 'hello', instance: 'test-instance', protocol: 1, serverVersion: 'test',
+      limits: { controlPerSecond: 2000, icePerSecond: 2000, handRaiseIntervalMs: 10000, chatIntervalMs: 1000, reactionIntervalMs: 250 } });
     if (request) retired.deliver({ type: 'ok', requestId: request.requestId });
     retired.deliver({ type: 'room:state', ...actualState({ role: 'audience' }) });
     for (const [event, detail] of [

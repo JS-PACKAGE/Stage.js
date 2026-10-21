@@ -19,7 +19,7 @@ interface StageTrack { enabled: boolean; stopped: boolean; readyState: string; s
 interface StageStream { getTracks(): StageTrack[]; getAudioTracks(): StageTrack[] }
 export function actualState(overrides: Partial<ParticipantView> = {}): RoomStatePayload {
   return { roomId: 'same-room', name: '測試舞台', controllerId: 'guest', speakers: [], hands: [], audienceCount: 0,
-    codeRequired: false, limits: { maxSpeakers: 8, maxAudience: 300 }, status: 'live', resumeToken: 'test-resume',
+    codeRequired: false, recording: false, recordingAvailable: false, limits: { maxSpeakers: 8, maxAudience: 300 }, status: 'live', resumeToken: 'test-resume',
     me: { participantId: 'guest', name: '測試主控', role: 'controller', onStage: false, handRaised: false, muted: false,
       forceMuted: false, gainDb: 0, connected: true, joinedAt: 0, ...overrides } };
 }
@@ -168,7 +168,7 @@ export async function actualApp(t: TestContext, options: { deferCapture?: boolea
     calls: () => calls, ready: () => ready,
     async join(overrides: Partial<ParticipantView> = {}) {
       form.submit(); await flush(); const socket = StageSocket.instances.at(-1)!;
-      socket.deliver({ type: 'hello', protocol: 1, serverVersion: 'test', limits: { controlPerSecond: 2000, icePerSecond: 2000, handRaiseIntervalMs: 10000 } });
+      socket.deliver({ type: 'hello', instance: 'test-instance', protocol: 1, serverVersion: 'test', limits: { controlPerSecond: 2000, icePerSecond: 2000, handRaiseIntervalMs: 10000, chatIntervalMs: 1000, reactionIntervalMs: 250 } });
       await until(() => socket.sent.some(message => message.type === 'join'), 'join request');
       const request = socket.sent.find(message => message.type === 'join')!;
       socket.deliver({ type: 'room:state', ...actualState(overrides) }); socket.deliver({ type: 'ok', requestId: request.requestId });
@@ -182,4 +182,3 @@ export async function actualApp(t: TestContext, options: { deferCapture?: boolea
     },
   };
 }
-

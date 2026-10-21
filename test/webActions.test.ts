@@ -11,7 +11,7 @@ const people = source.slice(source.indexOf('function panelList('), source.indexO
 const landing = source.slice(source.indexOf('function landing()'), source.indexOf('function renderNotices('));
 const audienceFilter = source.slice(source.indexOf('function resetAudienceFilter()'), source.indexOf('function renderRoom('));
 const render = source.slice(source.indexOf('function renderRoom('), source.indexOf('function panelList('));
-const cooldown = source.slice(source.indexOf('function updateCooldown('), source.indexOf("client.on('state', ({ detail })"));
+const cooldown = source.slice(source.indexOf('function updateCooldown('), source.indexOf('/** Chat lives')) + source.slice(source.indexOf('function syncHandPosition('), source.indexOf("client.on('state', ({ detail })"));
 interface Button {
   disabled: boolean;
   textContent: string;
@@ -63,6 +63,7 @@ function setup(): Harness {
         const visit = node => { if (node.dataset.roomAction) nodes.push(node); for (const child of node.children) visit(child); };
         children.forEach(visit);
       } };
+    const chatPanel = { dataset: {}, children: [] }, chatList = { replaceChildren() {} };
     const brand = {}, status = {}, connectionLine = { dataset: {}, children: [], classList: { toggle() {} } };
     const audioRetryNotice = { hidden: true, textContent: '', dataset: {}, children: [] };
     const ownHandPosition = { hidden: true, textContent: '', dataset: {}, children: [] };

@@ -95,7 +95,7 @@ it('actual SDK newer error survives a pending output rejection and fulfillment',
 it('actual SDK state before join ACK may select; disconnected state never admits output', async t => {
   const h = await actualApp(t, { output: true }); force(h); assert.equal(h.sinks.length, 0);
   h.form.submit(); await flush(); const socket = StageSocket.instances.at(-1)!;
-  socket.deliver({ type: 'hello', protocol: 1, serverVersion: 'test', limits: { controlPerSecond: 2000, icePerSecond: 2000, handRaiseIntervalMs: 10000 } });
+  socket.deliver({ type: 'hello', instance: 'test-instance', protocol: 1, serverVersion: 'test', limits: { controlPerSecond: 2000, icePerSecond: 2000, handRaiseIntervalMs: 10000, chatIntervalMs: 1000, reactionIntervalMs: 250 } });
   await h.until(() => socket.sent.some(m => m.type === 'join'), 'join request');
   force(h); assert.equal(h.sinks.length, 0);
   socket.deliver({ type: 'room:state', ...actualState({ role: 'audience' }) }); apply(h).click(); assert.equal(h.sinks.length, 1);
@@ -179,7 +179,7 @@ it('actual SDK forced changes during pending, reconnect and hidden controls cann
 it('actual SDK same-seat reconnect retains the operation until settlement after resumed state and ACK', async t => {
   const h = await setup(t); await list(h); select(h).change('usb'); apply(h).click(); const original = StageSocket.instances.at(-1)!;
   original.close(); await flush(); await h.tick(500); const socket = StageSocket.instances.at(-1)!; assert.notEqual(socket, original);
-  socket.deliver({ type: 'hello', protocol: 1, serverVersion: 'test', limits: { controlPerSecond: 2000, icePerSecond: 2000, handRaiseIntervalMs: 10000 } });
+  socket.deliver({ type: 'hello', instance: 'test-instance', protocol: 1, serverVersion: 'test', limits: { controlPerSecond: 2000, icePerSecond: 2000, handRaiseIntervalMs: 10000, chatIntervalMs: 1000, reactionIntervalMs: 250 } });
   await h.until(() => socket.sent.some(m => m.type === 'join'), 'resumed join'); const request = socket.sent.find(m => m.type === 'join')!;
   socket.deliver({ type: 'room:state', ...actualState({ role: 'audience' }) }); socket.deliver({ type: 'ok', requestId: request.requestId }); await flush();
   locked(h, 'apply'); force(h); assert.equal(h.sinks.length, 1); h.sinks[0]!.work.resolve(); await flush();

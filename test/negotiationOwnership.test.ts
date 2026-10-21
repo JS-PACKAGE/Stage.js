@@ -86,7 +86,7 @@ async function setup(t: TestContext) {
     assert.equal(room.subscribers.has(id), true, 'the current subscriber must survive');
     assert.equal(room.peers.get(listener.id), listenerPeer, 'unrelated peers must survive');
     assert.equal(mixer.sourceCount, 1, 'the current mixer source must survive');
-    assert.equal(h.hub.metrics().find(sample => sample.name === 'stage_publishers')!.value, 1);
+    assert.equal(h.hub.metrics().filter(sample => sample.type !== 'histogram').find(sample => sample.name === 'stage_publishers')!.value, 1);
     assert.equal(h.hub.roomCount, 1);
   };
   const assertAudio = (id = speaker.id) => {
@@ -99,7 +99,7 @@ async function setup(t: TestContext) {
     assert.equal(room.publishers.has(speaker.id), false);
     assert.equal(room.subscribers.has(speaker.id), false);
     assert.equal(mixer.sourceCount, 0);
-    assert.equal(h.hub.metrics().find(sample => sample.name === 'stage_publishers')!.value, 0);
+    assert.equal(h.hub.metrics().filter(sample => sample.type !== 'histogram').find(sample => sample.name === 'stage_publishers')!.value, 0);
     assert.equal(h.transport.emitUplink(host.roomId, speaker.id, sine(960, 0.2)), false);
     assert.equal(room.peers.get(listener.id), listenerPeer);
     assert.equal(h.hub.roomCount, 1);

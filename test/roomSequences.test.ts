@@ -109,7 +109,7 @@ function verify(r: Room, m: Ledger): void {
   const shared = {
     roomId: 'room', name: 'Sequence room', controllerId: m.controller,
     speakers: staged(m).map(p => view(m, p)), hands: hands(m).map(p => view(m, p)),
-    audienceCount: audience(m).length, codeRequired: m.codeRequired,
+    audienceCount: audience(m).length, codeRequired: m.codeRequired, recording: false, recordingAvailable: false,
     limits: m.limits, status: staged(m).length ? 'live' : 'waiting',
   };
   assert.deepEqual(r.sharedSnapshot(), shared, 'shared snapshot has exactly the public fields');

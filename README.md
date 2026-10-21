@@ -124,13 +124,17 @@ Windows 用 `.\stage.ps1 <command>`，指令相同；Windows 無法對背景 nod
 | 區塊 | 重點欄位 |
 |---|---|
 | `server` | `host`、`port`、`wsPath`；`allowInsecure`（明文 ws，僅限 loopback host）；`tls.certFile`／`keyFile`；`static` 靜態掛載（`/` → `web/dist`，`/lib/` → `packages/client/dist` 附 CORS）；`metrics.{enabled,token}`（`GET /metrics`，對外 host 須設 token）；`trustProxy`（反向代理後以 `X-Forwarded-For` 計算每 IP 連線）；`httpShutdownDrainMs`（最後 HTTP 排空期限，0–60000 ms，詳見監控與停機） |
-| `limits` | `maxRooms`、`maxConnections`、`maxConnectionsPerIp`（同一位址同時連線，0＝不限；NAT 或反向代理後多人共用位址，設定前先估算，代理後須開 `server.trustProxy`）、`joinTimeoutMs`（連上後未開房／進房的逾時，0＝不限）、`maxSpeakersPerRoom`（8，主控以外的台上者；主控席位另計）、`maxAudiencePerRoom`（300）、`maxFrameBytes`（64KB）、`maxSendBufferBytes`（每條 ws 待送位元組上限，含下一則訊息；範例 1 MiB，舊設定省略時採 `maxFrameBytes × 16`）、`maxPendingMessages`／`maxPendingBytes`（每條 ws 等待處理的工作數／位元組上限，詳見下方輸入工作佇列）、`controlPerSecond`（20）、`handRaiseIntervalMs`（10000）、`icePerSecond`（30）、`nameMaxLength`（32）、`codeMaxLength`（16）、`sdpMaxLength` |
-| `rooms` | `codeLength`（8）、`controllerGraceMs`（主控斷線寬限 60000）、`participantGraceMs`（其他人斷線寬限 15000；期間保留席位、台位、舉手順位與 PeerConnection，音訊不中斷；0＝立即移除）、`heartbeatIntervalMs`、`presenceBroadcastMs`（觀眾進出合併 `room:state` 廣播的時間窗，250；進場者本人仍立即收到自己的 snapshot）、`qualityIntervalMs`（台上者連線品質回報間隔，2000；0＝停用）、`createToken`（非空時 `room:create` 須帶相同 `token`，否則 `unauthorized`；空字串＝任何人可開房，對外部署建議設定） |
+| `limits` | `maxRooms`、`maxConnections`、`maxConnectionsPerIp`（同一位址同時連線，0＝不限；NAT 或反向代理後多人共用位址，設定前先估算，代理後須開 `server.trustProxy`）、`joinTimeoutMs`（連上後未開房／進房的逾時，0＝不限）、`maxSpeakersPerRoom`（8，主控以外的台上者；主控席位另計）、`maxAudiencePerRoom`（300）、`maxFrameBytes`（64KB）、`maxSendBufferBytes`（每條 ws 待送位元組上限，含下一則訊息；範例 1 MiB，舊設定省略時採 `maxFrameBytes × 16`）、`maxPendingMessages`／`maxPendingBytes`（每條 ws 等待處理的工作數／位元組上限，詳見下方輸入工作佇列）、`controlPerSecond`（20）、`handRaiseIntervalMs`（10000）、`icePerSecond`（30）、`nameMaxLength`（32）、`codeMaxLength`（16）、`sdpMaxLength`、`chatMaxLength`（500）、`chatIntervalMs`（1000）、`reactionIntervalMs`（250） |
+| `rooms` | `codeLength`（8）、`controllerGraceMs`（主控斷線寬限 60000）、`participantGraceMs`（其他人斷線寬限 15000；期間保留席位、台位、舉手順位與 PeerConnection，音訊不中斷；0＝立即移除）、`heartbeatIntervalMs`、`presenceBroadcastMs`（觀眾進出合併 `room:state` 廣播的時間窗，250；進場者本人仍立即收到自己的 snapshot）、`qualityIntervalMs`（台上者連線品質回報間隔，2000；0＝停用）、`chatHistory`（每房保留聊天則數，50；0＝停用且不恢復舊聊天）、`createToken`（非空時 `room:create` 須帶相同 `token`，否則 `unauthorized`；空字串＝任何人可開房，對外部署建議設定） |
 | `audio` | `sampleRate`（48000；只接受 Opus 原生取樣率）、`frameMs`（20）、`codecWorkers`（Opus 編解碼 worker 數，房間平均分配到各 worker）、`opus.{vbr,minBitrate,maxBitrate,bitrate,complexity}`、`opus.fec`／`opus.packetLossPercent`（下行 in-band FEC 與預期掉包率）、`opus.dtx`（靜音不送包）、`lowTier.{enabled,bitrate,packetLossPercent,enterLossPercent,exitLossPercent}`（RTCP 接收報告顯示持續掉包的觀眾改收第二路共用混音：較低位元率＋較多 FEC，掉包回落後切回）、`mixer.{maxBufferedFrames,limiterThreshold}`、`mixer.latencyTargetMs`（僅供 `bench-mixer`／`load-test` 當驗收門檻）、`mixer.speakingThreshold`／`speakingHoldMs`（說話指示的 RMS 門檻與釋放延遲）、`jitter.playoutFrames`（每路上行預緩衝幀數）、`jitter.reorderPackets`（亂序容忍包數，超過即判定遺失並補幀）、`noiseFilter.{enabled,highPassHz,gateThreshold,gateHoldMs,gateFloor}`（伺服器端上行降噪：高通濾掉低頻雜音＋噪音門壓低說話間隙的背景音；瀏覽器端另開 `noiseSuppression`）、`loudness.{enabled,targetRms,maxGainDb,speechRms,adaptMs}`（伺服器端每路音量正規化：依說話時的平均音量把各發言者拉到相近大小，增益上限 ±maxGainDb） |
-| `rtc` | `iceServers`（下發給瀏覽器的靜態 STUN）、`serverIceServers`（伺服器端 ICE）、`portRange`（`[]` 或 `[min, max]`）、`mediaWorkerTimeoutMs`（worker RPC 逾時，預設／舊設定省略時 30000，1–300000 ms；不適用於 `mediaWorkers: 0`）、`mediaWorkers`（承載 PeerConnection 的 worker thread 數，預設 2 對應 300 聽眾；0＝主執行緒）、`turn.{urls,secret,ttlSeconds}`（coturn `use-auth-secret` 短期憑證，每次進房以 HMAC 簽發；`urls: []` 停用） |
+| `rtc` | `iceServers`（下發給瀏覽器的靜態 STUN）、`serverIceServers`（伺服器端 ICE）、`portRange`（`[]` 或 `[min, max]`）、`mediaWorkerTimeoutMs`（worker RPC 逾時，預設／舊設定省略時 30000，1–300000 ms；不適用於 `mediaWorkers: 0`）、`mediaWorkers`（承載 PeerConnection 的 worker thread 數，預設 2 對應 300 聽眾；0＝主執行緒；`auto`＝核心數 − 1 − codecWorkers，限制 2–8）、`turn.{urls,secret,ttlSeconds}`（coturn `use-auth-secret` 短期憑證，每次進房以 HMAC 簽發；`urls: []` 停用） |
+| `recording` | `enabled`（主控可否錄音，預設 false）、`dir`（`.opus` 存放目錄，相對路徑以專案根目錄為準）、`maxDurationMinutes`（單次錄音上限，逾時自動停止） |
+| `persistence` | `stateFile`（非空時把房間存成 JSON、重啟後恢復；含房間代碼與 resumeToken，檔案權限 600，勿入庫；空字串停用）、`saveIntervalMs`（定期刷新間隔，安靜房間也更新，停機時另寫一次）、`restoreGraceMs`（恢復後等參與者回來的時間；停機超過此時間的狀態檔不採用） |
 | `log` | `level`：`debug`／`info`／`warn`／`error`（房間代碼、token、憑證、SDP 一律不入日誌） |
 
 `rooms.createToken` 最多 256 個 UTF-16 code unit，與既有 `room:create.token` 的 wire 驗證上限一致；啟動及離線設定檢查會提早拒絕超限設定，錯誤只指出欄位與上限，不回顯權杖。舊版雖可載入更長值，正常控制訊息無法提交該值完成認證。此檢查不 trim、正規化或截斷：空字串維持停用建立權杖，非空值（含空白）仍須精確匹配；補充平面字元計兩個 code unit，UTF-8 位元組數不是此上限。設定仍必須提供字串；不變更其他認證、frame 限制或既有公開錯誤。
+
+舊設定省略新增聊天欄位時，採範例值；省略 `recording`／`persistence` 整節時預設停用，因此升級不會自動錄音或寫入房間資料。
 
 ### 對外部署
 
@@ -178,6 +182,8 @@ logger 會遞迴遮蔽物件／陣列中的 `code`、`resumeToken`、`token`、`
 
 一般未上台、未舉手觀眾的名稱只對本人與目前主控可見；沒有等待中的合併廣播或房間狀態變更時，改名只刷新這兩位的個人化 snapshot。其他人的資料未變，因此不再收到這次冗餘 state／觸發其既有接收流程。台上者、舉手者、主控，以及有 pending 廣播的情況仍沿用全房更新；沒有新增週期廣播。受控 301 席／20 舉手工作量中，一次此類改名的 state frames 從 301 降為 2；1 個台上席的 JSON state bytes 為 1,319,402→62,426，9 席為 1,746,570→63,834。這些數字不含 ACK、WebSocket framing 或壓縮，也不代表 CPU、音訊或容量量測。
 
+監控：`GET /healthz` 回 `ok`；`GET /metrics` 回 Prometheus 文字格式（`Authorization: Bearer <server.metrics.token>`），包含房間／連線／發言者數、上下行封包與補幀數、DTX 省略幀、全房無聲時跳過編碼的幀數（`opus.dtx` 開啟且台上全員靜音或沒有上行超過 1 秒時，混音不再編碼、直接以 DTX 處理）、low tier 聽眾數、codec backlog 與丟幀、mixer underrun／漂移丟幀／tick 延遲、event loop delay 與記憶體，以及兩個 histogram：`stage_mix_encode_seconds`（混音 tick 到下行編碼完成，伺服器自身在下行延遲中的份額）與 `stage_negotiate_seconds`（套用 offer 到產生 answer）。[`deploy/grafana-dashboard.json`](deploy/grafana-dashboard.json) 是對應的 Grafana dashboard（匯入時選 Prometheus 資料來源）。
+
 ## WebSocket 協定摘要
 
 無法解析的 WebSocket upgrade request target 會收到固定、空內容的 HTTP 400 並關閉該 socket，不建立 session，也不把原始 target 或 parser error 寫入診斷／回應。合法 URL 仍沿用既有 path、連線容量與握手檢查；停機中的 upgrade 仍優先回 503。這是輸入邊界的解析失敗隔離，不新增 Origin／認證政策或遠端服務驗證。
@@ -200,18 +206,24 @@ JSON frame，型別定義在 [`shared/protocol.ts`](shared/protocol.ts)。每個
 | `mic:gain {targetId, gainDb}` | 主控調整某人在混音中的音量（±20 dB，0＝不調整；疊加在自動音量正規化之上），離開舞台後再上台仍保留；所有人在 `room:state` 的 `gainDb` 看到 |
 | `room:rename {name}` | 主控更新房間名稱；沿用進房名稱清洗與設定長度，改變時全房收到個人化 state，再回請求者 ACK；同名只刷新請求者，仍須主控權限 |
 | `room:rotate-code` | 主控更換房間代碼（限需代碼的房間）；舊代碼／邀請連結立即失效，既有連線保留。重連仍驗證代碼；主控 SDK 更新已收到的新代碼，其他成員未取得新代碼時無法以舊代碼重連 |
+| `chat:send {text}` | 聊天（任何已進房者；換行保留、控制字元移除後 HTML 轉義，≤ `limits.chatMaxLength` 字元） |
+| `reaction {emoji}` | 表情反應，只接受 `REACTIONS`（👏 ❤️ 😂 😮 👍 🎉） |
+| `recording:start`／`recording:stop` | 主控開始／停止錄音（伺服器 `recording.enabled` 時）：把觀眾聽到的完整混音存成 `<dir>/<roomId>-<UTC 時間>.opus`（Ogg/Opus，直接封裝共用編碼、不另外編碼；沒有任何人在台上時混音器不出幀，那段不寫入）；錄音中所有人的 `room:state.recording` 為 true |
 | `rtc:offer`／`rtc:ice {payload}` | WebRTC 信令（一律由 client 發 offer） |
 | `ping` | 回 `pong` |
 
 | Server → Client | 說明 |
 |---|---|
-| `hello` | `{protocol, serverVersion, limits: {controlPerSecond, icePerSecond, handRaiseIntervalMs}}`：client 依 `limits` 自行節流與舉手冷卻 |
+| `hello` | `{protocol, serverVersion, instance, limits: {controlPerSecond, icePerSecond, handRaiseIntervalMs, chatIntervalMs, reactionIntervalMs}}`：client 依 `limits` 自行節流與舉手冷卻；`instance` 每次伺服器啟動都不同，回座時發現它變了就重建 PeerConnection |
 | `room:state` | 個人化 snapshot（每次變動重送）；每人帶 `connected`（ws 斷線、席位保留中為 false）；`code`、`audience` 名單只給主控，`resumeToken` 只給本人 |
-| `room:created`、`room:closed` | 開房（只有建立者收到 code）、關房（全員離房）；伺服器停止時 `room:closed` 帶 `reason: 'shutdown'`，連線隨後以 close code 1001 關閉 |
+| `room:created`、`room:closed` | 開房（只有建立者收到 code）、關房（全員離房）；伺服器停止時 `room:closed` 帶 `reason: 'shutdown'`，連線隨後以 close code 1001 關閉（開啟 `persistence` 時不送 `room:closed`，只以 1001 關閉，client 自動重連回座） |
 | `kicked` | `{roomId}`：你被主控踢出，伺服器隨即以 close code 4001 關閉連線 |
 | `rtc:config` | 瀏覽器用的 ICE servers（設定 `rtc.turn` 時含該參與者專屬的短期 TURN 憑證） |
 | `speaking` | `{participantIds}`：目前在混音中有聲的參與者（VAD＋釋放延遲）；成功建立／加入／恢復連線時，在房間快照之後、ACK 之前送目前集合（可為空），之後只在集合變動時廣播 |
 | `quality` | `{participants: [{participantId, uplinkLossPercent?, downlinkLossPercent?, rttMs?}]}`：依 `qualityIntervalMs` 回報可取得統計的上行者連線品質（上行掉包為該區間伺服器實際遺失比例，下行掉包取自對方 RTCP 接收報告），只送給主控與台上者 |
+| `chat` | `{messageId, participantId, name, text, sentAt}`：廣播給全房 |
+| `chat:history` | `{messages}`：進房（含斷線回座）時補送最近 `rooms.chatHistory` 則；沒有訊息時不送 |
+| `reaction` | `{participantId, name, emoji}`：廣播給全房，不保留 |
 | `role:update`、`hand:raise`／`hand:withdraw`、`stage:invite`、`stage:joined`、`stage:left`、`control:transferred`、`mic:muted`／`mic:unmuted` | 事件廣播 |
 | `hand:rejected {roomId, participantId}` | 成功婉拒後，僅向當前在線申請者發送的暫時通知；在其更新快照之後，不保存或重播 |
 | `rtc:answer`、`rtc:ice` | 伺服器端信令 |
@@ -419,6 +431,7 @@ node scripts/bench-control-plane.ts --hands # 真實本機 WebSocket＋Mock 媒�
 node scripts/bench-audience-count.ts # 觀眾計數 getter 的有界比較
 node scripts/bench-mixer.ts      # 混音壓測：3／8 發言者 × 300 訂閱者
 node scripts/load-test.ts        # 全端壓測：3 發言者＋298 werift 觀眾（--speakers/--audience/--seconds/--procs/--url）
+node scripts/load-test.ts --seconds 3600 --sample-seconds 60 --max-heap-growth-mb 50  # 長時間 soak：每分鐘記 RSS／heap／late ticks／編碼 p99，heap 成長超過門檻即失敗
 npm audit
 ```
 

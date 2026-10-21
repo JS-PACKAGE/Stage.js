@@ -103,7 +103,7 @@ async function actualSample(t: TestContext) {
     const form = h.find(node => node.tagName === 'form' && node.children.some(child => child.tagName === 'h2' && child.textContent === title));
     const values = onStage ? { name: 'Listener', roomName: 'Fixture' } : { roomId: host.roomId, code: host.code, name: 'Listener' };
     for (const [name, value] of Object.entries(values)) {
-      const input = form.descendants().find(node => node.name === name); assert.ok(input); input.value = value;
+      const input = form.descendants().filter(node => node.type !== 'histogram').find(node => node.name === name); assert.ok(input); input.value = value;
     }
     form.submit();
     await until(() => sdk.state !== null && StagePeer.instances.at(-1)?.localDescription !== null, 'room entry and offer');

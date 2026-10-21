@@ -332,7 +332,7 @@ for (const stage of ['capture', 'sender'] as const) {
 
 it('actual SDK whole embed initial state owns a no-capture default preference before join ACK settles', async t => {
   const h = await actualApp(t); h.form.submit(); await flush(); const socket = StageSocket.instances.at(-1)!;
-  socket.deliver({ type: 'hello', protocol: 1, serverVersion: 'test', limits: { controlPerSecond: 2000, icePerSecond: 2000, handRaiseIntervalMs: 10000 } });
+  socket.deliver({ type: 'hello', instance: 'test-instance', protocol: 1, serverVersion: 'test', limits: { controlPerSecond: 2000, icePerSecond: 2000, handRaiseIntervalMs: 10000, chatIntervalMs: 1000, reactionIntervalMs: 250 } });
   await h.until(() => socket.sent.some(message => message.type === 'join'), 'join request before ACK');
   const join = socket.sent.find(message => message.type === 'join')!;
   socket.deliver({ type: 'room:state', ...actualState({ role: 'audience' }) }); picker(h);
@@ -350,7 +350,7 @@ it('actual SDK whole embed reconnect retains pending input replacement on its or
   const captures = h.captures.length; socket.close(); await flush(); assert.equal(client.status, 'reconnecting'); picker(h, 'pending-usb', 'apply');
   force(h, 'apply'); force(h, 'refresh'); forceChange(h, ''); picker(h, 'pending-usb', 'apply'); assert.equal(h.captures.length, captures);
   await h.tick(500); const resumed = StageSocket.instances.at(-1)!; assert.notEqual(resumed, socket);
-  resumed.deliver({ type: 'hello', protocol: 1, serverVersion: 'test', limits: { controlPerSecond: 2000, icePerSecond: 2000, handRaiseIntervalMs: 10000 } });
+  resumed.deliver({ type: 'hello', instance: 'test-instance', protocol: 1, serverVersion: 'test', limits: { controlPerSecond: 2000, icePerSecond: 2000, handRaiseIntervalMs: 10000, chatIntervalMs: 1000, reactionIntervalMs: 250 } });
   await h.until(() => resumed.sent.some(message => message.type === 'join'), 'resume join');
   const join = resumed.sent.find(message => message.type === 'join')!;
   resumed.deliver({ type: 'room:state', ...actualState({ role: 'speaker', onStage: true, muted: true }) });

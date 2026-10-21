@@ -479,7 +479,7 @@ it('whole embed actual SDK reconnect retains rows/open, rejects old request natu
   socket.close(); assert.equal(summary(h), '舉手申請（2） · 上次收到'); assert.equal(row(h).node, a.node); locked(a);
   await flush(); locked(a, false, true); assert.equal(h.node('error-notice').hidden, true); assert.equal(panel(h).open, true);
   force(a.reject); await h.tick(500); const resumed = StageSocket.instances.at(-1)!; assert.notEqual(resumed, socket);
-  resumed.deliver({ type: 'hello', protocol: 1, serverVersion: 'test', limits: { controlPerSecond: 2000, icePerSecond: 2000, handRaiseIntervalMs: 10000 } });
+  resumed.deliver({ type: 'hello', instance: 'test-instance', protocol: 1, serverVersion: 'test', limits: { controlPerSecond: 2000, icePerSecond: 2000, handRaiseIntervalMs: 10000, chatIntervalMs: 1000, reactionIntervalMs: 250 } });
   await h.until(() => resumed.sent.some(message => message.type === 'join'), 'resume join');
   const joined = resumed.sent.find(message => message.type === 'join'); assert.ok(joined?.type === 'join'); assert.equal(joined.resumeToken, 'test-resume');
   resumed.deliver({ type: 'ok', requestId: joined.requestId }); await flush(); locked(a, false, true);

@@ -169,8 +169,8 @@ class Socket {
   onclose: (() => void) | null = null;
   constructor() {
     Socket.instances.push(this);
-    queueMicrotask(() => this.deliver({ type: 'hello', protocol: 1, serverVersion: 'test',
-      limits: { controlPerSecond: 2000, icePerSecond: 2000, handRaiseIntervalMs: 10000 } }));
+    queueMicrotask(() => this.deliver({ type: 'hello', instance: 'test-instance', protocol: 1, serverVersion: 'test',
+      limits: { controlPerSecond: 2000, icePerSecond: 2000, handRaiseIntervalMs: 10000, chatIntervalMs: 1000, reactionIntervalMs: 250 } }));
   }
   deliver(message: ServerMessage): void { this.onmessage?.({ data: JSON.stringify(message) }); }
   send(data: string): void {
@@ -277,7 +277,7 @@ async function integratedSetup(t: TestContext) {
   async function join() {
     const form = h.find(node => node.tagName === 'form' && node.children.some(child => child.tagName === 'h2' && child.textContent === '加入房間'));
     for (const [name, value] of Object.entries({ roomId: 'same-room', name: '測試聽眾' })) {
-      const input = form.descendants().find(node => node.name === name); assert.ok(input); input.value = value;
+      const input = form.descendants().filter(node => node.type !== 'histogram').find(node => node.name === name); assert.ok(input); input.value = value;
     }
     form.submit(); await until(() => sdk.state !== null && Peer.instances.at(-1)?.remoteDescription !== null, 'join form and audience negotiation');
     const socket = Socket.instances.at(-1)!, peer = Peer.instances.at(-1)!;

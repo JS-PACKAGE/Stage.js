@@ -25,8 +25,8 @@ function request(socket: StageSocket): Extract<ClientMessage, { type: 'join' }> 
   const join = socket.sent.find((message): message is Extract<ClientMessage, { type: 'join' }> => message.type === 'join');
   assert.ok(join); return join;
 }
-const hello = (socket: StageSocket): void => socket.deliver({ type: 'hello', protocol: 1, serverVersion: 'test',
-  limits: { controlPerSecond: 2000, icePerSecond: 2000, handRaiseIntervalMs: 10000 } });
+const hello = (socket: StageSocket): void => socket.deliver({ type: 'hello', instance: 'test-instance', protocol: 1, serverVersion: 'test',
+  limits: { controlPerSecond: 2000, icePerSecond: 2000, handRaiseIntervalMs: 10000, chatIntervalMs: 1000, reactionIntervalMs: 250 } });
 
 it('whole embed declares a separate initially hidden last-error alert and native dismiss button', () => {
   const html = readFileSync(new URL('../web/embed.html', import.meta.url), 'utf8');

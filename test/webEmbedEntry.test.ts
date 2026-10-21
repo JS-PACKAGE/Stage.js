@@ -39,7 +39,7 @@ class Peer {
 }
 const state = (name = '測試舞台'): RoomStatePayload => ({
   roomId: 'same-room', name, controllerId: 'host', speakers: [], hands: [], audienceCount: 1,
-  codeRequired: true, limits: { maxSpeakers: 8, maxAudience: 300 }, status: 'live',
+  codeRequired: true, recording: false, recordingAvailable: false, limits: { maxSpeakers: 8, maxAudience: 300 }, status: 'live',
   me: { participantId: 'guest', name: '測試聽眾', role: 'audience', onStage: false, handRaised: false,
     muted: false, forceMuted: false, gainDb: 0, connected: true, joinedAt: 0 },
 });
@@ -114,7 +114,7 @@ async function fixture(t: TestContext, options: { deferLibrary?: boolean } = {})
     node, form, submit, status, hand, leave, clients, loads, tick,
     async start(): Promise<Socket> { form.submit(); assertSubmission(submit, true); await flush(); const socket = Socket.instances.at(-1); assert.ok(socket); return socket; },
     async hello(socket: Socket): Promise<Extract<ClientMessage, { type: 'join' }>> {
-      socket.deliver({ type: 'hello', protocol: 1, serverVersion: 'test', limits: { controlPerSecond: 20, icePerSecond: 30, handRaiseIntervalMs: 10000 } });
+      socket.deliver({ type: 'hello', instance: 'test-instance', protocol: 1, serverVersion: 'test', limits: { controlPerSecond: 20, icePerSecond: 30, handRaiseIntervalMs: 10000, chatIntervalMs: 1000, reactionIntervalMs: 250 } });
       await flush(); await tick();
       const request = socket.sent.find((message): message is Extract<ClientMessage, { type: 'join' }> => message.type === 'join');
       assert.ok(request); return request;
@@ -322,7 +322,7 @@ it('whole embed checks ownership after disconnect and hello awaits before constr
   h.form.submit(); h.form.submit(); await flush();
   assert.equal(h.clients.length, 1, 'only the newest synchronous form event reaches library construction');
   const retired = Socket.instances[0]!;
-  retired.deliver({ type: 'hello', protocol: 1, serverVersion: 'test', limits: { controlPerSecond: 20, icePerSecond: 30, handRaiseIntervalMs: 10000 } });
+  retired.deliver({ type: 'hello', instance: 'test-instance', protocol: 1, serverVersion: 'test', limits: { controlPerSecond: 20, icePerSecond: 30, handRaiseIntervalMs: 10000, chatIntervalMs: 1000, reactionIntervalMs: 250 } });
   h.form.submit(); await flush(); await h.tick();
   assert.equal(h.clients.length, 2); assert.deepEqual(retired.sent, []);
   assertSubmission(h.submit, true);

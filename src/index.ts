@@ -6,6 +6,8 @@ import { createLogger } from './log.ts';
 import { MixerCounters, processSamples, renderPrometheus } from './metrics.ts';
 import { MixerClock } from './mixer/MixerClock.ts';
 import { RoomMixer } from './mixer/RoomMixer.ts';
+import { startRecording } from './recording/recorder.ts';
+import { loadState, saveState } from './persistence.ts';
 import { WeriftMediaTransport } from './transport/WeriftMediaTransport.ts';
 import { StageHub } from './ws/hub.ts';
 import { createStageServer } from './ws/server.ts';
@@ -62,8 +64,37 @@ const stageHub = new StageHub({
     mixer.start(mixerClock);
     return mixer;
   },
+  startRecording: (roomId) => startRecording({
+    dir: resolve(root, config.recording.dir),
+    roomId,
+    frameSamples: audio.frameMs * 48,
+    vendor: `Stage.js ${version}`,
+    now: Date.now(),
+    log,
+  }),
 });
 hub = stageHub;
+
+const stateFile = config.persistence.stateFile && resolve(root, config.persistence.stateFile);
+let saveTimer: NodeJS.Timeout | undefined;
+let saving: Promise<void> = Promise.resolve();
+if (stateFile) {
+  const saved = loadState(stateFile, config.persistence.restoreGraceMs, Date.now(), log);
+  if (saved) log.info('rooms restored from state file', { restored: stageHub.restore(saved), saved: saved.rooms.length });
+  let pendingSave = false;
+  const save = () => {
+    // Refresh liveness even for quiet rooms; bound slow-disk work to one pending snapshot.
+    if (pendingSave) return;
+    pendingSave = true;
+    saving = saveState(stateFile, stageHub.exportState())
+      .catch((error: unknown) => log.error('state file write failed', { error }))
+      .finally(() => { pendingSave = false; });
+  };
+  // Written right away too, so a restored-but-unchanged state is not lost to an early crash.
+  save();
+  saveTimer = setInterval(save, config.persistence.saveIntervalMs);
+  saveTimer.unref();
+}
 
 const processMetrics = config.server.metrics.enabled ? processSamples() : () => [];
 const server = createStageServer({
@@ -90,11 +121,17 @@ const stop = async (signal: string, code = 0) => {
   if (stopping) return;
   stopping = true;
   log.info('shutting down', { signal });
+  clearInterval(saveTimer);
   // One failed cleanup phase must not skip the remaining resources or the requested exit.
-  try { await server.close(); }
+  try { await server.close(Boolean(stateFile)); }
   catch (error) {
     exitCode ||= 1;
     log.error('server shutdown failed', { error });
+  }
+  if (stateFile) {
+    await saving;
+    try { await saveState(stateFile, stageHub.exportState()); }
+    catch (error) { exitCode ||= 1; log.error('state file write failed', { error }); }
   }
   try { await transport.close(); }
   catch (error) {
@@ -107,7 +144,8 @@ process.on('SIGINT', () => void stop('SIGINT'));
 process.on('SIGTERM', () => void stop('SIGTERM'));
 // A stray rejection (typically a WebRTC stack timer firing after a peer closed) is logged, not fatal:
 // Node's default would take every room down. An uncaught exception may have left state inconsistent,
-// so the rooms are told the server is going away and the process exits non-zero for the supervisor.
+// so the process stops (rooms closed, or saved for restore — each one is re-validated then) and exits
+// non-zero for the supervisor.
 process.on('unhandledRejection', (reason) => {
   log.error('unhandled rejection', { error: reason });
 });

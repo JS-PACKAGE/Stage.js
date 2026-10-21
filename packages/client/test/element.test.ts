@@ -107,7 +107,7 @@ function click(button: HTMLButtonElement): void { button.onclick?.call(button, {
 function roomState(onStage = false, roomId = 'one'): RoomStatePayload {
   return {
     roomId, name: 'Room &amp; Hall', controllerId: 'host', speakers: [], hands: [], audienceCount: 1,
-    codeRequired: false, limits: { maxSpeakers: 8, maxAudience: 300 }, status: 'live',
+    codeRequired: false, recording: false, recordingAvailable: false, limits: { maxSpeakers: 8, maxAudience: 300 }, status: 'live',
     me: { participantId: 'me', name: 'Listener', role: onStage ? 'speaker' : 'audience', onStage,
       handRaised: false, muted: false, forceMuted: false, gainDb: 0, connected: true, joinedAt: 0 },
   };
@@ -187,8 +187,8 @@ function socketJoiningWidget(t: TestContext, attributes: Record<string, string> 
     deliver(message: ServerMessage): void { this.onmessage?.({ data: JSON.stringify(message) }); }
     hello(): void {
       this.readyState = Socket.OPEN;
-      this.deliver({ type: 'hello', protocol: 1, serverVersion: 'test',
-        limits: { controlPerSecond: 20, icePerSecond: 30, handRaiseIntervalMs: 10000 } });
+      this.deliver({ type: 'hello', instance: 'test-instance', protocol: 1, serverVersion: 'test',
+        limits: { controlPerSecond: 20, icePerSecond: 30, handRaiseIntervalMs: 10000, chatIntervalMs: 1000, reactionIntervalMs: 250 } });
     }
     close(): void { this.readyState = 3; this.onclose?.(); }
   }

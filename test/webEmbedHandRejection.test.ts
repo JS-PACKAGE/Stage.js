@@ -157,7 +157,7 @@ it('whole embed real SDK reconnect never replays old feedback and retired socket
   const h = await actualApp(t), { socket } = await h.join({ role: 'audience' });
   socket.deliver({ type: 'hand:rejected', roomId: 'same-room', participantId: 'guest' }); shown(h); socket.close(); hidden(h);
   synthetic(h.clients[0]); hidden(h); await h.tick(500); const resumed = StageSocket.instances.at(-1)!; assert.notEqual(resumed, socket);
-  resumed.deliver({ type: 'hello', protocol: 1, serverVersion: 'test', limits: { controlPerSecond: 2000, icePerSecond: 2000, handRaiseIntervalMs: 10000 } });
+  resumed.deliver({ type: 'hello', instance: 'test-instance', protocol: 1, serverVersion: 'test', limits: { controlPerSecond: 2000, icePerSecond: 2000, handRaiseIntervalMs: 10000, chatIntervalMs: 1000, reactionIntervalMs: 250 } });
   await h.until(() => resumed.sent.some(message => message.type === 'join'), 'resume request'); const join = resumed.sent.find(message => message.type === 'join')!;
   resumed.deliver({ type: 'room:state', ...actualState({ role: 'audience' }) }); resumed.deliver({ type: 'ok', requestId: join.requestId }); await flush(); hidden(h);
   socket.deliver({ type: 'hand:rejected', roomId: 'same-room', participantId: 'guest' }); hidden(h);
@@ -166,7 +166,7 @@ it('whole embed real SDK reconnect never replays old feedback and retired socket
 
 it('whole embed real pre-ACK disconnection retires feedback despite retained SDK state', async t => {
   const h = await actualApp(t); h.form.submit(); await flush(); const socket = StageSocket.instances.at(-1)!;
-  socket.deliver({ type: 'hello', protocol: 1, serverVersion: 'test', limits: { controlPerSecond: 2000, icePerSecond: 2000, handRaiseIntervalMs: 10000 } });
+  socket.deliver({ type: 'hello', instance: 'test-instance', protocol: 1, serverVersion: 'test', limits: { controlPerSecond: 2000, icePerSecond: 2000, handRaiseIntervalMs: 10000, chatIntervalMs: 1000, reactionIntervalMs: 250 } });
   await h.until(() => socket.sent.some(message => message.type === 'join'), 'join request');
   socket.deliver({ type: 'room:state', ...actualState({ role: 'audience' }) });
   socket.deliver({ type: 'hand:rejected', roomId: 'same-room', participantId: 'guest' }); shown(h);

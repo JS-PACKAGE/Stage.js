@@ -60,7 +60,7 @@ const errorBox = (h: View) => h.find(node => node.attributes.role === 'alert');
 const notices = (h: App) => h.find(node => node.classList.contains('notices'));
 function assertLanding(h: App): void {
   assert.equal(h.sdk.state, null); assert.equal(h.sdk.status, 'disconnected');
-  assert.equal(h.app.descendants().filter(node => node.tagName === 'form').length, 2);
+  assert.equal(h.app.descendants().filter(node => node.tagName === 'form' && !node.classList.contains('chat-form')).length, 2);
   assert.equal(h.clock.jobs.size, 0);
 }
 async function join(h: App, state = managementState()): Promise<void> {
@@ -328,8 +328,8 @@ class GainSocket {
   deliver(message: ServerMessage): void { this.onmessage?.({ data: JSON.stringify(message) }); }
   hello(): void {
     this.readyState = GainSocket.OPEN;
-    this.deliver({ type: 'hello', protocol: 1, serverVersion: 'test',
-      limits: { controlPerSecond: 20, icePerSecond: 30, handRaiseIntervalMs: 10000 } });
+    this.deliver({ type: 'hello', instance: 'test-instance', protocol: 1, serverVersion: 'test',
+      limits: { controlPerSecond: 20, icePerSecond: 30, handRaiseIntervalMs: 10000, chatIntervalMs: 1000, reactionIntervalMs: 250 } });
   }
   close(): void { this.readyState = 3; this.onclose?.(); }
 }

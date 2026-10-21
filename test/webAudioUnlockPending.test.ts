@@ -61,11 +61,11 @@ async function actualSample(t: TestContext) {
     const state = roomState();
     const form = h.find(node => node.tagName === 'form' && node.children.some(child => child.tagName === 'h2' && child.textContent === '加入房間'));
     for (const [name, value] of Object.entries({ roomId: state.roomId, name: state.me.name })) {
-      const input = form.descendants().find(node => node.name === name); assert.ok(input); input.value = value;
+      const input = form.descendants().filter(node => node.type !== 'histogram').find(node => node.name === name); assert.ok(input); input.value = value;
     }
     form.submit(); await flushSample();
     const socket = StageSocket.instances.at(-1)!;
-    socket.deliver({ type: 'hello', protocol: 1, serverVersion: 'test', limits: { controlPerSecond: 2000, icePerSecond: 2000, handRaiseIntervalMs: 10000 } });
+    socket.deliver({ type: 'hello', instance: 'test-instance', protocol: 1, serverVersion: 'test', limits: { controlPerSecond: 2000, icePerSecond: 2000, handRaiseIntervalMs: 10000, chatIntervalMs: 1000, reactionIntervalMs: 250 } });
     await until(() => socket.sent.some(message => message.type === 'join'), 'initial join request');
     const request = socket.sent.find(message => message.type === 'join')!;
     socket.deliver({ type: 'room:state', ...state }); socket.deliver({ type: 'ok', requestId: request.requestId });
@@ -207,7 +207,7 @@ it('real SDK sample same-seat reconnect retains the existing play and pending no
   assert.equal(h.audio.plays.length, 2);
   await h.until(() => StageSocket.instances.length === 2, 'reconnect socket');
   const resumed = StageSocket.instances.at(-1)!;
-  resumed.deliver({ type: 'hello', protocol: 1, serverVersion: 'test', limits: { controlPerSecond: 2000, icePerSecond: 2000, handRaiseIntervalMs: 10000 } });
+  resumed.deliver({ type: 'hello', instance: 'test-instance', protocol: 1, serverVersion: 'test', limits: { controlPerSecond: 2000, icePerSecond: 2000, handRaiseIntervalMs: 10000, chatIntervalMs: 1000, reactionIntervalMs: 250 } });
   await h.until(() => resumed.sent.some(message => message.type === 'join'), 'resume join request');
   const request = resumed.sent.find(message => message.type === 'join')!;
   resumed.deliver({ type: 'room:state', ...state }); resumed.deliver({ type: 'ok', requestId: request.requestId }); await flushSample();
@@ -234,7 +234,7 @@ for (const change of ['same-seat-rejoin', 'participant', 'room'] as const) {
       function acceptJoin(): void {
         const form = h.find(node => node.tagName === 'form' && node.children.some(child => child.tagName === 'h2' && child.textContent === '加入房間'));
         for (const [name, value] of Object.entries({ roomId: 'same-room', name: '測試聽眾' })) {
-          const input = form.descendants().find(node => node.name === name); assert.ok(input); input.value = value;
+          const input = form.descendants().filter(node => node.type !== 'histogram').find(node => node.name === name); assert.ok(input); input.value = value;
         }
         form.submit(); h.sdk.acceptJoin(roomState());
       }

@@ -23,7 +23,7 @@ class FakeSocket {
   onclose: (() => void) | null = null;
   constructor(_url: string) {
     FakeSocket.instances.push(this);
-    queueMicrotask(() => this.onmessage?.({ data: JSON.stringify({ type: 'hello', protocol: 1, serverVersion: 'test', limits: { controlPerSecond: 20, icePerSecond: 30, handRaiseIntervalMs: 10000 } }) }));
+    queueMicrotask(() => this.onmessage?.({ data: JSON.stringify({ type: 'hello', instance: 'test-instance', protocol: 1, serverVersion: 'test', limits: { controlPerSecond: 20, icePerSecond: 30, handRaiseIntervalMs: 10000, chatIntervalMs: 1000, reactionIntervalMs: 250 } }) }));
   }
   send(data: string) {
     this.sent.push(data);

@@ -35,14 +35,14 @@ class Peer {
 
 const state: RoomStatePayload = {
   roomId: 'room', name: 'Room', controllerId: 'host', speakers: [], hands: [], audienceCount: 1,
-  codeRequired: false, limits: { maxSpeakers: 8, maxAudience: 300 }, status: 'live',
+  codeRequired: false, recording: false, recordingAvailable: false, limits: { maxSpeakers: 8, maxAudience: 300 }, status: 'live',
   me: { participantId: 'guest', name: 'Guest', role: 'audience', onStage: false, handRaised: false,
     muted: false, forceMuted: false, gainDb: 0, connected: true, joinedAt: 0 },
 };
 
 const flush = async () => { for (let i = 0; i < 12; i++) await Promise.resolve(); };
 const settle = (request: Promise<unknown>): Promise<unknown> => request.then(() => undefined, (error: unknown) => error);
-const hello = (socket: Socket) => socket.deliver({ type: 'hello', protocol: 1, serverVersion: 'test', limits: { controlPerSecond: 20, icePerSecond: 30, handRaiseIntervalMs: 10000 } });
+const hello = (socket: Socket) => socket.deliver({ type: 'hello', instance: 'test-instance', protocol: 1, serverVersion: 'test', limits: { controlPerSecond: 20, icePerSecond: 30, handRaiseIntervalMs: 10000, chatIntervalMs: 1000, reactionIntervalMs: 250 } });
 function assertError(error: unknown, code: StageError['code']): void {
   assert.ok(error instanceof StageError);
   assert.equal(error.code, code);

@@ -32,6 +32,12 @@ export interface MixFrame {
 
 export type MixFrameListener = (frame: MixFrame) => void;
 
+/**
+ * Receives the room's encoded full mix (the audience downlink), one Opus packet per mixer frame,
+ * in order. `null` = this frame has no packet (skipped while silent, shed, or failed to encode).
+ */
+export type MixPacketSink = (packet: Uint8Array | null) => void;
+
 /** Mixer output a transport can subscribe to. */
 export interface MixedPcmSource {
   /** Returns an unsubscribe function. */
@@ -90,6 +96,8 @@ export interface MediaTransport {
 
   /** Attach (or detach with null) the room mixer output; encoded to Opus and sent to subscribers. */
   setMixedStream(roomId: string, source: MixedPcmSource | null): void;
+  /** Also deliver the room's encoded full mix to `sink` (null stops); encoded once, shared with the audience. */
+  setRecording(roomId: string, sink: MixPacketSink | null): void;
   /** Downlink: subscribers receive `frame.minus(id) ?? frame.full`. */
   subscribe(roomId: string, participantId: string): void;
   unsubscribe(roomId: string, participantId: string): void;

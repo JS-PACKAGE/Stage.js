@@ -82,12 +82,12 @@ class Peer {
 }
 function state(id = 'listener', status: 'waiting' | 'live' = 'live', onStage = false): RoomStatePayload {
   return { roomId: 'room', name: 'Room', controllerId: 'host', speakers: [], hands: [], audienceCount: 1,
-    codeRequired: false, limits: { maxSpeakers: 8, maxAudience: 300 }, status,
+    codeRequired: false, recording: false, recordingAvailable: false, limits: { maxSpeakers: 8, maxAudience: 300 }, status,
     me: { participantId: id, name: id, role: onStage ? 'speaker' : 'audience', onStage,
       handRaised: false, muted: false, forceMuted: false, gainDb: 0, connected: true, joinedAt: 0 } };
 }
-const hello = (socket: Socket) => socket.deliver({ type: 'hello', protocol: 1, serverVersion: 'test',
-  limits: { controlPerSecond: 20, icePerSecond: 30, handRaiseIntervalMs: 10000 } });
+const hello = (socket: Socket) => socket.deliver({ type: 'hello', instance: 'test-instance', protocol: 1, serverVersion: 'test',
+  limits: { controlPerSecond: 20, icePerSecond: 30, handRaiseIntervalMs: 10000, chatIntervalMs: 1000, reactionIntervalMs: 250 } });
 async function fixture(t: TestContext, options: { beforeJoinAck?: boolean; status?: 'waiting' | 'live'; speaker?: boolean; noState?: boolean } = {}) {
   Socket.instances = []; Peer.instances = [];
   let captures = 0, plays = 0;

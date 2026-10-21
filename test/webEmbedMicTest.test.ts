@@ -283,7 +283,7 @@ it('actual SDK visibility and page lifecycle stop pending or active resources an
   node(h, 'start').click(); const track = h.captures[1]!.resolve(); await flush(); h.pageWindow.dispatchEvent(new Event('pagehide'));
   assert.equal(track.stops, 1); idle(h, true); h.pageWindow.dispatchEvent(new Event('pageshow')); idle(h, true); await h.tick(1000);
   const resumed = StageSocket.instances.at(-1)!; assert.notEqual(resumed, h.socket);
-  resumed.deliver({ type: 'hello', protocol: 1, serverVersion: 'test', limits: { controlPerSecond: 2000, icePerSecond: 2000, handRaiseIntervalMs: 10000 } });
+  resumed.deliver({ type: 'hello', instance: 'test-instance', protocol: 1, serverVersion: 'test', limits: { controlPerSecond: 2000, icePerSecond: 2000, handRaiseIntervalMs: 10000, chatIntervalMs: 1000, reactionIntervalMs: 250 } });
   await h.until(() => resumed.sent.some(message => message.type === 'join'), 'resume join');
   const request = resumed.sent.find(message => message.type === 'join')!;
   resumed.deliver({ type: 'room:state', ...actualState({ role: 'audience' }) }); resumed.deliver({ type: 'ok', requestId: request.requestId });

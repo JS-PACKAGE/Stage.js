@@ -60,12 +60,12 @@ class Peer {
 }
 function state(id: string): RoomStatePayload {
   return { roomId: 'room', name: 'Room', controllerId: 'host', speakers: [], hands: [], audienceCount: 1,
-    codeRequired: false, limits: { maxSpeakers: 8, maxAudience: 300 }, status: 'live',
+    codeRequired: false, recording: false, recordingAvailable: false, limits: { maxSpeakers: 8, maxAudience: 300 }, status: 'live',
     me: { participantId: id, name: id, role: 'audience', onStage: false, handRaised: false,
       muted: false, forceMuted: false, gainDb: 0, connected: true, joinedAt: 0 } };
 }
-const hello = (socket: Socket) => socket.deliver({ type: 'hello', protocol: 1, serverVersion: 'test',
-  limits: { controlPerSecond: 20, icePerSecond: 30, handRaiseIntervalMs: 10000 } });
+const hello = (socket: Socket) => socket.deliver({ type: 'hello', instance: 'test-instance', protocol: 1, serverVersion: 'test',
+  limits: { controlPerSecond: 20, icePerSecond: 30, handRaiseIntervalMs: 10000, chatIntervalMs: 1000, reactionIntervalMs: 250 } });
 const candidate = { candidate: 'candidate:0', sdpMid: '0', sdpMLineIndex: 0 };
 function localIce(peer: Peer) {
   assert.ok(peer.onicecandidate);

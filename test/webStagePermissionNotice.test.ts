@@ -27,7 +27,7 @@ function invite(h: FakeApp): void {
 async function join(h: FakeApp, state = roomState()): Promise<void> {
   const form = h.find(node => node.tagName === 'form' && node.children.some(child => child.tagName === 'h2' && child.textContent === '加入房間'));
   for (const [name, value] of Object.entries({ roomId: state.roomId, name: state.me.name })) {
-    const input = form.descendants().find(node => node.name === name); assert.ok(input); input.value = value;
+    const input = form.descendants().filter(node => node.type !== 'histogram').find(node => node.name === name); assert.ok(input); input.value = value;
   }
   form.submit(); h.sdk.acceptJoin(state); await flushSample();
 }
@@ -42,7 +42,7 @@ async function actualSetup(t: TestContext) {
   const sdk = boundary.clients[0]!;
   const h = sampleApp({ sdk }); cleanup = () => h.cleanup();
   const socket = StageSocket.instances[0]!;
-  socket.deliver({ type: 'hello', protocol: 1, serverVersion: 'test', limits: { controlPerSecond: 2000, icePerSecond: 2000, handRaiseIntervalMs: 10000 } });
+  socket.deliver({ type: 'hello', instance: 'test-instance', protocol: 1, serverVersion: 'test', limits: { controlPerSecond: 2000, icePerSecond: 2000, handRaiseIntervalMs: 10000, chatIntervalMs: 1000, reactionIntervalMs: 250 } });
   await boundary.until(() => socket.sent.some(message => message.type === 'join'), 'public SDK join request');
   const request = socket.sent.find(message => message.type === 'join')!;
   const audience = { ...actualState({ role: 'audience', handRaised: true }), controllerId: 'host' };

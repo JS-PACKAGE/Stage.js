@@ -42,7 +42,7 @@ describe('configurable client request deadlines', () => {
   async function connect(client: StageClient) {
     const ready = client.connect();
     const socket = Socket.instances.at(-1)!;
-    socket.deliver({ type: 'hello', protocol: 1, serverVersion: 'test', limits: { controlPerSecond: 20, icePerSecond: 30, handRaiseIntervalMs: 10000 } });
+    socket.deliver({ type: 'hello', instance: 'test-instance', protocol: 1, serverVersion: 'test', limits: { controlPerSecond: 20, icePerSecond: 30, handRaiseIntervalMs: 10000, chatIntervalMs: 1000, reactionIntervalMs: 250 } });
     await ready; return socket;
   }
   function peer(client: StageClient) {

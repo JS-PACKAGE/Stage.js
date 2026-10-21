@@ -35,7 +35,7 @@ class Peer {
 }
 function state(id: string): RoomStatePayload {
   return { roomId: 'room', name: 'room', controllerId: 'host', speakers: [], hands: [], audienceCount: 1,
-    codeRequired: false, limits: { maxSpeakers: 8, maxAudience: 300 }, status: 'live',
+    codeRequired: false, recording: false, recordingAvailable: false, limits: { maxSpeakers: 8, maxAudience: 300 }, status: 'live',
     me: { participantId: id, name: id, role: 'audience', onStage: false,
       handRaised: false, muted: false, forceMuted: false, gainDb: 0, connected: true, joinedAt: 0 } };
 }

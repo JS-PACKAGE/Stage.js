@@ -6,7 +6,7 @@ type App = ReturnType<typeof sampleApp>;
 async function join(h: App): Promise<void> {
   const form = h.find(node => node.tagName === 'form' && node.children.some(child => child.tagName === 'h2' && child.textContent === '加入房間'));
   for (const [name, value] of [['roomId', 'same-room'], ['name', '測試聽眾']]) {
-    const input = form.descendants().find(node => node.name === name); assert.ok(input); input.value = value!;
+    const input = form.descendants().filter(node => node.type !== 'histogram').find(node => node.name === name); assert.ok(input); input.value = value!;
   }
   form.submit(); h.sdk.acceptJoin(roomState()); await flushSample();
 }

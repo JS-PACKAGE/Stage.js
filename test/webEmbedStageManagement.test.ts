@@ -301,7 +301,7 @@ it('whole embed actual SDK reconnect retains row/open, releases its rejected pro
   socket.close(); assert.equal(summary(h), '舞台管理（2） · 上次收到'); assert.equal(row(h).node, a.node); locked(a);
   await flush(); locked(a, false, true); assert.equal(h.node('error-notice').hidden, true); assert.equal(panel(h).open, true);
   force(a.remove); await h.tick(500); const resumed = StageSocket.instances.at(-1)!; assert.notEqual(resumed, socket);
-  resumed.deliver({ type: 'hello', protocol: 1, serverVersion: 'test', limits: { controlPerSecond: 2000, icePerSecond: 2000, handRaiseIntervalMs: 10000 } });
+  resumed.deliver({ type: 'hello', instance: 'test-instance', protocol: 1, serverVersion: 'test', limits: { controlPerSecond: 2000, icePerSecond: 2000, handRaiseIntervalMs: 10000, chatIntervalMs: 1000, reactionIntervalMs: 250 } });
   await h.until(() => resumed.sent.some(message => message.type === 'join'), 'resume join');
   const joined = resumed.sent.find(message => message.type === 'join'); assert.ok(joined?.type === 'join'); assert.equal(joined.resumeToken, 'test-resume');
   resumed.deliver({ type: 'ok', requestId: joined.requestId }); await flush(); locked(a, false, true);
@@ -315,7 +315,7 @@ it('whole embed actual SDK reconnect retains row/open, releases its rejected pro
 });
 it('whole embed actual SDK initial state-before-ACK disconnect retires controls despite retained SDK snapshot', async t => {
   const h = await actualApp(t); h.form.submit(); await flush(); const socket = StageSocket.instances[0]!;
-  socket.deliver({ type: 'hello', protocol: 1, serverVersion: 'test', limits: { controlPerSecond: 2000, icePerSecond: 2000, handRaiseIntervalMs: 10000 } });
+  socket.deliver({ type: 'hello', instance: 'test-instance', protocol: 1, serverVersion: 'test', limits: { controlPerSecond: 2000, icePerSecond: 2000, handRaiseIntervalMs: 10000, chatIntervalMs: 1000, reactionIntervalMs: 250 } });
   await h.until(() => socket.sent.some(message => message.type === 'join'), 'initial join');
   socket.deliver({ type: 'room:state', ...actualState(), speakers: [person('a')] });
   const a = row(h); panel(h).open = true; socket.close(); await flush();

@@ -256,9 +256,9 @@ async function actualSetup(t: TestContext) {
   const until = async (test: () => boolean) => { for (let i = 0; i < 80 && !test(); i++) { now += 10; t.mock.timers.tick(10); await flushSample(); } assert.ok(test()); };
   const join = async (s: RoomStatePayload) => {
     const form = h.find(node => node.tagName === 'form' && node.children.some(child => child.tagName === 'h2' && child.textContent === '加入房間'));
-    for (const [name, value] of Object.entries({ roomId: s.roomId, name: s.me.name, code: s.code! })) form.descendants().find(node => node.name === name)!.value = value;
+    for (const [name, value] of Object.entries({ roomId: s.roomId, name: s.me.name, code: s.code! })) form.descendants().filter(node => node.type !== 'histogram').find(node => node.name === name)!.value = value;
     form.submit(); await flushSample(); const socket = StageSocket.instances.at(-1)!;
-    socket.deliver({ type: 'hello', protocol: 1, serverVersion: 'test', limits: { controlPerSecond: 2000, icePerSecond: 2000, handRaiseIntervalMs: 10000 } });
+    socket.deliver({ type: 'hello', instance: 'test-instance', protocol: 1, serverVersion: 'test', limits: { controlPerSecond: 2000, icePerSecond: 2000, handRaiseIntervalMs: 10000, chatIntervalMs: 1000, reactionIntervalMs: 250 } });
     await until(() => socket.sent.some(message => message.type === 'join'));
     const request = socket.sent.find(message => message.type === 'join')!;
     socket.deliver({ type: 'room:state', ...s }); socket.deliver({ type: 'ok', requestId: request.requestId });

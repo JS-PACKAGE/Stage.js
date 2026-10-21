@@ -34,7 +34,7 @@ class Peer {
 const created: Creation = { roomId: 'room', code: 'test-code' };
 const state: RoomStatePayload = {
   roomId: 'room', name: 'Room', controllerId: 'host', speakers: [], hands: [], audienceCount: 0,
-  codeRequired: true, limits: { maxSpeakers: 8, maxAudience: 300 }, status: 'live',
+  codeRequired: true, recording: false, recordingAvailable: false, limits: { maxSpeakers: 8, maxAudience: 300 }, status: 'live',
   me: { participantId: 'host', name: 'Host', role: 'controller', onStage: false, handRaised: false,
     muted: false, forceMuted: false, gainDb: 0, connected: true, joinedAt: 0 },
 };
@@ -42,7 +42,7 @@ const flush = async () => { for (let i = 0; i < 12; i++) await Promise.resolve()
 const observe = <T>(promise: Promise<T>): Promise<Outcome<T>> => promise.then(
   value => ({ ok: true, value }), (error: unknown) => ({ ok: false, error }),
 );
-const hello = (socket: Socket) => socket.deliver({ type: 'hello', protocol: 1, serverVersion: 'test', limits: { controlPerSecond: 20, icePerSecond: 30, handRaiseIntervalMs: 10000 } });
+const hello = (socket: Socket) => socket.deliver({ type: 'hello', instance: 'test-instance', protocol: 1, serverVersion: 'test', limits: { controlPerSecond: 20, icePerSecond: 30, handRaiseIntervalMs: 10000, chatIntervalMs: 1000, reactionIntervalMs: 250 } });
 const acknowledge = (socket: Socket, request: RequestMessage) => socket.deliver({ type: 'ok', requestId: request.requestId });
 const rejectJoined = (socket: Socket, request: RequestMessage) => socket.deliver({ type: 'error', requestId: request.requestId, code: 'already_joined', message: 'Already joined.' });
 function assertError(outcome: Outcome<unknown>, code: StageError['code']): void {

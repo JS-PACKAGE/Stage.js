@@ -37,8 +37,8 @@ function pendingPlayback(t: TestContext, h: ActualApp): Deferred {
   h.node('unlock').click(); busy(h.node('unlock'), true); return work;
 }
 function hello(socket: StageSocket): void {
-  socket.deliver({ type: 'hello', protocol: 1, serverVersion: 'test',
-    limits: { controlPerSecond: 2000, icePerSecond: 2000, handRaiseIntervalMs: 10000 } });
+  socket.deliver({ type: 'hello', instance: 'test-instance', protocol: 1, serverVersion: 'test',
+    limits: { controlPerSecond: 2000, icePerSecond: 2000, handRaiseIntervalMs: 10000, chatIntervalMs: 1000, reactionIntervalMs: 250 } });
 }
 function joinRequest(socket: StageSocket): Extract<ClientMessage, { type: 'join' }> {
   const request = socket.sent.find((message): message is Extract<ClientMessage, { type: 'join' }> => message.type === 'join');

@@ -37,7 +37,7 @@ function stream() {
 }
 function state(onStage: boolean, id: string): RoomStatePayload {
   return { roomId: id, name: id, controllerId: 'host', speakers: [], hands: [], audienceCount: 0,
-    codeRequired: false, limits: { maxSpeakers: 8, maxAudience: 300 }, status: 'live',
+    codeRequired: false, recording: false, recordingAvailable: false, limits: { maxSpeakers: 8, maxAudience: 300 }, status: 'live',
     me: { participantId: id, name: id, role: onStage ? 'speaker' : 'audience', onStage,
       handRaised: false, muted: false, forceMuted: false, gainDb: 0, connected: true, joinedAt: 0 } };
 }

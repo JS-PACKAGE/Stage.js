@@ -12,7 +12,7 @@ type View = Pick<App, 'app' | 'find' | 'clock'>;
 interface Stats { inbound: { rtt?: number; lossPercent?: number; bufferMs?: number } | null; outbound: null }
 const result = (rtt = 0.02, lossPercent = 0): Stats => ({ inbound: { rtt, lossPercent, bufferMs: 10 }, outbound: null });
 const connection = (h: Pick<View, 'find'>) => h.find(node => node.classList.contains('connection'));
-const forms = (h: Pick<View, 'app'>) => h.app.descendants().filter(node => node.tagName === 'form');
+const forms = (h: Pick<View, 'app'>) => h.app.descendants().filter(node => node.tagName === 'form' && !node.classList.contains('chat-form'));
 function timers(h: Pick<View, 'clock'>, meter: number, stats: number): void {
   assert.equal(h.clock.intervals(50).length, meter, '50 ms microphone meter count');
   assert.equal(h.clock.intervals(2000).length, stats, '2000 ms connection diagnostics count');
@@ -53,8 +53,8 @@ class Socket {
   send(data: string): void { assert.equal(this.readyState, Socket.OPEN); this.sent.push(JSON.parse(data) as Request); }
   deliver(message: unknown): void { this.onmessage?.({ data: JSON.stringify(message) }); }
   hello(): void {
-    this.deliver({ type: 'hello', protocol: 1, serverVersion: 'test',
-      limits: { controlPerSecond: 2000, icePerSecond: 2000, handRaiseIntervalMs: 10000 } });
+    this.deliver({ type: 'hello', instance: 'test-instance', protocol: 1, serverVersion: 'test',
+      limits: { controlPerSecond: 2000, icePerSecond: 2000, handRaiseIntervalMs: 10000, chatIntervalMs: 1000, reactionIntervalMs: 250 } });
   }
   close(): void { this.closeCalls++; this.readyState = 3; this.onclose?.(); }
 }

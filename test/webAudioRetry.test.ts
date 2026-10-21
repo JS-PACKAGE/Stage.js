@@ -191,7 +191,7 @@ async function actualSample(t: TestContext, holdJoinAck = false) {
   const join = async (room = host) => {
     const form = app.find(node => node.tagName === 'form' && node.children.some(child => child.tagName === 'h2' && child.textContent === '加入房間'));
     for (const [name, value] of Object.entries({ roomId: room.roomId, code: room.code, name: 'Listener' })) {
-      const input = form.descendants().find(node => node.name === name); assert.ok(input); input.value = value;
+      const input = form.descendants().filter(node => node.type !== 'histogram').find(node => node.name === name); assert.ok(input); input.value = value;
     }
     form.submit(); await until(() => sdk.state !== null && Peer.instances.at(-1)!.createCalls > 0, 'room snapshot and initial offer');
     return { socket: Socket.instances.at(-1)!, peer: Peer.instances.at(-1)!, id: sdk.me!.participantId };

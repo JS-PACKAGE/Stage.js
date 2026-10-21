@@ -12,7 +12,7 @@ class Socket {
   onclose: (() => void) | null = null;
   constructor(_url: string) {
     Socket.instances.push(this);
-    queueMicrotask(() => this.onmessage?.({ data: JSON.stringify({ type: 'hello', protocol: 1, serverVersion: 'test', limits: { controlPerSecond: 20, icePerSecond: 30, handRaiseIntervalMs: 10000 } }) }));
+    queueMicrotask(() => this.onmessage?.({ data: JSON.stringify({ type: 'hello', instance: 'test-instance', protocol: 1, serverVersion: 'test', limits: { controlPerSecond: 20, icePerSecond: 30, handRaiseIntervalMs: 10000, chatIntervalMs: 1000, reactionIntervalMs: 250 } }) }));
   }
   send(data: string) {
     this.sent.push(data);
@@ -89,7 +89,7 @@ describe('monotonic client intervals', () => {
     client['createMedia'] = () => {}; client['syncMedia'] = () => {};
     const state = (participantId: string): RoomStatePayload => ({
       roomId: 'room', name: 'Room', controllerId: 'host', speakers: [], hands: [], audienceCount: 1,
-      codeRequired: false, limits: { maxSpeakers: 8, maxAudience: 300 }, status: 'live',
+      codeRequired: false, recording: false, recordingAvailable: false, limits: { maxSpeakers: 8, maxAudience: 300 }, status: 'live',
       me: { participantId, name: 'Guest', role: 'audience', onStage: false, handRaised: false,
         muted: false, forceMuted: false, gainDb: 0, connected: true, joinedAt: 0 },
     });

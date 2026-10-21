@@ -30,7 +30,7 @@ function state(role: ParticipantView['role'] = 'audience', onStage = false): Roo
   s.audienceCount = role === 'audience' && !onStage ? 1 : 0; return s;
 }
 function hello(socket: StageSocket) {
-  socket.deliver({ type: 'hello', protocol: 1, serverVersion: 'test', limits: { controlPerSecond: 2000, icePerSecond: 2000, handRaiseIntervalMs: 10000 } });
+  socket.deliver({ type: 'hello', instance: 'test-instance', protocol: 1, serverVersion: 'test', limits: { controlPerSecond: 2000, icePerSecond: 2000, handRaiseIntervalMs: 10000, chatIntervalMs: 1000, reactionIntervalMs: 250 } });
 }
 async function join(h: App, s = state()) {
   h.form.submit(); await flush(); const socket = StageSocket.instances.at(-1)!; hello(socket);

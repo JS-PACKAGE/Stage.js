@@ -2,6 +2,7 @@ import { randomBytes, randomInt, timingSafeEqual } from 'node:crypto';
 import {
   PROTOCOL_VERSION,
   SERVER_PEER_ID,
+  type ChatMessage,
   type ClientMessage,
   type ConnectionQuality,
   type IceCandidatePayload,
@@ -10,11 +11,12 @@ import {
 } from '../../shared/protocol.ts';
 import type { AppConfig } from '../config.ts';
 import type { Logger } from '../log.ts';
-import type { MetricSample } from '../metrics.ts';
+import { Histogram, type MetricSample } from '../metrics.ts';
 import { ERROR_MESSAGES, InvariantViolation, StageError } from '../model/errors.ts';
-import { Room, type Participant, type RoomEvent } from '../model/room.ts';
+import { Room, type Participant, type RoomEvent, type RoomSnapshot } from '../model/room.ts';
 import { offerSendsAudio, summarizeOffer } from '../rtc/sdp.ts';
 import { iceServersFor } from '../rtc/turn.ts';
+import type { Recording } from '../recording/recorder.ts';
 import type { MediaTransport, MixedPcmSource } from '../transport/MediaTransport.ts';
 import { SerialQueue } from './serialQueue.ts';
 
@@ -45,6 +47,8 @@ export interface HubDeps {
   serverVersion: string;
   /** Returns a running mixer for a new room. */
   createMixer(roomId: string): Mixer;
+  /** Opens a recording file for a room; absent = recording unavailable whatever the config says. */
+  startRecording?(roomId: string): Recording;
   now?: () => number;
   setTimer?: (fn: () => void, ms: number) => unknown;
   clearTimer?: (handle: unknown) => void;
@@ -75,8 +79,26 @@ interface RoomRuntime {
   qualityInFlight: boolean;
   /** Uplink counters at the previous report, so each report covers one interval. */
   readonly uplinkCounts: Map<string, { received: number; lost: number }>;
+  /** Last `rooms.chatHistory` messages, oldest first. */
+  readonly chat: ChatMessage[];
+  nextMessageId: number;
+  /** Open recording file and its `recording.maxDurationMinutes` stop timer. */
+  recording: { file: Recording; timer: unknown } | undefined;
   lastStatus: 'waiting' | 'live';
   closed: boolean;
+}
+
+export interface PersistedRoom {
+  room: RoomSnapshot;
+  chat: ChatMessage[];
+  nextMessageId: number;
+}
+
+/** `persistence.stateFile` contents. */
+export interface PersistedState {
+  version: 1;
+  savedAt: number;
+  rooms: PersistedRoom[];
 }
 
 const CODE_ALPHABET = 'ABCDEFGHJKLMNPQRSTUVWXYZ23456789';
@@ -103,6 +125,15 @@ export class StageHub {
   private readonly now: () => number;
   private readonly setTimer: (fn: () => void, ms: number) => unknown;
   private readonly clearTimer: (handle: unknown) => void;
+  /** Recording files still flushing; shutdown waits for them. */
+  private readonly closingRecordings = new Set<Promise<void>>();
+  /** Bumped on every change worth saving (state broadcasts, chat, rooms added or removed). */
+  private revision = 0;
+  /** Rooms suspended by `shutdown(true)`; still part of the final `exportState`. */
+  private readonly retired: PersistedRoom[] = [];
+  /** Identifies this process in `hello`, so resuming clients notice a restart. */
+  private readonly instance = randomBytes(8).toString('base64url');
+  private readonly negotiateLatency = new Histogram([0.005, 0.01, 0.025, 0.05, 0.1, 0.25, 0.5, 1, 2.5]);
 
   constructor(deps: HubDeps) {
     this.deps = deps;
@@ -123,12 +154,19 @@ export class StageHub {
       { name: 'stage_participants', help: 'Participants in all rooms, including disconnected ones within grace.', type: 'gauge', value: participants },
       { name: 'stage_sessions', help: 'Connected ws sessions bound to a room.', type: 'gauge', value: sessions },
       { name: 'stage_publishers', help: 'Participants whose uplink feeds a mixer.', type: 'gauge', value: publishers },
+      { name: 'stage_negotiate_seconds', help: 'Time to apply a client offer and produce the answer (includes worker round trip).', type: 'histogram', histogram: this.negotiateLatency },
     ];
   }
 
   attach(session: Session): void {
-    const { controlPerSecond, icePerSecond, handRaiseIntervalMs } = this.deps.config.limits;
-    session.send({ type: 'hello', protocol: PROTOCOL_VERSION, serverVersion: this.deps.serverVersion, limits: { controlPerSecond, icePerSecond, handRaiseIntervalMs } });
+    const { controlPerSecond, icePerSecond, handRaiseIntervalMs, chatIntervalMs, reactionIntervalMs } = this.deps.config.limits;
+    session.send({
+      type: 'hello',
+      protocol: PROTOCOL_VERSION,
+      serverVersion: this.deps.serverVersion,
+      instance: this.instance,
+      limits: { controlPerSecond, icePerSecond, handRaiseIntervalMs, chatIntervalMs, reactionIntervalMs },
+    });
   }
 
   /** Whether the session has created or joined a room (and not been evicted since). */
@@ -196,8 +234,106 @@ export class StageHub {
     }).catch((err) => this.internalFailure(rt, err));
   }
 
-  async shutdown(): Promise<void> {
-    for (const rt of [...this.rooms.values()]) await rt.queue.run(() => this.closeRoom(rt, 'shutdown', true));
+  /**
+   * Stop serving. `keepRooms` (persistence on): rooms are saved by the caller and will be restored,
+   * so nobody is told the room closed; their sockets just drop and the clients reconnect and resume.
+   */
+  async shutdown(keepRooms = false): Promise<void> {
+    for (const rt of [...this.rooms.values()]) {
+      await rt.queue.run(() => {
+        if (!keepRooms) { this.closeRoom(rt, 'shutdown', true); return; }
+        if (rt.recording) { rt.room.recording = false; this.stopRecording(rt); }
+        // Taken before teardown so the caller's final save still sees the room.
+        this.retired.push(this.persistRoom(rt));
+        for (const s of rt.sessions.values()) this.bindings.delete(s);
+        this.teardownRoom(rt);
+        this.deps.log.info('room suspended for restart', { roomId: rt.room.roomId });
+      });
+    }
+    await Promise.all(this.closingRecordings);
+  }
+
+  /** Revision for control-state observers; snapshots also refresh periodically for liveness. */
+  get stateRevision(): number {
+    return this.revision;
+  }
+
+  /** Rooms as they stand, for `persistence.stateFile` (secret: holds codes and resume tokens). */
+  exportState(): PersistedState {
+    const rooms = [...this.rooms.values()].filter((rt) => !rt.closed).map((rt) => this.persistRoom(rt));
+    return { version: 1, savedAt: this.now(), rooms: [...rooms, ...this.retired] };
+  }
+
+  /**
+   * Rebuild saved rooms with everyone disconnected for `persistence.restoreGraceMs`, then resumed or
+   * removed exactly like a dropped connection. Returns how many rooms came back; bad rooms are skipped.
+   */
+  restore(state: PersistedState): number {
+    const { config, log } = this.deps;
+    let restored = 0;
+    for (const saved of state.rooms) {
+      try {
+        if (this.rooms.size >= config.limits.maxRooms) throw new StageError('room_full', 'max rooms');
+        const room = Room.restore(saved.room, { maxSpeakers: config.limits.maxSpeakersPerRoom, maxAudience: config.limits.maxAudiencePerRoom }, this.recordingAvailable);
+        if (this.rooms.has(room.roomId)) throw new StageError('conflict', 'duplicate room');
+        const rt = this.addRuntime(room);
+        rt.chat.push(...(config.rooms.chatHistory > 0 && Array.isArray(saved.chat) ? saved.chat.slice(-config.rooms.chatHistory) : []));
+        rt.nextMessageId = typeof saved.nextMessageId === 'number' ? saved.nextMessageId : 1;
+        const grace = config.persistence.restoreGraceMs;
+        for (const p of room.participants.values()) {
+          const controller = p.role === 'controller';
+          this.holdSeat(rt, p.participantId, controller, controller ? Math.max(grace, config.rooms.controllerGraceMs) : grace);
+        }
+        restored++;
+        log.info('room restored', { roomId: room.roomId, participants: room.participants.size });
+      } catch (err) {
+        log.warn('room not restored', { roomId: typeof saved.room?.roomId === 'string' ? saved.room.roomId : undefined, error: err });
+      }
+    }
+    return restored;
+  }
+
+  private persistRoom(rt: RoomRuntime): PersistedRoom {
+    return { room: rt.room.snapshotForRestart(), chat: rt.chat.slice(), nextMessageId: rt.nextMessageId };
+  }
+
+  private get recordingAvailable(): boolean {
+    return this.deps.config.recording.enabled && this.deps.startRecording !== undefined;
+  }
+
+  /** Registers a room with its mixer and media wiring; no sessions yet. */
+  private addRuntime(room: Room): RoomRuntime {
+    const mixer = this.deps.createMixer(room.roomId);
+    const rt: RoomRuntime = {
+      room,
+      queue: new SerialQueue(),
+      mixer,
+      sessions: new Map(),
+      publishers: new Map(),
+      speakingIds: [],
+      stateTimerDelay: undefined,
+      qualityInFlight: false,
+      graceTimer: undefined,
+      graceTimers: new Map(),
+      stateTimer: undefined,
+      qualityTimer: undefined,
+      uplinkCounts: new Map(),
+      chat: [],
+      nextMessageId: 1,
+      recording: undefined,
+      lastStatus: room.status,
+      closed: false,
+    };
+    this.rooms.set(room.roomId, rt);
+    this.revision++;
+    this.deps.transport.setMixedStream(room.roomId, mixer);
+    // Fired from the mixer clock, outside the room queue: read-only fan-out, so no queueing needed.
+    mixer.onSpeaking((participantIds) => {
+      if (rt.closed) return;
+      rt.speakingIds = [...participantIds];
+      this.broadcast(rt, { type: 'speaking', participantIds });
+    });
+    return rt;
   }
 
   // ─────────────────────────────── commands ───────────────────────────────
@@ -220,35 +356,12 @@ export class StageHub {
       code,
       codeRequired,
       limits: { maxSpeakers: config.limits.maxSpeakersPerRoom, maxAudience: config.limits.maxAudiencePerRoom },
+      recordingAvailable: this.recordingAvailable,
       now: this.now(),
       controller,
     });
-    const mixer = this.deps.createMixer(roomId);
-    const rt: RoomRuntime = {
-      room,
-      queue: new SerialQueue(),
-      mixer,
-      sessions: new Map([[controller.participantId, session]]),
-      publishers: new Map(),
-      speakingIds: [],
-      graceTimer: undefined,
-      graceTimers: new Map(),
-      stateTimer: undefined,
-      stateTimerDelay: undefined,
-      qualityTimer: undefined,
-      qualityInFlight: false,
-      uplinkCounts: new Map(),
-      lastStatus: room.status,
-      closed: false,
-    };
-    this.rooms.set(roomId, rt);
-    transport.setMixedStream(roomId, mixer);
-    // Fired from the mixer clock: update the room-local baseline and fan out without queueing.
-    mixer.onSpeaking((participantIds) => {
-      if (rt.closed) return;
-      rt.speakingIds = [...participantIds];
-      this.broadcast(rt, { type: 'speaking', participantIds });
-    });
+    const rt = this.addRuntime(room);
+    rt.sessions.set(controller.participantId, session);
     this.bindings.set(session, { roomId, participantId: controller.participantId });
     log.info('room created', { roomId, participantId: controller.participantId, codeRequired });
 
@@ -298,6 +411,7 @@ export class StageHub {
 
     session.send({ type: 'rtc:config', iceServers: iceServersFor(this.deps.config.rtc, participantId, this.now()) });
     session.send({ type: 'room:state', ...room.snapshot(participantId) });
+    if (rt.chat.length) session.send({ type: 'chat:history', messages: rt.chat });
     this.presenceChanged(rt);
     this.sendSpeaking(rt, session);
     session.send({ type: 'ok', requestId: msg.requestId });
@@ -383,11 +497,44 @@ export class StageHub {
         break;
       case 'room:rotate-code':
         room.rotateCode(pid, this.newCode());
+        this.revision++;
         // Only the controller's snapshot carries the code.
         session.send({ type: 'room:state', ...room.snapshot(pid) });
         session.send({ type: 'ok', requestId: msg.requestId });
         this.deps.log.info('room code rotated', { roomId: room.roomId });
         return;
+      case 'chat:send': {
+        const message: ChatMessage = { messageId: rt.nextMessageId++, participantId: pid, name: room.get(pid)!.name, text: msg.text, sentAt: now };
+        const keep = this.deps.config.rooms.chatHistory;
+        if (keep > 0) {
+          rt.chat.push(message);
+          this.revision++;
+          if (rt.chat.length > keep) rt.chat.shift();
+        }
+        this.broadcast(rt, { type: 'chat', ...message });
+        session.send({ type: 'ok', requestId: msg.requestId });
+        return;
+      }
+      case 'reaction':
+        this.broadcast(rt, { type: 'reaction', participantId: pid, name: room.get(pid)!.name, emoji: msg.emoji });
+        session.send({ type: 'ok', requestId: msg.requestId });
+        return;
+      case 'recording:start': {
+        room.setRecording(pid, true);
+        try {
+          this.startRecording(rt);
+        } catch (err) {
+          room.recording = false;
+          throw err;
+        }
+        events = [];
+        break;
+      }
+      case 'recording:stop':
+        room.setRecording(pid, false);
+        this.stopRecording(rt);
+        events = [];
+        break;
       case 'rtc:answer':
         // The server never sends offers, so an answer is always out of protocol.
         throw new StageError('bad_request', 'unexpected rtc:answer');
@@ -412,6 +559,40 @@ export class StageHub {
     }
     session.send({ type: 'ok', requestId: msg.requestId });
     if (msg.type === 'control:transfer') this.deps.log.info('control transferred', { roomId: room.roomId, fromId: pid, toId: msg.targetId });
+  }
+
+  private startRecording(rt: RoomRuntime): void {
+    const { roomId } = rt.room;
+    let file: Recording;
+    try {
+      file = this.deps.startRecording!(roomId);
+    } catch (err) {
+      this.deps.log.error('recording failed to start', { roomId, error: err });
+      throw new StageError('internal', 'recording open failed');
+    }
+    const timer = this.setTimer(() => {
+      void rt.queue.run(() => {
+        if (rt.closed || rt.recording?.file !== file) return;
+        rt.room.recording = false;
+        this.stopRecording(rt);
+        this.deps.log.info('recording reached its time limit', { roomId });
+        this.broadcastState(rt);
+      }).catch((err) => this.internalFailure(rt, err));
+    }, this.deps.config.recording.maxDurationMinutes * 60_000);
+    rt.recording = { file, timer };
+    this.deps.transport.setRecording(roomId, file.sink);
+    this.deps.log.info('recording started', { roomId, file: file.file });
+  }
+
+  private stopRecording(rt: RoomRuntime): void {
+    const recording = rt.recording;
+    if (!recording) return;
+    rt.recording = undefined;
+    this.clearTimer(recording.timer);
+    this.deps.transport.setRecording(rt.room.roomId, null);
+    const closing = recording.file.stop().finally(() => this.closingRecordings.delete(closing));
+    this.closingRecordings.add(closing);
+    this.deps.log.info('recording stopped', { roomId: rt.room.roomId, file: recording.file.file });
   }
 
   private newCode(): string {
@@ -477,7 +658,9 @@ export class StageHub {
     });
     let answer: SessionDescriptionPayload;
     try {
+      const started = performance.now();
       answer = await transport.negotiate(roomId, pid, msg.payload, { allowUplink: negotiation.allowUplink });
+      this.negotiateLatency.observe((performance.now() - started) / 1000);
     } catch (err) {
       // A bad offer is that client's problem, not a reason to tear down the room.
       log.warn('negotiation failed', { roomId, participantId: pid, error: err });
@@ -532,11 +715,7 @@ export class StageHub {
     const controller = p.role === 'controller';
     const graceMs = controller ? controllerGraceMs : participantGraceMs;
     if (controller || (graceMs > 0 && !left)) {
-      p.connected = false;
-      const timer = this.setTimer(() => {
-        void rt.queue.run(() => (controller ? this.expireController(rt, pid) : this.expireParticipant(rt, pid))).catch((err) => this.internalFailure(rt, err));
-      }, graceMs);
-      if (controller) rt.graceTimer = timer; else rt.graceTimers.set(pid, timer);
+      this.holdSeat(rt, pid, controller, graceMs);
       this.deps.log.info('participant disconnected, grace started', { roomId: room.roomId, participantId: pid, role: p.role });
       if (p.onStage) this.broadcastState(rt); else this.presenceChanged(rt);
       return;
@@ -702,7 +881,17 @@ export class StageHub {
     }, delay);
   }
 
+  /** Keeps a disconnected participant's seat for `graceMs`; a `join` with their resume token cancels it. */
+  private holdSeat(rt: RoomRuntime, pid: string, controller: boolean, graceMs: number): void {
+    rt.room.get(pid)!.connected = false;
+    const timer = this.setTimer(() => {
+      void rt.queue.run(() => (controller ? this.expireController(rt, pid) : this.expireParticipant(rt, pid))).catch((err) => this.internalFailure(rt, err));
+    }, graceMs);
+    if (controller) rt.graceTimer = timer; else rt.graceTimers.set(pid, timer);
+  }
+
   private broadcastState(rt: RoomRuntime): void {
+    this.revision++;
     // Supersedes a pending coalesced broadcast.
     if (rt.stateTimer !== undefined) { this.clearTimer(rt.stateTimer); rt.stateTimer = undefined; rt.stateTimerDelay = undefined; }
     // Views shared by all recipients are built and serialized once; only `me` & co. are per session.
@@ -721,6 +910,18 @@ export class StageHub {
 
   private closeRoom(rt: RoomRuntime, reason: string, shutdown = false): void {
     if (rt.closed) return;
+    const { roomId } = rt.room;
+    const closed: ServerMessage = shutdown ? { type: 'room:closed', roomId, reason: 'shutdown' } : { type: 'room:closed', roomId };
+    for (const s of rt.sessions.values()) {
+      s.send(closed);
+      this.bindings.delete(s);
+    }
+    this.teardownRoom(rt);
+    this.deps.log.info('room closed', { roomId, reason });
+  }
+
+  /** Releases timers, recording, media and the registry entry; sessions must already be unbound. */
+  private teardownRoom(rt: RoomRuntime): void {
     rt.closed = true;
     const { roomId } = rt.room;
     if (rt.graceTimer !== undefined) this.clearTimer(rt.graceTimer);
@@ -728,19 +929,15 @@ export class StageHub {
     rt.graceTimers.clear();
     if (rt.stateTimer !== undefined) this.clearTimer(rt.stateTimer);
     if (rt.qualityTimer !== undefined) this.clearTimer(rt.qualityTimer);
-    const closed: ServerMessage = shutdown ? { type: 'room:closed', roomId, reason: 'shutdown' } : { type: 'room:closed', roomId };
-    for (const s of rt.sessions.values()) {
-      s.send(closed);
-      this.bindings.delete(s);
-    }
     rt.sessions.clear();
     rt.publishers.clear();
+    this.stopRecording(rt);
     rt.speakingIds = [];
     this.deps.transport.setMixedStream(roomId, null);
     this.deps.transport.closeRoom(roomId);
     rt.mixer.stop();
     this.rooms.delete(roomId);
-    this.deps.log.info('room closed', { roomId, reason });
+    this.revision++;
   }
 
   // ─────────────────────────────── errors ───────────────────────────────

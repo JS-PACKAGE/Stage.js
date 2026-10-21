@@ -65,7 +65,7 @@ class Peer {
 }
 function state(id: string): RoomStatePayload {
   return { roomId: 'room', name: 'room', controllerId: 'host', speakers: [], hands: [], audienceCount: 1,
-    codeRequired: false, limits: { maxSpeakers: 8, maxAudience: 300 }, status: 'live',
+    codeRequired: false, recording: false, recordingAvailable: false, limits: { maxSpeakers: 8, maxAudience: 300 }, status: 'live',
     me: { participantId: id, name: id, role: 'audience', onStage: false,
       handRaised: false, muted: false, forceMuted: false, gainDb: 0, connected: true, joinedAt: 0 } };
 }
@@ -94,8 +94,8 @@ async function fixture(t: TestContext) {
   });
   const connected = client.connect();
   const socket = Socket.instances[0]!;
-  socket.deliver({ type: 'hello', protocol: 1, serverVersion: 'test',
-    limits: { controlPerSecond: 20, icePerSecond: 30, handRaiseIntervalMs: 10000 } });
+  socket.deliver({ type: 'hello', instance: 'test-instance', protocol: 1, serverVersion: 'test',
+    limits: { controlPerSecond: 20, icePerSecond: 30, handRaiseIntervalMs: 10000, chatIntervalMs: 1000, reactionIntervalMs: 250 } });
   await connected;
   let acknowledgedOffers = 0;
   async function acknowledgeOffer() {
