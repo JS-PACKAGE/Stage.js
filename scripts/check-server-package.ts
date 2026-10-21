@@ -227,9 +227,11 @@ export async function checkServerPackage(options: ServerPackageCheckOptions = {}
         socket!.once('close', () => reject(new Error('WebSocket closed before hello')));
       });
       const limits = config.limits as Record<string, unknown>;
-      assert.deepEqual(await run(hello, 'WebSocket hello', requestTimeout), {
-        type: 'hello', protocol: 1, serverVersion: manifest.version,
-        limits: { controlPerSecond: limits.controlPerSecond, icePerSecond: limits.icePerSecond, handRaiseIntervalMs: limits.handRaiseIntervalMs },
+      const greeting = await run(hello, 'WebSocket hello', requestTimeout);
+      assert.ok(record(greeting) && typeof greeting.instance === 'string' && /^[A-Za-z0-9_-]{11}$/.test(greeting.instance), 'WebSocket hello contract: instance');
+      assert.deepEqual(greeting, {
+        type: 'hello', protocol: 1, serverVersion: manifest.version, instance: greeting.instance,
+        limits: { controlPerSecond: limits.controlPerSecond, icePerSecond: limits.icePerSecond, handRaiseIntervalMs: limits.handRaiseIntervalMs, chatIntervalMs: limits.chatIntervalMs, reactionIntervalMs: limits.reactionIntervalMs },
       }, 'WebSocket hello contract');
       assert.equal(socket.readyState, WebSocket.OPEN, 'Hello socket must remain open until SIGTERM');
       assert.ok(!closed && child.kill('SIGTERM'), 'Expected to signal the running owned server');

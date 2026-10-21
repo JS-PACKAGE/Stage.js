@@ -67,7 +67,7 @@ wss.on('connection', ws => {
   if (scenario === 'ws-overflow') { ws.send('x'.repeat(65537)); return; }
   if (scenario === 'ws-malformed') { ws.send('{bad JSON'); return; }
   const { version } = JSON.parse(readFileSync(join(root, 'package.json'), 'utf8'));
-  ws.send(JSON.stringify({ type: 'hello', protocol: 1, serverVersion: scenario === 'wrong-hello' ? 'wrong' : version, limits: { controlPerSecond: config.limits.controlPerSecond, icePerSecond: config.limits.icePerSecond, handRaiseIntervalMs: config.limits.handRaiseIntervalMs } }));
+  ws.send(JSON.stringify({ type: 'hello', instance: 'test-server', protocol: 1, serverVersion: scenario === 'wrong-hello' ? 'wrong' : version, limits: { controlPerSecond: config.limits.controlPerSecond, icePerSecond: config.limits.icePerSecond, handRaiseIntervalMs: config.limits.handRaiseIntervalMs, chatIntervalMs: config.limits.chatIntervalMs, reactionIntervalMs: config.limits.reactionIntervalMs } }));
 });
 await new Promise(resolve => server.listen(config.server.port, config.server.host, resolve));
 const port = server.address().port;
