@@ -76,3 +76,9 @@ button.danger { color: var(--danger); border-color: var(--danger); }
   .landing-grid, .stage-grid { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 }
 @media (min-width: 1180px) { .stage-grid { grid-template-columns: repeat(3, minmax(0, 1fr)); } }
+
+.stage-quality { margin-top: 16px; }
+.stage-quality summary { cursor: pointer; font-weight: 700; }
+.stage-quality summary:focus-visible { outline: 2px solid var(--accent); outline-offset: 4px; }
+.stage-quality-list { padding-left: 1.25rem; overflow-wrap: anywhere; }
+.stage-quality-list li + li { margin-top: 8px; }

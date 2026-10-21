@@ -10,12 +10,12 @@ import { InvariantViolation, StageError } from './errors.ts';
 export interface Participant {
   readonly participantId: string;
   /** Already HTML-escaped (AGENTS.md §S3/§S8). */
-  readonly name: string;
+  name: string;
   readonly resumeToken: string;
   readonly joinedAt: number;
   role: Role;
   onStage: boolean;
-  /** When the participant last stepped on stage; orders auto-transfer successors. */
+  /** Wall-clock timestamp when the participant last stepped on stage. */
   stageSince: number;
   handRaised: boolean;
   selfMuted: boolean;
@@ -75,7 +75,8 @@ const ROLES: Record<string, true> = { controller: true, speaker: true, audience:
  */
 export class Room {
   readonly roomId: string;
-  readonly name: string;
+  /** Already HTML-escaped (AGENTS.md §S3/§S8). */
+  name: string;
   code: string;
   readonly codeRequired: boolean;
   readonly createdAt: number;
@@ -140,7 +141,7 @@ export class Room {
       name: text(p.name, 'name'),
       resumeToken: text(p.resumeToken, 'resumeToken'),
       joinedAt: num(p.joinedAt, 'joinedAt'),
-      role: ROLES[p.role] ? p.role : bad('role'),
+      role: Object.hasOwn(ROLES, p.role) ? p.role : bad('role'),
       onStage: flag(p.onStage, 'onStage'),
       stageSince: num(p.stageSince, 'stageSince'),
       handRaised: flag(p.handRaised, 'handRaised'),
@@ -184,9 +185,8 @@ export class Room {
   }
 
   get audienceCount(): number {
-    let n = 0;
-    for (const p of this.participants.values()) if (p.role === 'audience') n++;
-    return n;
+    // Valid rooms contain one controller; every other non-audience member is an on-stage speaker.
+    return this.participants.size - this.speakerCount - 1;
   }
 
   get status(): 'waiting' | 'live' {
@@ -248,6 +248,24 @@ export class Room {
     if (targetId === byId) throw new StageError('conflict', 'controller cannot kick itself');
     this.require(targetId);
     return this.remove(targetId);
+  }
+
+  /** Update the bound participant's own name, already sanitized by input validation. */
+  rename(participantId: string, name: string): boolean {
+    const p = this.require(participantId);
+    const changed = p.name !== name;
+    p.name = name;
+    this.assertInvariants();
+    return changed;
+  }
+
+  /** Controller updates the room title, already sanitized by input validation. */
+  renameRoom(byId: string, name: string): boolean {
+    this.requireController(byId);
+    const changed = this.name !== name;
+    this.name = name;
+    this.assertInvariants();
+    return changed;
   }
 
   /** Trim one participant's level in the mix; validation bounds the range. */
@@ -393,16 +411,15 @@ export class Room {
    * speaker, else earliest audience member (PLAN 假設 4). Only connected people qualify.
    */
   pickSuccessor(): Participant | undefined {
-    let best: Participant | undefined;
+    // Collection order records actual entry order even when the wall clock moves backwards.
     for (const id of this.speakers) {
       const p = this.participants.get(id);
-      if (p && id !== this.controllerId && p.connected && (!best || p.stageSince < best.stageSince)) best = p;
+      if (p && id !== this.controllerId && p.connected) return p;
     }
-    if (best) return best;
     for (const p of this.participants.values()) {
-      if (p.role === 'audience' && p.connected && (!best || p.joinedAt < best.joinedAt)) best = p;
+      if (p.role === 'audience' && p.connected) return p;
     }
-    return best;
+    return undefined;
   }
 
   // ─────────────────────────────── mic ───────────────────────────────
@@ -516,6 +533,9 @@ export class Room {
     const fail = (why: string): never => {
       throw new InvariantViolation(`room ${this.roomId}: ${why}`);
     };
+    const hands = new Set(this.handQueue);
+    if (hands.size !== this.handQueue.length) fail('duplicate hand');
+    for (const id of hands) if (!this.participants.has(id)) fail('unknown hand');
     let controllers = 0;
     let nonController = 0;
     for (const p of this.participants.values()) {
@@ -523,14 +543,14 @@ export class Room {
       else nonController++;
       if (p.onStage !== this.speakers.has(p.participantId)) fail('onStage/speakers mismatch');
       if (p.role === 'speaker' && !p.onStage) fail('speaker off stage');
-      if (p.handRaised !== this.handQueue.includes(p.participantId)) fail('hand flag/queue mismatch');
+      if (p.role === 'audience' && p.onStage) fail('audience on stage');
+      if (p.handRaised !== hands.has(p.participantId)) fail('hand flag/queue mismatch');
       if (p.handRaised && p.role !== 'audience') fail('non-audience in hand queue');
       if (!p.onStage && (p.selfMuted || p.forceMuted)) fail('mute flags off stage');
     }
     if (controllers !== 1) fail(`expected 1 controller, found ${controllers}`);
     if (this.participants.get(this.controllerId)?.role !== 'controller') fail('controllerId mismatch');
     for (const id of this.speakers) if (!this.participants.has(id)) fail('unknown speaker');
-    if (new Set(this.handQueue).size !== this.handQueue.length) fail('duplicate hand');
     if (this.speakerCount > this.limits.maxSpeakers) fail('speaker cap exceeded');
     if (nonController > this.limits.maxAudience) fail('audience cap exceeded');
   }

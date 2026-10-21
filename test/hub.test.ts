@@ -6,6 +6,13 @@ import { FakeSession, harness, RECVONLY_OFFER, SENDRECV_OFFER, sine, testConfig,
 
 const FRAME = 960;
 
+function flushHandState(h: Harness): void {
+  for (const timer of h.timers.filter(timer => !timer.cleared && timer.ms === 0)) {
+    timer.cleared = true;
+    timer.fn();
+  }
+}
+
 function energy(x: Float32Array): number {
   let e = 0;
   for (const v of x) e += v * v;
@@ -23,6 +30,7 @@ describe('flow 1 — raise hand → approve → on stage with uplink', () => {
     assert.equal(await h.req(other.s, { type: 'rtc:offer', payload: RECVONLY_OFFER }), 'ok');
     assert.equal(await h.req(aud.s, { type: 'hand:raise' }), 'ok');
     assert.deepEqual(other.s.last('hand:raise'), { type: 'hand:raise', participantId: aud.id });
+    flushHandState(h);
     assert.deepEqual(host.s.last('room:state')!.hands.map((p) => p.participantId), [aud.id]);
 
     assert.equal(await h.req(host.s, { type: 'stage:approve', targetId: aud.id }), 'ok');
@@ -190,6 +198,7 @@ describe('ws drop with the seat held (rooms.participantGraceMs)', () => {
     await h.req(b.s, { type: 'hand:raise' });
     const token = a.s.last('room:state')!.resumeToken!;
     await h.hub.detach(a.s);
+    flushHandState(h);
     assert.deepEqual(host.s.last('room:state')!.hands.map((p) => p.participantId), [a.id, b.id], 'queue position kept');
     const back = new FakeSession();
     h.hub.attach(back);
@@ -371,8 +380,10 @@ describe('presence broadcasts', () => {
     host.s.clear();
     await h.hub.detach(crowd[0]!.s);
     assert.equal(host.s.all('room:state').length, 0, 'a plain audience leave is coalesced too');
-    // A raised hand changes the queue everyone sees: broadcast now, superseding the pending one.
+    // A raised hand supersedes the presence delay with one next-turn snapshot.
     await h.req(crowd[1]!.s, { type: 'hand:raise' });
+    assert.equal(h.timers.filter(t => !t.cleared && t.ms === 0).length, 1);
+    flushHandState(h);
     assert.equal(host.s.last('room:state')!.audienceCount, 2);
     assert.ok(h.timers.every((t) => t.cleared || t === pending[0]), 'pending presence broadcast superseded');
   });
@@ -730,6 +741,8 @@ describe('persistence across a restart', () => {
     assert.equal(await after.req(s, { type: 'join', roomId: host.roomId, code: host.code, name: 'Host', resumeToken: tokens.host }), 'ok');
     for (const t of after.timers.filter((x) => !x.cleared && x.ms === 120_000)) t.fn();
     await nextTurn();
+    for (const t of after.timers.filter((x) => !x.cleared && x.ms < 120_000)) t.fn();
+    await nextTurn();
     const st = s.last('room:state')!;
     assert.deepEqual(st.speakers.map((p) => p.participantId), [host.id], 'the others are gone');
     assert.equal(st.hands.length, 0);
@@ -747,4 +760,30 @@ describe('persistence across a restart', () => {
     assert.equal(after.hub.restore(state), 0);
     assert.equal(after.hub.roomCount, 0);
   });
+});
+
+it('rotated admission codes stay revoked after a persisted restart', async () => {
+  const before = harness();
+  const host = await before.create();
+  const revision = before.hub.stateRevision;
+  assert.equal(await before.req(host.s, { type: 'room:rotate-code' }), 'ok');
+  assert.ok(before.hub.stateRevision > revision);
+  const code = host.s.last('room:state')!.code!;
+  const after = harness();
+  assert.equal(after.hub.restore(JSON.parse(JSON.stringify(before.hub.exportState()))), 1);
+  const guest = new FakeSession(); after.hub.attach(guest);
+  assert.equal(await after.req(guest, { type: 'join', roomId: host.roomId, code: host.code, name: 'Guest' }), 'unauthorized');
+  assert.equal(await after.req(guest, { type: 'join', roomId: host.roomId, code, name: 'Guest' }), 'ok');
+  await before.hub.shutdown(); await after.hub.shutdown();
+});
+
+it('disabling chat history discards persisted chat before replay and the next save', async () => {
+  const before = harness(); const host = await before.create();
+  await before.req(host.s, { type: 'chat:send', text: 'old private history' });
+  const after = harness(testConfig(c => { c.rooms.chatHistory = 0; }));
+  assert.equal(after.hub.restore(JSON.parse(JSON.stringify(before.hub.exportState()))), 1);
+  const guest = await after.join(host.roomId, host.code, 'Guest');
+  assert.equal(guest.s.all('chat:history').length, 0);
+  assert.deepEqual(after.hub.exportState().rooms[0]!.chat, []);
+  await before.hub.shutdown(); await after.hub.shutdown();
 });

@@ -26,6 +26,8 @@ export type ShardMessage =
 
 // The worker shares this module's extension: `.ts` under type stripping, `.js` from `dist/`.
 const workerUrl = new URL(`./mediaWorker${extname(fileURLToPath(import.meta.url))}`, import.meta.url);
+interface PendingCall extends PromiseWithResolvers<ShardMessage> { timer: NodeJS.Timeout }
+
 const peerKey = (roomId: string, id: string) => `${roomId}\u0000${id}`;
 
 /**
@@ -36,12 +38,13 @@ export class MediaShard implements PeerHost {
   private readonly config: AppConfig;
   private readonly events: PeerHostEvents;
   private readonly log: Logger;
-  private readonly pending = new Map<number, PromiseWithResolvers<ShardMessage>>();
+  private readonly pending = new Map<number, PendingCall>();
   /** Peers placed on this shard, keyed like the worker's host; drives least-loaded placement. */
   private readonly peers = new Map<string, { roomId: string; id: string }>();
   private worker: Worker;
   private nextJob = 0;
   private closed = false;
+  private closing: Promise<void> | undefined;
   constructor(config: AppConfig, events: PeerHostEvents, log: Logger) {
     this.config = config; this.events = events; this.log = log;
     this.worker = this.spawn();
@@ -51,8 +54,14 @@ export class MediaShard implements PeerHost {
     const worker = new Worker(workerUrl, { workerData: this.config });
     worker.unref();
     worker.on('message', (msg: ShardMessage) => {
+      // Timed-out negotiations must never deliver callbacks into a replacement peer's lifetime.
+      if (this.worker !== worker) return;
       switch (msg.op) {
-        case 'done': case 'failed': { const p = this.pending.get(msg.job); this.pending.delete(msg.job); p?.resolve(msg); return; }
+        case 'done': case 'failed': {
+          const p = this.pending.get(msg.job);
+          if (p) { clearTimeout(p.timer); this.pending.delete(msg.job); p.resolve(msg); }
+          return;
+        }
         case 'candidate': this.events.localCandidate(msg.roomId, msg.id, msg.candidate); return;
         case 'closed': this.events.peerClosed(msg.roomId, msg.id); return;
         case 'uplink': this.events.uplink(msg.roomId, msg.id, msg.seq, msg.payload); return;
@@ -60,31 +69,46 @@ export class MediaShard implements PeerHost {
       }
     });
     worker.on('error', err => this.log.error('Media worker crashed', { error: err.message }));
-    worker.on('exit', code => {
-      if (this.worker !== worker) return;
-      for (const p of this.pending.values()) p.reject(new Error('Media worker exited'));
-      this.pending.clear();
-      if (this.closed) return;
-      // Its PeerConnections died with it: report them closed so the hub tears the sessions' media down.
-      const lost = [...this.peers.values()];
-      this.peers.clear();
-      this.log.warn('Respawning media worker', { code, lostPeers: lost.length });
-      this.worker = this.spawn();
-      for (const { roomId, id } of lost) this.events.peerClosed(roomId, id);
-    });
+    worker.on('exit', code => this.recover(worker, new Error('Media worker exited'), { code }));
+
     return worker;
   }
+  private rejectPending(error: unknown): void {
+    for (const p of this.pending.values()) { clearTimeout(p.timer); p.reject(error); }
+    this.pending.clear();
+  }
+  private recover(worker: Worker, error: Error, detail: Record<string, unknown>): void {
+    if (this.worker !== worker) return;
+    this.rejectPending(error);
+    const lost = [...this.peers.values()];
+    this.peers.clear();
+    if (this.closed) return;
+    this.log.warn('Respawning media worker', { ...detail, lostPeers: lost.length });
+    this.worker = this.spawn();
+    for (const { roomId, id } of lost) this.events.peerClosed(roomId, id);
+  }
   private async call(msg: ShardRequest & { job: number }): Promise<ShardMessage & { op: 'done' }> {
-    const pending = Promise.withResolvers<ShardMessage>();
-    this.pending.set(msg.job, pending);
-    this.worker.postMessage(msg);
-    const reply = await pending.promise;
+    if (this.closed && msg.op !== 'close') throw new Error('Media shard is closed');
+    const worker = this.worker;
+    const result = Promise.withResolvers<ShardMessage>();
+    const timer = setTimeout(() => {
+      // Rejecting the promise alone is unsafe: the abandoned SDP operation could still mutate a peer.
+      void worker.terminate().catch(err => this.log.error('Media worker termination failed', { error: String(err) }));
+      this.recover(worker, new Error('Media worker request timed out'), { op: msg.op, timeoutMs: this.config.rtc.mediaWorkerTimeoutMs });
+    }, this.config.rtc.mediaWorkerTimeoutMs);
+    this.pending.set(msg.job, { ...result, timer });
+    try {
+      worker.postMessage(msg);
+      if (msg.op === 'negotiate') this.peers.set(peerKey(msg.roomId, msg.id), { roomId: msg.roomId, id: msg.id });
+    }
+    catch (error) { clearTimeout(timer); this.pending.delete(msg.job); result.reject(error); }
+    const reply = await result.promise;
     if (reply.op !== 'done') throw new Error(reply.op === 'failed' ? reply.message : 'Unexpected media worker reply');
     return reply;
   }
-  private post(msg: ShardRequest): void { this.worker.postMessage(msg); }
+  private post(msg: ShardRequest): void { if (!this.closed) this.worker.postMessage(msg); }
   async negotiate(roomId: string, id: string, offer: SessionDescriptionPayload, allowUplink: boolean): Promise<SessionDescriptionPayload> {
-    this.peers.set(peerKey(roomId, id), { roomId, id });
+    if (this.closed) throw new Error('Media shard is closed');
     const { result } = await this.call({ op: 'negotiate', job: this.nextJob++, roomId, id, offer, allowUplink });
     if (!result || !('sdp' in result)) throw new Error('Missing answer');
     return result;
@@ -105,10 +129,12 @@ export class MediaShard implements PeerHost {
     const { result } = await this.call({ op: 'counters', job: this.nextJob++ });
     return result && 'downlinkPackets' in result ? result : { downlinkPackets: 0, downlinkDtxFrames: 0 };
   }
-  async close(): Promise<void> {
+  close(): Promise<void> { return this.closing ??= this.closeOnce(); }
+  private async closeOnce(): Promise<void> {
     this.closed = true;
     this.peers.clear();
-    // Let the host close its PeerConnections (DTLS close_notify) before the thread goes away.
+    this.rejectPending(new Error('Media shard is closed'));
+    // Let the host close its PeerConnections (DTLS close_notify), bounded by the same RPC deadline.
     await this.call({ op: 'close', job: this.nextJob++ }).catch(() => undefined);
     await this.worker.terminate();
   }

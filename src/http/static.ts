@@ -1,7 +1,10 @@
 import { createReadStream } from 'node:fs';
-import { stat } from 'node:fs/promises';
+import type { BigIntStats } from 'node:fs';
+import { lstat, realpath, stat } from 'node:fs/promises';
 import type { IncomingMessage, ServerResponse } from 'node:http';
 import { extname, resolve, sep } from 'node:path';
+import { pipeline } from 'node:stream';
+import { acceptedAssetEncodings, isCompressibleAsset } from './encoding.ts';
 import type { StaticMount } from '../config.ts';
 
 const CONTENT_TYPES: Record<string, string> = {
@@ -19,6 +22,10 @@ const CONTENT_TYPES: Record<string, string> = {
   '.ts': 'text/plain; charset=utf-8',
 };
 
+function within(root: string, file: string): boolean {
+  return file === root || file.startsWith(root.endsWith(sep) ? root : root + sep);
+}
+
 /**
  * Serve built assets (web/dist, packages/client/dist). Only GET/HEAD, only
  * files inside the mount directory, `nosniff` everywhere; `cors` mounts allow
@@ -33,8 +40,10 @@ export function createStaticHandler(mounts: StaticMount[], baseDir: string) {
   return async (req: IncomingMessage, res: ServerResponse): Promise<boolean> => {
     if (req.method !== 'GET' && req.method !== 'HEAD') return false;
     let pathname: string;
+    let url: URL;
     try {
-      pathname = decodeURIComponent(new URL(req.url ?? '/', 'http://x').pathname);
+      url = new URL(req.url ?? '/', 'http://x');
+      pathname = decodeURIComponent(url.pathname);
     } catch {
       return false;
     }
@@ -44,26 +53,73 @@ export function createStaticHandler(mounts: StaticMount[], baseDir: string) {
     let rel = pathname.slice(mount.mount.length);
     if (rel === '' || rel.endsWith('/')) rel += 'index.html';
     const file = resolve(mount.root, rel);
-    if (file !== mount.root && !file.startsWith(mount.root + sep)) return false;
-    let size: number, mtime: Date;
+    if (!within(mount.root, file)) return false;
+    let canonicalRoot: string, canonicalFile: string;
+    let metadata: BigIntStats;
     try {
-      const st = await stat(file);
+      [canonicalRoot, canonicalFile] = await Promise.all([realpath(mount.root), realpath(file)]);
+      // Lexical containment alone follows asset/directory symlinks outside the public tree.
+      // Resolve per request so release-root symlink swaps and later builds still work.
+      if (!within(canonicalRoot, canonicalFile)) return false;
+      const st = await stat(canonicalFile, { bigint: true });
       if (!st.isFile()) return false;
-      size = st.size;
-      mtime = st.mtime;
+      metadata = st;
     } catch {
       return false;
     }
-    // Weak validator from size + mtime: enough for built assets, and the client library is fetched
-    // by every embedding page, so revalidation must be a 304 rather than a full download.
-    const etag = `W/"${size.toString(16)}-${mtime.getTime().toString(16)}"`;
+    if (pathname === mount.mount.slice(0, -1)) {
+      // Preserve the encoded path/query and origin, even for unusual mount names.
+      // The slash makes document-relative assets resolve inside this mount.
+      res.statusCode = 308;
+      res.setHeader('Location', `./${url.pathname.slice(url.pathname.lastIndexOf('/') + 1)}/${url.search}`);
+      res.setHeader('Cache-Control', 'no-cache');
+      res.setHeader('X-Content-Type-Options', 'nosniff');
+      if (mount.cors) res.setHeader('Access-Control-Allow-Origin', '*');
+      res.end();
+      return true;
+    }
+    const encodings = acceptedAssetEncodings(req.headers['accept-encoding']);
+    let selected = canonicalFile;
+    let encoding: string | undefined;
+    for (const candidate of encodings) {
+      if (candidate === 'identity') { encoding = 'identity'; break; }
+      if (!isCompressibleAsset(file)) continue;
+      const sidecar = `${file}.${candidate === 'gzip' ? 'gz' : 'br'}`;
+      try {
+        const compressed = await lstat(sidecar, { bigint: true });
+        // Old sidecars from a partial rebuild must not hide a newer source; don't follow symlinks.
+        if (!compressed.isFile() || compressed.mtimeNs < metadata.mtimeNs || compressed.size >= metadata.size) continue;
+        const canonicalSidecar = await realpath(sidecar);
+        if (!within(canonicalRoot, canonicalSidecar)) continue;
+        selected = canonicalSidecar; encoding = candidate; metadata = compressed;
+        break;
+      } catch { /* No usable precompressed representation; try the next accepted encoding. */ }
+    }
+    res.setHeader('Vary', 'Accept-Encoding');
+    res.setHeader('X-Content-Type-Options', 'nosniff');
+    if (mount.cors) res.setHeader('Access-Control-Allow-Origin', '*');
+    if (encoding === undefined) {
+      res.statusCode = 406;
+      res.setHeader('Cache-Control', 'no-store');
+      res.end();
+      return true;
+    }
+    if (encoding !== 'identity') res.setHeader('Content-Encoding', encoding);
+    // A weak metadata validator, not a content hash. File identity distinguishes release swaps
+    // that preserve size/mtime; bigint fields retain filesystem precision without extra reads.
+    const stamp = [metadata.dev, metadata.ino, metadata.size, metadata.mtimeNs, metadata.ctimeNs]
+      .map(value => value.toString(16)).join('-');
+    const etag = `W/"${encoding}-${stamp}"`;
+    // Match ordinary Stats' millisecond rounding for the existing HTTP date contract.
+    // BigIntStats.mtime truncates instead, which can change the second at a .9995 boundary.
+    const modifiedMs = Number(metadata.mtimeNs / 1_000_000_000n) * 1000
+      + Number(metadata.mtimeNs % 1_000_000_000n) / 1_000_000;
+    const mtime = new Date(Math.round(modifiedMs));
     res.setHeader('ETag', etag);
     res.setHeader('Last-Modified', mtime.toUTCString());
     res.setHeader('Cache-Control', extname(file) === '.html' ? 'no-cache' : 'public, max-age=300');
-    res.setHeader('X-Content-Type-Options', 'nosniff');
-    if (mount.cors) res.setHeader('Access-Control-Allow-Origin', '*');
     const since = req.headers['if-modified-since'];
-    const fresh = req.headers['if-none-match'] === etag
+    const fresh = req.headers['if-none-match']?.split(',').some(tag => tag.trim() === '*' || tag.trim().replace(/^W\//, '') === etag.slice(2))
       || (req.headers['if-none-match'] === undefined && since !== undefined && Math.floor(mtime.getTime() / 1000) <= Math.floor(new Date(since).getTime() / 1000));
     if (fresh) {
       res.statusCode = 304;
@@ -72,12 +128,13 @@ export function createStaticHandler(mounts: StaticMount[], baseDir: string) {
     }
     res.statusCode = 200;
     res.setHeader('Content-Type', CONTENT_TYPES[extname(file)] ?? 'application/octet-stream');
-    res.setHeader('Content-Length', size);
+    res.setHeader('Content-Length', metadata.size.toString());
     if (req.method === 'HEAD') {
       res.end();
       return true;
     }
-    createReadStream(file).pipe(res);
+    // Missing/replaced assets or clients disconnecting during a stream must not crash the server.
+    pipeline(createReadStream(selected), res, () => {});
     return true;
   };
 }

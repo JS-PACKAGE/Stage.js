@@ -1,7 +1,7 @@
 import { readFileSync } from 'node:fs';
 import { basename, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
-import { ConfigError, loadConfig, samplesPerFrame } from './config.ts';
+import { ConfigError, loadConfig } from './config.ts';
 import { createLogger } from './log.ts';
 import { MixerCounters, processSamples, renderPrometheus } from './metrics.ts';
 import { MixerClock } from './mixer/MixerClock.ts';
@@ -67,7 +67,7 @@ const stageHub = new StageHub({
   startRecording: (roomId) => startRecording({
     dir: resolve(root, config.recording.dir),
     roomId,
-    frameSamples: samplesPerFrame(audio),
+    frameSamples: audio.frameMs * 48,
     vendor: `Stage.js ${version}`,
     now: Date.now(),
     log,
@@ -81,12 +81,14 @@ let saving: Promise<void> = Promise.resolve();
 if (stateFile) {
   const saved = loadState(stateFile, config.persistence.restoreGraceMs, Date.now(), log);
   if (saved) log.info('rooms restored from state file', { restored: stageHub.restore(saved), saved: saved.rooms.length });
-  let savedRevision = -1;
+  let pendingSave = false;
   const save = () => {
-    const revision = stageHub.stateRevision;
-    if (revision === savedRevision) return;
-    savedRevision = revision;
-    saving = saving.then(() => saveState(stateFile, stageHub.exportState())).catch((err: Error) => log.error('state file write failed', { error: err.message }));
+    // Refresh liveness even for quiet rooms; bound slow-disk work to one pending snapshot.
+    if (pendingSave) return;
+    pendingSave = true;
+    saving = saveState(stateFile, stageHub.exportState())
+      .catch((error: unknown) => log.error('state file write failed', { error }))
+      .finally(() => { pendingSave = false; });
   };
   // Written right away too, so a restored-but-unchanged state is not lost to an early crash.
   save();
@@ -94,7 +96,7 @@ if (stateFile) {
   saveTimer.unref();
 }
 
-const processMetrics = processSamples();
+const processMetrics = config.server.metrics.enabled ? processSamples() : () => [];
 const server = createStageServer({
   config,
   hub: stageHub,
@@ -112,19 +114,31 @@ log.info('Stage.js listening', {
 });
 
 let stopping = false;
+let exitCode = 0;
 const stop = async (signal: string, code = 0) => {
+  // Fatal intent can arrive while graceful shutdown is already awaiting a close operation.
+  if (exitCode === 0 && code !== 0) exitCode = code;
   if (stopping) return;
   stopping = true;
   log.info('shutting down', { signal });
   clearInterval(saveTimer);
-  // With persistence, rooms survive the restart: clients just reconnect and resume their seats.
-  await server.close(Boolean(stateFile));
+  // One failed cleanup phase must not skip the remaining resources or the requested exit.
+  try { await server.close(Boolean(stateFile)); }
+  catch (error) {
+    exitCode ||= 1;
+    log.error('server shutdown failed', { error });
+  }
   if (stateFile) {
     await saving;
-    await saveState(stateFile, stageHub.exportState()).catch((err: Error) => log.error('state file write failed', { error: err.message }));
+    try { await saveState(stateFile, stageHub.exportState()); }
+    catch (error) { exitCode ||= 1; log.error('state file write failed', { error }); }
   }
-  await transport.close();
-  process.exit(code);
+  try { await transport.close(); }
+  catch (error) {
+    exitCode ||= 1;
+    log.error('transport shutdown failed', { error });
+  }
+  process.exit(exitCode);
 };
 process.on('SIGINT', () => void stop('SIGINT'));
 process.on('SIGTERM', () => void stop('SIGTERM'));
@@ -133,9 +147,9 @@ process.on('SIGTERM', () => void stop('SIGTERM'));
 // so the process stops (rooms closed, or saved for restore — each one is re-validated then) and exits
 // non-zero for the supervisor.
 process.on('unhandledRejection', (reason) => {
-  log.error('unhandled rejection', { error: reason instanceof Error ? reason.stack ?? reason.message : String(reason) });
+  log.error('unhandled rejection', { error: reason });
 });
 process.on('uncaughtException', (err) => {
-  log.error('uncaught exception, shutting down', { error: err.stack ?? String(err) });
+  log.error('uncaught exception, shutting down', { error: err });
   void stop('uncaughtException', 1);
 });

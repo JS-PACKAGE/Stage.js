@@ -1,6 +1,6 @@
 import { readFileSync } from 'node:fs';
 import { availableParallelism } from 'node:os';
-import { parse } from 'yaml';
+import { LineCounter, parse, YAMLParseError } from 'yaml';
 import type { IceServerConfig } from '../shared/protocol.ts';
 
 export interface StaticMount {
@@ -21,6 +21,8 @@ export interface AppConfig {
     metrics: { enabled: boolean; token: string };
     /** Behind a reverse proxy: take the client address from `X-Forwarded-For` for per-IP limits. */
     trustProxy: boolean;
+    /** Grace for unfinished HTTP responses after listener shutdown begins (0 = cut off immediately). */
+    httpShutdownDrainMs: number;
   };
   limits: {
     maxRooms: number;
@@ -28,6 +30,11 @@ export interface AppConfig {
     maxSpeakersPerRoom: number;
     maxAudiencePerRoom: number;
     maxFrameBytes: number;
+    /** Maximum pending outbound bytes, including the next message; slow readers are disconnected. */
+    maxSendBufferBytes: number;
+    /** Waiting inbound work, excluding the single active operation. */
+    maxPendingMessages: number;
+    maxPendingBytes: number;
     controlPerSecond: number;
     handRaiseIntervalMs: number;
     icePerSecond: number;
@@ -118,6 +125,8 @@ export interface AppConfig {
     portRange: [number, number] | [];
     /** Worker threads hosting PeerConnections (ICE/DTLS/SRTP); 0 keeps them on the main thread. */
     mediaWorkers: number;
+    /** Worker RPC deadline; an unresponsive shard is replaced so stale operations cannot survive. */
+    mediaWorkerTimeoutMs: number;
     /** Ephemeral TURN (coturn use-auth-secret); empty `urls` disables it. */
     turn: { urls: string[]; secret: string; ttlSeconds: number };
   };
@@ -132,7 +141,7 @@ export interface AppConfig {
   persistence: {
     /** JSON file the rooms are saved to and restored from; empty disables persistence. */
     stateFile: string;
-    /** How often a changed state is written (also written on shutdown). */
+    /** How often state and liveness are written (also written on shutdown). */
     saveIntervalMs: number;
     /** Restored participants get this long to reconnect; a file older than this is ignored. */
     restoreGraceMs: number;
@@ -200,6 +209,8 @@ export function autoMediaWorkers(codecWorkers: number, cores = availableParallel
   return Math.min(8, Math.max(2, cores - 1 - codecWorkers));
 }
 
+// Node timer delays above this value normalize to 1ms instead of a longer wait.
+const MAX_TIMER_DELAY_MS = 2_147_483_647;
 const LOOPBACK: Record<string, true> = { '127.0.0.1': true, '::1': true, localhost: true };
 
 export function parseConfig(raw: unknown): AppConfig {
@@ -224,11 +235,16 @@ export function parseConfig(raw: unknown): AppConfig {
     }),
     metrics: { enabled: bool(mt, 'enabled', 'server.metrics'), token: str(mt, 'token', 'server.metrics') },
     trustProxy: bool(s, 'trustProxy', 'server'),
+    httpShutdownDrainMs: s.httpShutdownDrainMs === undefined ? 1000 : int(s, 'httpShutdownDrainMs', 'server', 0, 60000),
   };
   if (server.metrics.enabled && server.metrics.token === '' && LOOPBACK[server.host] !== true) {
     throw new ConfigError('server.metrics.token: required when metrics are enabled on a non-loopback host');
   }
   if (!server.wsPath.startsWith('/')) throw new ConfigError('server.wsPath: must start with "/"');
+  // Admission compares the parsed pathname literally. Do not silently configure a different route.
+  let pathname: string | undefined;
+  try { pathname = new URL(`http://x${server.wsPath}`).pathname; } catch { /* report only the field, never its value */ }
+  if (pathname !== server.wsPath) throw new ConfigError('server.wsPath: must be a literal HTTP URL pathname without query, fragment or normalization');
   const hasTls = server.tls.certFile !== '' && server.tls.keyFile !== '';
   if (!hasTls && !server.allowInsecure) {
     throw new ConfigError('server.tls: certFile/keyFile required unless server.allowInsecure is true (local dev only)');
@@ -244,31 +260,41 @@ export function parseConfig(raw: unknown): AppConfig {
     maxSpeakersPerRoom: int(l, 'maxSpeakersPerRoom', 'limits', 1),
     maxAudiencePerRoom: int(l, 'maxAudiencePerRoom', 'limits', 1),
     maxFrameBytes: int(l, 'maxFrameBytes', 'limits', 1024),
+    // Older configuration files derive a bounded allowance from their existing frame limit.
+    maxSendBufferBytes: l.maxSendBufferBytes === undefined
+      ? Math.min(Number.MAX_SAFE_INTEGER, int(l, 'maxFrameBytes', 'limits', 1024) * 16)
+      : int(l, 'maxSendBufferBytes', 'limits', 1024),
+    maxPendingMessages: l.maxPendingMessages === undefined ? 128 : int(l, 'maxPendingMessages', 'limits', 1),
+    maxPendingBytes: l.maxPendingBytes === undefined
+      ? Math.min(Number.MAX_SAFE_INTEGER, int(l, 'maxFrameBytes', 'limits', 1024) * 16)
+      : int(l, 'maxPendingBytes', 'limits', 1024),
     controlPerSecond: int(l, 'controlPerSecond', 'limits', 1),
     handRaiseIntervalMs: int(l, 'handRaiseIntervalMs', 'limits', 0),
     icePerSecond: int(l, 'icePerSecond', 'limits', 1),
     nameMaxLength: int(l, 'nameMaxLength', 'limits', 1),
     codeMaxLength: int(l, 'codeMaxLength', 'limits', 1),
     sdpMaxLength: int(l, 'sdpMaxLength', 'limits', 256),
-    joinTimeoutMs: int(l, 'joinTimeoutMs', 'limits', 0),
+    joinTimeoutMs: int(l, 'joinTimeoutMs', 'limits', 0, MAX_TIMER_DELAY_MS),
     maxConnectionsPerIp: int(l, 'maxConnectionsPerIp', 'limits', 0),
-    chatMaxLength: int(l, 'chatMaxLength', 'limits', 1, 2000),
-    chatIntervalMs: int(l, 'chatIntervalMs', 'limits', 0),
-    reactionIntervalMs: int(l, 'reactionIntervalMs', 'limits', 0),
+    chatMaxLength: l.chatMaxLength === undefined ? 500 : int(l, 'chatMaxLength', 'limits', 1, 2000),
+    chatIntervalMs: l.chatIntervalMs === undefined ? 1000 : int(l, 'chatIntervalMs', 'limits', 0),
+    reactionIntervalMs: l.reactionIntervalMs === undefined ? 250 : int(l, 'reactionIntervalMs', 'limits', 0),
   };
 
   const r = obj(root.rooms, 'rooms');
   const rooms: AppConfig['rooms'] = {
     codeLength: int(r, 'codeLength', 'rooms', 4),
-    controllerGraceMs: int(r, 'controllerGraceMs', 'rooms', 0),
-    participantGraceMs: int(r, 'participantGraceMs', 'rooms', 0),
-    heartbeatIntervalMs: int(r, 'heartbeatIntervalMs', 'rooms', 1000),
+    controllerGraceMs: int(r, 'controllerGraceMs', 'rooms', 0, MAX_TIMER_DELAY_MS),
+    participantGraceMs: int(r, 'participantGraceMs', 'rooms', 0, MAX_TIMER_DELAY_MS),
+    heartbeatIntervalMs: int(r, 'heartbeatIntervalMs', 'rooms', 1000, MAX_TIMER_DELAY_MS),
     presenceBroadcastMs: int(r, 'presenceBroadcastMs', 'rooms', 0, 10000),
     qualityIntervalMs: int(r, 'qualityIntervalMs', 'rooms', 0, 60000),
-    chatHistory: int(r, 'chatHistory', 'rooms', 0, 1000),
+    chatHistory: r.chatHistory === undefined ? 50 : int(r, 'chatHistory', 'rooms', 0, 1000),
     createToken: str(r, 'createToken', 'rooms'),
   };
   if (rooms.codeLength > limits.codeMaxLength) throw new ConfigError('rooms.codeLength: exceeds limits.codeMaxLength');
+  // Match the room:create wire token limit before accepting a credential no client can submit.
+  if (rooms.createToken.length > 256) throw new ConfigError('rooms.createToken: must be at most 256 UTF-16 code units');
 
   const a = obj(root.audio, 'audio');
   const o = obj(a.opus, 'audio.opus');
@@ -365,10 +391,11 @@ export function parseConfig(raw: unknown): AppConfig {
     serverIceServers: iceServers(t.serverIceServers, 'rtc.serverIceServers'),
     portRange,
     mediaWorkers: t.mediaWorkers === 'auto' ? autoMediaWorkers(audio.codecWorkers) : int(t, 'mediaWorkers', 'rtc', 0, 64),
+    mediaWorkerTimeoutMs: t.mediaWorkerTimeoutMs === undefined ? 30000 : int(t, 'mediaWorkerTimeoutMs', 'rtc', 1, 300000),
     turn,
   };
 
-  const rc = obj(root.recording, 'recording');
+  const rc = obj(root.recording === undefined ? { enabled: false, dir: 'recordings', maxDurationMinutes: 240 } : root.recording, 'recording');
   const recording: AppConfig['recording'] = {
     enabled: bool(rc, 'enabled', 'recording'),
     dir: str(rc, 'dir', 'recording'),
@@ -376,11 +403,11 @@ export function parseConfig(raw: unknown): AppConfig {
   };
   if (recording.enabled && recording.dir === '') throw new ConfigError('recording.dir: required when recording is enabled');
 
-  const ps = obj(root.persistence, 'persistence');
+  const ps = obj(root.persistence === undefined ? { stateFile: '', saveIntervalMs: 2000, restoreGraceMs: 120000 } : root.persistence, 'persistence');
   const persistence: AppConfig['persistence'] = {
     stateFile: str(ps, 'stateFile', 'persistence'),
     saveIntervalMs: int(ps, 'saveIntervalMs', 'persistence', 500, 600_000),
-    restoreGraceMs: int(ps, 'restoreGraceMs', 'persistence', 1000),
+    restoreGraceMs: int(ps, 'restoreGraceMs', 'persistence', 1000, MAX_TIMER_DELAY_MS),
   };
 
   const lg = obj(root.log, 'log');
@@ -395,13 +422,21 @@ export function loadConfig(path: string): AppConfig {
   try {
     text = readFileSync(path, 'utf8');
   } catch {
-    throw new ConfigError(`cannot read ${path} (copy config.example.yaml to config.yaml)`);
+    throw new ConfigError('cannot read configuration file (copy config.example.yaml to config.yaml)');
   }
   let raw: unknown;
+  const lineCounter = new LineCounter();
   try {
-    raw = parse(text);
+    // Warning excerpts and parser messages can contain credentials. Error-level logging still
+    // rejects malformed YAML; unlike "silent", it does not discard parser errors.
+    raw = parse(text, { logLevel: 'error', prettyErrors: false, lineCounter });
   } catch (err) {
-    throw new ConfigError(`invalid YAML in ${path}: ${err instanceof Error ? err.message : String(err)}`);
+    let detail = '';
+    if (err instanceof YAMLParseError) {
+      const { line, col } = lineCounter.linePos(err.pos[0]);
+      detail = ` (${err.code}, line ${line}, column ${col})`;
+    }
+    throw new ConfigError(`invalid YAML${detail}`);
   }
   return parseConfig(raw);
 }

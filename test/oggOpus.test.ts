@@ -56,8 +56,8 @@ describe('Ogg Opus writer', () => {
   });
 
   it('conceals missing frames with TOC-only packets after the first real one and drops them before', () => {
-    const pages = record((w) => { w.packet(null); w.packet(Uint8Array.of(0xf9, 1, 2)); w.packet(null); w.packet(new Uint8Array(0)); });
-    assert.deepEqual(pages.slice(2).flatMap((p) => p.packets).map((p) => [...p]), [[0xf9, 1, 2], [0xf8], [0xf8]]);
+    const pages = record((w) => { w.packet(null); w.packet(Uint8Array.of(0xf8, 1, 2)); w.packet(null); w.packet(new Uint8Array(0)); });
+    assert.deepEqual(pages.slice(2).flatMap((p) => p.packets).map((p) => [...p]), [[0xf8, 1, 2], [0xf8], [0xf8]]);
     assert.equal(pages.at(-1)!.granule, 3n * 960n);
   });
 
@@ -73,3 +73,27 @@ describe('Ogg Opus writer', () => {
     assert.equal(record(() => {}).length, 2);
   });
 });
+
+for (const sampleRate of [8000, 12000, 16000, 24000, 48000]) {
+  for (const frameMs of [10, 20, 40, 60]) {
+    it(`preserves decoded concealment duration and granules at ${sampleRate} Hz / ${frameMs} ms`, async () => {
+      const { OpusEncoder, OpusDecoder } = await import('../src/transport/opus.ts');
+      const { testConfig } = await import('./helpers.ts');
+      const audio = testConfig().audio;
+      audio.sampleRate = sampleRate; audio.frameMs = frameMs;
+      const encoder = new OpusEncoder(audio);
+      const decoder = new OpusDecoder(48000);
+      try {
+        const pcm = Float32Array.from({ length: sampleRate * frameMs / 1000 }, (_, i) => Math.sin(i * 0.1) * 0.2);
+        const chunks: Uint8Array[] = [];
+        const writer = new OggOpusWriter(chunk => chunks.push(chunk), { frameSamples: frameMs * 48, serial: 1, vendor: 'test' });
+        writer.packet(encoder.encode(pcm)); writer.packet(null); writer.packet(new Uint8Array()); writer.close();
+        const pages = parse(new Uint8Array(Buffer.concat(chunks)));
+        const packets = pages.slice(2).flatMap(page => page.packets);
+        assert.equal(packets.length, 3);
+        for (const packet of packets) assert.equal(decoder.decode(packet).length, frameMs * 48);
+        assert.equal(pages.at(-1)!.granule, BigInt(3 * frameMs * 48));
+      } finally { encoder.free(); decoder.free(); }
+    });
+  }
+}

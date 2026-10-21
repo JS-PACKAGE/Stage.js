@@ -1,7 +1,7 @@
 {
   "name": "stage-js",
   "version": "1.0.0",
-  "description": "Stage.js — multi-party audio stage: WebSocket control plane + WebRTC audio plane with server-side mixing",
+  "description": "Stage.js \u2014 multi-party audio stage: WebSocket control plane + WebRTC audio plane with server-side mixing",
   "license": "Apache-2.0",
   "private": true,
   "type": "module",
@@ -13,13 +13,17 @@
     "web"
   ],
   "scripts": {
-    "build": "npm run build:server && npm run build -w packages/client && npm run build -w web",
+    "build": "npm run build:server && npm run build -w packages/client && npm run build -w web && npm run build:compress && npm run test:client-package",
     "build:server": "tsc -p tsconfig.build.json",
     "typecheck": "tsc --noEmit -p tsconfig.json && npm run typecheck -w packages/client && npm run typecheck -w web",
-    "test": "node --test --test-timeout=20000 \"test/**/*.test.ts\"",
+    "test": "node --test --test-timeout=20000 \"test/**/*.test.ts\" && npm run test -w packages/client",
+    "test:client-package": "node scripts/check-client-package.ts",
     "start": "node dist/src/index.js",
+    "config:check": "node src/check-config.ts",
     "dev": "node --watch src/index.ts",
-    "dev:web": "npm run dev -w web"
+    "dev:web": "npm run dev -w web",
+    "build:compress": "node scripts/precompress.ts packages/client/dist web/dist",
+    "test:server-package": "node scripts/check-server-package.ts"
   },
   "dependencies": {
     "@evan/opus": "1.0.3",

@@ -42,7 +42,7 @@ export class OggOpusWriter {
   private pending: Uint8Array[] = [];
   private pendingSegments = 0;
   /** TOC byte of the last real packet: concealment packets reuse its mode and frame size. */
-  private lastToc: number | undefined;
+  private concealment: Uint8Array | undefined;
   private closed = false;
 
   constructor(write: (chunk: Uint8Array) => void, options: OggOpusOptions) {
@@ -75,9 +75,14 @@ export class OggOpusWriter {
    */
   packet(packet: Uint8Array | null): void {
     if (this.closed) return;
-    if (packet && packet.length > 0) this.lastToc = packet[0]!;
-    else if (this.lastToc === undefined) return;
-    else packet = Uint8Array.of(this.lastToc & 0xfc);
+    if (packet && packet.length > 0) {
+      const toc = packet[0]!;
+      const code = toc & 3;
+      const count = code === 0 ? 1 : code === 3 ? (packet[1]! & 63) : 2;
+      // Code 3 CBR with zero bytes per frame preserves the original packet duration.
+      this.concealment = count === 1 ? Uint8Array.of(toc & 0xfc) : Uint8Array.of((toc & 0xfc) | 3, count);
+    } else if (!this.concealment) return;
+    else packet = this.concealment;
     this.push(packet);
   }
 

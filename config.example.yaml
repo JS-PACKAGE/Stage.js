@@ -1,9 +1,10 @@
 # Stage.js 設定範本。複製為 config.yaml 後修改（config.yaml 不入庫）。
-# 所有欄位皆必填；程式不寫死任何參數。標「可調整」者為新創數值。
+# 建議保留全部欄位；五個相容舊設定的可省略欄位與預設值見 README「設定」。標「可調整」者為新創數值。
 
 server:
   host: 127.0.0.1
   port: 9728
+  # 必須是 HTTP URL 解析後不變的 pathname；勿含 query／fragment／dot segment，非 ASCII 或空白請使用百分比編碼。
   wsPath: /ws
   # 明文 ws 僅限本機開發：true 時 host 必須是 loopback（127.0.0.1／::1／localhost），否則拒絕啟動。
   # 對外部署請設 false 並提供 TLS 憑證（或由本機反向代理終止 TLS）。
@@ -26,6 +27,8 @@ server:
     token: ""
   # 反向代理之後設 true：每 IP 連線上限改以 X-Forwarded-For 第一個位址計算。直接對外時務必保持 false（標頭可偽造）。
   trustProxy: false
+  # HTTP listener 停止接收後，最多等待未完成回應多久；0 立即切斷，範圍 0–60000ms。舊設定省略時為 1000ms。
+  httpShutdownDrainMs: 1000
 
 limits:
   maxRooms: 100                # 可調整
@@ -33,13 +36,16 @@ limits:
   maxSpeakersPerRoom: 8        # 裁示定值（主控以外的台上者；主控席位另計）
   maxAudiencePerRoom: 300      # 裁示定值
   maxFrameBytes: 65536         # 可調整（64KB）
+  maxSendBufferBytes: 1048576  # 每條 ws 待送位元組上限，含下一則訊息；慢速讀取端超過即斷線，依正常寬限期回座（可調整）
+  maxPendingMessages: 128     # 每條 ws 等待處理的訊息數；不含正在執行的一筆
+  maxPendingBytes: 1048576     # 等待訊息的 UTF-8 位元組上限；超過任一上限即斷線並清除等待工作
   controlPerSecond: 20         # 可調整
   handRaiseIntervalMs: 10000   # 可調整
   icePerSecond: 30             # 可調整
   nameMaxLength: 32
   codeMaxLength: 16
   sdpMaxLength: 16384
-  joinTimeoutMs: 30000         # 連上 ws 後逾此時間仍未開房／進房即以 1008 斷線（0＝不限；可調整）
+  joinTimeoutMs: 30000         # 連上 ws 後逾此時間仍未開房／進房即以 1008 斷線（0＝不限；上限 2147483647）
   maxConnectionsPerIp: 0       # 同一位址同時連線上限（0＝不限）。學校／公司 NAT 或未設 server.trustProxy 的反向代理會讓大量使用者共用一個位址，設定前請估算（可調整）
   chatMaxLength: 500           # 聊天訊息字元上限（清洗後；可調整）
   chatIntervalMs: 1000         # 每連線兩則聊天訊息的最短間隔；過快以 1008 斷線（client 依 hello.limits 自行節流；可調整）
@@ -47,13 +53,13 @@ limits:
 
 rooms:
   codeLength: 8                # 房間代碼長度（可調整）
-  controllerGraceMs: 60000     # 主控斷線逾此時間才自動移交（可調整）
-  participantGraceMs: 15000    # 發言者／觀眾斷線後保留席位、台位、舉手順位與音訊連線的時間；逾時才移除（0＝立即移除；可調整）
-  heartbeatIntervalMs: 30000   # ws ping 間隔
+  controllerGraceMs: 60000     # 主控斷線逾此時間才自動移交（0＝立即排程；上限 2147483647）
+  participantGraceMs: 15000    # 發言者／觀眾斷線後保留席位、台位、舉手順位與音訊連線的時間；逾時才移除（0＝立即移除；上限 2147483647）
+  heartbeatIntervalMs: 30000   # ws ping 間隔（1000～2147483647）
   presenceBroadcastMs: 250     # 觀眾進出時合併 room:state 廣播的時間窗（0＝即時；大量同時進場時避免 N² 廣播，可調整）
   qualityIntervalMs: 2000      # 每隔多久把台上者的連線品質（上下行掉包、RTT）送給主控與台上者（0＝停用，可調整）
   chatHistory: 50              # 每房保留的最近聊天訊息數，新進房者會收到（0＝不保留；可調整）
-  createToken: ""              # 非空時建立房間須附此權杖（防止匿名占滿 maxRooms）；只放 config.yaml，對外部署建議設定
+  createToken: ""              # 非空時建立房間須附此權杖；最多 256 UTF-16 code units，不 trim；只放 config.yaml，對外部署建議設定
 
 audio:
   sampleRate: 48000            # 擷取／混音／Opus 編解碼取樣率（Opus 原生 48k，無重取樣）
@@ -110,6 +116,7 @@ rtc:
   # 大批進場時的 DTLS 握手也會卡住混音時鐘；1 條 worker 一樣會被 300 位聽眾吃滿而延誤上行轉送。
   # 預設 2 對應每房 300 聽眾的裁示上限（與 audio.codecWorkers 合計勿超過核心數；核心少時調低），
   # 用 load-test 驗證。auto＝核心數 − 1 − codecWorkers，至少 2、至多 8。
+  mediaWorkerTimeoutMs: 30000  # media worker RPC 逾時即重生該 worker、釋放待回覆工作；該 worker 的音訊連線需重建（可調整）
   mediaWorkers: 2
   # 短期 TURN 憑證（coturn：use-auth-secret + static-auth-secret）。每次進房以 HMAC 簽發，
   # 帳密逾 ttlSeconds 失效；secret 只放 config.yaml，不入庫、不入日誌。urls 空陣列＝停用。
@@ -129,7 +136,7 @@ persistence:
   # 非空時把房間狀態（含房間代碼與 resumeToken，屬機密，檔案權限 600）存到此 JSON 檔，重啟後恢復：
   # 停機時不關房，client 自動重連並以 resumeToken 回座（台位、舉手順位、聊天紀錄保留，音訊連線重建）。
   stateFile: ""                # 例：.run/stage-state.json（相對路徑以專案根目錄為準；空字串＝停用）
-  saveIntervalMs: 2000         # 狀態有變動時多久寫一次（停機時另寫一次；可調整）
+  saveIntervalMs: 2000         # 定期刷新間隔，安靜房間也更新（停機時另寫一次；可調整）
   restoreGraceMs: 120000       # 恢復後等參與者回來的時間；停機比這更久的狀態檔不採用（可調整）
 
 log:

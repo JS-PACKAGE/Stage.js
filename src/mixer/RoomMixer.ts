@@ -164,12 +164,13 @@ export class RoomMixer implements MixedPcmSource {
       if (!samples) { if (source.primed) this.counters.underruns++; source.primed = false; }
       else if (frames.length > 2 * playout) { frames.shift(); this.counters.droppedFrames++; }
       const contribution = source.muted ? null : samples ?? null;
-      source.contribution = contribution;
       let energy = 0;
       if (contribution) {
-        silent = false;
         for (let i = 0; i < raw.length; i++) { const s = contribution[i]!; raw[i] = raw[i]! + s; energy += s * s; }
+        // Exact-zero PCM is also silence (e.g. a disabled microphone track), not just missing frames.
+        if (energy > 0) silent = false;
       }
+      source.contribution = energy > 0 ? contribution : null;
       const wasSpeaking = source.hold > 0;
       if (energy >= energyThreshold) source.hold = this.holdFrames;
       else if (source.hold > 0) source.hold--;

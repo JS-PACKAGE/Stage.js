@@ -8,6 +8,7 @@ RUN_DIR="$ROOT/.run"
 PID_FILE="$RUN_DIR/stage.pid"
 LOG_FILE="$RUN_DIR/stage.log"
 ENTRY="$ROOT/dist/src/index.js"
+CHECKER="$ROOT/dist/src/check-config.js"
 STOP_TIMEOUT=${STAGE_STOP_TIMEOUT:-15}
 
 cd "$ROOT"
@@ -29,10 +30,37 @@ ensure_config() {
   fi
 }
 
+valid_pid() {
+  case "$1" in ''|*[!0123456789]*) return 1 ;; esac
+  { [ "$1" -ge 1 ] && [ "$1" -le 2147483647 ]; } 2>/dev/null
+}
+
+# 0 = live, 1 = absent/stale, 2 = invalid/unreadable (never probe or delete it).
 running_pid() {
   [ -f "$PID_FILE" ] || return 1
-  pid=$(cat "$PID_FILE")
-  if [ -n "$pid" ] && kill -0 "$pid" 2>/dev/null; then
+  # Inspect bytes before shell substitution can silently discard embedded NULs.
+  pid_bytes=$(LC_ALL=C od -An -v -tu1 "$PID_FILE" 2>/dev/null) || {
+    printf 'stage: 無法讀取 PID 檔：%s\n' "$PID_FILE" >&2
+    return 2
+  }
+  pid=
+  pid_ended=0
+  pid_invalid=0
+  for byte in $pid_bytes; do
+    case "$byte" in
+      4[89]|5[01234567])
+        [ "$pid_ended" -eq 0 ] || { pid_invalid=1; break; }
+        pid="$pid$((byte - 48))"
+        ;;
+      10) pid_ended=1 ;;
+      *) pid_invalid=1; break ;;
+    esac
+  done
+  if [ "$pid_invalid" -ne 0 ] || ! valid_pid "$pid"; then
+    printf 'stage: PID 檔必須包含 1 到 2147483647 的十進位整數：%s\n' "$PID_FILE" >&2
+    return 2
+  fi
+  if kill -0 "$pid" 2>/dev/null; then
     printf '%s\n' "$pid"
     return 0
   fi
@@ -45,14 +73,24 @@ cmd_install() { check_node; npm ci; }
 cmd_build() { check_node; npm run build; }
 
 cmd_start() {
+  if pid=$(running_pid); then
+    die "已在執行中（pid ${pid}）"
+  else
+    result=$?
+    [ "$result" -eq 1 ] || return 1
+  fi
   check_node
-  if pid=$(running_pid); then die "已在執行中（pid ${pid}）"; fi
   [ -f "$ENTRY" ] || die "找不到 ${ENTRY}，請先執行 build"
   ensure_config
   mkdir -p "$RUN_DIR"
   nohup node "$ENTRY" >>"$LOG_FILE" 2>&1 &
   pid=$!
-  printf '%s\n' "$pid" >"$PID_FILE"
+  if ! printf '%s\n' "$pid" >"$PID_FILE"; then
+    # A failed start must not leave an untracked child, even if it ignores TERM.
+    kill -KILL "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+    die "無法寫入 PID 檔：$PID_FILE"
+  fi
   # 設定錯誤或 port 被占用時程序會立刻退出，稍等一下再確認
   sleep 1
   if kill -0 "$pid" 2>/dev/null; then
@@ -64,8 +102,24 @@ cmd_start() {
   fi
 }
 
+validate_stop_timeout() {
+  # Decimal seconds, bounded to signed 32-bit so comparisons work on macOS/Linux shells.
+  case "$STOP_TIMEOUT" in
+    ''|*[!0123456789]*) die "STAGE_STOP_TIMEOUT 必須為 0 到 2147483647 的十進位整數秒數" ;;
+  esac
+  [ "$STOP_TIMEOUT" -le 2147483647 ] 2>/dev/null || die "STAGE_STOP_TIMEOUT 必須為 0 到 2147483647 的十進位整數秒數"
+}
+
 cmd_stop() {
-  if ! pid=$(running_pid); then printf '未在執行\n'; return 0; fi
+  validate_stop_timeout
+  if pid=$(running_pid); then
+    :
+  else
+    result=$?
+    [ "$result" -eq 1 ] || return 1
+    printf '未在執行\n'
+    return 0
+  fi
   # SIGTERM 讓伺服器通知所有房間並關閉連線
   kill -TERM "$pid"
   waited=0
@@ -82,10 +136,30 @@ cmd_stop() {
   printf '已停止（pid %s）\n' "$pid"
 }
 
+cmd_restart() {
+  validate_stop_timeout
+  if running_pid >/dev/null; then
+    :
+  else
+    result=$?
+    [ "$result" -eq 1 ] || return 1
+  fi
+  check_node
+  [ -f "$ENTRY" ] || die "找不到 ${ENTRY}，請先執行 build"
+  [ -f "$CHECKER" ] || die "找不到已建置的設定檢查器，請先執行 build"
+  ensure_config
+  # Use the deployed schema and identical environment/path resolution before TERM.
+  node "$CHECKER"
+  cmd_stop
+  cmd_start
+}
+
 cmd_status() {
   if pid=$(running_pid); then
     printf '執行中（pid %s）\n' "$pid"
   else
+    result=$?
+    [ "$result" -eq 1 ] || return 1
     printf '未在執行\n'
     return 3
   fi
@@ -104,7 +178,7 @@ cmd_help() {
   build        建置伺服器、client 函式庫與範例前端
   start        於背景啟動已建置的伺服器（pid／log 位於 .run/）
   stop         優雅停止（SIGTERM，逾時後強制終止）
-  restart      stop 後再 start
+  restart      預檢已建置版本與設定，通過後 stop 再 start
   status       顯示執行狀態（未執行時 exit code 3）
   logs [N|-f]  顯示最後 N 行 log（預設 100），-f 持續追蹤
   run          前景執行（給 systemd／容器等外部監管使用）
@@ -113,7 +187,7 @@ cmd_help() {
 
 環境變數：
   STAGE_CONFIG        設定檔路徑（預設 ./config.yaml，不存在時自動由範例建立）
-  STAGE_STOP_TIMEOUT  stop 等待秒數（預設 15）
+  STAGE_STOP_TIMEOUT  stop 等待秒數（0–2147483647 十進位整數，預設 15；0 不等待）
 EOF
 }
 
@@ -124,7 +198,7 @@ case "$command" in
   build) cmd_build ;;
   start) cmd_start ;;
   stop) cmd_stop ;;
-  restart) cmd_stop; cmd_start ;;
+  restart) cmd_restart ;;
   status) cmd_status ;;
   logs) cmd_logs "$@" ;;
   run) check_node; ensure_config; exec node "$ENTRY" ;;
